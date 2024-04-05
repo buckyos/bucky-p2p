@@ -426,6 +426,7 @@ pub(super) mod context {
 
 
 
+#[repr(u16)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
 pub enum PackageCmdCode {
     Exchange = 0,

@@ -1,7 +1,9 @@
 use std::sync::RwLock;
 use async_std::net::UdpSocket;
-use cyfs_base::{BuckyError, Endpoint, Protocol};
+use cyfs_base::{BuckyError, BuckyErrorCode, Endpoint, Protocol, RawEncodeWithContext};
 use socket2::{Socket, Domain, Type};
+use crate::protocol::{PackageBox, PackageBoxEncodeContext};
+use crate::types::MixAesKey;
 
 pub struct UDPSocket {
     local: Endpoint,
@@ -21,8 +23,8 @@ impl std::fmt::Debug for UDPSocket {
 }
 
 impl UDPSocket {
-    pub fn local(&self) -> Endpoint {
-        self.local.clone()
+    pub fn local(&self) -> &Endpoint {
+        &self.local
     }
 
     pub fn is_same(&self, other: &Self) -> bool {

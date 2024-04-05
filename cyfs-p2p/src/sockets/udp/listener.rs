@@ -6,7 +6,7 @@ use crate::history::keystore::Keystore;
 use crate::protocol::{DynamicPackage, Exchange, merge_context, MTU_LARGE, PackageBox, PackageBoxDecodeContext, SnCall};
 use crate::sockets::udp::udp_socket::{UDPSocket};
 use super::super::UpdateOuterResult;
-use crate::types::MixAesKey;
+use crate::types::{LocalDeviceRef, MixAesKey};
 
 pub struct UdpPackageBox {
     package_box: PackageBox,
@@ -42,6 +42,7 @@ impl AsRef<PackageBox> for UdpPackageBox {
 pub trait UDPListenerEventListener: 'static + Send + Sync {
     async fn on_udp_package_box(
         &self,
+        socket: Arc<UDPSocket>,
         package_box: UdpPackageBox,
     );
     async fn on_udp_raw_data(&self, data: &[u8], context: (Arc<UDPSocket>, DeviceId, MixAesKey, Endpoint)) -> Result<(), BuckyError>;
@@ -55,7 +56,7 @@ struct UDPListenerState {
 }
 pub struct UDPListener {
     key_store: Arc<Keystore>,
-    local_device_id: DeviceId,
+    local_device: LocalDeviceRef,
     sn_only: bool,
     state: RwLock<UDPListenerState>,
     buffer_size: usize,
@@ -65,13 +66,13 @@ pub type UDPListenerRef = Arc<UDPListener>;
 impl UDPListener {
     pub fn new(
         key_store: Arc<Keystore>,
-        local_device_id: DeviceId,
+        local_device: LocalDeviceRef,
         sn_only: bool,
         buffer_size: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             key_store,
-            local_device_id,
+            local_device,
             sn_only,
             state: RwLock::new(UDPListenerState {
                 outer: None,
@@ -104,7 +105,7 @@ impl UDPListener {
     }
 
     pub fn local(&self) -> Endpoint {
-        self.state.read().unwrap().socket.as_ref().unwrap().local()
+        self.state.read().unwrap().socket.as_ref().unwrap().local().clone()
     }
 
     pub fn mapping_port(&self) -> Option<u16> {
@@ -230,7 +231,7 @@ impl UDPListener {
                             let state = this.state.read().unwrap();
                             (state.listener.clone(), state.socket.as_ref().unwrap().clone())
                         };
-                        if !exchange.verify(&this.local_device_id).await {
+                        if !exchange.verify(this.local_device.device_id()).await {
                             warn!("{} exchg verify failed, from {}.", socket, from);
                             return;
                         }
@@ -238,10 +239,11 @@ impl UDPListener {
                             return;
                         }
 
-                        listener.as_ref().unwrap().on_udp_package_box(UdpPackageBox::new(
-                            package_box,
-                            from,
-                        )).await;
+                        listener.as_ref().unwrap().on_udp_package_box(this.socket().as_ref().unwrap().clone(),
+                                                                      UdpPackageBox::new(
+                                                                          package_box,
+                                                                          from,
+                                                                      )).await;
                     });
                 } else {
                     let listener = {
@@ -252,10 +254,11 @@ impl UDPListener {
                         return;
                     }
                     Executor::spawn_ok(async move {
-                        let _ = listener.as_ref().unwrap().on_udp_package_box(UdpPackageBox::new(
-                            package_box,
-                            from,
-                        )).await;
+                        let _ = listener.as_ref().unwrap().on_udp_package_box(this.socket().as_ref().unwrap().clone(),
+                                                                              UdpPackageBox::new(
+                                                                                  package_box,
+                                                                                  from,
+                                                                              )).await;
                     });
                 }
             }

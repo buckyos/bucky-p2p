@@ -1,19 +1,18 @@
 use std::{
-    collections::{HashMap, hash_map}, 
-    time::Duration, 
+    collections::{HashMap, hash_map},
+    time::Duration,
     sync::{Arc, atomic::{AtomicU64, Ordering}}
 };
 use cyfs_debug::Mutex;
 use cyfs_base::*;
 use crate::{
-    types::*, 
+    types::*,
 };
-use super::{
-    net_listener::UdpSender, statistic::{PeerStatus, StatisticManager, }
-};
+use crate::sn::service::statistic::{PeerStatus, StatisticManager};
+use crate::sockets::{DataSender};
 
 struct Config {
-    pub client_ping_interval: Duration, 
+    pub client_ping_interval: Duration,
     pub client_ping_timeout: Duration
 }
 
@@ -27,17 +26,17 @@ impl Default for Config {
 }
 
 
-pub struct FoundPeer {
+pub struct FoundPeer<T: DataSender> {
     pub desc: Device,
-    pub sender: Arc<UdpSender>,
+    pub sender: T,
     pub is_wan: bool,
     pub peer_status: PeerStatus,
 }
 
 
-struct CachedPeerInfo {
+struct CachedPeerInfo<T: DataSender> {
     pub desc: Device,
-    pub sender: Arc<UdpSender>,
+    pub sender: T,
     pub aes_key: Option<MixAesKey>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
@@ -69,14 +68,14 @@ fn contain_addr(dev: &Device, addr: &SocketAddr) -> bool {
     false
 }
 
-impl CachedPeerInfo {
+impl<T: DataSender + Clone> CachedPeerInfo<T> {
     fn new(
-        desc: Device, 
-        sender: Arc<UdpSender>, 
-        aes_key: Option<&MixAesKey>, 
-        send_time: Timestamp, 
-        seq: TempSeq, 
-        peer_status: PeerStatus) -> CachedPeerInfo {
+        desc: Device,
+        sender: T,
+        aes_key: Option<&MixAesKey>,
+        send_time: Timestamp,
+        seq: TempSeq,
+        peer_status: PeerStatus) -> CachedPeerInfo<T> {
         CachedPeerInfo {
             is_wan: has_wan_endpoint(&desc),
             last_ping_seq: seq,
@@ -92,10 +91,10 @@ impl CachedPeerInfo {
         }
     }
 
-    fn to_found_peer(&self) -> FoundPeer {
+    fn to_found_peer(&self) -> FoundPeer<T> {
         FoundPeer {
-            desc: self.desc.clone(), 
-            sender: self.sender.clone(), 
+            desc: self.desc.clone(),
+            sender: self.sender.clone(),
             is_wan: self.is_wan,
             peer_status: self.peer_status.clone(),
         }
@@ -135,13 +134,13 @@ impl CachedPeerInfo {
     }
 }
 
-struct Peers {
-    active_peers: HashMap<DeviceId, CachedPeerInfo>,
-    knock_peers: HashMap<DeviceId, CachedPeerInfo>,
+struct Peers<T: DataSender> {
+    active_peers: HashMap<DeviceId, CachedPeerInfo<T>>,
+    knock_peers: HashMap<DeviceId, CachedPeerInfo<T>>,
 }
 
-impl Peers {
-    fn find_peer(&mut self, peerid: &DeviceId, reason: FindPeerReason) -> Option<&mut CachedPeerInfo> {
+impl<T: DataSender> Peers<T> {
+    fn find_peer(&mut self, peerid: &DeviceId, reason: FindPeerReason) -> Option<&mut CachedPeerInfo<T>> {
         let found_cache = match self.active_peers.get_mut(peerid) {
             Some(p) => {
                 Some(p)
@@ -151,7 +150,7 @@ impl Peers {
                 None => None
             }
         };
-    
+
         if let Some(p) = found_cache {
             match reason {
                 FindPeerReason::CallFrom(t) => {
@@ -171,12 +170,13 @@ impl Peers {
 }
 
 
-pub struct PeerManager {
-    peers: Mutex<Peers>, 
+pub struct PeerManager<T: DataSender> {
+    peers: Mutex<Peers<T>>,
     last_knock_time: AtomicU64,
     config: Config,
     statistic_manager: &'static StatisticManager,
 }
+pub type PeerManagerRef<T> = Arc<PeerManager<T>>;
 
 enum FindPeerReason {
     CallFrom(Timestamp),
@@ -184,9 +184,9 @@ enum FindPeerReason {
 }
 
 
-impl PeerManager {
-    pub fn new() -> PeerManager {
-        PeerManager {
+impl<T: DataSender + Clone> PeerManager<T> {
+    pub fn new() -> PeerManagerRef<T> {
+        Arc::new(PeerManager {
             peers: Mutex::new(Peers {
                 active_peers: Default::default(),
                 knock_peers: Default::default(),
@@ -194,19 +194,19 @@ impl PeerManager {
             last_knock_time: AtomicU64::new(bucky_time_now()),
             config: Default::default(),
             statistic_manager: StatisticManager::get_instance(),
-        }
+        })
     }
 
     pub fn peer_heartbeat(
-        &self, 
-        peerid: DeviceId, 
-        peer_desc: &Option<Device>, 
-        sender: Arc<UdpSender>, 
-        aes_key: Option<&MixAesKey>, 
-        send_time: Timestamp, 
+        &self,
+        peerid: DeviceId,
+        peer_desc: &Option<Device>,
+        mut sender: T,
+        aes_key: Option<&MixAesKey>,
+        send_time: Timestamp,
         seq: TempSeq) -> bool {
 
-        let exist_cache_found = |cached_peer: &mut CachedPeerInfo| -> bool {
+        let exist_cache_found = |cached_peer: &mut CachedPeerInfo<T>| -> bool {
             if cached_peer.last_send_time > send_time {
                 log::warn!("ping send-time little.");
                 return false;
@@ -247,7 +247,7 @@ impl PeerManager {
             }
 
             // 客户端被签名的地址才被更新，避免恶意伪装
-            if contain_addr(&cached_peer.desc, sender.remote()) 
+            if contain_addr(&cached_peer.desc, sender.remote().addr())
                 || cached_peer.sender.key().mix_key != sender.key().mix_key {
                 cached_peer.sender = sender.clone();
             }
@@ -283,7 +283,13 @@ impl PeerManager {
         // 3.新建cache
         match peer_desc {
             Some(desc) => {
-                let old = peers.active_peers.insert(peerid.clone(), CachedPeerInfo::new(desc.clone(), sender, aes_key, send_time, seq, self.statistic_manager.get_peer_status(peerid.clone(), send_time)));
+                let old = peers.active_peers.insert(peerid.clone(),
+                                                    CachedPeerInfo::new(desc.clone(),
+                                                                        sender,
+                                                                        aes_key,
+                                                                        send_time,
+                                                                        seq,
+                                                                        self.statistic_manager.get_peer_status(peerid.clone(), send_time)));
                 assert!(old.is_none());
                 true
             }
@@ -311,7 +317,7 @@ impl PeerManager {
 
     }
 
-    pub fn find_peer(&self, id: &DeviceId) -> Option<FoundPeer> {
+    pub fn find_peer(&self, id: &DeviceId) -> Option<FoundPeer<T>> {
         self.peers.lock().unwrap().find_peer(id, FindPeerReason::Other).map(|c| c.to_found_peer())
     }
 }

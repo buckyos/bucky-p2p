@@ -1,66 +1,65 @@
 use log::*;
 use std::{
-    time::Duration, 
-    collections::HashMap, 
+    time::Duration,
+    collections::HashMap,
     sync::{Arc}
 };
+use std::pin::Pin;
 use cyfs_debug::Mutex;
-use futures::executor::ThreadPool;
 use cyfs_base::*;
 use crate::{
-    types::*, 
+    types::*,
     protocol::{DynamicPackage, PackageBox}
 };
-
-use super::{
-    net_listener::{UdpSender}
-};
+use crate::protocol::MTU_LARGE;
+use crate::sockets::DataSender;
 
 
-struct PackageResendInfo {
+struct PackageResendInfo<T: DataSender> {
     pkg: Arc<PackageBox>,
-    sender: Arc<UdpSender>,
+    sender: T,
     interval: Duration,
     times: u8,
     last_time: Timestamp,
     nick_name: String,
 }
 
-pub trait ResendCallbackTrait: Send + Sync {
-    fn on_callback(&self, pkg: Arc<PackageBox>, errno: BuckyErrorCode);
+#[callback_trait::callback_trait]
+pub trait ResendCallbackTrait: Send + Sync + 'static {
+    async fn on_callback(&self, pkg: Arc<PackageBox>, errno: BuckyErrorCode);
 }
 
-pub struct ResendQueue {
+pub struct ResendQueue<T: DataSender> {
     default_interval: Duration,
     max_times: u8,
-    thread_pool: ThreadPool, 
-    
-    packages: Mutex<HashMap<u32, PackageResendInfo>>, 
 
-    cb: Box<dyn ResendCallbackTrait>,
+    packages: Mutex<HashMap<u32, PackageResendInfo<T>>>,
+
+    cb: Option<Pin<Box<dyn ResendCallbackTrait>>>,
 
 }
 
-impl ResendQueue {
+impl<T: DataSender + Clone> ResendQueue<T> {
     pub fn new(
-        thread_pool: ThreadPool, 
-        default_interval: Duration, 
-        max_times: u8,
-        cb: Box<dyn ResendCallbackTrait>) -> ResendQueue {
+        default_interval: Duration,
+        max_times: u8) -> ResendQueue<T> {
         ResendQueue {
             default_interval,
             max_times,
-            thread_pool, 
-            packages: Mutex::new(Default::default()), 
-            cb,
+            packages: Mutex::new(Default::default()),
+            cb: None,
         }
     }
 
-    pub fn send(
-        &self, 
-        sender: Arc<UdpSender>, 
-        pkg: DynamicPackage, 
-        pkg_id: u32, 
+    pub fn set_callback(&mut self, cb: impl ResendCallbackTrait) {
+        self.cb = Some(Box::pin(cb));
+    }
+
+    pub async fn send(
+        &self,
+        mut sender: T,
+        pkg: DynamicPackage,
+        pkg_id: u32,
         pkg_nick_name: String) {
         let now = bucky_time_now();
         let to_send = {
@@ -71,12 +70,12 @@ impl ResendQueue {
                     info.times >>= 1;
                     info.interval = info.interval / 2;
                 }
-                let pkg_box = sender.box_pkg(pkg);
+                let pkg_box = PackageBox::from_package(sender.remote_device_id().clone(), sender.key().clone(), pkg);
                 info.sender = sender;
                 info.pkg = Arc::new(pkg_box);
                 info.nick_name = pkg_nick_name.clone();
-    
-                if now > info.last_time 
+
+                if now > info.last_time
                     && Duration::from_micros(now - info.last_time) > info.interval {
                     info.times += 1;
                     info.last_time = now;
@@ -85,7 +84,7 @@ impl ResendQueue {
                     None
                 }
             } else {
-                let pkg_box = Arc::new(sender.box_pkg(pkg));
+                let pkg_box = Arc::new(PackageBox::from_package(sender.remote_device_id().clone(), sender.key().clone(), pkg));
                 packages.insert(pkg_id, PackageResendInfo {
                     pkg: pkg_box.clone(),
                     sender: sender.clone(),
@@ -99,33 +98,39 @@ impl ResendQueue {
         };
 
         if let Some((sender, pkg)) = to_send {
-            self.thread_pool.spawn_ok(async move {
-                match sender.send(&*pkg).await {
-                    Ok(_) => {
-                        info!("{} send ok.", pkg_nick_name);
-                    },
-                    Err(e) => {
-                        warn!("{} send failed, error: {}.", pkg_nick_name, e.to_string());
-                    }
+            match sender.send_pkg_box(pkg.as_ref()).await {
+                Ok(_) => {
+                    info!("{} send ok.", pkg_nick_name);
+                },
+                Err(e) => {
+                    warn!("{} send failed, error: {}.", pkg_nick_name, e.to_string());
                 }
-            });
+            }
         }
     }
 
-    pub fn confirm_pkg(&self, pkg_id: u32) {
-        if let Some(will_remove) = self.packages.lock().unwrap().remove(&pkg_id) {
-            self.cb.on_callback(will_remove.pkg.clone(), BuckyErrorCode::Ok);
+    pub async fn confirm_pkg(&self, pkg_id: u32) {
+        if self.cb.is_none() {
+            return;
+        }
+
+        let ret = {
+            self.packages.lock().unwrap().remove(&pkg_id)
+        };
+        if let Some(will_remove) = ret {
+            self.cb.as_ref().unwrap().on_callback(will_remove.pkg.clone(), BuckyErrorCode::Ok).await;
         }
     }
 
-    pub fn try_resend(&self, now: Timestamp) {
+    pub async fn try_resend(&self, now: Timestamp) {
         let mut to_send = vec![];
         let mut will_remove = vec![];
-        
+
+        let mut remove_list = Vec::new();
         {
             let mut packages = self.packages.lock().unwrap();
             for (pkg_id, pkg_info) in packages.iter_mut() {
-                if now > pkg_info.last_time 
+                if now > pkg_info.last_time
                     && Duration::from_micros(now - pkg_info.last_time) > pkg_info.interval {
                     pkg_info.times += 1;
                     pkg_info.interval = pkg_info.interval * 2;
@@ -133,35 +138,37 @@ impl ResendQueue {
                     if pkg_info.times >= self.max_times {
                         will_remove.push(*pkg_id);
                     }
-    
+
                     let pkg = pkg_info.pkg.clone();
                     let sender = pkg_info.sender.clone();
                     let nick_name = pkg_info.nick_name.clone();
-    
+
                     to_send.push((pkg, sender, nick_name));
                 }
             }
-    
+
             for id in will_remove {
                 let pkg = packages.remove(&id);
-                if let Some(p) = pkg {
-                    warn!("{} resend timeout, to: {}.", p.nick_name, p.sender.session_name());
-                    self.cb.on_callback(p.pkg.clone(), BuckyErrorCode::Timeout);
-                }
+                remove_list.push(pkg);
+            }
+        }
+
+        for pkg in remove_list {
+            if let Some(p) = pkg {
+                warn!("{} resend timeout, {} to: {}.", p.nick_name, p.sender.local().addr(), p.sender.remote().addr());
+                self.cb.as_ref().unwrap().on_callback(p.pkg.clone(), BuckyErrorCode::Timeout).await;
             }
         }
 
         for (pkg, sender, nick_name) in to_send {
-            self.thread_pool.spawn_ok(async move {
-                match sender.send(&*pkg).await {
-                    Ok(_) => {
-                        info!("{} send ok, to: {}.", nick_name, sender.session_name());
-                    },
-                    Err(e) => {
-                        warn!("{} send failed, to: {}, error: {}.", nick_name, sender.session_name(), e.to_string());
-                    }
+            match sender.send_pkg_box(pkg.as_ref()).await {
+                Ok(_) => {
+                    info!("{} send ok, {} to {}.", nick_name, sender.local(), sender.remote());
+                },
+                Err(e) => {
+                    warn!("{} send failed, {} to {}, error: {}.", nick_name, sender.local(), sender.remote(), e.to_string());
                 }
-            });
+            }
         }
     }
 }

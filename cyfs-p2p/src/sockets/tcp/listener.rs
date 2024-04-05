@@ -11,6 +11,7 @@ use cyfs_base::{BuckyError, BuckyErrorCode, BuckyResult, DeviceId, Endpoint, end
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
 use crate::protocol::{Exchange, MTU_LARGE, PackageBox, PackageBoxDecodeContext, PackageCmdCode};
+use crate::types::LocalDeviceRef;
 use super::super::UpdateOuterResult;
 use super::TCPSocket;
 
@@ -18,7 +19,8 @@ use super::TCPSocket;
 pub trait TcpListenerEventListener: Send + Sync + 'static {
     async fn on_new_connection(
         &self,
-        socket: TCPSocket
+        socket: TCPSocket,
+        first_box: PackageBox,
     ) -> BuckyResult<()>;
 }
 
@@ -31,7 +33,7 @@ struct TCPListenerState {
 
 pub(crate) struct TCPListener {
     key_store: Arc<Keystore>,
-    local_device_id: DeviceId,
+    local_device: LocalDeviceRef,
     accept_timout: Duration,
     state: RwLock<TCPListenerState>,
     tcp_listener: RwLock<Option<Arc<dyn TcpListenerEventListener>>>,
@@ -40,7 +42,7 @@ pub(crate) type TCPListenerRef = Arc<TCPListener>;
 
 impl std::fmt::Display for TCPListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TCPListener:{{local:{}}}", self.local_device_id)
+        write!(f, "TCPListener:{{local:{}}}", self.local_device.device_id())
     }
 }
 
@@ -53,12 +55,12 @@ enum BoxType {
 impl TCPListener {
     pub fn new(
         key_store: Arc<Keystore>,
-        local_device_id: DeviceId,
+        local_device: LocalDeviceRef,
         accept_timout: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             key_store,
-            local_device_id,
+            local_device,
             accept_timout,
             state: RwLock::new(TCPListenerState {
                 local: None,
@@ -199,7 +201,7 @@ impl TCPListener {
         Ok((box_type, box_buf))
     }
 
-    async fn accept(&self, socket: TcpStream) -> Result<TCPSocket, BuckyError> {
+    async fn accept(&self, socket: TcpStream) -> Result<(TCPSocket, PackageBox), BuckyError> {
         let remote = socket.peer_addr().map_err(|e| BuckyError::from(e))?;
         let local = socket.local_addr().map_err(|e| BuckyError::from(e))?;
         let remote = Endpoint::from((endpoint::Protocol::Tcp, remote));
@@ -228,7 +230,7 @@ impl TCPListener {
             None => return Err(BuckyError::new(BuckyErrorCode::InvalidData, "no package")),
         };
         if let Some(exchg) = exchg {
-            if !exchg.verify(&self.local_device_id).await {
+            if !exchg.verify(self.local_device.device_id()).await {
                 warn!("tcp exchg verify failed.");
                 return Err(BuckyError::new(
                     BuckyErrorCode::InvalidData,
@@ -237,7 +239,7 @@ impl TCPListener {
             }
         }
 
-        Ok(TCPSocket::new(socket, self.local_device_id.clone(), local, remote, first_box.key().clone()))
+        Ok((TCPSocket::new(socket, self.local_device.device_id().clone(), local, remote, first_box.key().clone()), first_box))
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -253,8 +255,8 @@ impl TCPListener {
                             let this = this.clone();
                             task::spawn(async move {
                                 match this.accept(socket.clone()).await {
-                                    Ok(socket) => {
-                                        if let Err(e) = tcp_listener.on_new_connection(socket).await {
+                                    Ok((socket, first_box)) => {
+                                        if let Err(e) = tcp_listener.on_new_connection(socket, first_box).await {
                                             error!("tcp-listener accept error({}).", e);
                                         }
                                     }

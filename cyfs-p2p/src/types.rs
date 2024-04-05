@@ -11,10 +11,11 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct MixAesKey {
-    pub enc_key: AesKey, 
+    pub enc_key: AesKey,
     pub mix_key: AesKey
 }
 
@@ -95,7 +96,7 @@ impl TempSeq {
 
     fn now(_now: Timestamp) -> u32 {
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as u32;
-        let since_2021 = Duration::from_secs((40 * 365 + 9) * 24 * 3600).as_secs() as u32;
+        let since_2021 = Duration::from_secs((50 * 365 + 9) * 24 * 3600).as_secs() as u32;
         // TODO: 用10年？
         (now - since_2021) * 10
     }
@@ -346,9 +347,9 @@ impl StateWaiter {
     pub async fn abort_wait<A: futures::Future<Output = BuckyError>, T, S: FnOnce() -> T>(t: A, waiter: AbortRegistration, state: S) -> BuckyResult<T> {
         match Abortable::new(t, waiter).await {
             Ok(err) => {
-                //FIXME: remove waker 
+                //FIXME: remove waker
                 Err(err)
-            }, 
+            },
             Err(_) =>  Ok(state())
         }
     }
@@ -360,10 +361,31 @@ impl StateWaiter {
     }
 
     pub fn pop(&mut self) -> Option<AbortHandle> {
-        self.wakers.pop_front()   
+        self.wakers.pop_front()
     }
 
     pub fn len(&self) -> usize {
         self.wakers.len()
+    }
+}
+
+pub struct LocalDevice {
+    device: Device,
+    device_id: DeviceId,
+}
+pub type LocalDeviceRef = Arc<LocalDevice>;
+
+impl LocalDevice {
+    pub fn new(device: Device) -> Arc<Self> {
+        let device_id = device.desc().device_id();
+        Arc::new(Self { device, device_id })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    pub fn device_id(&self) -> &DeviceId {
+        &self.device_id
     }
 }

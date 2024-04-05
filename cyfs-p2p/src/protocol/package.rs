@@ -4,17 +4,6 @@ use super::{
     v0
 };
 
-#[derive(PartialEq, Eq)]
-pub enum OnPackageResult {
-    Continue,
-    Handled,
-    Break,
-}
-
-pub trait OnPackage<T: Package, Context = Option<()>> {
-    fn on_package(&self, _pkg: &T, context: Context) -> Result<OnPackageResult, BuckyError>;
-}
-
 pub struct DynamicPackage {
     version: u8,
     cmd_code: PackageCmdCode,

@@ -1,5 +1,4 @@
 use async_std::task;
-use futures::executor::ThreadPool;
 use log::*;
 use std::{
     any::Any,
@@ -17,10 +16,13 @@ use crate::{
     protocol::{*, v0::*},
     types::*,
 };
+use crate::sn::service::peer_manager::PeerManagerRef;
+use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, GeneralDataSender};
+use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
+use crate::sockets::udp::{UDPListenerEventListener, UdpPackageBox, UDPSocket};
 
 use super::{
     call_stub::CallStub,
-    net_listener::{MessageSender, NetListener, UdpSender},
     peer_manager::PeerManager,
     receipt::*,
     resend_queue::{ResendQueue, ResendCallbackTrait},
@@ -32,40 +34,36 @@ use super::{
 //     begin_time: Instant,
 // }
 
-struct ServiceImpl {
+pub struct SnService {
     seq_generator: TempSeqGenerator,
-    key_store: Keystore,
-    local_device_id: DeviceId,
-    local_device: Device,
+    key_store: Arc<Keystore>,
+    local_device: LocalDeviceRef,
     stopped: AtomicBool,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
-    thread_pool: ThreadPool,
 
     // call_tracker: CallTracker,
-    peer_mgr: PeerManager,
-    resend_queue: Option<ResendQueue>,
+    peer_mgr: PeerManagerRef<GeneralDataSender>,
+    resend_queue: Option<ResendQueue<GeneralDataSender>>,
     call_stub: CallStub,
-
+    udp_recv_buffer: usize,
 }
 
-#[derive(Clone)]
-pub struct SnService(Arc<ServiceImpl>);
+pub type SnServiceRef = Arc<SnService>;
 
 impl SnService {
     pub fn new(
-        local_device: Device,
+        local_device: LocalDeviceRef,
         local_secret: PrivateKey,
+        udp_recv_buffer: usize,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
-    ) -> SnService {
-        let thread_pool = ThreadPool::new().unwrap();
-
-        let service = Self(Arc::new(ServiceImpl {
+    ) -> SnServiceRef {
+        let mut service = SnService {
             seq_generator: TempSeqGenerator::new(),
-            key_store: Keystore::new(
+            key_store: Arc::new(Keystore::new(
                 local_secret.clone(),
-                local_device.desc().clone(),
+                local_device.device().desc().clone(),
                 RsaCPUObjectSigner::new(
-                    local_device.desc().public_key().clone(),
+                    local_device.device().desc().public_key().clone(),
                     local_secret.clone(),
                 ),
                 keystore::Config {
@@ -73,132 +71,108 @@ impl SnService {
                     active_time: Duration::from_secs(600),
                     capacity: 100000,
                 },
-            ),
+            )),
             resend_queue: None,/* ResendQueue::new(thread_pool.clone(), Duration::from_millis(200), 5), */
-            local_device_id: local_device.desc().device_id(),
             local_device: local_device.clone(),
             stopped: AtomicBool::new(false),
             peer_mgr: PeerManager::new(),
             call_stub: CallStub::new(),
-            thread_pool: thread_pool.clone(),
             contract,
             // call_tracker: CallTracker {
             //     calls: Default::default(),
             //     begin_time: Instant::now()
             // }
-        }));
-
-        let resend_queue = ResendQueue::new(thread_pool, Duration::from_millis(200), 5, Box::new(service.clone()));
-
-        let mut_service = unsafe { &mut *(Arc::as_ptr(&service.0) as *mut ServiceImpl) };
-        mut_service.resend_queue = Some(resend_queue);
-
-        service
-    }
-
-    pub async fn start(&self) -> BuckyResult<()> {
-        let mut endpoints_v4 = vec![];
-        let mut endpoints_v6 = vec![];
-        for endpoint in self.0.local_device.connect_info().endpoints() {
-            if endpoint.addr().is_ipv4() {
-                endpoints_v4.push(endpoint.clone());
-            } else {
-                endpoints_v6.push(endpoint.clone());
-            };
-        }
-
-        let _listener = match NetListener::listen(&endpoints_v6, &endpoints_v4, self.clone()).await
-        {
-            Ok((listener, udp_count, _)) => {
-                if udp_count == 0 {
-                    log::error!("sn-minner start failed for all udp-endpoints listen failed.");
-                    Err(BuckyError::new(
-                        BuckyErrorCode::Failed,
-                        "all udp-endpoint listen failed",
-                    ))
-                } else {
-                    Ok(listener)
-                }
-            }
-            Err(e) => Err(e),
-        }?;
-
-        // 清理过期数据
-        let timer = {
-            let service = self.clone();
-            task::spawn(async move {
-                loop {
-                    {
-                        if service.is_stopped() {
-                            return;
-                        }
-                        service.clean_timeout_resource();
-                    }
-                    task::sleep(Duration::from_micros(100000)).await;
-                }
-            })
+            udp_recv_buffer,
         };
 
-        // 没有stop
-        timer.await;
+        let peer_manager = service.peer_manager().clone();
+        let mut resend_queue = ResendQueue::new(Duration::from_millis(200), 5);
+        resend_queue.set_callback(move |pkg: Arc<PackageBox>, errno: BuckyErrorCode| {
+            let peer_manager = peer_manager.clone();
+            async move {
+                if let Some(p) = pkg.packages_no_exchange()
+                    .get(0)
+                    .map(| p | {
+                        let p: &SnCalled = p.as_ref();
+                        p
+                    }) {
+                    peer_manager.find_peer(&p.peer_info.desc().device_id())
+                        .map(| requestor | {
+                            requestor.peer_status.record(p.to_peer_id.clone(), p.call_seq, errno);
+                        });
+                }
+            }
+        });
+        service.resend_queue = Some(resend_queue);
+        let service_ref = Arc::new(service);
+
+        service_ref
+    }
+
+    pub async fn start(self: &Arc<Self>) -> BuckyResult<()> {
+        let eps = self.local_device.device().connect_info().endpoints();
+        let net_listener = NetListener::open(self.key_store.clone(),
+                                          self.local_device.clone(),
+                                          eps.as_slice(),
+                                          None,
+                                          Duration::from_secs(30),
+                                          self.udp_recv_buffer,
+                                          false).await?;
+        net_listener.set_udp_listener_event_listener(self.clone());
+        net_listener.set_tcp_listener_event_listener(self.clone());
+
+        // 清理过期数据
+        let service = self.clone();
+        async_std::task::spawn(async move {
+            loop {
+                {
+                    if service.is_stopped() {
+                        return;
+                    }
+                    service.clean_timeout_resource().await;
+                }
+                async_std::task::sleep(Duration::from_secs(100)).await;
+            }
+        });
 
         Ok(())
     }
 
     pub fn stop(&self) {
-        self.0.stopped.store(true, atomic::Ordering::Relaxed);
+        self.stopped.store(true, atomic::Ordering::Relaxed);
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.0.stopped.load(atomic::Ordering::Relaxed)
+        self.stopped.load(atomic::Ordering::Relaxed)
     }
 
     pub fn local_device_id(&self) -> &DeviceId {
-        &self.0.local_device_id
+        &self.local_device.device_id()
     }
 
     pub(super) fn key_store(&self) -> &Keystore {
-        &self.0.key_store
+        &self.key_store
     }
 
-    fn resend_queue(&self) -> &ResendQueue {
-        self.0.resend_queue.as_ref().unwrap()
+    fn resend_queue(&self) -> &ResendQueue<GeneralDataSender> {
+        self.resend_queue.as_ref().unwrap()
     }
 
-    fn peer_manager(&self) -> &PeerManager {
-        &self.0.peer_mgr
+    fn peer_manager(&self) -> &PeerManagerRef<GeneralDataSender> {
+        &self.peer_mgr
     }
 
-    pub(super) fn thread_pool(&self) -> &ThreadPool {
-        &self.0.thread_pool
+    async fn send_resp<T: DataSender>(&self, mut sender: T, pkg: DynamicPackage, send_log: String) -> BuckyResult<()> {
+        if let Err(e) = sender.send_dynamic_pkg(pkg).await {
+            warn!("{} send failed. error: {}.", send_log, e.to_string());
+            Err(e)
+        } else {
+            debug!("{} send ok.", send_log);
+            Ok(())
+        }
     }
 
-    fn send_resp(&self, mut sender: MessageSender, pkg: DynamicPackage, send_log: String) {
-        self.thread_pool().spawn_ok(async move {
-            if let Err(e) = sender.send(pkg).await {
-                warn!("{} send failed. error: {}.", send_log, e.to_string());
-            } else {
-                debug!("{} send ok.", send_log);
-            }
-
-            if let MessageSender::Tcp(tcp_sender) = sender {
-                tcp_sender.close()
-            }
-        });
-    }
-
-    fn send_resp_udp(&self, sender: Arc<UdpSender>, pkg: DynamicPackage, send_log: String) {
-        self.thread_pool().spawn_ok(async move {
-            let pkg_box = sender.box_pkg(pkg);
-            if let Err(e) = sender.send(&pkg_box).await {
-                warn!("{} send failed. error: {}.", send_log, e.to_string());
-            } else {
-                debug!("{} send ok.", send_log);
-            }
-        });
-    }
-
-    fn clean_timeout_resource(&self) {
+    async fn clean_timeout_resource(&self) {
         let now = bucky_time_now();
 
         if let Some(drops) = self.peer_manager().try_knock_timeout(now) {
@@ -207,8 +181,8 @@ impl SnService {
             }
         }
 
-        self.resend_queue().try_resend(now);
-        self.0.call_stub.recycle(now);
+        self.resend_queue().try_resend(now).await;
+        self.call_stub.recycle(now);
         // {
         //     let tracker = &mut self.call_tracker;
         //     if let Ordering::Greater = now.duration_since(tracker.begin_time).cmp(&TRACKER_INTERVAL) {
@@ -218,11 +192,11 @@ impl SnService {
         // }
     }
 
-    pub(super) fn handle(&self, mut pkg_box: PackageBox, resp_sender: MessageSender) {
+    pub(super) async fn handle(&self, mut pkg_box: PackageBox, mut resp_sender: GeneralDataSender) -> BuckyResult<()> {
         let first_pkg = pkg_box.pop();
         if first_pkg.is_none() {
             warn!("fetch none pkg");
-            return;
+            return Ok(());
         }
 
         let send_time = bucky_time_now();
@@ -233,15 +207,15 @@ impl SnService {
                 if let Ok(_) = exchg {
                     self.key_store().add_key(pkg_box.key(), pkg_box.remote());
                 } else {
-                    warn!("fetch exchange failed, from: {:?}.", resp_sender.remote());
-                    return;
+                    warn!("fetch exchange failed, from: {:?}.", resp_sender.remote().addr());
+                    return Ok(());
                 }
 
                 match pkg_box.pop() {
                     Some(pkg) => pkg,
                     None => {
-                        warn!("fetch none cmd-pkg, from: {:?}.", resp_sender.remote());
-                        return;
+                        warn!("fetch none cmd-pkg, from: {:?}.", resp_sender.remote().addr());
+                        return Ok(());
                     }
                 }
             }
@@ -251,98 +225,83 @@ impl SnService {
         match cmd_pkg.cmd_code() {
             PackageCmdCode::SnPing => {
                 let ping_req = <Box<dyn Any + Send>>::downcast::<SnPing>(cmd_pkg.into_any());
-                if let Ok(ping_req) = ping_req {
+                return if let Ok(ping_req) = ping_req {
                     self.handle_ping(
                         ping_req,
-                        resp_sender,
-                        Some((pkg_box.key(), pkg_box.remote())),
+                        resp_sender.clone(),
                         send_time,
-                    );
+                    ).await?;
+                    Ok(())
                 } else {
                     warn!("fetch ping-req failed, from: {:?}.", resp_sender.remote());
-                    return;
+                    Ok(())
                 }
             }
             PackageCmdCode::SnCall => {
                 let call_req = <Box<dyn Any + Send>>::downcast::<SnCall>(cmd_pkg.into_any());
-                if let Ok(call_req) = call_req {
+                return if let Ok(call_req) = call_req {
                     self.handle_call(
                         call_req,
                         resp_sender,
-                        Some((pkg_box.key(), pkg_box.remote())),
                         send_time,
-                    );
+                    ).await;
+                    Ok(())
                 } else {
                     warn!("fetch sn-call failed, from: {:?}.", resp_sender.remote());
-                    return;
+                    Ok(())
                 }
             }
             PackageCmdCode::SnCalledResp => {
                 let called_resp =
                     <Box<dyn Any + Send>>::downcast::<SnCalledResp>(cmd_pkg.into_any());
-                if let Ok(called_resp) = called_resp {
-                    self.handle_called_resp(called_resp, Some(pkg_box.key()))
+                return if let Ok(called_resp) = called_resp {
+                    self.handle_called_resp(called_resp, Some(pkg_box.key())).await;
+                    Ok(())
                 } else {
                     warn!(
                         "fetch sn-called-resp failed, from: {:?}.",
                         resp_sender.remote()
                     );
-                    return;
+                    Ok(())
                 }
             }
             _ => warn!("invalid cmd-package, from: {:?}.", resp_sender.remote()),
         }
+        Ok(())
     }
 
 
-    fn handle_ping(
+    async fn handle_ping(
         &self,
         ping_req: Box<SnPing>,
-        resp_sender: MessageSender,
-        encryptor: Option<(&MixAesKey, &DeviceId)>,
+        mut resp_sender: GeneralDataSender,
         send_time: Timestamp,
-    ) {
-        if resp_sender.local().unwrap().is_ipv4() {
-            self.handle_ipv4_ping(ping_req, resp_sender, encryptor, send_time);
+    ) -> BuckyResult<()> {
+        if resp_sender.local().addr().is_ipv4() {
+            self.handle_ipv4_ping(ping_req, resp_sender, send_time).await
         } else {
-            self.handle_ipv6_ping(ping_req, resp_sender, encryptor, send_time)
+            self.handle_ipv6_ping(ping_req, resp_sender, send_time).await
         }
     }
 
-    fn handle_ipv6_ping(
+    async fn handle_ipv6_ping(
         &self,
         ping_req: Box<SnPing>,
-        resp_sender: MessageSender,
-        encryptor: Option<(&MixAesKey, &DeviceId)>,
+        mut resp_sender: GeneralDataSender,
         _send_time: Timestamp,
-    ) {
+    ) -> BuckyResult<()> {
         let from_peer_id = match ping_req.from_peer_id.as_ref() {
             Some(id) => id,
-            None => match encryptor {
-                Some((_, id)) => id,
-                None => {
-                    warn!(
-                        "[ping from 'unknow-deviceid' seq({})] without from peer-desc.",
-                        ping_req.seq.value()
-                    );
-                    return;
-                }
-            },
+            None => resp_sender.remote_device_id()
         };
+
+        let aes_key = resp_sender.key();
 
         let log_key = format!(
             "[ping from {} seq({})]",
             from_peer_id.to_string(),
             ping_req.seq.value()
         );
-
-        let resp_sender = match resp_sender {
-            MessageSender::Tcp(_) => {
-                warn!("{} from tcp.", log_key);
-                return;
-            }
-            MessageSender::Udp(u) => Arc::new(u),
-        };
 
         info!("{}", log_key);
 
@@ -353,54 +312,38 @@ impl SnService {
             peer_info: None,
             end_point_array: vec![Endpoint::from((
                 Protocol::Udp,
-                resp_sender.remote().clone(),
+                resp_sender.remote().addr().clone(),
             ))],
             receipt: None,
         };
 
-        self.send_resp_udp(
+        self.send_resp(
             resp_sender,
             DynamicPackage::from(ping_resp),
             format!("{}", log_key),
-        );
+        ).await?;
 
+        Ok(())
     }
 
-    fn handle_ipv4_ping(
+    async fn handle_ipv4_ping(
         &self,
         ping_req: Box<SnPing>,
-        resp_sender: MessageSender,
-        encryptor: Option<(&MixAesKey, &DeviceId)>,
+        mut resp_sender: GeneralDataSender,
         send_time: Timestamp,
-    ) {
+    ) -> BuckyResult<()> {
         let from_peer_id = match ping_req.from_peer_id.as_ref() {
             Some(id) => id,
-            None => match encryptor {
-                Some((_, id)) => id,
-                None => {
-                    warn!(
-                        "[ping from 'unknow-deviceid' seq({})] without from peer-desc.",
-                        ping_req.seq.value()
-                    );
-                    return;
-                }
-            },
+            None => resp_sender.remote_device_id()
         };
 
-        let aes_key = encryptor.map(|(key, _)| key);
+        let aes_key = resp_sender.key();
 
         let log_key = format!(
             "[ping from {} seq({})]",
             from_peer_id.to_string(),
             ping_req.seq.value()
         );
-        let resp_sender = match resp_sender {
-            MessageSender::Tcp(_) => {
-                warn!("{} from tcp.", log_key);
-                return;
-            }
-            MessageSender::Udp(u) => Arc::new(u),
-        };
 
         info!("{}", log_key);
 
@@ -426,31 +369,32 @@ impl SnService {
             from_peer_id.clone(),
             &ping_req.peer_info,
             resp_sender.clone(),
-            aes_key,
+            Some(aes_key),
             send_time,
             ping_req.seq,
         ) {
             warn!("{} cache peer failed. the ping maybe is timeout.", log_key);
-            return;
+            return Ok(());
         };
 
         let ping_resp = SnPingResp {
             seq: ping_req.seq,
             sn_peer_id: self.local_device_id().clone(),
             result: BuckyErrorCode::Ok.into_u8(),
-            peer_info: Some(self.0.local_device.clone()),
+            peer_info: Some(self.local_device.device().clone()),
             end_point_array: vec![Endpoint::from((
                 Protocol::Udp,
-                resp_sender.remote().clone(),
+                resp_sender.remote().addr().clone(),
             ))],
             receipt: None,
         };
 
-        self.send_resp_udp(
+        self.send_resp(
             resp_sender,
             DynamicPackage::from(ping_resp),
             format!("{}", log_key),
-        );
+        ).await?;
+        Ok(())
     }
 
     // fn verify_receipt_sign(
@@ -538,11 +482,10 @@ impl SnService {
     //     Some((IsAcceptClient::Accept(is_request_receipt), local_receipt))
     // }
 
-    fn handle_call(
+    async fn handle_call<T: DataSender>(
         &self,
         mut call_req: Box<SnCall>,
-        resp_sender: MessageSender,
-        _encryptor: Option<(&MixAesKey, &DeviceId)>,
+        mut resp_sender: T,
         _send_time: Timestamp,
     ) {
         let from_peer_id = &call_req.from_peer_id;
@@ -604,9 +547,9 @@ impl SnService {
                         to_peer_cache.is_wan
                     );
 
-                    if self.0.call_stub.insert(from_peer_id, &call_req.seq) {
+                    if self.call_stub.insert(from_peer_id, &call_req.seq) {
                         if call_req.is_always_call || !to_peer_cache.is_wan {
-                            let called_seq = self.0.seq_generator.generate();
+                            let called_seq = self.seq_generator.generate();
                             let mut called_req = SnCalled {
                                 seq: called_seq,
                                 to_peer_id: call_req.to_peer_id.clone(),
@@ -640,7 +583,7 @@ impl SnService {
                                 DynamicPackage::from(called_req),
                                 called_seq.value(),
                                 called_log,
-                            );
+                            ).await;
                             // self.call_tracker.calls.insert(called_seq, (call_req.send_time, Instant::now(), call_req.to_peer_id.clone()));
                         }
                     } else {
@@ -691,9 +634,9 @@ impl SnService {
         );
     }
 
-    fn handle_called_resp(&self, called_resp: Box<SnCalledResp>, _aes_key: Option<&MixAesKey>) {
+    async fn handle_called_resp(&self, called_resp: Box<SnCalledResp>, _aes_key: Option<&MixAesKey>) {
         info!("called-resp seq {}.", called_resp.seq.value());
-        self.resend_queue().confirm_pkg(called_resp.seq.value());
+        self.resend_queue().confirm_pkg(called_resp.seq.value()).await;
 
         // 统计性能
         // if let Some((call_send_time, called_send_time, peerid)) = self.call_tracker.calls.remove(&called_resp.seq) {
@@ -711,18 +654,28 @@ impl SnService {
     }
 }
 
-impl ResendCallbackTrait for SnService {
-    fn on_callback(&self, pkg: Arc<PackageBox>, errno: BuckyErrorCode) {
-        if let Some(p) = pkg.packages_no_exchange()
-                                    .get(0)
-                                    .map(| p | {
-                                        let p: &SnCalled = p.as_ref();
-                                        p
-                                    }) {
-            self.peer_manager().find_peer(&p.peer_info.desc().device_id())
-                .map(| requestor | {
-                    requestor.peer_status.record(p.to_peer_id.clone(), p.call_seq, errno);
-                });
+#[async_trait::async_trait]
+impl UDPListenerEventListener for SnService {
+    async fn on_udp_package_box(&self, socket: Arc<UDPSocket>, package_box: UdpPackageBox) {
+        let remote_ep = package_box.remote().clone();
+        let pkg: PackageBox = package_box.into();
+        let resp_sender = UdpDataSender::new(socket,
+                                             remote_ep,
+                                             pkg.remote().clone(),
+                                             pkg.key().clone());
+        if let Err(e) = self.handle(pkg, GeneralDataSender::from(resp_sender)).await {
+            error!("handle udp package failed, e:{}", e);
         }
+    }
+
+    async fn on_udp_raw_data(&self, data: &[u8], context: (Arc<UDPSocket>, DeviceId, MixAesKey, Endpoint)) -> Result<(), BuckyError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TcpListenerEventListener for SnService {
+    async fn on_new_connection(&self, socket: TCPSocket, first_box: PackageBox) -> BuckyResult<()> {
+        self.handle(first_box, GeneralDataSender::from(socket)).await
     }
 }

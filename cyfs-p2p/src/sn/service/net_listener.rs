@@ -1,34 +1,31 @@
 use log::*;
 use std::{
-    time::{Duration}, 
-    io::{ErrorKind}, 
+    time::{Duration},
+    io::{ErrorKind},
     net::SocketAddr,
-    future::Future, 
-    pin::Pin, 
-    sync::Arc, 
+    future::Future,
+    pin::Pin,
+    sync::Arc,
     // thread
 };
 use async_std::{
-    net::{UdpSocket, TcpListener, Shutdown}, 
-    task::{self, Context, Poll}, 
+    net::{UdpSocket, TcpListener, Shutdown},
+    task::{self, Context, Poll},
 };
 use futures::{
     executor::ThreadPool
 };
 use cyfs_base::*;
 use crate::{
-    types::*, 
+    types::*,
     protocol::*,
-    history::keystore::Keystore, 
-    interface::{
-        udp::{PackageBoxDecodeContext, PackageBoxEncodeContext, MTU_LARGE},
-        tcp::{AcceptInterface, PackageInterface},
-    }, sn::service::statistic::StatisticManager, 
+    history::keystore::Keystore,
+    sn::service::statistic::StatisticManager,
 };
 use super::SnService;
 
 pub struct NetListener {
-    thread_pool: ThreadPool, 
+    thread_pool: ThreadPool,
     close_notifier: async_std::channel::Sender<()>
 }
 
@@ -102,8 +99,8 @@ impl NetListener {
                     continue;
                 }
             };
-            
-        
+
+
             Self::process_pkg(&service, pkg, sender).await;
         }
     }
@@ -120,18 +117,18 @@ impl NetListener {
                     continue;
                 }
             };
-            
+
             Self::process_pkg(&service, pkg, sender).await;
         }
     }
 
     /*
     async fn listen_process(
-        udp_listeners: Vec<UdpListener>, 
-        tcp_listeners: Vec<TcpAcceptor>, 
-        service: SnService, 
+        udp_listeners: Vec<UdpListener>,
+        tcp_listeners: Vec<TcpAcceptor>,
+        service: SnService,
         close_waiter: async_std::channel::Receiver<()>) {
-        
+
         let mut udp_listen_futures: Vec<Pin<Box<dyn Future<Output = BuckyResult<(PackageBox, MessageSender)>> + Send>>> = Vec::with_capacity(udp_listeners.len());
         for udp in udp_listeners.as_slice() {
             udp_listen_futures.push(Box::pin(udp.recv()));
@@ -309,10 +306,10 @@ impl NetListener {
     }
 
     pub async fn listen(
-        endpoints_v6: &[Endpoint], 
-        endpoints_v4: &[Endpoint], 
+        endpoints_v6: &[Endpoint],
+        endpoints_v4: &[Endpoint],
         service: SnService) -> BuckyResult<(NetListener, usize, usize)> {
-        
+
         let (mut udp_results, mut tcp_results) = Self::bind(endpoints_v6, service.local_device_id(), service.key_store()).await;
         let (mut udp_results_v4, mut tcp_results_v4) = Self::bind(endpoints_v4, service.local_device_id(), service.key_store()).await;
 
@@ -334,11 +331,11 @@ impl NetListener {
         let udp_count = udp_listeners.len();
         let tcp_count = tcp_listeners.len();
         let (close_notifier, _close_waiter) = async_std::channel::bounded(1);
-        
+
         let pool_size = 4;
         let mut builder = ThreadPool::builder();
         let thread_pool = builder.pool_size(pool_size).create().unwrap();
-        
+
         // 每个socket在多个任务处理，理想情况下每个线程处理一个udp+tcp
         for _ in 0..pool_size {
             for listener in &udp_listeners {
@@ -366,16 +363,16 @@ impl NetListener {
             let close_waiter = close_waiter.clone();
             thread_pool.spawn_ok(async move {
                 Self::listen_process(
-                    udp_listeners, 
-                    tcp_listeners, 
-                    service, 
+                    udp_listeners,
+                    tcp_listeners,
+                    service,
                     close_waiter).await;
             });
         }
         */
 
         Ok((NetListener {
-            thread_pool, 
+            thread_pool,
             close_notifier
         }, udp_count, tcp_count))
     }
@@ -447,9 +444,9 @@ impl UdpListener {
                     match PackageBox::raw_decode_with_context(recv, ctx) {
                         Ok((package_box, _)) => {
                             let resp_sender = MessageSender::Udp(UdpSender::new(
-                                self.0.clone(), 
-                                package_box.remote().clone(), 
-                                package_box.key().clone(), 
+                                self.0.clone(),
+                                package_box.remote().clone(),
+                                package_box.key().clone(),
                                 from));
                             break Ok((package_box, resp_sender))
                         },
@@ -482,7 +479,7 @@ impl UdpListener {
 #[derive(Clone)]
 // 暂时只支持QA
 struct TcpAcceptor {
-    local_device_id: DeviceId, 
+    local_device_id: DeviceId,
     addr: SocketAddr,
     socket: Arc<TcpListener>,
     key_store: Keystore,
@@ -498,7 +495,7 @@ impl TcpAcceptor {
             Ok(socket) => {
                 info!("tcp-listener({}) bind ok.", addr);
                 Ok(TcpAcceptor {
-                    local_device_id, 
+                    local_device_id,
                     addr,
                     socket: Arc::new(socket),
                     key_store,

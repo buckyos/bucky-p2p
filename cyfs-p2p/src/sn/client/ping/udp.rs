@@ -12,11 +12,9 @@ use cyfs_base::*;
 use crate::{
     types::*,
     protocol::{*, v0::*},
-    interface::{udp::{Interface, PackageBoxEncodeContext}},
     history::keystore,
 };
 use crate::history::keystore::Keystore;
-use crate::interface::udp::InterfaceImpl;
 use super::{
     client::{PingSession, PingSessionResp},
 };
@@ -281,7 +279,6 @@ impl PingSession for UdpPingSession {
                 SessionState::Responsed { resp, .. } => Ok(resp.clone())
             }
         };
-
         match next {
             NextStep::Wait(waiter) => StateWaiter::wait(waiter, state).await,
             NextStep::Return(result) => result,

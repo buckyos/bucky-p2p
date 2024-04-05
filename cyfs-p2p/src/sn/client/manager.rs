@@ -18,6 +18,8 @@ use crate::finder::DeviceCache;
 use crate::history::keystore::Keystore;
 use crate::interface::NetManager;
 use crate::pn::client::ProxyManager;
+use crate::receive_processor::RecieveProcessorRef;
+use crate::sockets::NetListenerRef;
 use super::{
     cache::*,
     ping::{PingConfig, PingClients, SnStatus},
@@ -45,6 +47,7 @@ struct ManagerImpl {
     ping_config: PingConfig,
     local_device: Device,
     called_event_listener: Arc<dyn PingClientCalledEvent>,
+    processor: RecieveProcessorRef,
 }
 
 #[derive(Clone)]
@@ -164,7 +167,7 @@ impl ClientManager {
         to_start
     }
 
-    pub fn reset_endpoints(&self, net_listener: NetListener, local_device: Device) -> PingClients {
+    pub fn reset_endpoints(&self, net_listener: NetListenerRef, local_device: Device) -> PingClients {
         let (to_start, to_close) = {
             let mut ping = self.0.ping.write().unwrap();
             let to_close = ping.clone();

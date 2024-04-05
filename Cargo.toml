@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["./cyfs-p2p"]
+members = [
+    "./cyfs-p2p",
+    "./pn-miner",
+    "./sn-miner-rust",
+]

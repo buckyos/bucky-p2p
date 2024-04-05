@@ -1,0 +1,18 @@
+[package]
+name = "sn-miner-rust"
+version = "0.5.0"
+authors = ["zhangzhen <zhangzhen@buckyos.com>"]
+edition = "2018"
+license = "BSD-2-Clause"
+description = "Rust sn-miner-rust package"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+async-std = "1.11"
+cyfs-base = "0.6.12"
+cyfs-debug = "0.6.6"
+cyfs-util = "0.6.8"
+cyfs-p2p = { path = "../cyfs-p2p" }
+clap = "2"

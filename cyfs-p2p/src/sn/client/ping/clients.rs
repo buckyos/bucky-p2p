@@ -10,11 +10,11 @@ use cyfs_base::*;
 use crate::{
     types::*,
     protocol::{*, v0::*},
-    interface::{NetListener, udp::{Interface, PackageBoxEncodeContext}},
     dht::*
 };
 use crate::history::keystore::Keystore;
 use crate::sn::client::{ SnCache};
+use crate::sockets::NetListenerRef;
 use super::super::{
     manager::PingClientCalledEvent
 };
@@ -44,7 +44,7 @@ struct StateImpl {
 struct ClientsImpl {
     key_store: Arc<Keystore>,
     sn_cache: Arc<SnCache>,
-    net_listener: NetListener,
+    net_listener: NetListenerRef,
     sn_list: Vec<Device>,
     local_device: Device,
     gen_seq: Arc<TempSeqGenerator>,
@@ -67,7 +67,7 @@ impl PingClients {
         &self,
         key_store: Arc<Keystore>,
         sn_cache: Arc<SnCache>,
-        net_listener: NetListener,
+        net_listener: NetListenerRef,
         local_device: Device,
         ping_config: PingConfig,
         called_event_listener: Arc<dyn PingClientCalledEvent>,
@@ -119,7 +119,7 @@ impl PingClients {
         sn_cache: Arc<SnCache>,
         local_device_id: &DeviceId,
         gen_seq: Arc<TempSeqGenerator>,
-        net_listener: NetListener,
+        net_listener: NetListenerRef,
         sn_list: Vec<Device>,
         local_device: Device,
         ping_config: PingConfig,
@@ -142,10 +142,6 @@ impl PingClients {
             ping_config,
             called_event_listener,
         }))
-    }
-
-    pub fn net_listener(&self) -> &NetListener {
-        &self.0.net_listener
     }
 
     pub fn default_local(&self) -> Device {

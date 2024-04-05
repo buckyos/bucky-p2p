@@ -1,11 +1,14 @@
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use cyfs_base::{BuckyError, BuckyErrorCode, BuckyResult, DeviceId, Endpoint, Protocol};
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
+use crate::LocalDeviceRef;
+use crate::protocol::{DynamicPackage, PackageCmdCode};
+use crate::types::MixAesKey;
 use super::tcp::{TCPListener, TcpListenerEventListener, TCPListenerRef};
-use super::udp::{UDPListener, UDPListenerEventListener, UDPListenerRef, UDPSocket};
+use super::udp::{UDPListener, UDPListenerEventListener, UDPListenerRef, UdpPackageBox, UDPSocket};
 use super::UpdateOuterResult;
 
 pub struct NetListener {
@@ -13,6 +16,7 @@ pub struct NetListener {
     udp: Vec<UDPListenerRef>,
     tcp: Vec<TCPListenerRef>,
 }
+pub type NetListenerRef = Arc<NetListener>;
 
 impl std::fmt::Display for NetListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -22,22 +26,22 @@ impl std::fmt::Display for NetListener {
 impl NetListener {
     pub async fn open(
         key_store: Arc<Keystore>,
-        local_device_id: DeviceId,
+        local_device: LocalDeviceRef,
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
         tcp_accept_timout: Duration,
         udp_recv_buffer: usize,
         udp_sn_only: bool,
-    ) -> BuckyResult<Self> {
+    ) -> BuckyResult<Arc<Self>> {
         let ep_len = endpoints.len();
         if ep_len == 0 {
             let err = BuckyError::new(BuckyErrorCode::InvalidParam, "no endpoint");
-            warn!("NetListener{{local:{}}} bind failed for {}", local_device_id, err);
+            warn!("NetListener{{local:{}}} bind failed for {}", local_device.device_id(), err);
             return Err(err);
         }
 
         let mut listener = NetListener {
-            local: local_device_id.clone(),
+            local: local_device.device_id().clone(),
             udp: vec![],
             tcp: vec![],
             // ip_set: BTreeSet::new(),
@@ -72,7 +76,7 @@ impl NetListener {
 
             if ep_pair.is_err() {
                 let err = ep_pair.unwrap_err();
-                warn!("NetListener{{local:{}}} bind on {:?} failed for {:?}", local_device_id, ep, err);
+                warn!("NetListener{{local:{}}} bind on {:?} failed for {:?}", local_device.device_id(), ep, err);
                 continue;
             }
 
@@ -95,7 +99,7 @@ impl NetListener {
                     };
                     let udp_listener = UDPListener::new(
                                                         key_store.clone(),
-                                                        local_device_id.clone(),
+                                                        local_device.clone(),
                                                         udp_sn_only,
                                                         udp_recv_buffer);
                     let ret= udp_listener.bind(&local, out, mapping_port).await;
@@ -116,7 +120,7 @@ impl NetListener {
                             dst_port
                         })
                     };
-                    let mut tcp_listener = TCPListener::new(key_store.clone(), local_device_id.clone(), tcp_accept_timout);
+                    let mut tcp_listener = TCPListener::new(key_store.clone(), local_device.clone(), tcp_accept_timout);
                     let ret = tcp_listener.bind(local, out, mapping_port).await;
                     listener.tcp.push(tcp_listener);
                     ret
@@ -136,10 +140,10 @@ impl NetListener {
                 // }
             }
         }
-        Ok(listener)
+        Ok(Arc::new(listener))
     }
 
-    pub fn set_udp_listener_event_listner(&self, listener: Arc<dyn UDPListenerEventListener>) {
+    pub fn set_udp_listener_event_listener(&self, listener: Arc<dyn UDPListenerEventListener>) {
         for udp in self.udp.iter() {
             udp.set_listener(listener.clone());
         }

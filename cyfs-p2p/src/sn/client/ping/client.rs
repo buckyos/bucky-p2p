@@ -13,8 +13,10 @@ use crate::{
     types::*,
     protocol::{v0::*},
 };
+use crate::executor::Executor;
 use crate::history::keystore::Keystore;
 use crate::sn::client::{ClientManager, SnCache};
+use crate::sockets::{NetListenerRef, UpdateOuterResult};
 use super::{
     udp::{self, *}
 };
@@ -60,14 +62,6 @@ impl std::str::FromStr for SnStatus {
         }
     }
 }
-
-#[derive(Clone, Debug)]
-pub struct PingSessionResp {
-    pub from: Endpoint,
-    pub err: BuckyErrorCode,
-    pub endpoints: Vec<Endpoint>
-}
-
 
 #[async_trait::async_trait]
 pub trait PingSession: Send + Sync + std::fmt::Display {
@@ -134,7 +128,7 @@ enum Ipv6ClientState {
     Wait(Timestamp, Box<dyn PingSession>)
 }
 
-struct ClientImpl {
+struct PingClient {
     key_store: Arc<Keystore>,
     sn_cache: Arc<SnCache>,
     config: PingConfig,
@@ -142,18 +136,17 @@ struct ClientImpl {
     sn_id: DeviceId,
     sn: Device,
     gen_seq: Arc<TempSeqGenerator>,
-    net_listener: NetListener,
+    net_listener: NetListenerRef,
     local_device: RwLock<Device>,
     state: RwLock<ClientState>,
-}
 
-#[derive(Clone)]
-pub struct PingClient(Arc<ClientImpl>);
+}
+pub type PingClientRef = Arc<PingClient>;
 
 impl std::fmt::Display for PingClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let device_id = self.0.local_device.read().unwrap().desc().device_id();
-        write!(f, "PingClients{{local:{}, sn:{}}}", device_id, self.sn())
+        let device_id = self.local_device.read().unwrap().desc().device_id();
+        write!(f, "PingClient {{local:{}, sn:{}}}", device_id, self.sn())
     }
 }
 
@@ -163,15 +156,15 @@ impl PingClient {
         sn_cache: Arc<SnCache>,
         config: PingConfig,
         gen_seq: Arc<TempSeqGenerator>,
-        net_listener: NetListener,
+        net_listener: NetListenerRef,
         sn_index: usize,
         sn: Device,
         local_device: Device,
-    ) -> Self {
+    ) -> Arc<Self> {
         let sn_id = sn.desc().device_id();
         key_store.reset_peer(&sn_id);
 
-        Self(Arc::new(ClientImpl {
+        Arc::new(PingClient {
             key_store,
             sn_cache,
             config,
@@ -185,46 +178,42 @@ impl PingClient {
                 ipv4: Ipv4ClientState::Init(StateWaiter::new()),
                 ipv6: Ipv6ClientState::None
             })
-        }))
+        })
     }
 
     pub(crate) fn reset(
         &self,
-        net_listener: NetListener,
+        net_listener: NetListenerRef,
         local_device: Device,
-    ) -> Self {
-        Self(Arc::new(ClientImpl {
-            key_store: self.0.key_store.clone(),
-            sn_cache: self.0.sn_cache.clone(),
-            config: self.0.config.clone(),
-            sn_id: self.0.sn_id.clone(),
-            sn_index: self.0.sn_index,
-            sn: self.0.sn.clone(),
-            gen_seq: self.0.gen_seq.clone(),
+    ) -> Arc<Self> {
+        Arc::new(PingClient {
+            key_store,
+            sn_cache,
+            config,
+            gen_seq,
             net_listener,
+            sn,
+            sn_id,
+            sn_index,
             local_device: RwLock::new(local_device),
             state: RwLock::new(ClientState {
                 ipv4: Ipv4ClientState::Init(StateWaiter::new()),
                 ipv6: Ipv6ClientState::None
             })
-        }))
+        })
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self, &other)
     }
 
     pub fn local_device(&self) -> Device {
-        self.0.local_device.read().unwrap().clone()
-    }
-
-    fn net_listener(&self) -> &NetListener {
-        &self.0.net_listener
+        self.local_device.read().unwrap().clone()
     }
 
     pub fn stop(&self) {
         let (waiter, sessions) = {
-            let mut state = self.0.state.write().unwrap();
+            let mut state = self.state.write().unwrap();
             let (waiter, mut sessions) = match &mut state.ipv4 {
                 Ipv4ClientState::Init(waiter) => {
                     let waiter = waiter.transfer();
@@ -279,11 +268,11 @@ impl PingClient {
 
 
     pub fn sn(&self) -> &DeviceId {
-        &self.0.sn_id
+        &self.sn_id
     }
 
     pub fn index(&self) -> usize {
-        self.0.sn_index
+        self.sn_index
     }
 
 
@@ -306,7 +295,7 @@ impl PingClient {
             local_dev.body_mut().as_mut().unwrap().increase_update_time(bucky_time_now());
 
             let _ = sign_and_set_named_object_body(
-                self.0.key_store.signer(),
+                self.key_store.signer(),
                 &mut local_dev,
                 &SignatureSource::RefIndex(0),
             ).await;
@@ -314,7 +303,7 @@ impl PingClient {
 
 
             let updated = {
-                let mut store = self.0.local_device.write().unwrap();
+                let mut store = self.local_device.write().unwrap();
                 if store.body().as_ref().unwrap().update_time() < local_dev.body().as_ref().unwrap().update_time() {
                     *store = local_dev;
                     true
@@ -339,7 +328,7 @@ impl PingClient {
 
     fn ping_ipv4_once(&self) {
         info!("{} ping once", self);
-        let mut state = self.0.state.write().unwrap();
+        let mut state = self.state.write().unwrap();
         match &mut state.ipv4 {
             Ipv4ClientState::Active {
                 state: active,
@@ -353,7 +342,7 @@ impl PingClient {
 
                             let client = self.clone();
                             let session = session.clone_as_ping_session();
-                            task::spawn(async move {
+                            Executor::spawn_ok(async move {
                                 client.sync_session_resp(session.as_ref(), session.wait().await);
                             });
                         }
@@ -385,11 +374,11 @@ impl PingClient {
         }
 
         let next = {
-            let mut state = self.0.state.write().unwrap();
+            let mut state = self.state.write().unwrap();
             match &state.ipv6 {
                 Ipv6ClientState::Try(session) => {
                     let session = session.clone_as_ping_session();
-                    state.ipv6 = Ipv6ClientState::Wait(bucky_time_now() + self.0.config.interval.as_micros() as u64, session.reset(None, None));
+                    state.ipv6 = Ipv6ClientState::Wait(bucky_time_now() + self.config.interval.as_micros() as u64, session.reset(None, None));
                     match result {
                         Ok(resp) => if resp.endpoints.len() > 0 {
                             NextStep::Update(session.local().clone(), resp.endpoints[0])
@@ -405,14 +394,14 @@ impl PingClient {
 
         if let NextStep::Update(local, outer) = next {
             let client = self.clone();
-            task::spawn(async move {
+            Executor::spawn_ok(async move {
                 client.update_local(local, outer).await;
             });
         }
     }
 
 
-    fn sync_ipv4_session_resp(&self, session: &dyn PingSession, result: BuckyResult<PingSessionResp>) {
+    fn sync_ipv4_session_resp(self: &PingClientRef, session: &dyn PingSession, result: BuckyResult<PingSessionResp>) {
         info!("{} wait session {} finished {:?}", self, session, result);
         struct NextStep {
             waiter: Option<StateWaiter>,
@@ -435,7 +424,7 @@ impl PingClient {
         }
 
         let next = {
-            let mut state = self.0.state.write().unwrap();
+            let mut state = self.state.write().unwrap();
             match &mut state.ipv4 {
                 Ipv4ClientState::Connecting {
                     waiter,
@@ -456,7 +445,7 @@ impl PingClient {
                                 next.update_cache = Some(Some(resp.from));
                                 state.ipv4 = Ipv4ClientState::Active {
                                     waiter: StateWaiter::new(),
-                                    state: ActiveState::Wait(bucky_time_now() + self.0.config.interval.as_micros() as u64, session.reset(None, Some(resp.from)))
+                                    state: ActiveState::Wait(bucky_time_now() + self.config.interval.as_micros() as u64, session.reset(None, Some(resp.from)))
                                 };
 
                                 next
@@ -491,7 +480,7 @@ impl PingClient {
                     } else if active.trying_session().and_then(|exists| if exists.local() == session.local() { Some(()) } else { None }).is_some() {
                         match result {
                             Ok(resp) => {
-                                *active = ActiveState::Wait(bucky_time_now() + self.0.config.interval.as_micros() as u64, session.reset(None, None));
+                                *active = ActiveState::Wait(bucky_time_now() + self.config.interval.as_micros() as u64, session.reset(None, None));
 
                                 if resp.endpoints.len() > 0 {
                                     next.update = Some((session.local(), resp.endpoints[0]));
@@ -502,7 +491,7 @@ impl PingClient {
                             Err(_err) => {
                                 match active {
                                     ActiveState::FirstTry(session) => {
-                                        self.0.key_store.reset_peer(&self.sn());
+                                        self.key_store.reset_peer(&self.sn());
                                         let session = session.reset(None, None);
                                         info!("{} start second try", self);
                                         *active = ActiveState::SecondTry(session.clone_as_ping_session());
@@ -527,15 +516,15 @@ impl PingClient {
 
         if let Some(update) = next.update_cache {
             if let Some(remote) = update {
-                self.0.sn_cache.add_active(session.sn(), EndpointPair::from((session.local().clone(), remote)));
+                self.sn_cache.add_active(session.sn(), EndpointPair::from((session.local().clone(), remote)));
             } else {
-                self.0.sn_cache.remove_active(session.sn());
+                self.sn_cache.remove_active(session.sn());
             }
         }
 
         if let Some(session) = next.to_start {
             let client = self.clone();
-            task::spawn(async move {
+            Executor::spawn_ok(async move {
                 client.sync_session_resp(session.as_ref(), session.wait().await);
             });
         }
@@ -546,7 +535,7 @@ impl PingClient {
 
         if let Some((local, outer)) = next.update {
             let client = self.clone();
-            task::spawn(async move {
+            Executor::spawn_ok(async move {
                 client.update_local(local, outer).await;
             });
         } else if next.ping_once {
@@ -562,7 +551,7 @@ impl PingClient {
         }
 
         let next = {
-            let mut state = self.0.state.write().unwrap();
+            let mut state = self.state.write().unwrap();
             match &mut state.ipv4 {
                 Ipv4ClientState::Stopped => NextStep::Return(Err(BuckyError::new(BuckyErrorCode::Interrupted, "user canceled"))),
                 Ipv4ClientState::Active {
@@ -578,7 +567,7 @@ impl PingClient {
             NextStep::Return(result) => result,
             NextStep::Wait(waiter) => {
                 StateWaiter::wait(waiter, || {
-                    let state = self.0.state.read().unwrap();
+                    let state = self.state.read().unwrap();
                     match &state.ipv4 {
                         Ipv4ClientState::Stopped => Err(BuckyError::new(BuckyErrorCode::Interrupted, "user canceled")),
                         Ipv4ClientState::Timeout =>  Ok(()),
@@ -589,7 +578,7 @@ impl PingClient {
         }
     }
 
-    pub async fn wait_online(&self) -> BuckyResult<SnStatus> {
+    pub async fn wait_online(self: &PingClientRef) -> BuckyResult<SnStatus> {
         info!("{} waiting online", self);
         enum NextStep {
             Wait(AbortRegistration),
@@ -597,7 +586,7 @@ impl PingClient {
             Return(BuckyResult<SnStatus>)
         }
         let next = {
-            let mut state = self.0.state.write().unwrap();
+            let mut state = self.state.write().unwrap();
             match &mut state.ipv4 {
                 Ipv4ClientState::Init(waiter) => {
                     let waiter = waiter.new_waiter();
@@ -611,7 +600,7 @@ impl PingClient {
         };
 
         let state = || {
-            let state = self.0.state.read().unwrap();
+            let state = self.state.read().unwrap();
             match &state.ipv4 {
                 Ipv4ClientState::Active {..} => Ok(SnStatus::Online),
                 Ipv4ClientState::Timeout =>  Ok(SnStatus::Offline),
@@ -627,18 +616,18 @@ impl PingClient {
                 info!("{} started", self);
                 let mut ipv6_session = None;
                 let mut ipv4_sessions = vec![];
-                for local in self.0.net_listener.udp().iter().filter(|interface| interface.local().addr().is_ipv4()) {
-                    let sn_endpoints: Vec<Endpoint> = self.0.sn.connect_info().endpoints().iter().filter(|endpoint| endpoint.is_udp() && endpoint.is_same_ip_version(&local.local())).cloned().collect();
+                for local in self.net_listener.udp().iter().filter(|interface| interface.local().addr().is_ipv4()) {
+                    let sn_endpoints: Vec<Endpoint> = self.sn.connect_info().endpoints().iter().filter(|endpoint| endpoint.is_udp() && endpoint.is_same_ip_version(&local.local())).cloned().collect();
                     if sn_endpoints.len() > 0 {
                         let params = UdpSesssionParams {
-                            config: self.0.config.udp.clone(),
+                            config: self.config.udp.clone(),
                             local: local.clone(),
                             local_device: self.local_device(),
                             with_device: true,
-                            sn_desc: self.0.sn.desc().clone(),
+                            sn_desc: self.sn.desc().clone(),
                             sn_endpoints,
                         };
-                        let session = UdpPingSession::new(self.0.key_store.clone(), self.0.gen_seq.clone(), params).clone_as_ping_session();
+                        let session = UdpPingSession::new(self.key_store.clone(), self.gen_seq.clone(), params).clone_as_ping_session();
 
                         info!("{} add session {}", self, session);
                         ipv4_sessions.push(session);
@@ -646,18 +635,18 @@ impl PingClient {
                 };
 
 
-                for local in self.0.net_listener.udp().iter().filter(|interface| interface.local().addr().is_ipv6()) {
-                    let sn_endpoints: Vec<Endpoint> = self.0.sn.connect_info().endpoints().iter().filter(|endpoint| endpoint.is_udp() && endpoint.is_same_ip_version(&local.local())).cloned().collect();
+                for local in self.net_listener.udp().iter().filter(|interface| interface.local().addr().is_ipv6()) {
+                    let sn_endpoints: Vec<Endpoint> = self.sn.connect_info().endpoints().iter().filter(|endpoint| endpoint.is_udp() && endpoint.is_same_ip_version(&local.local())).cloned().collect();
                     if sn_endpoints.len() > 0 {
                         let params = UdpSesssionParams {
-                            config: self.0.config.udp.clone(),
+                            config: self.config.udp.clone(),
                             local: local.clone(),
                             local_device: self.local_device(),
                             with_device: false,
-                            sn_desc: self.0.sn.desc().clone(),
+                            sn_desc: self.sn.desc().clone(),
                             sn_endpoints,
                         };
-                        let session = UdpPingSession::new(self.0.key_store.clone(), self.0.gen_seq.clone(), params).clone_as_ping_session();
+                        let session = UdpPingSession::new(self.key_store.clone(), self.gen_seq.clone(), params).clone_as_ping_session();
 
                         info!("{} add session {}", self, session);
                         ipv6_session = Some(session);
@@ -666,7 +655,7 @@ impl PingClient {
                 };
 
                 let next = {
-                    let mut state = self.0.state.write().unwrap();
+                    let mut state = self.state.write().unwrap();
                     match &mut state.ipv4 {
                         Ipv4ClientState::Init(waiter) => {
                             let waiter = waiter.transfer();
@@ -693,13 +682,13 @@ impl PingClient {
                         if start {
                             for session in ipv4_sessions.into_iter() {
                                 let client = self.clone();
-                                task::spawn(async move {
+                                Executor::spawn_ok(async move {
                                     client.sync_session_resp(session.as_ref(), session.wait().await);
                                 });
                             }
                             if let Some(session) = ipv6_session {
                                 let client = self.clone();
-                                task::spawn(async move {
+                                Executor::spawn_ok(async move {
                                     client.sync_session_resp(session.as_ref(), session.wait().await);
                                 });
                             }
@@ -716,9 +705,9 @@ impl PingClient {
 
     }
 
-    pub fn on_time_escape(&self, now: Timestamp) {
+    pub fn on_time_escape(self: &PingClientRef, now: Timestamp) {
         let sessions = {
-            let mut state = self.0.state.write().unwrap();
+            let mut state = self.state.write().unwrap();
             let mut sessions = match &mut state.ipv4 {
                 Ipv4ClientState::Connecting {
                     sessions,
@@ -737,7 +726,7 @@ impl PingClient {
 
                                     let client = self.clone();
                                     let session = session.clone_as_ping_session();
-                                    task::spawn(async move {
+                                    Executor::spawn_ok(async move {
                                         client.sync_session_resp(session.as_ref(), session.wait().await);
                                     });
                                 }
@@ -765,7 +754,7 @@ impl PingClient {
                         {
                             let client = self.clone();
                             let session = session.clone_as_ping_session();
-                            task::spawn(async move {
+                            Executor::spawn_ok(async move {
                                 client.sync_session_resp(session.as_ref(), session.wait().await);
                             });
                         }
@@ -784,7 +773,7 @@ impl PingClient {
 
     pub fn on_udp_ping_resp(&self, resp: &SnPingResp, from: &Endpoint, interface: Interface) {
         let sessions = {
-            let state = self.0.state.read().unwrap();
+            let state = self.state.read().unwrap();
 
             if from.addr().is_ipv4() {
                 match &state.ipv4 {

@@ -6,6 +6,7 @@ use cyfs_base::*;
 use crate::{
     types::*,
 };
+use crate::dht::KadId;
 
 pub struct SnCache {
     known_list: RwLock<BTreeSet<DeviceId>>,

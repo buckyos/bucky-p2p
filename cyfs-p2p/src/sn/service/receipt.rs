@@ -1,7 +1,6 @@
 use std::time::SystemTime;
-use crate::sn::types::SnServiceReceipt;
-use crate::{ReceiptWithSignature};
 use cyfs_base::*;
+use crate::protocol::{ReceiptWithSignature, SnServiceReceipt};
 
 pub type IsRequestReceipt = bool;
 #[derive(Copy, Clone, Debug)]
