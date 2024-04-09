@@ -10,8 +10,10 @@ pub mod sn;
 mod dht;
 mod finder;
 mod receive_processor;
+mod stack;
 
 #[macro_use]
 extern crate log;
 
 pub use types::*;
+pub use stack::*;

@@ -12,21 +12,14 @@ use super::udp::{UDPListener, UDPListenerEventListener, UDPListenerRef, UdpPacka
 use super::UpdateOuterResult;
 
 pub struct NetListener {
-    local: DeviceId,
     udp: Vec<UDPListenerRef>,
     tcp: Vec<TCPListenerRef>,
 }
 pub type NetListenerRef = Arc<NetListener>;
 
-impl std::fmt::Display for NetListener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NetListener:{{local:{}}}", self.local)
-    }
-}
 impl NetListener {
     pub async fn open(
         key_store: Arc<Keystore>,
-        local_device: LocalDeviceRef,
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
         tcp_accept_timout: Duration,
@@ -36,12 +29,11 @@ impl NetListener {
         let ep_len = endpoints.len();
         if ep_len == 0 {
             let err = BuckyError::new(BuckyErrorCode::InvalidParam, "no endpoint");
-            warn!("NetListener{{local:{}}} bind failed for {}", local_device.device_id(), err);
+            warn!("NetListener bind failed for {}", err);
             return Err(err);
         }
 
         let mut listener = NetListener {
-            local: local_device.device_id().clone(),
             udp: vec![],
             tcp: vec![],
             // ip_set: BTreeSet::new(),
@@ -76,7 +68,7 @@ impl NetListener {
 
             if ep_pair.is_err() {
                 let err = ep_pair.unwrap_err();
-                warn!("NetListener{{local:{}}} bind on {:?} failed for {:?}", local_device.device_id(), ep, err);
+                warn!("NetListener bind on {:?} failed for {:?}", ep, err);
                 continue;
             }
 
@@ -99,7 +91,6 @@ impl NetListener {
                     };
                     let udp_listener = UDPListener::new(
                                                         key_store.clone(),
-                                                        local_device.clone(),
                                                         udp_sn_only,
                                                         udp_recv_buffer);
                     let ret= udp_listener.bind(&local, out, mapping_port).await;
@@ -120,7 +111,7 @@ impl NetListener {
                             dst_port
                         })
                     };
-                    let mut tcp_listener = TCPListener::new(key_store.clone(), local_device.clone(), tcp_accept_timout);
+                    let mut tcp_listener = TCPListener::new(key_store.clone(), tcp_accept_timout);
                     let ret = tcp_listener.bind(local, out, mapping_port).await;
                     listener.tcp.push(tcp_listener);
                     ret
@@ -167,7 +158,7 @@ impl NetListener {
             }
             //TODO: 支持显式绑定本地ip的 reset
             if !all_default {
-                error!("{} reset should be endpoint with default flag", self);
+                error!("reset should be endpoint with default flag");
                 return self.clone();
             }
         }

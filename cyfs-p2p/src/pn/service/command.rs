@@ -118,6 +118,7 @@ impl CommandTunnel {
                         // let exchange: &Exchange = package_box.packages()[0].as_ref();
                         service.keystore().add_key(
                             package_box.key(),
+                            package_box.local(),
                             package_box.remote(),
                         );
                         let _ = tunnel.on_package_box(package_box, from);
@@ -154,6 +155,7 @@ impl CommandTunnel {
         };
         let mut package_box = PackageBox::encrypt_box(
             syn_proxy.from_peer_info.desc().device_id(),
+            syn_proxy.to_peer_id.clone(),
             key.clone());
         package_box.append(vec![DynamicPackage::from(ack_proxy)]);
 

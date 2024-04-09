@@ -3,6 +3,7 @@ use super::{common::*, package::*, SnCall};
 
 //TODO: Option<AesKey> 支持明文包
 pub struct PackageBox {
+    local: DeviceId,
     remote: DeviceId,
     key: MixAesKey,
     packages: Vec<DynamicPackage>,
@@ -22,21 +23,22 @@ impl std::fmt::Debug for PackageBox {
 }
 
 impl PackageBox {
-    pub fn from_packages(remote: DeviceId, key: MixAesKey, packages: Vec<DynamicPackage>) -> Self {
+    pub fn from_packages(local: DeviceId, remote: DeviceId, key: MixAesKey, packages: Vec<DynamicPackage>) -> Self {
         // session package 的数组，不合并
-        let mut package_box = Self::encrypt_box(remote, key);
+        let mut package_box = Self::encrypt_box(local, remote, key);
         package_box.append(packages);
         package_box
     }
 
-    pub fn from_package(remote: DeviceId, key: MixAesKey, package: DynamicPackage) -> Self {
-        let mut package_box = Self::encrypt_box(remote.clone(), key);
+    pub fn from_package(local: DeviceId, remote: DeviceId, key: MixAesKey, package: DynamicPackage) -> Self {
+        let mut package_box = Self::encrypt_box(local, remote.clone(), key);
         package_box.packages.push(package);
         package_box
     }
 
-    pub fn encrypt_box(remote: DeviceId, key: MixAesKey) -> Self {
+    pub fn encrypt_box(local: DeviceId, remote: DeviceId, key: MixAesKey) -> Self {
         Self {
+            local,
             remote,
             key,
             packages: vec![],
@@ -60,6 +62,10 @@ impl PackageBox {
         } else {
             Some(self.packages.remove(0))
         }
+    }
+
+    pub fn local(&self) -> &DeviceId {
+        &self.local
     }
 
     pub fn remote(&self) -> &DeviceId {
@@ -247,18 +253,18 @@ impl<'de> PackageBoxDecodeContext<'de> {
         }
     }
     // 拿到local私钥
-    pub fn local_secret(&self) -> &PrivateKey {
-        self.keystore.private_key()
+    pub fn local_secret(&self, device_id: &DeviceId) -> Option<PrivateKey> {
+        self.keystore.private_key(device_id)
     }
 
-    pub fn local_public_key(&self) -> &PublicKey {
-        self.keystore.public_key()
+    pub fn local_public_key(&self, device_id: &DeviceId) -> Option<PublicKey> {
+        self.keystore.public_key(device_id)
     }
 
-    pub fn key_from_mixhash(&self, mix_hash: &KeyMixHash) -> Option<(DeviceId, MixAesKey)> {
+    pub fn key_from_mixhash(&self, mix_hash: &KeyMixHash) -> Option<(DeviceId, DeviceId, MixAesKey)> {
         self.keystore
             .get_key_by_mix_hash(mix_hash, true, true)
-            .map(|k| (k.peerid, k.key))
+            .map(|k| (k.local_id, k.remote_id, k.key))
     }
 
     pub fn version_of(&self, _remote: &DeviceId) -> u8 {
@@ -293,6 +299,19 @@ impl RawEncodeWithContext<PackageBoxEncodeContext> for PackageBox {
                     "try encode exchange without public-key",
                 ));
             }
+            let confusion = rand::random::<u16>();
+            let mut hash = hash_data(confusion.to_le_bytes().as_slice()).as_slice().to_vec();
+            hash.extend(&hash_data(hash.as_slice()).as_slice()[0..16]);
+            let aes_key = AesKey::from(hash);
+
+
+            let mut encrypted_device_id = vec![0u8; AesKey::padded_len(DeviceId::raw_bytes().unwrap())];
+            aes_key.encrypt(exchange.to_device_id.as_ref().as_slice(), encrypted_device_id.as_mut_slice(), exchange.to_device_id.as_ref().as_slice().len())?;
+
+            // 写入对端的device_id
+            buf = confusion.raw_encode(buf, &None)?;
+            buf[..encrypted_device_id.len()].copy_from_slice(encrypted_device_id.as_slice());
+            buf = &mut buf[encrypted_device_id.len()..];
             // 首先用对端的const info加密aes key
             buf[..exchange.key_encrypted.len()].copy_from_slice(&exchange.key_encrypted[..]);
             buf = &mut buf[exchange.key_encrypted.len()..];
@@ -378,8 +397,8 @@ RawDecodeWithContext<
         let (mix_hash, hash_buf) = KeyMixHash::raw_decode(buf)?;
 
         enum KeyStub {
-            Exist(DeviceId),
-            Exchange(Vec<u8>)
+            Exist((DeviceId, DeviceId)),
+            Exchange((DeviceId, Vec<u8>))
         }
 
         struct KeyInfo {
@@ -392,25 +411,44 @@ RawDecodeWithContext<
         let mut mix_key = None;
         let (key_info, buf) = {
             match context.key_from_mixhash(&mix_hash) {
-                Some((remote, key)) => {
+                Some((local, remote, key)) => {
                     mix_key = Some(key.mix_key);
 
                     (KeyInfo {
-                        stub: KeyStub::Exist(remote),
+                        stub: KeyStub::Exist((local, remote)),
                         enc_key: key.enc_key,
                         mix_hash
                     }, hash_buf)
                 },
                 None => {
+                    let (confusion, buf) = u16::raw_decode(buf)?;
+                    let mut hash = hash_data(confusion.to_le_bytes().as_slice()).as_slice().to_vec();
+                    hash.extend(&hash_data(hash.as_slice()).as_slice()[0..16]);
+                    let aes_key = AesKey::from(hash);
+
+                    let padded_len = AesKey::padded_len(DeviceId::raw_bytes().unwrap());
+                    let mut encrypted_device_id = vec![0u8; padded_len];
+                    encrypted_device_id.copy_from_slice(&buf[..padded_len]);
+                    let buf = &buf[padded_len..];
+                    let len = aes_key.inplace_decrypt(encrypted_device_id.as_mut_slice(), padded_len)?;
+                    assert_eq!(len, DeviceId::raw_bytes().unwrap());
+                    let device_id = DeviceId::try_from(ObjectId::try_from(encrypted_device_id[0..DeviceId::raw_bytes().unwrap()].to_vec())?)?;
+
+                    let device_secret = context.local_secret(&device_id);
+                    if device_secret.is_none() {
+                        error!("unkown device {}", device_id.to_string());
+                        return Err(BuckyError::new(BuckyErrorCode::InvalidData, "unkown device"));
+                    }
+                    let device_secret = device_secret.unwrap();
                     let mut enc_key = AesKey::default();
-                    let (remain, _) = context.local_secret().decrypt_aeskey(buf, enc_key.as_mut_slice()).map_err(|e|{
+                    let (remain, _) = device_secret.decrypt_aeskey(buf, enc_key.as_mut_slice()).map_err(|e|{
                         error!("decrypt aeskey err={}. (maybe: 1. local/remote device time is not correct 2. the packet is broken 3. the packet not contains Exchange info etc.. )", e);
                         e
                     })?;
                     let encrypted = Vec::from(&buf[..buf.len() - remain.len()]);
                     let (mix_hash, remain) = KeyMixHash::raw_decode(remain)?;
                     (KeyInfo {
-                        stub: KeyStub::Exchange(encrypted),
+                        stub: KeyStub::Exchange((device_id, encrypted)),
                         enc_key,
                         mix_hash,
                     }, remain)
@@ -418,7 +456,7 @@ RawDecodeWithContext<
             }
         };
 
-        let mut version = if let KeyStub::Exist(remote) = &key_info.stub {
+        let mut version = if let KeyStub::Exist((_, remote)) = &key_info.stub {
             context.version_of(remote)
         } else {
             0
@@ -498,18 +536,20 @@ RawDecodeWithContext<
             mix_key: mix_key.unwrap()
         };
         match key_info.stub {
-            KeyStub::Exist(remote) => {
-                let mut package_box = PackageBox::encrypt_box(remote,key );
+            KeyStub::Exist((local, remote)) => {
+                let mut package_box = PackageBox::encrypt_box(local, remote,key );
                 package_box.append(packages);
                 Ok((package_box, remain_buf))
             }
-            KeyStub::Exchange(encrypted) => {
+            KeyStub::Exchange((local, encrypted)) => {
                 if packages.len() > 0 && packages[0].cmd_code().is_exchange() {
                     let exchange: &mut Exchange = packages[0].as_mut();
                     exchange.key_encrypted = encrypted;
 
+                    assert_eq!(exchange.to_device_id, local);
+
                     let mut package_box =
-                        PackageBox::encrypt_box(exchange.from_device_desc.desc().device_id(), key);
+                        PackageBox::encrypt_box(local, exchange.from_device_desc.desc().device_id(), key);
                     package_box.append(packages);
                     Ok((package_box, remain_buf))
                 } else {

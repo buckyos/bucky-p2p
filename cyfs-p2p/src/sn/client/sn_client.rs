@@ -5,21 +5,22 @@ use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, BuckyResult, Device,
 use crate::history::keystore;
 use crate::history::keystore::Keystore;
 use crate::protocol::{Exchange, MTU_LARGE, PackageBox, PackageBoxEncodeContext, SnCall, SnPing};
-use crate::protocol::v0::SnCalledResp;
+use crate::protocol::v0::{SnCalledResp, SnPingResp};
 use crate::sockets::DataSender;
 use super::super::types::PingSessionResp;
 use crate::sockets::udp::UDPSocket;
 use crate::types::{LocalDeviceRef, TempSeqGenerator};
 
+#[derive(Clone)]
 pub enum SNResp {
-    Ping(PingSessionResp),
+    Ping(SnPingResp),
     Call(SnCalledResp),
 }
 
-impl TryInto<PingSessionResp> for SNResp {
+impl TryInto<SnPingResp> for SNResp {
     type Error = BuckyError;
 
-    fn try_into(self) -> Result<PingSessionResp, Self::Error> {
+    fn try_into(self) -> Result<SnPingResp, Self::Error> {
         match self {
             SNResp::Ping(resp) => {
                 Ok(resp)
@@ -46,7 +47,7 @@ impl TryInto<SnCalledResp> for SNResp {
     }
 }
 
-pub type SNRespWaiter = CallbackWaiter<String, BuckyResult<SNResp>>;
+pub type SNRespWaiter = CallbackWaiter<String, SNResp>;
 pub type SNRespWaiterRef = Arc<SNRespWaiter>;
 
 pub trait SNRespWaiterEx {
@@ -66,12 +67,10 @@ pub struct SNClientState {
 }
 pub struct SNClient<T: DataSender> {
     local_device: LocalDeviceRef,
-    sn_index: usize,
     sn_id: DeviceId,
     sn: Device,
     sn_ep: Endpoint,
     gen_seq: Arc<TempSeqGenerator>,
-    state: RwLock<SNClientState>,
     data_sender: T,
     resp_waiter: SNRespWaiterRef,
     with_device: bool,
@@ -89,12 +88,10 @@ impl<T: DataSender> std::fmt::Display for SNClient<T> {
 impl<T: DataSender + Clone> SNClient<T> {
     pub fn new(
         local_device: LocalDeviceRef,
-        sn_index: usize,
         sn_id: DeviceId,
         sn: Device,
         sn_ep: Endpoint,
         gen_seq: Arc<TempSeqGenerator>,
-        state: RwLock<SNClientState>,
         data_sender: T,
         resp_waiter: SNRespWaiterRef,
         with_device: bool,
@@ -103,12 +100,10 @@ impl<T: DataSender + Clone> SNClient<T> {
         call_timeout: Duration,) -> Self {
         SNClient {
             local_device,
-            sn_index,
             sn_id,
             sn,
             sn_ep,
             gen_seq,
-            state,
             data_sender,
             resp_waiter,
             with_device,
@@ -118,18 +113,21 @@ impl<T: DataSender + Clone> SNClient<T> {
         }
     }
 
-    fn map_ret<T>(ret: Result<BuckyResult<SNResp>, WaiterError>) -> BuckyResult<T> {
+    fn map_ret(ret: Result<SNResp, WaiterError>) -> BuckyResult<SNResp> {
         let ret = ret.map_err(|_| BuckyError::from((BuckyErrorCode::Timeout, "ping timeout")))?;
-        let ret = ret?;
-        let ret = ret.try_into()?;
         Ok(ret)
     }
 
-    pub async fn ping(&self) -> BuckyResult<PingSessionResp> {
+    pub fn data_sender(&self) -> &T {
+        &self.data_sender
+    }
+
+    pub async fn ping(&self) -> BuckyResult<SnPingResp> {
+        let seq = self.gen_seq.generate();
         let ping_req = SnPing {
             protocol_version: 0,
             stack_version: 0,
-            seq: Default::default(),
+            seq: seq.clone(),
             sn_peer_id: self.sn_id.clone(),
             from_peer_id: Some(self.local_device.device_id().clone()),
             peer_info: if self.with_device { Some(self.local_device.device().clone())} else {None},
@@ -138,11 +136,11 @@ impl<T: DataSender + Clone> SNClient<T> {
             receipt: None,
         };
 
-        let seq = self.gen_seq.generate();
-        let key_stub = self.key_store.create_key(self.sn.desc(), true);
+        let key_stub = self.key_store.create_key(self.local_device.device_id(), self.sn.desc(), true);
 
         info!("{} send sn ping, seq={:?} key={}", self, seq, key_stub.key);
         let mut pkg_box = PackageBox::encrypt_box(
+            self.local_device.device_id().clone(),
             self.sn_id.clone(),
             key_stub.key.clone());
 
@@ -151,7 +149,7 @@ impl<T: DataSender + Clone> SNClient<T> {
                                             self.local_device.device().clone(),
                                             key_encrypted,
                                             key_stub.key.mix_key.clone()));
-            let _ = exchg.sign(self.key_store.signer()).await;
+            let _ = exchg.sign(&self.key_store.signer(self.local_device.device_id()).unwrap()).await;
             pkg_box.push(exchg);
         }
         pkg_box.push(ping_req);
@@ -159,13 +157,13 @@ impl<T: DataSender + Clone> SNClient<T> {
         let result_future = self.resp_waiter.create_timeout_result_future(SNRespWaiter::get_ping_id(seq.value()), self.ping_timeout);
         self.data_sender.send_pkg_box(&pkg_box).await?;
         let ret = result_future.await;
-        Self::map_ret(ret)
+        Self::map_ret(ret)?.try_into()
     }
 
     pub async fn call(&self,
                       reverse_endpoints: Option<&[Endpoint]>,
                       remote: &DeviceId,
-                      payload_pkg: &PackageBox) -> BuckyResult<()> {
+                      payload_pkg: &PackageBox) -> BuckyResult<SnCalledResp> {
         let seq = self.gen_seq.generate();
         let mut call = SnCall {
             protocol_version: 0,
@@ -184,22 +182,25 @@ impl<T: DataSender + Clone> SNClient<T> {
 
         let mut context = PackageBoxEncodeContext::from(&call);
         let mut buf = vec![0u8;MTU_LARGE];
-        let data = payload_pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None)?;
-        buf.truncate(data.len());
+        let len = {
+            let data = payload_pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None)?;
+            data.len()
+        };
+        buf.truncate(len);
         call.payload = SizedOwnedData::from(buf);
 
-        let key_stub = self.key_store.create_key(self.sn.desc(), true);
+        let key_stub = self.key_store.create_key(self.local_device.device_id(), self.sn.desc(), true);
         info!("{} send sn call, seq={:?} key={}", self, seq, key_stub.key);
-        let mut packages = PackageBox::encrypt_box(self.sn_id.clone(), key_stub.key.clone());
+        let mut packages = PackageBox::encrypt_box(self.local_device.device_id().clone(), self.sn_id.clone(), key_stub.key.clone());
         if let keystore::EncryptedKey::Unconfirmed(encrypted) = &key_stub.encrypted {
             let mut exchange = Exchange::from((&call, encrypted.clone(), key_stub.key.mix_key.clone()));
-            let _ = exchange.sign(self.key_store.signer()).await.unwrap();
+            let _ = exchange.sign(&self.key_store.signer(self.local_device.device_id()).unwrap()).await.unwrap();
             packages.push(exchange);
         }
         packages.push(call);
 
         let result_future = self.resp_waiter.create_timeout_result_future(SNRespWaiter::get_call_id(seq.value()), self.call_timeout);
         self.data_sender.send_pkg_box(&packages).await?;
-        Self::map_ret(result_future.await)
+        Self::map_ret(result_future.await)?.try_into()
     }
 }

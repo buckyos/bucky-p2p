@@ -84,22 +84,16 @@ impl Service {
 
         let config = config.unwrap_or_default();
 
-        let signer = RsaCPUObjectSigner::new(
-            local_device.desc().public_key().clone(),
-            local_secret.clone(),
-        );
-
         let service = Self(Arc::new(ServiceImpl {
-            keystore: Keystore::new(
-                local_secret,
-                local_device.desc().clone(),
-                signer,
-                config.keystore.clone()),
+            keystore: Keystore::new(config.keystore.clone()),
             command_tunnel: None,
             proxy_tunnels: ProxyTunnelManager::open(config.tunnel.clone(), proxy_ports.as_slice())?,
             events: events.unwrap_or(Box::new(DefaultEvents {}))
         }));
 
+        service.keystore().add_local_key(local_device.desc().device_id().clone(),
+                                         local_secret,
+                                         local_device.desc().clone());
         let command_port = local_device.connect_info().endpoints()[0];
 
         let service_impl = unsafe { &mut *(Arc::as_ptr(&service.0) as *mut ServiceImpl) };

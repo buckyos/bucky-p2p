@@ -33,18 +33,11 @@ struct TCPListenerState {
 
 pub(crate) struct TCPListener {
     key_store: Arc<Keystore>,
-    local_device: LocalDeviceRef,
     accept_timout: Duration,
     state: RwLock<TCPListenerState>,
     tcp_listener: RwLock<Option<Arc<dyn TcpListenerEventListener>>>,
 }
 pub(crate) type TCPListenerRef = Arc<TCPListener>;
-
-impl std::fmt::Display for TCPListener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TCPListener:{{local:{}}}", self.local_device.device_id())
-    }
-}
 
 #[derive(Eq, PartialEq)]
 enum BoxType {
@@ -55,12 +48,10 @@ enum BoxType {
 impl TCPListener {
     pub fn new(
         key_store: Arc<Keystore>,
-        local_device: LocalDeviceRef,
         accept_timout: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             key_store,
-            local_device,
             accept_timout,
             state: RwLock::new(TCPListenerState {
                 local: None,
@@ -92,15 +83,15 @@ impl TCPListener {
         let mut state = self.state.write().unwrap();
         if let Some(outer_ep) = state.outer.as_ref() {
             if *outer_ep != *outer {
-                info!("{} reset outer to {}", self, outer);
+                info!("reset outer to {}", outer);
                 state.outer = Some(*outer);
                 UpdateOuterResult::Update
             } else {
-                trace!("{} ignore update outer to {}", self, outer);
+                trace!("ignore update outer to {}", outer);
                 UpdateOuterResult::None
             }
         } else {
-            info!("{} update outer to {}", self, outer);
+            info!("update outer to {}", outer);
             state.outer = Some(*outer);
             UpdateOuterResult::Update
         }
@@ -230,7 +221,7 @@ impl TCPListener {
             None => return Err(BuckyError::new(BuckyErrorCode::InvalidData, "no package")),
         };
         if let Some(exchg) = exchg {
-            if !exchg.verify(self.local_device.device_id()).await {
+            if !exchg.verify(first_box.local()).await {
                 warn!("tcp exchg verify failed.");
                 return Err(BuckyError::new(
                     BuckyErrorCode::InvalidData,
@@ -239,7 +230,7 @@ impl TCPListener {
             }
         }
 
-        Ok((TCPSocket::new(socket, self.local_device.device_id().clone(), local, remote, first_box.key().clone()), first_box))
+        Ok((TCPSocket::new(socket, first_box.local().clone(), first_box.remote().clone(), local, remote, first_box.key().clone()), first_box))
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -284,7 +275,6 @@ impl TCPListener {
     }
 
     pub async fn reset(self: &Arc<Self>, local: &Endpoint) -> Arc<Self> {
-        info!("{} reset with {}", self, local);
         let mut new = self.state.write().unwrap();
         new.local = Some(local.clone());
         new.outer = None;

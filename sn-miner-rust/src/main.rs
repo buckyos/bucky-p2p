@@ -62,7 +62,7 @@ async fn main() {
                 private_key,
                 4096,
                 Box::new(SnServiceContractServerImpl::new()),
-            );
+            ).await;
 
             let _ = service.start().await;
 

@@ -16,8 +16,9 @@ use crate::{
     protocol::{*, v0::*},
     types::*,
 };
+use crate::executor::Executor;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, GeneralDataSender};
+use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, GeneralDataSender, NetListenerRef};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
 use crate::sockets::udp::{UDPListenerEventListener, UdpPackageBox, UDPSocket};
 
@@ -46,32 +47,36 @@ pub struct SnService {
     resend_queue: Option<ResendQueue<GeneralDataSender>>,
     call_stub: CallStub,
     udp_recv_buffer: usize,
+    net_listener: NetListenerRef,
 }
 
 pub type SnServiceRef = Arc<SnService>;
 
 impl SnService {
-    pub fn new(
+    pub async fn new(
         local_device: LocalDeviceRef,
         local_secret: PrivateKey,
         udp_recv_buffer: usize,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
+        let key_store = Arc::new(Keystore::new(
+            keystore::Config {
+                // <TODO>提供配置
+                active_time: Duration::from_secs(600),
+                capacity: 100000,
+            },
+        ));
+        let net_listener = NetListener::open(
+            key_store.clone(),
+            local_device.device().connect_info().endpoints().as_slice(),
+            None,
+            Duration::from_secs(30),
+            udp_recv_buffer,
+            false,
+        ).await.unwrap();
         let mut service = SnService {
             seq_generator: TempSeqGenerator::new(),
-            key_store: Arc::new(Keystore::new(
-                local_secret.clone(),
-                local_device.device().desc().clone(),
-                RsaCPUObjectSigner::new(
-                    local_device.device().desc().public_key().clone(),
-                    local_secret.clone(),
-                ),
-                keystore::Config {
-                    // <TODO>提供配置
-                    active_time: Duration::from_secs(600),
-                    capacity: 100000,
-                },
-            )),
+            key_store,
             resend_queue: None,/* ResendQueue::new(thread_pool.clone(), Duration::from_millis(200), 5), */
             local_device: local_device.clone(),
             stopped: AtomicBool::new(false),
@@ -83,7 +88,12 @@ impl SnService {
             //     begin_time: Instant::now()
             // }
             udp_recv_buffer,
+            net_listener,
         };
+
+        service.key_store.add_local_key(local_device.device_id().clone(),
+                                        local_secret.clone(),
+                                        local_device.device().desc().clone());
 
         let peer_manager = service.peer_manager().clone();
         let mut resend_queue = ResendQueue::new(Duration::from_millis(200), 5);
@@ -110,16 +120,10 @@ impl SnService {
     }
 
     pub async fn start(self: &Arc<Self>) -> BuckyResult<()> {
-        let eps = self.local_device.device().connect_info().endpoints();
-        let net_listener = NetListener::open(self.key_store.clone(),
-                                          self.local_device.clone(),
-                                          eps.as_slice(),
-                                          None,
-                                          Duration::from_secs(30),
-                                          self.udp_recv_buffer,
-                                          false).await?;
-        net_listener.set_udp_listener_event_listener(self.clone());
-        net_listener.set_tcp_listener_event_listener(self.clone());
+        Executor::init(None);
+        self.net_listener.set_udp_listener_event_listener(self.clone());
+        self.net_listener.set_tcp_listener_event_listener(self.clone());
+        self.net_listener.start();
 
         // 清理过期数据
         let service = self.clone();
@@ -177,7 +181,7 @@ impl SnService {
 
         if let Some(drops) = self.peer_manager().try_knock_timeout(now) {
             for device in &drops {
-                self.key_store().reset_peer(device)
+                self.key_store().reset_peer(self.local_device.device_id(), device)
             }
         }
 
@@ -205,7 +209,7 @@ impl SnService {
             PackageCmdCode::Exchange => {
                 let exchg = <Box<dyn Any + Send>>::downcast::<Exchange>(first_pkg.into_any()); // pkg.into_any().downcast::<Exchange>();
                 if let Ok(_) = exchg {
-                    self.key_store().add_key(pkg_box.key(), pkg_box.remote());
+                    self.key_store().add_key(pkg_box.key(), pkg_box.local(), pkg_box.remote());
                 } else {
                     warn!("fetch exchange failed, from: {:?}.", resp_sender.remote().addr());
                     return Ok(());
@@ -662,6 +666,7 @@ impl UDPListenerEventListener for SnService {
         let resp_sender = UdpDataSender::new(socket,
                                              remote_ep,
                                              pkg.remote().clone(),
+                                             pkg.local().clone(),
                                              pkg.key().clone());
         if let Err(e) = self.handle(pkg, GeneralDataSender::from(resp_sender)).await {
             error!("handle udp package failed, e:{}", e);

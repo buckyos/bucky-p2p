@@ -616,6 +616,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-modes"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e2211b0817f061502a8dd9f11a37e879e79763e3c698d2418cf824d8cb2f21e"
+
+[[package]]
 name = "block-padding"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1057,7 +1063,7 @@ dependencies = [
  "async-trait",
  "base-x",
  "base58",
- "block-modes",
+ "block-modes 0.8.1",
  "chrono",
  "cyfs-base-derive",
  "cyfs-ecies",
@@ -1151,8 +1157,10 @@ dependencies = [
 name = "cyfs-p2p"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
  "async-std",
  "async-trait",
+ "block-modes 0.9.1",
  "callback-result",
  "callback-trait",
  "cyfs-base",
@@ -1168,6 +1176,18 @@ dependencies = [
  "sha2 0.8.2",
  "socket2 0.5.6",
  "winapi",
+]
+
+[[package]]
+name = "cyfs-p2p-test"
+version = "0.1.0"
+dependencies = [
+ "async-std",
+ "clap",
+ "cyfs-base",
+ "cyfs-debug",
+ "cyfs-p2p",
+ "cyfs-util",
 ]
 
 [[package]]

@@ -1,7 +1,9 @@
 use std::sync::Arc;
-use cyfs_base::{BuckyResult, DeviceId, Endpoint, RawEncodeWithContext};
+use std::time::Duration;
+use cyfs_base::{BuckyError, BuckyResult, DeviceDesc, DeviceId, Endpoint, RawEncodeWithContext};
 use crate::MixAesKey;
 use crate::protocol::{DynamicPackage, MTU_LARGE, PackageBox, PackageBoxEncodeContext};
+use crate::sockets::NetManager;
 use crate::sockets::tcp::TCPSocket;
 use crate::sockets::udp::UDPSocket;
 
@@ -15,12 +17,12 @@ pub enum SocketType {
 pub trait DataSender: Send + Sync + 'static {
     async fn send_resp(&self, data: &[u8]) -> BuckyResult<()>;
     async fn send_dynamic_pkg(&self, dynamic_package: DynamicPackage) -> BuckyResult<()> {
-        let pkg = PackageBox::from_package(self.remote_device_id().clone(), self.key().clone(), dynamic_package);
+        let pkg = PackageBox::from_package(self.local_device_id().clone(), self.remote_device_id().clone(), self.key().clone(), dynamic_package);
         self.send_pkg_box(&pkg).await
     }
 
     async fn send_dynamic_pkgs(&self, dynamic_packages: Vec<DynamicPackage>) -> BuckyResult<()> {
-        let pkg = PackageBox::from_packages(self.remote_device_id().clone(), self.key().clone(), dynamic_packages);
+        let pkg = PackageBox::from_packages(self.local_device_id().clone(), self.remote_device_id().clone(), self.key().clone(), dynamic_packages);
         self.send_pkg_box(&pkg).await
     }
 
@@ -36,6 +38,7 @@ pub trait DataSender: Send + Sync + 'static {
     fn remote(&self) -> &Endpoint;
     fn local(&self) -> &Endpoint;
     fn remote_device_id(&self) -> &DeviceId;
+    fn local_device_id(&self) -> &DeviceId;
     fn key(&self) -> &MixAesKey;
     fn socket_type(&self) -> SocketType;
 }
@@ -59,6 +62,10 @@ impl DataSender for TCPSocket {
         TCPSocket::remote_device_id(self)
     }
 
+    fn local_device_id(&self) -> &DeviceId {
+        TCPSocket::local_device_id(self)
+    }
+
     fn key(&self) -> &MixAesKey {
         TCPSocket::key(self)
     }
@@ -73,6 +80,7 @@ pub struct UdpDataSender {
     socket: Arc<UDPSocket>,
     remote: Endpoint,
     remote_device_id: DeviceId,
+    local_device_id: DeviceId,
     key: MixAesKey,
 }
 
@@ -80,11 +88,13 @@ impl UdpDataSender {
     pub fn new(socket: Arc<UDPSocket>,
                remote: Endpoint,
                remote_device_id: DeviceId,
+               local_device_id: DeviceId,
                key: MixAesKey,) -> Self {
         Self {
             socket,
             remote,
             remote_device_id,
+            local_device_id,
             key,
         }
     }
@@ -107,6 +117,10 @@ impl DataSender for UdpDataSender {
 
     fn remote_device_id(&self) -> &DeviceId {
         &self.remote_device_id
+    }
+
+    fn local_device_id(&self) -> &DeviceId {
+        &self.local_device_id
     }
 
     fn key(&self) -> &MixAesKey {
@@ -174,6 +188,13 @@ impl DataSender for GeneralDataSender {
         }
     }
 
+    fn local_device_id(&self) -> &DeviceId {
+        match self {
+            GeneralDataSender::TCP(s) => s.local_device_id(),
+            GeneralDataSender::UDP(s) => s.local_device_id(),
+        }
+    }
+
     fn key(&self) -> &MixAesKey {
         match self {
             GeneralDataSender::TCP(s) => s.key(),
@@ -198,5 +219,44 @@ impl From<TCPSocket> for GeneralDataSender {
 impl From<UdpDataSender> for GeneralDataSender {
     fn from(s: UdpDataSender) -> Self {
         GeneralDataSender::UDP(s)
+    }
+}
+
+pub trait ExtraParams: 'static + Send + Sync {}
+
+pub struct TcpExtraParams {
+    pub timeout: Duration,
+}
+
+impl ExtraParams for TcpExtraParams {}
+
+#[async_trait::async_trait]
+pub trait DataSenderFactory<P: ExtraParams, T: DataSender> {
+    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: P) -> BuckyResult<T>;
+}
+
+#[async_trait::async_trait]
+impl DataSenderFactory<TcpExtraParams, TCPSocket> for NetManager {
+    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: TcpExtraParams) -> BuckyResult<TCPSocket> {
+        let key = self.key_store.create_key(&local_device_id, &remote_device, true);
+        TCPSocket::connect(local_device_id, remote_ep, remote_device.device_id(), remote_device, key.key, p.timeout).await
+    }
+}
+
+pub struct UdpExtraParams {
+    pub local_ep: Endpoint
+}
+
+impl ExtraParams for UdpExtraParams {
+}
+
+#[async_trait::async_trait]
+impl DataSenderFactory<UdpExtraParams, UdpDataSender> for NetManager {
+    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: UdpExtraParams) -> BuckyResult<UdpDataSender> {
+        let key = self.key_store.create_key(&local_device_id, &remote_device, true);
+        let socket = self.get_udp_socket(&p.local_ep).ok_or_else(|| {
+            BuckyError::from("udp socket not found")
+        })?;
+        Ok(UdpDataSender::new(socket, remote_ep, remote_device.device_id().clone(), local_device_id, key.key))
     }
 }

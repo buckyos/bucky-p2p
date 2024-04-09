@@ -1,10 +1,11 @@
 use cyfs_base::*;
 use std::collections::{HashMap, LinkedList};
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::sync::{Arc};
+use std::sync::{Arc, RwLock};
 use std::cell::RefCell;
 use std::rc::Rc;
 use cyfs_debug::Mutex;
+use sha2::{Digest, Sha256};
 use crate::{
     types::*
 };
@@ -12,9 +13,8 @@ use crate::{
 
 const MIX_HASH_LIVE_MINUTES: usize = 31;
 
-#[derive(Clone)]
 pub struct Keystore {
-    local_encryptor: Arc<(PrivateKey, DeviceDesc, RsaCPUObjectSigner)>,
+    local_encryptor: RwLock<HashMap<DeviceId, (PrivateKey, DeviceDesc)>>,
     key_manager: Arc<Mutex<KeyManager>>,
 }
 
@@ -23,29 +23,30 @@ unsafe impl Sync for Keystore {}
 
 #[derive(Clone)]
 pub enum EncryptedKey {
-    None, 
-    Confirmed(Vec<u8>), 
+    None,
+    Confirmed(Vec<u8>),
     Unconfirmed(Vec<u8>)
 }
 
 impl EncryptedKey {
     pub fn is_local(&self) -> bool {
         match self {
-            Self::None => false, 
+            Self::None => false,
             _ => true
         }
     }
 
     pub fn is_unconfirmed(&self) -> bool {
         match self {
-            Self::Unconfirmed(_) => true, 
+            Self::Unconfirmed(_) => true,
             _ => false
         }
     }
 }
 pub struct FoundKey {
-    pub peerid: DeviceId,
-    pub key: MixAesKey, 
+    pub local_id: DeviceId,
+    pub remote_id: DeviceId,
+    pub key: MixAesKey,
     pub encrypted: EncryptedKey,
 }
 
@@ -55,31 +56,40 @@ pub struct Config {
     pub capacity: usize,
 }
 
+fn device_pair_hash(local_id: &DeviceId, remote_id: &DeviceId) -> HashValue {
+    let mut sha = Sha256::new();
+    sha.input(local_id.object_id().as_slice());
+    sha.input(remote_id.object_id().as_slice());
+    sha.result().into()
+}
+
 impl Keystore {
-    pub fn new(
-        private_key: PrivateKey, 
-        const_info: DeviceDesc, 
-        signer: RsaCPUObjectSigner, 
-        config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         Keystore {
-            local_encryptor: Arc::new((private_key, const_info, signer)),
+            local_encryptor: RwLock::new(HashMap::new()),
             key_manager: Arc::new(Mutex::new(KeyManager::new(config))),
         }
     }
 
-    pub fn private_key(&self) -> &PrivateKey {
-        &self.local_encryptor.0
+    pub fn add_local_key(&self, device_id: DeviceId, private_key: PrivateKey, device_info: DeviceDesc) {
+        self.local_encryptor.write().unwrap().insert(device_id, (private_key, device_info));
     }
 
-    pub fn signer(&self) -> &RsaCPUObjectSigner {
-        &self.local_encryptor.2
+    pub fn private_key(&self, device_id: &DeviceId) -> Option<PrivateKey> {
+        self.local_encryptor.read().unwrap().get(device_id).map(|v| v.0.clone())
     }
 
-    pub fn public_key(&self) -> &PublicKey { self.local_encryptor.1.public_key() }
+    pub fn signer(&self, device_id: &DeviceId) -> Option<RsaCPUObjectSigner> {
+        self.local_encryptor.read().unwrap().get(device_id).map(|v| RsaCPUObjectSigner::new(v.1.public_key().clone(), v.0.clone()))
+    }
 
-    pub fn get_key_by_remote(&self, peerid: &DeviceId, is_touch: bool) -> Option<FoundKey> {
+    pub fn public_key(&self, device_id: &DeviceId) -> Option<PublicKey> {
+        self.local_encryptor.read().unwrap().get(device_id).map(|v| v.1.public_key().clone())
+    }
+
+    pub fn get_key_by_remote(&self, local_id: &DeviceId, remote_id: &DeviceId, is_touch: bool) -> Option<FoundKey> {
         let mut mgr = self.key_manager.lock().unwrap();
-        mgr.find_by_peerid(peerid, is_touch).map(|found| found.as_ref().borrow().found())
+        mgr.find_by_peerid(&device_pair_hash(local_id, remote_id), is_touch).map(|found| found.as_ref().borrow().found())
     }
 
     pub fn get_key_by_mix_hash(&self, mix_hash: &KeyMixHash, is_touch: bool, is_confirmed: bool) -> Option<FoundKey> {
@@ -87,43 +97,45 @@ impl Keystore {
         mgr.find_by_mix_hash(mix_hash, is_touch, is_confirmed).map(|found| found.as_ref().borrow().found())
     }
 
-    pub fn create_key(&self, peer_desc: &DeviceDesc, is_touch: bool) -> FoundKey {
+    pub fn create_key(&self, local_id: &DeviceId, peer_desc: &DeviceDesc, is_touch: bool) -> FoundKey {
+        let pair_hash = device_pair_hash(local_id, &peer_desc.device_id());
         let mut mgr = self.key_manager.lock().unwrap();
-        match mgr.find_by_peerid(&peer_desc.device_id(), is_touch) {
+        match mgr.find_by_peerid(&pair_hash, is_touch) {
             Some(found) => found.as_ref().borrow().found(),
             None => {
                 let (enc_key, encrypted) = peer_desc.public_key().gen_aeskey_and_encrypt().unwrap();
                 let mix_key = AesKey::random();
                 let encrypted = EncryptedKey::Unconfirmed(encrypted);
                 let key = MixAesKey {
-                    enc_key, 
-                    mix_key, 
+                    enc_key,
+                    mix_key,
                 };
-                mgr.add_key(&key, &peer_desc.device_id(), encrypted.clone());
+                mgr.add_key(&key, local_id, &peer_desc.device_id(), encrypted.clone());
                 FoundKey {
+                    local_id: local_id.clone(),
                     key,
-                    peerid: peer_desc.device_id(),
+                    remote_id: peer_desc.device_id(),
                     encrypted
                 }
             }
         }
     }
 
-    pub fn add_key(&self, key: &MixAesKey, remote: &DeviceId) {
+    pub fn add_key(&self, key: &MixAesKey, local: &DeviceId, remote: &DeviceId) {
         let mut mgr = self.key_manager.lock().unwrap();
-        mgr.add_key(key, remote, EncryptedKey::None)
+        mgr.add_key(key, local, remote, EncryptedKey::None)
     }
 
-    pub fn reset_peer(&self, device_id: &DeviceId) {
-        info!("keystore reset peer {}", device_id);
+    pub fn reset_peer(&self, local_id: &DeviceId, device_id: &DeviceId) {
+        info!("keystore reset local {} peer {}", local_id, device_id);
         let mut mgr = self.key_manager.lock().unwrap();
-        mgr.reset_peer(device_id);
+        mgr.reset_peer(&device_pair_hash(local_id, device_id));
     }
 }
 
 struct KeyManager {
-    // 按peerid索引的key
-    peerid_key_map: HashMap<DeviceId, Vec<Rc<RefCell<HashedKeyInfo>>>>,
+    // 按peer pair hash索引的key
+    peerid_key_map: HashMap<HashValue, Vec<Rc<RefCell<HashedKeyInfo>>>>,
     // 按hash索引的key
     mixhash_key_map: HashMap<KeyMixHash, Rc<RefCell<HashedKeyInfo>>>,
     // 最近使用key列表，用于mixhash命中失败时优先重算最近使用的hash
@@ -198,7 +210,7 @@ impl KeyManager {
         }
     }
 
-    fn find_by_peerid(&mut self, peerid: &DeviceId, is_touch: bool) -> Option<Rc<RefCell<HashedKeyInfo>>> {
+    fn find_by_peerid(&mut self, peerid: &HashValue, is_touch: bool) -> Option<Rc<RefCell<HashedKeyInfo>>> {
         let found_map = self.peerid_key_map.get_mut(peerid);
         if let Some(found_key_list) = found_map {
             if found_key_list.len() == 0 {
@@ -251,11 +263,12 @@ impl KeyManager {
         }
     }
 
-    fn add_key(&mut self, key: &MixAesKey, peerid: &DeviceId, encrypted: EncryptedKey) {
+    fn add_key(&mut self, key: &MixAesKey, local_id: &DeviceId, remote_id: &DeviceId, encrypted: EncryptedKey) {
         let now = SystemTime::now();
         let expire_time = now + self.config.active_time;
 
-        let target_peer_key_list = self.peerid_key_map.entry(peerid.clone()).or_insert(Vec::default());
+        let pair_hash = device_pair_hash(local_id, remote_id);
+        let target_peer_key_list = self.peerid_key_map.entry(pair_hash).or_insert(Vec::default());
 
         let mut target_key = None;
         if !encrypted.is_unconfirmed() { // 确定是新key就不搜索了
@@ -274,14 +287,15 @@ impl KeyManager {
                 target
             },
             None => {
-                info!("keystore add remote key remote={} key={} confirmed={}", peerid, key, !encrypted.is_unconfirmed());
-                
+                info!("keystore add remote key local={} remote={} key={} confirmed={}", local_id, remote_id, key, !encrypted.is_unconfirmed());
+
                 let new_key = KeyInfo {
                     key: key.clone(),
-                    peerid: peerid.clone(),
+                    local_id: local_id.clone(),
+                    remote_id: remote_id.clone(),
                     encrypted,
                     is_storaged: false,
-                    expire_time: expire_time,
+                    expire_time,
                     last_access_time: now,
                 };
                 Rc::new(RefCell::new(HashedKeyInfo {
@@ -295,8 +309,8 @@ impl KeyManager {
         };
 
         if is_new_key {
-            log::trace!("create new key mix-hash: {}, remote: {}, key: {}", 
-                target_key.as_ref().borrow().original_hash.to_string(), peerid, key);
+            log::trace!("create new key mix-hash: {}, local: {}, remote: {}, key: {}",
+                target_key.as_ref().borrow().original_hash.to_string(), local_id, remote_id, key);
 
             target_peer_key_list.push(target_key.clone());
             self.latest_use_key_list.push_front(target_key.clone());
@@ -359,7 +373,8 @@ impl KeyManager {
         for hash in key.mix_hash.as_slice() {
             self.mixhash_key_map.remove(&hash.hash);
         }
-        let peer_key_list = self.peerid_key_map.get_mut(&key.info.peerid);
+        let pair_hash = device_pair_hash(&key.info.local_id, &key.info.remote_id);
+        let peer_key_list = self.peerid_key_map.get_mut(&pair_hash);
         if peer_key_list.is_none() {
             return;
         }
@@ -373,11 +388,11 @@ impl KeyManager {
             }
         }
         if peer_key_list.is_empty() {
-            self.peerid_key_map.remove(&key.info.peerid);
+            self.peerid_key_map.remove(&pair_hash);
         }
     }
 
-    fn reset_peer(&mut self, device_id: &DeviceId) {
+    fn reset_peer(&mut self, device_id: &HashValue) {
         let found_map = self.peerid_key_map.get_mut(device_id);
         if let Some(found_key_list) = found_map {
             let mut remain = vec![];
@@ -385,8 +400,8 @@ impl KeyManager {
                 let reserve = {
                     let mut mut_ref = exist.borrow_mut();
                     if let Some(encrypted) = match &mut_ref.info.encrypted {
-                        EncryptedKey::Unconfirmed(encrypted) => Some(encrypted.clone()), 
-                        EncryptedKey::Confirmed(encrypted) => Some(encrypted.clone()), 
+                        EncryptedKey::Unconfirmed(encrypted) => Some(encrypted.clone()),
+                        EncryptedKey::Confirmed(encrypted) => Some(encrypted.clone()),
                         EncryptedKey::None => None
                     } {
                         info!("keystore reset key remote={} key={}", device_id, mut_ref.info.key);
@@ -397,11 +412,11 @@ impl KeyManager {
                         false
                     }
                 };
-                
+
                 if reserve {
                     remain.push(exist.clone());
                 }
-            }   
+            }
             std::mem::swap(&mut remain, found_key_list);
         }
     }
@@ -499,8 +514,9 @@ impl HashedKeyInfo {
 
     fn found(&self) -> FoundKey {
         FoundKey {
+            local_id: self.info.local_id.clone(),
             key: self.info.key.clone(),
-            peerid: self.info.peerid.clone(),
+            remote_id: self.info.remote_id.clone(),
             encrypted: self.info.encrypted.clone(),
         }
     }
@@ -508,7 +524,8 @@ impl HashedKeyInfo {
 
 struct KeyInfo {
     key: MixAesKey,
-    peerid: DeviceId,
+    local_id: DeviceId,
+    remote_id: DeviceId,
     encrypted: EncryptedKey,
     is_storaged: bool,
     expire_time: SystemTime,
@@ -569,7 +586,7 @@ struct HashInfo {
 //         vec![],
 //         vec![],
 //         private_key.public(),
-//         Area::default(), 
+//         Area::default(),
 //         DeviceCategory::PC
 //     ).build();
 //     let sim_device_id = device.desc().device_id();
@@ -580,18 +597,18 @@ struct HashInfo {
 //     );
 
 //     let key_store = Keystore::new(
-//         private_key.clone(), 
-//         device.desc().clone(), 
-//         signer, 
+//         private_key.clone(),
+//         device.desc().clone(),
+//         signer,
 //         Config {
 //             active_time: Duration::from_secs(1),
 //             capacity: 5,
 //         });
-    
+
 //     let key_for_id0_first = key_store.create_key(device.desc(), true);
 //     assert!(key_for_id0_first.encrypted.is_unconfirmed());
 //     assert_eq!(key_for_id0_first.peerid, sim_device_id);
-    
+
 //     fn found_key_is_same(left: &FoundKey, right: &FoundKey) -> bool {
 //         left.enc_key == right.enc_key &&
 //             left.peerid == right.peerid &&
@@ -599,19 +616,19 @@ struct HashInfo {
 //     }
 //     assert!(found_key_is_same(&key_store.get_key_by_remote(&sim_device_id, true).unwrap(), &key_for_id0_first));
 //     assert!(found_key_is_same(&key_store.get_key_by_mix_hash(&key_for_id0_first.hash, true, false).unwrap(), &key_for_id0_first));
-    
+
 //     let key_for_id0_twice = key_store.create_key(device.desc(), true); // 不重复构造key
 //     assert!(key_for_id0_twice.encrypted.is_unconfirmed());
 //     assert!(found_key_is_same(&key_for_id0_twice, &key_for_id0_first));
-    
+
 //     let found_by_hash = key_store.get_key_by_mix_hash(&key_for_id0_first.hash, true, true).unwrap(); // confirm: false->true
 //     assert!(!found_by_hash.encrypted.is_unconfirmed());
 //     assert!(found_key_is_same(&found_by_hash, &key_for_id0_first));
-    
+
 //     let found_by_hash = key_store.get_key_by_mix_hash(&key_for_id0_first.hash, true, false).unwrap(); // confirm不能从true->false
 //     assert!(!found_by_hash.encrypted.is_unconfirmed());
 //     assert!(found_key_is_same(&found_by_hash, &key_for_id0_first));
-    
+
 //     let (key_random, key_encrypted) = private_key.public().gen_aeskey_and_encrypt().unwrap();
 //     let mix_key = AesKey::random();
 //     let found_key_for_random = FoundKey {
@@ -627,12 +644,12 @@ struct HashInfo {
 //     let found_by_hash_after_add = key_store.get_key_by_mix_hash(&found_key_for_random.hash, true, false).unwrap();
 //     assert!(!found_by_hash_after_add.encrypted.is_unconfirmed());
 //     assert!(found_key_is_same(&found_by_hash_after_add, &found_key_for_random));
-    
+
 //     key_store.add_key(&key_random, &sim_device_id); // confirm: false->true
 //     let found_by_hash_after_add_with_confirm = key_store.get_key_by_mix_hash(&found_key_for_random.hash, true, false).unwrap();
 //     assert!(!found_by_hash_after_add_with_confirm.encrypted.is_unconfirmed());
 //     assert!(found_key_is_same(&found_by_hash_after_add_with_confirm, &found_key_for_random));
-    
+
 //     let (key_random2, key_encrypted2) = private_key.public().gen_aeskey_and_encrypt().unwrap();
 //     let found_key_for_random2 = FoundKey {
 //         enc_key: key_random2.clone(),

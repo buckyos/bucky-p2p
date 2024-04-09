@@ -70,7 +70,7 @@ impl<T: DataSender + Clone> ResendQueue<T> {
                     info.times >>= 1;
                     info.interval = info.interval / 2;
                 }
-                let pkg_box = PackageBox::from_package(sender.remote_device_id().clone(), sender.key().clone(), pkg);
+                let pkg_box = PackageBox::from_package(sender.local_device_id().clone(), sender.remote_device_id().clone(), sender.key().clone(), pkg);
                 info.sender = sender;
                 info.pkg = Arc::new(pkg_box);
                 info.nick_name = pkg_nick_name.clone();
@@ -84,7 +84,7 @@ impl<T: DataSender + Clone> ResendQueue<T> {
                     None
                 }
             } else {
-                let pkg_box = Arc::new(PackageBox::from_package(sender.remote_device_id().clone(), sender.key().clone(), pkg));
+                let pkg_box = Arc::new(PackageBox::from_package(sender.local_device_id().clone(), sender.remote_device_id().clone(), sender.key().clone(), pkg));
                 packages.insert(pkg_id, PackageResendInfo {
                     pkg: pkg_box.clone(),
                     sender: sender.clone(),

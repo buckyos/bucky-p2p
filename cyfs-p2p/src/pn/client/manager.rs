@@ -9,7 +9,7 @@ use crate::{
     protocol::{*, v0::*},
 };
 use crate::finder::DeviceCache;
-use crate::receive_processor::{RecieveProcessor, RecieveProcessorRef};
+use crate::receive_processor::{ReceiveProcessor, ReceiveProcessorRef};
 use crate::sockets::DataSender;
 use crate::types::MixAesKey;
 
@@ -49,11 +49,9 @@ impl ProxyManager {
         }
     }
 
-    pub fn register_pkg_processor(self: &Arc<Self>, processor: &mut RecieveProcessor) {
+    pub fn register_pkg_processor(self: &Arc<Self>, processor: &mut ReceiveProcessor) {
         let this = self.clone();
-        processor.add_package_box_processor(PackageCmdCode::AckProxy,  move|resp_sender: &'static mut dyn DataSender,
-                                                                            remote_device_id: &'static DeviceId,
-                                                                            key: &'static MixAesKey,
+        processor.add_package_box_processor(PackageCmdCode::AckProxy,  move|resp_sender: &'static dyn DataSender,
                                                                             pkg: &'static DynamicPackage| {
             let this = this.clone();
             async move {

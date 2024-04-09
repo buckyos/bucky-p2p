@@ -1939,7 +1939,7 @@ fn encode_protocol_sn_called() {
     assert_eq!(dst_payload, src_payload);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SnCalledResp {
     //sn called的应答报文
     pub seq: TempSeq,         //序列号
@@ -2046,7 +2046,7 @@ fn encode_protocol_sn_called_resp() {
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SnPingResp {
     //SN Server收到来自device的SNPing包时，返回device的外网地址
     pub seq: TempSeq,                      //包序列包

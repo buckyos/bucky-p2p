@@ -11,6 +11,7 @@ use crate::types::MixAesKey;
 pub struct TCPSocket {
     socket: TcpStream,
     remote_device_id: DeviceId,
+    local_device_id: DeviceId,
     local: Endpoint,
     remote: Endpoint,
     key: MixAesKey,
@@ -27,10 +28,11 @@ impl std::fmt::Display for TCPSocket {
 }
 
 impl TCPSocket {
-    pub fn new(socket: TcpStream, remote_device_id: DeviceId, local: Endpoint, remote: Endpoint, key: MixAesKey) -> Self {
+    pub fn new(socket: TcpStream, local_device_id: DeviceId, remote_device_id: DeviceId, local: Endpoint, remote: Endpoint, key: MixAesKey) -> Self {
         Self {
             socket,
             remote_device_id,
+            local_device_id,
             local,
             remote,
             key,
@@ -39,6 +41,7 @@ impl TCPSocket {
 
 
     pub async fn connect(
+        local_device_id: DeviceId,
         remote_ep: Endpoint,
         remote_device_id: DeviceId,
         remote_device_desc: DeviceDesc,
@@ -61,6 +64,7 @@ impl TCPSocket {
             remote: remote_ep,
             remote_device_id,
             key,
+            local_device_id,
         };
         debug!("{} connected", socket);
         Ok(socket)
@@ -76,6 +80,10 @@ impl TCPSocket {
 
     pub fn remote_device_id(&self) -> &DeviceId {
         &self.remote_device_id
+    }
+
+    pub fn local_device_id(&self) -> &DeviceId {
+        &self.local_device_id
     }
 
     pub fn remote(&self) -> &Endpoint {

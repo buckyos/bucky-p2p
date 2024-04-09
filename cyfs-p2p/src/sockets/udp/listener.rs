@@ -56,7 +56,6 @@ struct UDPListenerState {
 }
 pub struct UDPListener {
     key_store: Arc<Keystore>,
-    local_device: LocalDeviceRef,
     sn_only: bool,
     state: RwLock<UDPListenerState>,
     buffer_size: usize,
@@ -66,13 +65,11 @@ pub type UDPListenerRef = Arc<UDPListener>;
 impl UDPListener {
     pub fn new(
         key_store: Arc<Keystore>,
-        local_device: LocalDeviceRef,
         sn_only: bool,
         buffer_size: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             key_store,
-            local_device,
             sn_only,
             state: RwLock::new(UDPListenerState {
                 outer: None,
@@ -205,7 +202,7 @@ impl UDPListener {
                             return;
                         }
                         let _ =
-                            listener.as_ref().unwrap().on_udp_raw_data(raw_data, (socket, found_key.peerid, found_key.key, from)).await;
+                            listener.as_ref().unwrap().on_udp_raw_data(raw_data, (socket, found_key.remote_id, found_key.key, from)).await;
 
                         return;
                     }
@@ -231,7 +228,7 @@ impl UDPListener {
                             let state = this.state.read().unwrap();
                             (state.listener.clone(), state.socket.as_ref().unwrap().clone())
                         };
-                        if !exchange.verify(this.local_device.device_id()).await {
+                        if !exchange.verify(package_box.local()).await {
                             warn!("{} exchg verify failed, from {}.", socket, from);
                             return;
                         }
