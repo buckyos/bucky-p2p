@@ -131,96 +131,96 @@ impl DataSender for UdpDataSender {
         SocketType::UDP
     }
 }
-
-#[derive(Clone)]
-pub enum GeneralDataSender {
-    TCP(TCPSocket),
-    UDP(UdpDataSender),
-}
-
-#[async_trait::async_trait]
-impl DataSender for GeneralDataSender {
-    async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
-        match self {
-            GeneralDataSender::TCP(s) => s.send_resp(data).await,
-            GeneralDataSender::UDP(s) => s.send_resp(data).await,
-        }
-    }
-
-    async fn send_dynamic_pkg(&self, dynamic_package: DynamicPackage) -> BuckyResult<()> {
-        match self {
-            GeneralDataSender::TCP(s) => s.send_dynamic_pkg(dynamic_package).await,
-            GeneralDataSender::UDP(s) => s.send_dynamic_pkg(dynamic_package).await,
-        }
-    }
-
-    async fn send_dynamic_pkgs(&self, dynamic_packages: Vec<DynamicPackage>) -> BuckyResult<()> {
-        match self {
-            GeneralDataSender::TCP(s) => s.send_dynamic_pkgs(dynamic_packages).await,
-            GeneralDataSender::UDP(s) => s.send_dynamic_pkgs(dynamic_packages).await,
-        }
-    }
-
-    async fn send_pkg_box(&self, pkg: &PackageBox) -> BuckyResult<()> {
-        match self {
-            GeneralDataSender::TCP(s) => s.send_pkg_box(pkg).await,
-            GeneralDataSender::UDP(s) => s.send_pkg_box(pkg).await,
-        }
-    }
-
-    fn remote(&self) -> &Endpoint {
-        match self {
-            GeneralDataSender::TCP(s) => s.remote(),
-            GeneralDataSender::UDP(s) => s.remote(),
-        }
-    }
-
-    fn local(&self) -> &Endpoint {
-        match self {
-            GeneralDataSender::TCP(s) => s.local(),
-            GeneralDataSender::UDP(s) => s.local(),
-        }
-    }
-    fn remote_device_id(&self) -> &DeviceId {
-        match self {
-            GeneralDataSender::TCP(s) => s.remote_device_id(),
-            GeneralDataSender::UDP(s) => s.remote_device_id(),
-        }
-    }
-
-    fn local_device_id(&self) -> &DeviceId {
-        match self {
-            GeneralDataSender::TCP(s) => s.local_device_id(),
-            GeneralDataSender::UDP(s) => s.local_device_id(),
-        }
-    }
-
-    fn key(&self) -> &MixAesKey {
-        match self {
-            GeneralDataSender::TCP(s) => s.key(),
-            GeneralDataSender::UDP(s) => s.key(),
-        }
-    }
-
-    fn socket_type(&self) -> SocketType {
-        match self {
-            GeneralDataSender::TCP(s) => s.socket_type(),
-            GeneralDataSender::UDP(s) => s.socket_type(),
-        }
-    }
-}
-
-impl From<TCPSocket> for GeneralDataSender {
-    fn from(s: TCPSocket) -> Self {
-        GeneralDataSender::TCP(s)
-    }
-}
-
-impl From<UdpDataSender> for GeneralDataSender {
-    fn from(s: UdpDataSender) -> Self {
-        GeneralDataSender::UDP(s)
-    }
-}
+//
+// #[derive(Clone)]
+// pub enum GeneralDataSender {
+//     TCP(TCPSocket),
+//     UDP(UdpDataSender),
+// }
+//
+// #[async_trait::async_trait]
+// impl DataSender for GeneralDataSender {
+//     async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.send_resp(data).await,
+//             GeneralDataSender::UDP(s) => s.send_resp(data).await,
+//         }
+//     }
+//
+//     async fn send_dynamic_pkg(&self, dynamic_package: DynamicPackage) -> BuckyResult<()> {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.send_dynamic_pkg(dynamic_package).await,
+//             GeneralDataSender::UDP(s) => s.send_dynamic_pkg(dynamic_package).await,
+//         }
+//     }
+//
+//     async fn send_dynamic_pkgs(&self, dynamic_packages: Vec<DynamicPackage>) -> BuckyResult<()> {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.send_dynamic_pkgs(dynamic_packages).await,
+//             GeneralDataSender::UDP(s) => s.send_dynamic_pkgs(dynamic_packages).await,
+//         }
+//     }
+//
+//     async fn send_pkg_box(&self, pkg: &PackageBox) -> BuckyResult<()> {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.send_pkg_box(pkg).await,
+//             GeneralDataSender::UDP(s) => s.send_pkg_box(pkg).await,
+//         }
+//     }
+//
+//     fn remote(&self) -> &Endpoint {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.remote(),
+//             GeneralDataSender::UDP(s) => s.remote(),
+//         }
+//     }
+//
+//     fn local(&self) -> &Endpoint {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.local(),
+//             GeneralDataSender::UDP(s) => s.local(),
+//         }
+//     }
+//     fn remote_device_id(&self) -> &DeviceId {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.remote_device_id(),
+//             GeneralDataSender::UDP(s) => s.remote_device_id(),
+//         }
+//     }
+//
+//     fn local_device_id(&self) -> &DeviceId {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.local_device_id(),
+//             GeneralDataSender::UDP(s) => s.local_device_id(),
+//         }
+//     }
+//
+//     fn key(&self) -> &MixAesKey {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.key(),
+//             GeneralDataSender::UDP(s) => s.key(),
+//         }
+//     }
+//
+//     fn socket_type(&self) -> SocketType {
+//         match self {
+//             GeneralDataSender::TCP(s) => s.socket_type(),
+//             GeneralDataSender::UDP(s) => s.socket_type(),
+//         }
+//     }
+// }
+//
+// impl From<TCPSocket> for GeneralDataSender {
+//     fn from(s: TCPSocket) -> Self {
+//         GeneralDataSender::TCP(s)
+//     }
+// }
+//
+// impl From<UdpDataSender> for GeneralDataSender {
+//     fn from(s: UdpDataSender) -> Self {
+//         GeneralDataSender::UDP(s)
+//     }
+// }
 
 pub trait ExtraParams: 'static + Send + Sync {}
 

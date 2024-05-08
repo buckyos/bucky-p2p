@@ -1,7 +1,7 @@
 use super::common::*;
 use super::sn::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AckAckTunnel {
     seq: TempSeq,
 }
@@ -79,7 +79,7 @@ fn encode_protocol_ack_ack_tunnel() {
     assert_eq!(dst.seq, src.seq);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PingTunnel {
     pub package_id: u32,
     pub send_time: Timestamp,
@@ -170,7 +170,7 @@ fn encode_protocol_ping_tunnel() {
     assert_eq!(dst.recv_data, src.recv_data);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PingTunnelResp {
     pub ack_package_id: u32,
     pub send_time: Timestamp,
@@ -861,7 +861,7 @@ pub const SESSIONDATA_FLAG_RESET: u16 = 1 << 12;
 pub const SESSIONDATA_FLAG_PING: u16 = 1 << 13;
 pub const SESSIONDATA_FLAG_TO_SESSION_ID: u16 = 1 << 14;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionData {
     pub stream_pos: u64,
     pub ack_stream_pos: u64,
@@ -1213,12 +1213,9 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
 #[derive(Clone, Debug)]
 pub struct TcpSynConnection {
     pub sequence: TempSeq,
-    pub result: u8,
     pub to_vport: u16,
     pub from_session_id: IncreaseId,
     pub to_device_id: DeviceId,
-    pub from_device_desc: Device,
-    pub reverse_endpoint: Option<Vec<Endpoint>>,
     pub payload: TailedOwnedData,
 }
 
@@ -1226,8 +1223,8 @@ impl std::fmt::Display for TcpSynConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TcpSynConnection:{{sequence:{:?},to_vport:{},from_device_id:{}, reverse_endpoint:{:?}}}",
-            self.sequence, self.to_vport, self.from_device_desc.desc().device_id(), self.reverse_endpoint
+            "TcpSynConnection:{{sequence:{:?},to_vport:{}}}",
+            self.sequence, self.to_vport
         )
     }
 }
@@ -1241,23 +1238,6 @@ impl Package for TcpSynConnection {
         PackageCmdCode::TcpSynConnection
     }
 }
-
-
-impl From<(&TcpSynConnection, Vec<u8>, AesKey)> for Exchange {
-    fn from(context: (&TcpSynConnection, Vec<u8>, AesKey)) -> Self {
-        let (tcp_syn, key_encrypted, mix_key) = context;
-        Exchange {
-            sequence: tcp_syn.sequence.clone(),
-            to_device_id: tcp_syn.to_device_id.clone(),
-            send_time: bucky_time_now(),
-            key_encrypted,
-            sign: Signature::default(),
-            from_device_desc: tcp_syn.from_device_desc.clone(),
-            mix_key
-        }
-    }
-}
-
 
 impl<Context: merge_context::Encode> RawEncodeWithContext<Context> for TcpSynConnection {
     fn raw_measure_with_context(
@@ -1277,12 +1257,9 @@ impl<Context: merge_context::Encode> RawEncodeWithContext<Context> for TcpSynCon
         let mut flags = context::FlagsCounter::new();
         let (mut context, buf) = context::Encode::<Self, Context>::new(enc_buf, merge_context)?;
         let buf = context.check_encode(buf, "sequence", &self.sequence, flags.next())?;
-        let buf = context.encode(buf, &self.result, flags.next())?;
         let buf = context.encode(buf, &self.to_vport, flags.next())?;
         let buf = context.encode(buf, &self.from_session_id, flags.next())?;
         let buf = context.check_encode(buf, "to_device_id", &self.to_device_id, flags.next())?;
-        let buf = context.check_encode(buf, "device_desc", &self.from_device_desc, flags.next())?;
-        let buf = context.option_encode(buf, &self.reverse_endpoint, flags.next())?;
         let _buf = context.encode(buf, &self.payload, flags.next())?;
         context.finish(enc_buf)
     }
@@ -1298,23 +1275,17 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
         let mut flags = context::FlagsCounter::new();
         let (mut context, buf) = context::Decode::new(buf, merge_context)?;
         let (sequence, buf) = context.check_decode(buf, "sequence", flags.next())?;
-        let (result, buf) = context.decode(buf, "TcpSynConnection.result", flags.next())?;
         let (to_vport, buf) = context.decode(buf, "TcpSynConnection.to_vport", flags.next())?;
         let (from_session_id, buf) = context.decode(buf, "TcpSynConnection.from_session_id", flags.next())?;
         let (to_device_id, buf) = context.check_decode(buf, "to_device_id", flags.next())?;
-        let (from_device_desc, buf) = context.check_decode(buf, "device_desc", flags.next())?;
-        let (reverse_endpoint, buf) = context.option_decode(buf, flags.next())?;
         let (payload, buf) = context.decode(buf, "TcpSynConnection.payload", flags.next())?;
 
         Ok((
             Self {
                 sequence,
-                result,
                 to_vport,
                 from_session_id,
                 to_device_id,
-                from_device_desc,
-                reverse_endpoint,
                 payload,
             },
             buf,
@@ -1643,7 +1614,7 @@ fn encode_protocol_tcp_ack_ack_connection() {
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SnCallResp {
     //sn call的响应包
     pub seq: TempSeq,                 //序列事情
@@ -2208,7 +2179,7 @@ fn encode_protocol_sn_ping_resp() {
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AckProxy {
     pub seq: TempSeq,
     pub to_peer_id: DeviceId,

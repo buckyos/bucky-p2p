@@ -12,6 +12,7 @@ use crate::{
     types::*,
     protocol::{*, v0::*},
 };
+use crate::executor::Executor;
 use super::service::{Service, WeakService};
 
 struct CommandTunnelImpl {
@@ -114,7 +115,7 @@ impl CommandTunnel {
             Ok((package_box, _)) => {
                 let tunnel = self.clone();
                 if package_box.has_exchange() {
-                    async_std::task::spawn(async move {
+                    Executor::spawn(async move {
                         // let exchange: &Exchange = package_box.packages()[0].as_ref();
                         service.keystore().add_key(
                             package_box.key(),

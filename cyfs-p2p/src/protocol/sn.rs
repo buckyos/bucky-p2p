@@ -564,7 +564,7 @@ impl<'de> RawDecode<'de> for SnServiceReceipt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReceiptWithSignature(SnServiceReceipt, Signature);
 
 impl ReceiptWithSignature {
@@ -701,7 +701,7 @@ fn encode_protocol_sn_ping() {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SnPing {
     pub protocol_version: u8,
     pub stack_version: u32,

@@ -717,9 +717,9 @@ checksum = "4964518bd3b4a8190e832886cdc0da9794f12e8e6c1613a9e90ff331c4c8724b"
 
 [[package]]
 name = "callback-result"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7a696921f744a955cc7dfbbb500815ee342f72f1a49e31e293ecdc29b5e238a"
+checksum = "853c325852121355ff8bb75e5472384d86d5e76a70bd1cbee4eb353b5cbfd189"
 dependencies = [
  "async-std",
  "notify-future",
@@ -727,9 +727,9 @@ dependencies = [
 
 [[package]]
 name = "callback-trait"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c8b014fc72bbfd91960ded9663a71211750ff7b64ec51869d566a3da5c4958e"
+checksum = "7f986b04f5a99d58b12ac84a62333ccb63b98ae3d57387c56d7ef94340493a4a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1158,6 +1158,7 @@ name = "cyfs-p2p"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
+ "async-channel 2.2.0",
  "async-std",
  "async-trait",
  "block-modes 0.9.1",
@@ -2300,9 +2301,9 @@ dependencies = [
 
 [[package]]
 name = "notify-future"
-version = "0.1.1"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9618126002b764395c435c06441fb4be45be5e78e46d70f46f3487fdb06b7939"
+checksum = "6554346f0032fd123eb39eb7b05aa65ee122bc51090bae1291c86e8d077a8a65"
 
 [[package]]
 name = "ntapi"

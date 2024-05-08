@@ -15,9 +15,9 @@ use crate::protocol::MTU_LARGE;
 use crate::sockets::DataSender;
 
 
-struct PackageResendInfo<T: DataSender> {
+struct PackageResendInfo {
     pkg: Arc<PackageBox>,
-    sender: T,
+    sender: Arc<dyn DataSender>,
     interval: Duration,
     times: u8,
     last_time: Timestamp,
@@ -29,20 +29,20 @@ pub trait ResendCallbackTrait: Send + Sync + 'static {
     async fn on_callback(&self, pkg: Arc<PackageBox>, errno: BuckyErrorCode);
 }
 
-pub struct ResendQueue<T: DataSender> {
+pub struct ResendQueue {
     default_interval: Duration,
     max_times: u8,
 
-    packages: Mutex<HashMap<u32, PackageResendInfo<T>>>,
+    packages: Mutex<HashMap<u32, PackageResendInfo>>,
 
     cb: Option<Pin<Box<dyn ResendCallbackTrait>>>,
 
 }
 
-impl<T: DataSender + Clone> ResendQueue<T> {
+impl ResendQueue {
     pub fn new(
         default_interval: Duration,
-        max_times: u8) -> ResendQueue<T> {
+        max_times: u8) -> ResendQueue {
         ResendQueue {
             default_interval,
             max_times,
@@ -57,7 +57,7 @@ impl<T: DataSender + Clone> ResendQueue<T> {
 
     pub async fn send(
         &self,
-        mut sender: T,
+        sender: Arc<dyn DataSender>,
         pkg: DynamicPackage,
         pkg_id: u32,
         pkg_nick_name: String) {

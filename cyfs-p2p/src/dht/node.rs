@@ -18,6 +18,7 @@ use std::{
     task::{Context, Poll, Waker},
     time::SystemTime,
 };
+use crate::executor::Executor;
 
 impl KadId for ObjectId {
     fn compare(&self, other: &Self) -> std::cmp::Ordering {
@@ -245,7 +246,7 @@ impl<T: TunnelInterface + Send + Sync + Clone + 'static> BdtDhtNode<T> {
         //TODO restore buckets from local
         self.package_loop();
         let mut dht_node = self.clone();
-        async_std::task::spawn(async move {
+        Executor::spawn(async move {
             let owner = dht_node.owner_id.clone();
             let _ = dht_node
                 .find_node(owner.as_ref(), Duration::from_secs(0))
@@ -296,7 +297,7 @@ impl<T: TunnelInterface + Send + Sync + Clone + 'static> BdtDhtNode<T> {
 
     fn package_loop(&self) {
         let mut dht_node = self.clone();
-        async_std::task::spawn(async move {
+        Executor::spawn(async move {
             loop {
                 match dht_node
                     .tunnel
@@ -447,7 +448,7 @@ impl<T: TunnelInterface + Send + Sync + Clone + 'static> BdtDhtNode<T> {
             let end_time = SystemTime::now().add(timeout);
 
             let bdt_node = self.clone();
-            async_std::task::spawn(async move {
+            Executor::spawn(async move {
                 let req = NodeRequest::Find(find_type);
                 loop {
                     let context = find_context.clone();

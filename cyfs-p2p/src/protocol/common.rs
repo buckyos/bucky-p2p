@@ -740,6 +740,7 @@ fn encode_protocol_exchange() {
 }
 
 
+#[derive(Clone)]
 pub struct SynTunnel {
     pub protocol_version: u8,
     pub stack_version: u32,
@@ -888,7 +889,7 @@ fn encode_protocol_syn_tunnel() {
 pub const ACK_TUNNEL_RESULT_OK: u8 = 0;
 pub const ACK_TUNNEL_RESULT_REFUSED: u8 = 1;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AckTunnel {
     pub protocol_version: u8,
     pub stack_version: u32,

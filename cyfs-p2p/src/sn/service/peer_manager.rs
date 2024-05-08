@@ -26,17 +26,17 @@ impl Default for Config {
 }
 
 
-pub struct FoundPeer<T: DataSender> {
+pub struct FoundPeer {
     pub desc: Device,
-    pub sender: T,
+    pub sender: Arc<dyn DataSender>,
     pub is_wan: bool,
     pub peer_status: PeerStatus,
 }
 
 
-struct CachedPeerInfo<T: DataSender> {
+struct CachedPeerInfo {
     pub desc: Device,
-    pub sender: T,
+    pub sender: Arc<dyn DataSender>,
     pub aes_key: Option<MixAesKey>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
@@ -68,14 +68,14 @@ fn contain_addr(dev: &Device, addr: &SocketAddr) -> bool {
     false
 }
 
-impl<T: DataSender + Clone> CachedPeerInfo<T> {
+impl CachedPeerInfo {
     fn new(
         desc: Device,
-        sender: T,
+        sender: Arc<dyn DataSender>,
         aes_key: Option<&MixAesKey>,
         send_time: Timestamp,
         seq: TempSeq,
-        peer_status: PeerStatus) -> CachedPeerInfo<T> {
+        peer_status: PeerStatus) -> CachedPeerInfo {
         CachedPeerInfo {
             is_wan: has_wan_endpoint(&desc),
             last_ping_seq: seq,
@@ -91,7 +91,7 @@ impl<T: DataSender + Clone> CachedPeerInfo<T> {
         }
     }
 
-    fn to_found_peer(&self) -> FoundPeer<T> {
+    fn to_found_peer(&self) -> FoundPeer {
         FoundPeer {
             desc: self.desc.clone(),
             sender: self.sender.clone(),
@@ -134,13 +134,13 @@ impl<T: DataSender + Clone> CachedPeerInfo<T> {
     }
 }
 
-struct Peers<T: DataSender> {
-    active_peers: HashMap<DeviceId, CachedPeerInfo<T>>,
-    knock_peers: HashMap<DeviceId, CachedPeerInfo<T>>,
+struct Peers {
+    active_peers: HashMap<DeviceId, CachedPeerInfo>,
+    knock_peers: HashMap<DeviceId, CachedPeerInfo>,
 }
 
-impl<T: DataSender> Peers<T> {
-    fn find_peer(&mut self, peerid: &DeviceId, reason: FindPeerReason) -> Option<&mut CachedPeerInfo<T>> {
+impl Peers {
+    fn find_peer(&mut self, peerid: &DeviceId, reason: FindPeerReason) -> Option<&mut CachedPeerInfo> {
         let found_cache = match self.active_peers.get_mut(peerid) {
             Some(p) => {
                 Some(p)
@@ -170,13 +170,13 @@ impl<T: DataSender> Peers<T> {
 }
 
 
-pub struct PeerManager<T: DataSender> {
-    peers: Mutex<Peers<T>>,
+pub struct PeerManager {
+    peers: Mutex<Peers>,
     last_knock_time: AtomicU64,
     config: Config,
     statistic_manager: &'static StatisticManager,
 }
-pub type PeerManagerRef<T> = Arc<PeerManager<T>>;
+pub type PeerManagerRef = Arc<PeerManager>;
 
 enum FindPeerReason {
     CallFrom(Timestamp),
@@ -184,8 +184,8 @@ enum FindPeerReason {
 }
 
 
-impl<T: DataSender + Clone> PeerManager<T> {
-    pub fn new() -> PeerManagerRef<T> {
+impl PeerManager {
+    pub fn new() -> PeerManagerRef {
         Arc::new(PeerManager {
             peers: Mutex::new(Peers {
                 active_peers: Default::default(),
@@ -201,12 +201,12 @@ impl<T: DataSender + Clone> PeerManager<T> {
         &self,
         peerid: DeviceId,
         peer_desc: &Option<Device>,
-        mut sender: T,
+        sender: Arc<dyn DataSender>,
         aes_key: Option<&MixAesKey>,
         send_time: Timestamp,
         seq: TempSeq) -> bool {
 
-        let exist_cache_found = |cached_peer: &mut CachedPeerInfo<T>| -> bool {
+        let exist_cache_found = |cached_peer: &mut CachedPeerInfo| -> bool {
             if cached_peer.last_send_time > send_time {
                 log::warn!("ping send-time little.");
                 return false;
@@ -317,7 +317,7 @@ impl<T: DataSender + Clone> PeerManager<T> {
 
     }
 
-    pub fn find_peer(&self, id: &DeviceId) -> Option<FoundPeer<T>> {
+    pub fn find_peer(&self, id: &DeviceId) -> Option<FoundPeer> {
         self.peers.lock().unwrap().find_peer(id, FindPeerReason::Other).map(|c| c.to_found_peer())
     }
 }

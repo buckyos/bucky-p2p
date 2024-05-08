@@ -4,6 +4,7 @@ use std::{sync::{RwLock, Arc}, collections::{BTreeMap, }, time::Duration};
 use cyfs_base::{DeviceId, bucky_time_now, SocketAddr, };
 use cyfs_util::SqliteStorage;
 use once_cell::sync::OnceCell;
+use crate::executor::Executor;
 
 use crate::Timestamp;
 
@@ -32,7 +33,7 @@ impl StatisticManager {
         })));
 
         let arc_ret = ret.clone();
-        async_std::task::spawn(async move {
+        Executor::spawn(async move {
             let mut storage = SqliteStorage::new();
             match storage.init("sn-statistic").await {
                 Ok(_) => {
@@ -46,7 +47,7 @@ impl StatisticManager {
         });
 
         ret
-       
+
     }
 }
 
@@ -90,13 +91,13 @@ impl StatisticManager {
 
         if let Some(storage) = storage {
             let storage = unsafe {&mut *(Arc::as_ptr(&storage) as *mut SqliteStorage)};
-            async_std::task::spawn(async move {
+            Executor::spawn(async move {
                 if let Some(all) = all {
                     for a in all.iter() {
                         a.storage(storage).await;
                     }
                 }
-        
+
             });
         }
     }
@@ -109,7 +110,7 @@ mod test {
         use cyfs_base::{DeviceId, bucky_time_now};
 
         use crate::TempSeq;
-    
+
         use super::StatisticManager;
 
         let m = StatisticManager::get_instance();

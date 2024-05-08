@@ -65,13 +65,13 @@ impl SNRespWaiterEx for SNRespWaiter {}
 pub struct SNClientState {
 
 }
-pub struct SNClient<T: DataSender> {
+pub struct SNClient {
     local_device: LocalDeviceRef,
     sn_id: DeviceId,
     sn: Device,
     sn_ep: Endpoint,
     gen_seq: Arc<TempSeqGenerator>,
-    data_sender: T,
+    data_sender: Box<dyn DataSender>,
     resp_waiter: SNRespWaiterRef,
     with_device: bool,
     key_store: Arc<Keystore>,
@@ -79,20 +79,20 @@ pub struct SNClient<T: DataSender> {
     call_timeout: Duration,
 }
 
-impl<T: DataSender> std::fmt::Display for SNClient<T> {
+impl std::fmt::Display for SNClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SNClient{{sn:{}, local:{}}}", self.sn_id, self.local_device.device_id())
     }
 }
 
-impl<T: DataSender + Clone> SNClient<T> {
+impl SNClient {
     pub fn new(
         local_device: LocalDeviceRef,
         sn_id: DeviceId,
         sn: Device,
         sn_ep: Endpoint,
         gen_seq: Arc<TempSeqGenerator>,
-        data_sender: T,
+        data_sender: Box<dyn DataSender>,
         resp_waiter: SNRespWaiterRef,
         with_device: bool,
         key_store: Arc<Keystore>,
@@ -118,7 +118,7 @@ impl<T: DataSender + Clone> SNClient<T> {
         Ok(ret)
     }
 
-    pub fn data_sender(&self) -> &T {
+    pub fn data_sender(&self) -> &Box<dyn DataSender> {
         &self.data_sender
     }
 

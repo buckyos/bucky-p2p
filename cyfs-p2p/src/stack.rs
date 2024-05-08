@@ -5,8 +5,9 @@ use once_cell::sync::OnceCell;
 use crate::executor::Executor;
 use crate::history::keystore::{Keystore};
 use crate::{LocalDevice, TempSeqGenerator};
+use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveProcessor, ReceiveProcessorRef};
-use crate::sn::client::{SNClientService, SNClientServiceRef};
+use crate::sn::client::{SNClientService, SNClientServiceRef, SNEvent, SNEventRef};
 use crate::sockets::{NetManager, NetManagerRef};
 
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
@@ -26,7 +27,7 @@ pub async fn init_p2p(
     let net_manager = NET_MANAGER.get_or_init(move || {
         net_manager.clone()
     });
-    let dispatcher = RECEIVE_DISPATCHER.get_or_init(||ReceiveDispatcher::new());
+    let dispatcher = RECEIVE_DISPATCHER.get_or_init(||ReceiveDispatcher::new(key_store.clone()));
     net_manager.set_udp_listener_event_listener(dispatcher.clone());
     net_manager.set_tcp_listener_event_listener(dispatcher.clone());
     net_manager.listen();
@@ -45,6 +46,23 @@ impl P2pStack {
     }
 }
 
+pub struct SNEventListener {
+
+}
+
+impl SNEventListener {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[async_trait::async_trait]
+impl SNEvent for SNEventListener {
+    async fn on_called(&self, called: &SnCalled) -> BuckyResult<()> {
+        todo!()
+    }
+}
+
 pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> BuckyResult<P2pStackRef> {
     let gen_seq = Arc::new(TempSeqGenerator::new());
     let mut processor = ReceiveProcessor::new();
@@ -57,6 +75,7 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         sn_list,
         LocalDevice::new(local_device),
         gen_seq.clone(),
+        Arc::new(SNEventListener::new()),
         Duration::from_secs(300),
         Duration::from_secs(300),
         Duration::from_secs(300),

@@ -19,7 +19,7 @@ use super::TCPSocket;
 pub trait TcpListenerEventListener: Send + Sync + 'static {
     async fn on_new_connection(
         &self,
-        socket: TCPSocket,
+        socket: Arc<TCPSocket>,
         first_box: PackageBox,
     ) -> BuckyResult<()>;
 }
@@ -192,7 +192,7 @@ impl TCPListener {
         Ok((box_type, box_buf))
     }
 
-    async fn accept(&self, socket: TcpStream) -> Result<(TCPSocket, PackageBox), BuckyError> {
+    async fn accept(&self, socket: TcpStream) -> Result<(Arc<TCPSocket>, PackageBox), BuckyError> {
         let remote = socket.peer_addr().map_err(|e| BuckyError::from(e))?;
         let local = socket.local_addr().map_err(|e| BuckyError::from(e))?;
         let remote = Endpoint::from((endpoint::Protocol::Tcp, remote));
@@ -230,7 +230,7 @@ impl TCPListener {
             }
         }
 
-        Ok((TCPSocket::new(socket, first_box.local().clone(), first_box.remote().clone(), local, remote, first_box.key().clone()), first_box))
+        Ok((Arc::new(TCPSocket::new(socket, first_box.local().clone(), first_box.remote().clone(), local, remote, first_box.key().clone())), first_box))
     }
 
     pub fn start(self: &Arc<Self>) {

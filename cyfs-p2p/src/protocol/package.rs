@@ -10,6 +10,97 @@ pub struct DynamicPackage {
     package: Box<dyn Any + Send + Sync>,
 }
 
+impl Clone for DynamicPackage {
+    fn clone(&self) -> Self {
+        match self.cmd_code {
+            PackageCmdCode::Exchange => {
+                let pkg = self.as_any().downcast_ref::<Exchange>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SynTunnel => {
+                let pkg = self.as_any().downcast_ref::<SynTunnel>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::AckTunnel => {
+                let pkg = self.as_any().downcast_ref::<AckTunnel>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::AckAckTunnel => {
+                let pkg = self.as_any().downcast_ref::<v0::AckAckTunnel>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::PingTunnel => {
+                let pkg = self.as_any().downcast_ref::<v0::PingTunnel>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::PingTunnelResp => {
+                let pkg = self.as_any().downcast_ref::<v0::PingTunnelResp>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SnCall => {
+                let pkg = self.as_any().downcast_ref::<SnCall>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SnCallResp => {
+                let pkg = self.as_any().downcast_ref::<v0::SnCallResp>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SnCalled => {
+                let pkg = self.as_any().downcast_ref::<v0::SnCalled>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SnCalledResp => {
+                let pkg = self.as_any().downcast_ref::<v0::SnCalledResp>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SnPing => {
+                let pkg = self.as_any().downcast_ref::<SnPing>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SnPingResp => {
+                let pkg = self.as_any().downcast_ref::<v0::SnPingResp>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::Datagram => {
+                let pkg = self.as_any().downcast_ref::<v0::Datagram>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SessionData => {
+                let pkg = self.as_any().downcast_ref::<v0::SessionData>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::TcpSynConnection => {
+                let pkg = self.as_any().downcast_ref::<v0::TcpSynConnection>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::TcpAckConnection => {
+                let pkg = self.as_any().downcast_ref::<v0::TcpAckConnection>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::TcpAckAckConnection => {
+                let pkg = self.as_any().downcast_ref::<v0::TcpAckAckConnection>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::SynProxy => {
+                let pkg = self.as_any().downcast_ref::<SynProxy>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::AckProxy => {
+                let pkg = self.as_any().downcast_ref::<v0::AckProxy>().unwrap();
+                DynamicPackage::from(pkg.clone())
+            }
+            PackageCmdCode::PieceData => {
+                unreachable!()
+            }
+            PackageCmdCode::PieceControl => {
+                unreachable!()
+            }
+            PackageCmdCode::ChannelEstimate => {
+                unreachable!()
+            }
+        }
+    }
+}
 impl<Context: merge_context::Encode> AsRef<dyn RawEncodeWithContext<Context>> for DynamicPackage {
     fn as_ref(&self) -> &(dyn RawEncodeWithContext<Context> + 'static) {
         use super::super::protocol;

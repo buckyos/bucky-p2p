@@ -18,7 +18,7 @@ use crate::{
 };
 use crate::executor::Executor;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, GeneralDataSender, NetListenerRef};
+use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, NetListenerRef};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
 use crate::sockets::udp::{UDPListenerEventListener, UdpPackageBox, UDPSocket};
 
@@ -43,8 +43,8 @@ pub struct SnService {
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
 
     // call_tracker: CallTracker,
-    peer_mgr: PeerManagerRef<GeneralDataSender>,
-    resend_queue: Option<ResendQueue<GeneralDataSender>>,
+    peer_mgr: PeerManagerRef,
+    resend_queue: Option<ResendQueue>,
     call_stub: CallStub,
     udp_recv_buffer: usize,
     net_listener: NetListenerRef,
@@ -127,7 +127,7 @@ impl SnService {
 
         // 清理过期数据
         let service = self.clone();
-        async_std::task::spawn(async move {
+        Executor::spawn(async move {
             loop {
                 {
                     if service.is_stopped() {
@@ -158,15 +158,15 @@ impl SnService {
         &self.key_store
     }
 
-    fn resend_queue(&self) -> &ResendQueue<GeneralDataSender> {
+    fn resend_queue(&self) -> &ResendQueue {
         self.resend_queue.as_ref().unwrap()
     }
 
-    fn peer_manager(&self) -> &PeerManagerRef<GeneralDataSender> {
+    fn peer_manager(&self) -> &PeerManagerRef {
         &self.peer_mgr
     }
 
-    async fn send_resp<T: DataSender>(&self, mut sender: T, pkg: DynamicPackage, send_log: String) -> BuckyResult<()> {
+    async fn send_resp(&self, mut sender: Arc<dyn DataSender>, pkg: DynamicPackage, send_log: String) -> BuckyResult<()> {
         if let Err(e) = sender.send_dynamic_pkg(pkg).await {
             warn!("{} send failed. error: {}.", send_log, e.to_string());
             Err(e)
@@ -196,7 +196,7 @@ impl SnService {
         // }
     }
 
-    pub(super) async fn handle(&self, mut pkg_box: PackageBox, mut resp_sender: GeneralDataSender) -> BuckyResult<()> {
+    pub(super) async fn handle(&self, mut pkg_box: PackageBox, resp_sender: Arc<dyn DataSender>) -> BuckyResult<()> {
         let first_pkg = pkg_box.pop();
         if first_pkg.is_none() {
             warn!("fetch none pkg");
@@ -278,7 +278,7 @@ impl SnService {
     async fn handle_ping(
         &self,
         ping_req: Box<SnPing>,
-        mut resp_sender: GeneralDataSender,
+        resp_sender: Arc<dyn DataSender>,
         send_time: Timestamp,
     ) -> BuckyResult<()> {
         if resp_sender.local().addr().is_ipv4() {
@@ -291,7 +291,7 @@ impl SnService {
     async fn handle_ipv6_ping(
         &self,
         ping_req: Box<SnPing>,
-        mut resp_sender: GeneralDataSender,
+        resp_sender: Arc<dyn DataSender>,
         _send_time: Timestamp,
     ) -> BuckyResult<()> {
         let from_peer_id = match ping_req.from_peer_id.as_ref() {
@@ -333,7 +333,7 @@ impl SnService {
     async fn handle_ipv4_ping(
         &self,
         ping_req: Box<SnPing>,
-        mut resp_sender: GeneralDataSender,
+        resp_sender: Arc<dyn DataSender>,
         send_time: Timestamp,
     ) -> BuckyResult<()> {
         let from_peer_id = match ping_req.from_peer_id.as_ref() {
@@ -486,10 +486,10 @@ impl SnService {
     //     Some((IsAcceptClient::Accept(is_request_receipt), local_receipt))
     // }
 
-    async fn handle_call<T: DataSender>(
+    async fn handle_call(
         &self,
         mut call_req: Box<SnCall>,
-        mut resp_sender: T,
+        mut resp_sender: Arc<dyn DataSender>,
         _send_time: Timestamp,
     ) {
         let from_peer_id = &call_req.from_peer_id;
@@ -663,12 +663,12 @@ impl UDPListenerEventListener for SnService {
     async fn on_udp_package_box(&self, socket: Arc<UDPSocket>, package_box: UdpPackageBox) {
         let remote_ep = package_box.remote().clone();
         let pkg: PackageBox = package_box.into();
-        let resp_sender = UdpDataSender::new(socket,
+        let resp_sender = Arc::new(UdpDataSender::new(socket,
                                              remote_ep,
                                              pkg.remote().clone(),
                                              pkg.local().clone(),
-                                             pkg.key().clone());
-        if let Err(e) = self.handle(pkg, GeneralDataSender::from(resp_sender)).await {
+                                             pkg.key().clone()));
+        if let Err(e) = self.handle(pkg, resp_sender).await {
             error!("handle udp package failed, e:{}", e);
         }
     }
@@ -680,7 +680,7 @@ impl UDPListenerEventListener for SnService {
 
 #[async_trait::async_trait]
 impl TcpListenerEventListener for SnService {
-    async fn on_new_connection(&self, socket: TCPSocket, first_box: PackageBox) -> BuckyResult<()> {
-        self.handle(first_box, GeneralDataSender::from(socket)).await
+    async fn on_new_connection(&self, socket: Arc<TCPSocket>, first_box: PackageBox) -> BuckyResult<()> {
+        self.handle(first_box, socket).await
     }
 }

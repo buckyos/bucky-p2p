@@ -5,13 +5,14 @@ use callback_result::CallbackWaiter;
 use cyfs_base::{bucky_time_now, BuckyErrorCode, BuckyResult, Device, DeviceId, Endpoint, NamedObject, Protocol};
 use futures::future::{abortable, Abortable, AbortHandle};
 use crate::{LocalDeviceRef, MixAesKey, TempSeqGenerator};
+use crate::executor::Executor;
 use crate::history::keystore::Keystore;
 use crate::protocol::{DynamicPackage, PackageBox, PackageCmdCode};
 use crate::protocol::v0::{SnCalled, SnCalledResp, SnPingResp};
-use crate::receive_processor::{ReceiveProcessor, ReceiveProcessorRef};
+use crate::receive_processor::{ReceiveProcessor, ReceiveProcessorRef, RespSender};
 use crate::sn::client::{SNClient, SNResp, SNRespWaiter, SNRespWaiterEx, SNRespWaiterRef};
 use crate::sn::types::PingSessionResp;
-use crate::sockets::{DataSender, DataSenderFactory, GeneralDataSender, NetManagerRef, TcpExtraParams, UdpDataSender, UdpExtraParams};
+use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, TcpExtraParams, UdpDataSender, UdpExtraParams};
 use crate::sockets::tcp::TCPSocket;
 
 #[async_trait::async_trait]
@@ -74,8 +75,8 @@ impl SNClientService {
 
     pub fn register_pkg_processor(self: &Arc<Self>, processor: &mut ReceiveProcessor) {
         let this = self.clone();
-        processor.add_package_box_processor(PackageCmdCode::SnPingResp, move |resp_sender: &'static dyn DataSender,
-                                                                              pkg: &'static DynamicPackage| {
+        processor.add_package_box_processor(PackageCmdCode::SnPingResp, move |resp_sender: &'static mut RespSender,
+                                                                              pkg: DynamicPackage| {
             let service = this.clone();
             async move {
                 let ping_resp: &SnPingResp = pkg.as_ref();
@@ -85,8 +86,8 @@ impl SNClientService {
         });
 
         let this = self.clone();
-        processor.add_package_box_processor(PackageCmdCode::SnCallResp, move |resp_sender: &'static dyn DataSender,
-                                                                         pkg: &'static DynamicPackage| {
+        processor.add_package_box_processor(PackageCmdCode::SnCallResp, move |resp_sender: &'static mut RespSender,
+                                                                         pkg: DynamicPackage| {
             let service = this.clone();
             async move {
                 Ok(())
@@ -94,8 +95,8 @@ impl SNClientService {
         });
 
         let this = self.clone();
-        processor.add_package_box_processor(PackageCmdCode::SnCalled, move |resp_sender: &'static dyn DataSender,
-                                                                            pkg: &'static DynamicPackage| {
+        processor.add_package_box_processor(PackageCmdCode::SnCalled, move |resp_sender: &'static mut RespSender,
+                                                                            pkg: DynamicPackage| {
             let service = this.clone();
             async move {
                 service.on_called(resp_sender, pkg.as_ref()).await
@@ -103,7 +104,7 @@ impl SNClientService {
         });
     }
 
-    async fn on_called(&self, resp_sender: &dyn DataSender, sn_called: &SnCalled) -> BuckyResult<()> {
+    async fn on_called(&self, resp_sender: &'static mut RespSender, sn_called: &SnCalled) -> BuckyResult<()> {
         assert_eq!(self.local_device.device_id(), resp_sender.local_device_id());
 
         let resp = match self.listener.on_called(sn_called).await {
@@ -152,7 +153,7 @@ impl SNClientService {
 
     pub async fn start(self: &Arc<Self>) {
         let this = self.clone();
-        async_std::task::spawn(async move {
+        Executor::spawn_ok(async move {
             this.ping_proc().await;
         });
     }
@@ -189,20 +190,20 @@ impl SNClientService {
         let mut tasks = vec![];
         let mut task_handles = vec![];
         for sn_ep in sn.connect_info().endpoints().iter() {
-            let sender_list: Vec<GeneralDataSender> = if sn_ep.protocol() == Protocol::Tcp {
+            let sender_list: Vec<Box<dyn DataSender>> = if sn_ep.protocol() == Protocol::Tcp {
                 // let data_sender: TCPSocket = self.net_manager.create_sender(self.local_device.device_id().clone(), sn.desc().clone(), sn_ep.clone(), TcpExtraParams {
                 //     timeout: self.conn_timeout,
                 // }).await?;
                 // vec![GeneralDataSender::from(data_sender)]
                 continue;
             } else {
-                let mut sender_list = vec![];
+                let mut sender_list: Vec<Box<dyn DataSender>> = vec![];
                 let udps = self.net_manager.udp_listeners();
                 for udp_listener in udps.iter() {
                     let data_sender: UdpDataSender = self.net_manager.create_sender(self.local_device.device_id().clone(), sn.desc().clone(), sn_ep.clone(), UdpExtraParams {
                         local_ep: udp_listener.local()
                     }).await?;
-                    sender_list.push(GeneralDataSender::from(data_sender));
+                    sender_list.push(Box::new(data_sender));
                 }
                 sender_list
             };
