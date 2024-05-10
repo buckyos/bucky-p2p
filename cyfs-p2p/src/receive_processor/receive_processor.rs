@@ -6,7 +6,7 @@ use cyfs_base::{BuckyError, BuckyErrorCode, BuckyResult, DeviceId, Endpoint, Raw
 use futures::future::AbortHandle;
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
-use crate::protocol::{DynamicPackage, Exchange, merge_context, MTU_LARGE, PackageBox, PackageCmdCode};
+use crate::protocol::{DynamicPackage, Exchange, merge_context, MTU_LARGE, OtherBoxTcpDecodeContext, PackageBox, PackageCmdCode};
 use crate::receive_processor::RespSender;
 use crate::sockets::{DataSender, SocketType, UdpDataSender};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
@@ -17,7 +17,7 @@ use crate::types::MixAesKey;
 pub trait PackageBoxProcessor: 'static + Send + Sync {
     async fn on_package(&self,
                         resp_sender: &mut RespSender,
-                        pkg: DynamicPackage) -> BuckyResult<()>;
+                        pkg: DynamicPackage, ) -> BuckyResult<()>;
 }
 
 pub struct ReceiveProcessor {
@@ -117,13 +117,11 @@ impl TcpListenerEventListener for ReceiveDispatcher {
             let key = pkg.key().clone();
             let local = pkg.local().clone();
             let remote = pkg.remote().clone();
-            Executor::spawn(async move {
-                key_store.add_key(
-                    &key,
-                    &local,
-                    &remote
-                );
-            });
+            key_store.add_key(
+                &key,
+                &local,
+                &remote,
+            );
         }
         let resp_sender = TCPReceiver::new(socket, processor.clone(), self.key_store.clone());
         let mut resp_sender = RespSender::new(resp_sender);
@@ -156,106 +154,6 @@ pub enum RecvBox<'a> {
     RawData(&'a [u8]),
 }
 
-enum DecryptBuffer<'de> {
-    Copy(&'de mut [u8]),
-    Inplace(*mut u8, usize),
-}
-
-struct OtherBoxDecodeContext<'de> {
-    decrypt_buf: DecryptBuffer<'de>,
-    local: &'de DeviceId,
-    remote: &'de DeviceId,
-    key: &'de MixAesKey,
-}
-
-impl<'de> OtherBoxDecodeContext<'de> {
-    pub fn new_copy(decrypt_buf: &'de mut [u8], local: &'de DeviceId, remote: &'de DeviceId, key: &'de MixAesKey) -> Self {
-        Self {
-            decrypt_buf: DecryptBuffer::Copy(decrypt_buf),
-            local,
-            remote,
-            key,
-        }
-    }
-
-    pub fn new_inplace(ptr: *mut u8, len: usize, local: &'de DeviceId, remote: &'de DeviceId, key: &'de MixAesKey) -> Self {
-        Self {
-            decrypt_buf: DecryptBuffer::Inplace(ptr, len),
-            local,
-            remote,
-            key,
-        }
-    }
-
-    // 返回用于aes 解码的buffer
-    pub unsafe fn decrypt_buf(self, data: &[u8]) -> &'de mut [u8] {
-        use DecryptBuffer::*;
-        match self.decrypt_buf {
-            Copy(decrypt_buf) => {
-                decrypt_buf[..data.len()].copy_from_slice(data);
-                decrypt_buf
-            }
-            Inplace(ptr, len) => {
-                std::slice::from_raw_parts_mut(ptr.offset((len - data.len()) as isize), data.len())
-            }
-        }
-    }
-
-    pub fn remote(&self) -> &DeviceId {
-        self.remote
-    }
-
-    pub fn key(&self) -> &MixAesKey {
-        self.key
-    }
-
-    pub fn local(&self) -> &DeviceId {
-        self.local
-    }
-}
-
-impl<'de> RawDecodeWithContext<'de, OtherBoxDecodeContext<'de>> for PackageBox {
-    fn raw_decode_with_context(
-        buf: &'de [u8],
-        context: OtherBoxDecodeContext<'de>,
-    ) -> BuckyResult<(Self, &'de [u8])> {
-        let key = context.key().clone();
-
-        let remote = context.remote().clone();
-        let local = context.local().clone();
-
-        let decrypt_buf = unsafe { context.decrypt_buf(buf) };
-        // 用key 解密数据
-        let decrypt_len = key.enc_key.inplace_decrypt(decrypt_buf, buf.len())?;
-        let remain_buf = &buf[buf.len()..];
-        let decrypt_buf = &decrypt_buf[..decrypt_len];
-        let mut packages = vec![];
-
-        {
-            let mut context = merge_context::FirstDecode::new();
-            let mut version = 0;
-            let (package, buf) = DynamicPackage::raw_decode_with_context(
-                decrypt_buf[0..decrypt_len].as_ref(),
-                (&mut context, &mut version),
-            )?;
-
-            packages.push(package);
-            let mut context: merge_context::OtherDecode = context.into();
-            let mut buf_ptr = buf;
-            while buf_ptr.len() > 0 {
-                let (package, buf) =
-                    DynamicPackage::raw_decode_with_context(buf_ptr, (&mut context, &mut version))?;
-                buf_ptr = buf;
-                packages.push(package);
-            }
-        }
-
-        let mut package_box = PackageBox::encrypt_box(local, remote, key);
-        package_box.append(packages);
-        Ok((package_box, remain_buf))
-    }
-}
-
 pub struct TCPReceiver {
     socket: Arc<TCPSocket>,
     processor: ReceiveProcessorRef,
@@ -274,8 +172,13 @@ impl TCPReceiver {
             recv_handle: Mutex::new(None),
         });
         let receiver = this.clone();
-        let (abort_future, handle) = futures::future::abortable(receiver.recv_proc());
+        let (abort_future, handle) = futures::future::abortable(async move {
+            receiver.recv_proc().await
+        });
         *this.recv_handle.lock().unwrap() = Some(handle);
+        Executor::spawn(async move {
+            abort_future.await;
+        });
         this
     }
 
@@ -291,13 +194,11 @@ impl TCPReceiver {
                                 let key = package_box.key().clone();
                                 let local = package_box.local().clone();
                                 let remote = package_box.remote().clone();
-                                Executor::spawn(async move {
-                                    key_store.add_key(
-                                        &key,
-                                        &local,
-                                        &remote
-                                    );
-                                });
+                                key_store.add_key(
+                                    &key,
+                                    &local,
+                                    &remote
+                                );
                             }
                             let mut resp_sender = RespSender::new(self.clone());
                             let pkg_list: Vec<DynamicPackage> = package_box.into();
@@ -352,7 +253,7 @@ impl TCPReceiver {
         let (box_type, box_buf) = self.receive_box(recv_buf).await?;
         match box_type {
             BoxType::Package => {
-                let context = OtherBoxDecodeContext::new_inplace(
+                let context = OtherBoxTcpDecodeContext::new_inplace(
                     box_buf.as_mut_ptr(),
                     box_buf.len(),
                     self.socket.local_device_id(),
@@ -373,6 +274,10 @@ impl DataSender for TCPReceiver {
     async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
         self.socket.send(data).await?;
         Ok(())
+    }
+
+    async fn send_pkg_box(&self, pkg: &PackageBox) -> BuckyResult<()> {
+        self.socket.send_pkg_box(pkg).await
     }
 
     fn remote(&self) -> &Endpoint {

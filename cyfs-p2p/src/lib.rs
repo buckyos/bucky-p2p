@@ -11,7 +11,7 @@ mod dht;
 mod finder;
 mod receive_processor;
 mod stack;
-// mod tunnel;
+mod tunnel;
 
 #[macro_use]
 extern crate log;

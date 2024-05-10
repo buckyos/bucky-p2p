@@ -32,6 +32,9 @@ impl RespSender {
     }
 
     pub(super) async fn send_cache(&mut self) -> BuckyResult<()> {
+        if self.pkg_cache.is_empty() {
+            return Ok(());
+        }
         let pkgs = std::mem::replace(&mut self.pkg_cache, vec![]);
         self.data_sender.send_dynamic_pkgs(pkgs).await
     }

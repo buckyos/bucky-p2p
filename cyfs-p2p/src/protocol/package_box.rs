@@ -77,6 +77,9 @@ impl PackageBox {
     }
 
     pub fn has_exchange(&self) -> bool {
+        if self.packages.is_empty() {
+            return false;
+        }
         self.packages.get(0).unwrap().cmd_code().is_exchange()
     }
 
@@ -144,7 +147,7 @@ impl Into<Vec<DynamicPackage>> for PackageBox {
 }
 
 
-pub struct PackageBoxEncodeContext {
+pub(crate) struct PackageBoxEncodeContext {
     plaintext: bool,
     ignore_exchange: bool,
     fixed_values: merge_context::FixedValues,
@@ -208,11 +211,11 @@ enum DecryptBuffer<'de> {
     Inplace(*mut u8, usize),
 }
 
-pub trait PackageBoxVersionGetter {
+pub(crate) trait PackageBoxVersionGetter {
     fn version_of(&self, remote: &DeviceId) -> u8;
 }
 
-pub struct PackageBoxDecodeContext<'de> {
+pub(crate) struct PackageBoxDecodeContext<'de> {
     decrypt_buf: DecryptBuffer<'de>,
     keystore: &'de keystore::Keystore,
 }
@@ -557,5 +560,249 @@ RawDecodeWithContext<
                 }
             }
         }
+    }
+}
+
+pub(crate) struct OtherBoxTcpEncodeContext {
+    pub plaintext: bool,
+}
+
+impl Default for OtherBoxTcpEncodeContext {
+    fn default() -> Self {
+        Self {
+            plaintext: false,
+        }
+    }
+}
+impl RawEncodeWithContext<OtherBoxTcpEncodeContext> for PackageBox {
+    fn raw_measure_with_context(
+        &self,
+        _: &mut OtherBoxTcpEncodeContext,
+        _purpose: &Option<RawEncodePurpose>,
+    ) -> BuckyResult<usize> {
+        unimplemented!()
+    }
+    fn raw_encode_with_context<'a>(
+        &self,
+        buf: &'a mut [u8],
+        _context: &mut OtherBoxTcpEncodeContext,
+        purpose: &Option<RawEncodePurpose>,
+    ) -> BuckyResult<&'a mut [u8]> {
+        let mut encrypt_in_len = buf.len();
+        let to_encrypt_buf = buf;
+
+        // 编码所有包
+        let mut context = merge_context::FirstEncode::new();
+        let packages = self.packages();
+        let enc: &dyn RawEncodeWithContext<merge_context::FirstEncode> =
+            packages.get(0).unwrap().as_ref();
+        let mut buf = enc.raw_encode_with_context(to_encrypt_buf, &mut context, purpose)?;
+
+        let mut context: merge_context::OtherEncode = context.into();
+        for p in &packages[1..] {
+            let enc: &dyn RawEncodeWithContext<merge_context::OtherEncode> = p.as_ref();
+            buf = enc.raw_encode_with_context(buf, &mut context, purpose)?;
+        }
+
+        encrypt_in_len -= buf.len();
+        // 用aes 加密package的部分
+        let len = self.key().enc_key.inplace_encrypt(to_encrypt_buf, encrypt_in_len)?;
+
+        Ok(&mut to_encrypt_buf[len..])
+    }
+}
+
+pub(crate) type FirstBoxTcpEncodeContext = PackageBoxEncodeContext;
+pub(crate) type FirstBoxTcpDecodeContext<'de> = PackageBoxDecodeContext<'de>;
+
+pub(crate) struct OtherBoxTcpDecodeContext<'de> {
+    decrypt_buf: DecryptBuffer<'de>,
+    local: &'de DeviceId,
+    remote: &'de DeviceId,
+    key: &'de MixAesKey,
+}
+
+impl<'de> OtherBoxTcpDecodeContext<'de> {
+    pub fn new_copy(decrypt_buf: &'de mut [u8], local: &'de DeviceId, remote: &'de DeviceId, key: &'de MixAesKey) -> Self {
+        Self {
+            decrypt_buf: DecryptBuffer::Copy(decrypt_buf),
+            local,
+            remote,
+            key,
+        }
+    }
+
+    pub fn new_inplace(ptr: *mut u8, len: usize, local: &'de DeviceId, remote: &'de DeviceId, key: &'de MixAesKey) -> Self {
+        Self {
+            decrypt_buf: DecryptBuffer::Inplace(ptr, len),
+            local,
+            remote,
+            key,
+        }
+    }
+
+    // 返回用于aes 解码的buffer
+    pub unsafe fn decrypt_buf(self, data: &[u8]) -> &'de mut [u8] {
+        use DecryptBuffer::*;
+        match self.decrypt_buf {
+            Copy(decrypt_buf) => {
+                decrypt_buf[..data.len()].copy_from_slice(data);
+                decrypt_buf
+            }
+            Inplace(ptr, len) => {
+                std::slice::from_raw_parts_mut(ptr.offset((len - data.len()) as isize), data.len())
+            }
+        }
+    }
+
+    pub fn remote(&self) -> &DeviceId {
+        self.remote
+    }
+
+    pub fn key(&self) -> &MixAesKey {
+        self.key
+    }
+
+    pub fn local(&self) -> &DeviceId {
+        self.local
+    }
+}
+
+impl<'de> RawDecodeWithContext<'de, OtherBoxTcpDecodeContext<'de>> for PackageBox {
+    fn raw_decode_with_context(
+        buf: &'de [u8],
+        context: OtherBoxTcpDecodeContext<'de>,
+    ) -> BuckyResult<(Self, &'de [u8])> {
+        let key = context.key().clone();
+
+        let remote = context.remote().clone();
+        let local = context.local().clone();
+
+        let decrypt_buf = unsafe { context.decrypt_buf(buf) };
+        // 用key 解密数据
+        let decrypt_len = key.enc_key.inplace_decrypt(decrypt_buf, buf.len())?;
+        let remain_buf = &buf[buf.len()..];
+        let decrypt_buf = &decrypt_buf[..decrypt_len];
+        let mut packages = vec![];
+
+        {
+            let mut context = merge_context::FirstDecode::new();
+            let mut version = 0;
+            let (package, buf) = DynamicPackage::raw_decode_with_context(
+                decrypt_buf[0..decrypt_len].as_ref(),
+                (&mut context, &mut version),
+            )?;
+
+            packages.push(package);
+            let mut context: merge_context::OtherDecode = context.into();
+            let mut buf_ptr = buf;
+            while buf_ptr.len() > 0 {
+                let (package, buf) =
+                    DynamicPackage::raw_decode_with_context(buf_ptr, (&mut context, &mut version))?;
+                buf_ptr = buf;
+                packages.push(package);
+            }
+        }
+
+        let mut package_box = PackageBox::encrypt_box(local, remote, key);
+        package_box.append(packages);
+        Ok((package_box, remain_buf))
+    }
+}
+
+pub(crate) struct PackageBoxTcpEncodeContext<InnerContext>(pub(crate) InnerContext);
+pub(crate) struct PackageBoxTcpDecodeContext<InnerContext>(pub(crate) InnerContext);
+
+impl RawEncodeWithContext<PackageBoxTcpEncodeContext<FirstBoxTcpEncodeContext>> for PackageBox {
+    fn raw_measure_with_context(
+        &self,
+        _: &mut PackageBoxTcpEncodeContext<FirstBoxTcpEncodeContext>,
+        _purpose: &Option<RawEncodePurpose>,
+    ) -> BuckyResult<usize> {
+        unimplemented!()
+    }
+    fn raw_encode_with_context<'a>(
+        &self,
+        buf: &'a mut [u8],
+        context: &mut PackageBoxTcpEncodeContext<FirstBoxTcpEncodeContext>,
+        purpose: &Option<RawEncodePurpose>,
+    ) -> BuckyResult<&'a mut [u8]> {
+        let buf_len = buf.len();
+        let box_header_len = u16::raw_bytes().unwrap();
+        if buf_len < box_header_len {
+            return Err(BuckyError::new(
+                BuckyErrorCode::OutOfLimit,
+                "buffer not enough",
+            ));
+        }
+
+        info!("packagebox FirstBoxEncodeContext buf_len={} box_header_len={}", buf.len(), box_header_len);
+
+        let box_len = {
+            let buf_ptr =
+                self.raw_encode_with_context(&mut buf[box_header_len..], &mut context.0, purpose)?;
+            buf_len - buf_ptr.len() - box_header_len
+        };
+        let buf = (box_len as u16).raw_encode(buf, purpose)?;
+        Ok(&mut buf[box_len..])
+    }
+}
+
+impl RawEncodeWithContext<PackageBoxTcpEncodeContext<OtherBoxTcpEncodeContext>> for PackageBox {
+    fn raw_measure_with_context(
+        &self,
+        _: &mut PackageBoxTcpEncodeContext<OtherBoxTcpEncodeContext>,
+        _purpose: &Option<RawEncodePurpose>,
+    ) -> BuckyResult<usize> {
+        unimplemented!()
+    }
+    fn raw_encode_with_context<'a>(
+        &self,
+        buf: &'a mut [u8],
+        context: &mut PackageBoxTcpEncodeContext<OtherBoxTcpEncodeContext>,
+        purpose: &Option<RawEncodePurpose>,
+    ) -> BuckyResult<&'a mut [u8]> {
+        let buf_len = buf.len();
+        let box_header_len = u16::raw_bytes().unwrap();
+        if buf_len < box_header_len {
+            return Err(BuckyError::new(
+                BuckyErrorCode::OutOfLimit,
+                "buffer not enough",
+            ));
+        }
+
+        info!("packagebox FirstBoxEncodeContext buf_len={} box_header_len={}", buf.len(), box_header_len);
+
+        let box_len = {
+            let buf_ptr =
+                self.raw_encode_with_context(&mut buf[box_header_len..], &mut context.0, purpose)?;
+            buf_len - buf_ptr.len() - box_header_len
+        };
+        let buf = (box_len as u16).raw_encode(buf, purpose)?;
+        Ok(&mut buf[box_len..])
+    }
+}
+
+impl<'de> RawDecodeWithContext<'de, PackageBoxTcpDecodeContext<FirstBoxTcpDecodeContext<'de>>>
+for PackageBox
+{
+    fn raw_decode_with_context(
+        buf: &'de [u8],
+        context: PackageBoxTcpDecodeContext<FirstBoxTcpDecodeContext<'de>>,
+    ) -> BuckyResult<(Self, &'de [u8])> {
+        let (_box_len, buf) = u16::raw_decode(buf)?;
+        PackageBox::raw_decode_with_context(buf, context.0)
+    }
+}
+
+impl<'de> RawDecodeWithContext<'de, PackageBoxTcpDecodeContext<OtherBoxTcpDecodeContext<'de>>>
+for PackageBox
+{
+    fn raw_decode_with_context(
+        buf: &'de [u8],
+        context: PackageBoxTcpDecodeContext<OtherBoxTcpDecodeContext<'de>>,
+    ) -> BuckyResult<(Self, &'de [u8])> {
+        let (_box_len, buf) = u16::raw_decode(buf)?;
+        PackageBox::raw_decode_with_context(buf, context.0)
     }
 }

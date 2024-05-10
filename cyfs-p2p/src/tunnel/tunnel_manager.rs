@@ -10,7 +10,8 @@ use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor, RespSender, TCPReceiver};
 use crate::sn::client::{SNClientServiceRef, SNEvent};
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, TcpExtraParams, UdpExtraParams};
-use super::tunnel::{Tunnel, TunnelWaiterRef};
+use crate::tunnel::tunnel_connection::TunnelConnectionKey;
+use super::{Tunnel, TunnelWaiter, TunnelWaiterRef};
 
 pub struct TunnelGuard {
     tunnel: Option<Tunnel>,
@@ -78,9 +79,9 @@ impl Tunnels {
         state.result_waiters.insert(tunnel.get_sequence(), tunnel.get_resp_waiter().clone());
     }
 
-    pub fn get_tunnel_waiter(&self, seq: TempSeq) -> Option<&TunnelWaiterRef> {
+    pub fn get_tunnel_waiter(&self, seq: TempSeq) -> Option<TunnelWaiterRef> {
         let mut state = self.state.lock().unwrap();
-        state.result_waiters.get(&seq)
+        state.result_waiters.get(&seq).map(|v| v.clone())
     }
 }
 
@@ -102,13 +103,34 @@ pub struct TunnelManager {
     device_cache: Arc<DeviceCache>,
     conn_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
+    resp_waiter: TunnelWaiterRef,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
 impl TunnelManager {
-    pub fn new() -> Arc<Self> {
+    pub fn new(
+        net_manager: NetManagerRef,
+        receive_dispatcher: ReceiveDispatcherRef,
+        sn_service: SNClientServiceRef,
+        local_device: LocalDeviceRef,
+        protocol_version: u8,
+        stack_version: u32,
+        listener: TunnelManagerEventRef,
+        device_cache: Arc<DeviceCache>,
+        conn_timeout: Duration,) -> Arc<Self> {
         Arc::new(Self {
             tunnels: Default::default(),
+            net_manager,
+            receive_dispatcher,
+            sn_service,
+            local_device,
+            protocol_version,
+            stack_version,
+            listener,
+            device_cache,
+            conn_timeout,
+            gen_seq: Arc::new(TempSeqGenerator::new()),
+            resp_waiter: Arc::new(TunnelWaiter::new()),
         })
     }
 
@@ -118,7 +140,7 @@ impl TunnelManager {
                                                                              pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                self.on_syn_tunnel(resp_sender, pkg.as_ref()).await
+                this.on_syn_tunnel(resp_sender, pkg.as_ref()).await
             }
         });
 
@@ -127,7 +149,7 @@ impl TunnelManager {
                                                                              pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                self.on_syn_tunnel(resp_sender, pkg.as_ref()).await
+                this.on_ack_tunnel(resp_sender, pkg).await
             }
         });
 
@@ -136,7 +158,7 @@ impl TunnelManager {
                                                                                pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                self.on_syn_tunnel(resp_sender, pkg.as_ref()).await
+                this.on_syn_tunnel(resp_sender, pkg.as_ref()).await
             }
         });
 
@@ -145,7 +167,7 @@ impl TunnelManager {
                                                                                pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                self.on_syn_tunnel(resp_sender, pkg.as_ref()).await
+                this.on_syn_tunnel(resp_sender, pkg.as_ref()).await
             }
         });
 
@@ -154,7 +176,7 @@ impl TunnelManager {
                                                                              pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                self.on_syn_tunnel(resp_sender, pkg.as_ref()).await
+                this.on_syn_tunnel(resp_sender, pkg.as_ref()).await
             }
         });
 
@@ -163,13 +185,32 @@ impl TunnelManager {
                                                                              pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                self.on_syn_tunnel(resp_sender, pkg.as_ref()).await
+                this.on_syn_tunnel(resp_sender, pkg.as_ref()).await
             }
         });
     }
 
     async fn on_syn_tunnel(&self, resp_sender: &'static mut RespSender, req: &SynTunnel) -> BuckyResult<()> {
         self.device_cache.add(&req.from_device_desc.desc().device_id(), &req.from_device_desc);
+
+        let tunnels = self.get_tunnels(&req.from_device_desc.desc().device_id());
+        if tunnels.get_tunnel_waiter(req.sequence).is_some() {
+            return Ok(());
+        }
+
+        let mut tunnel = Tunnel::new_for_connected(
+            self.net_manager.clone(),
+            self.receive_dispatcher.clone(),
+            req.sequence,
+            self.protocol_version,
+            self.stack_version,
+            req.from_device_desc.clone(),
+            self.local_device.clone(),
+            self.conn_timeout,
+            resp_sender.clone_data_sender(),
+            self.resp_waiter.clone(),
+        );
+
         let ack = AckTunnel {
             protocol_version: self.protocol_version,
             stack_version: self.stack_version,
@@ -180,51 +221,56 @@ impl TunnelManager {
             to_device_desc: self.local_device.device().clone(),
         };
         resp_sender.send_dynamic_pkg(DynamicPackage::from(ack)).await?;
+
+        tunnels.add_tunnel_waiter(&tunnel);
+        self.listener.on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
         Ok(())
     }
 
-    async fn on_ack_tunnel(&self, resp_sender: &'static mut RespSender, req: &AckTunnel) -> BuckyResult<()> {
-        self.device_cache.add(&req.to_device_desc.desc().device_id(), &req.to_device_desc);
-        Ok(())
-    }
-
-    pub async fn create_tunnel(&self, remote: &Device, pkgs: &[DynamicPackage]) -> BuckyResult<TunnelGuard> {
-        let remote_id = remote.desc().device_id();
-        let tunnels = {
-            let mut tunnels = self.tunnels.write().unwrap();
-            let device_tunnels = tunnels.get(&remote_id);
-            if device_tunnels.is_none() {
-                let device_tunnels = Tunnels::new();
-                tunnels.insert(remote_id.clone(), device_tunnels.clone());
-                device_tunnels
-            } else {
-                device_tunnels.unwrap().clone()
-            }
+    async fn on_ack_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+        let (to_device_desc, seq) = {
+            let ack: &AckTunnel = req.as_ref();
+            (ack.to_device_desc.clone(), ack.sequence)
         };
+        self.resp_waiter.set_result_with_cache(TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()), req);
+        self.device_cache.add(&to_device_desc.desc().device_id(), &to_device_desc);
+        Ok(())
+    }
+
+    fn get_tunnels(&self, remote_id: &DeviceId) -> Arc<Tunnels> {
+        let mut tunnels = self.tunnels.write().unwrap();
+        let device_tunnels = tunnels.get(remote_id);
+        if device_tunnels.is_none() {
+            let device_tunnels = Tunnels::new();
+            tunnels.insert(remote_id.clone(), device_tunnels.clone());
+            device_tunnels
+        } else {
+            device_tunnels.unwrap().clone()
+        }
+    }
+
+    pub async fn create_tunnel(&self, remote: &Device) -> BuckyResult<TunnelGuard> {
+        let remote_id = remote.desc().device_id();
+        let tunnels = self.get_tunnels(&remote_id);
 
         if let Some(tunnel) = tunnels.get_tunnel() {
             Ok(TunnelGuard::new(tunnel, tunnels.clone()))
         } else {
-            let tunnel = Tunnel::new(remote).await?;
-            Ok(TunnelGuard {
-                tunnel: Some(tunnel),
-                tunnels
-            })
-        }
-    }
-
-    async fn new_tunnel(&self, remote: &Device, pkgs: &[DynamicPackage]) -> BuckyResult<Tunnel> {
-        let connect_info = remote.connect_info();
-
-        let data_senders = self.create_data_sender(remote, connect_info.endpoints().as_slice()).await?;
-        if data_senders.len() > 0 {
-            let tunnels = data_senders.iter().map(|data_sender| {
-                let tunnel = Tunnel::new(self.gen_seq.generate(), data_sender.clone(), self.protocol_version, self.stack_version, self.local_device.clone());
-                self.tunnels.write().unwrap().get(&remote.device_id()).unwrap().add_tunnel_waiter(&tunnel);
-                tunnel
-            }).collect::<Vec<Tunnel>>();
-
-
+            let seq = self.gen_seq.generate();
+            let mut tunnel = Tunnel::new(
+                self.net_manager.clone(),
+                self.receive_dispatcher.clone(),
+                seq,
+                self.protocol_version,
+                self.stack_version,
+                remote.clone(),
+                self.local_device.clone(),
+                self.conn_timeout,
+                self.resp_waiter.clone(),
+            );
+            tunnel.connect_tunnel().await?;
+            tunnels.add_tunnel_waiter(&tunnel);
+            Ok(TunnelGuard::new(tunnel, tunnels.clone()))
         }
     }
 
@@ -269,13 +315,13 @@ impl SNEvent for TunnelManager {
             (ctx, Some(called.into())),
         ).map(|(package_box, _)| package_box)
             .map_err(|err| {
-                error!("{} ignore decode payload failed, err={}.", self.local_device_id(), err);
+                error!("{} ignore decode payload failed, err={}.", self.local_device.device_id(), err);
                 err
             })?;
         if caller_box.has_exchange() {
             // let exchange: &Exchange = caller_box.packages()[0].as_ref();
             self.net_manager.key_store().add_key(caller_box.key(), caller_box.local(), caller_box.remote());
         }
-
+        Ok(())
     }
 }

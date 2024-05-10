@@ -3,7 +3,7 @@ use super::sn::*;
 
 #[derive(Debug, Clone)]
 pub struct AckAckTunnel {
-    seq: TempSeq,
+    pub seq: TempSeq,
 }
 
 impl Package for AckAckTunnel {
