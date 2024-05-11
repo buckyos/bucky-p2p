@@ -717,9 +717,9 @@ checksum = "4964518bd3b4a8190e832886cdc0da9794f12e8e6c1613a9e90ff331c4c8724b"
 
 [[package]]
 name = "callback-result"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "853c325852121355ff8bb75e5472384d86d5e76a70bd1cbee4eb353b5cbfd189"
+checksum = "35fc4aabfd4f7e92c5b1e5f1e9e3e8990e32d98f9854da8133c8041ffe8b3bca"
 dependencies = [
  "async-std",
  "notify-future",
@@ -1172,6 +1172,7 @@ dependencies = [
  "md5",
  "mini-moka",
  "nix",
+ "notify-future",
  "once_cell",
  "rand 0.7.3",
  "sha2 0.8.2",

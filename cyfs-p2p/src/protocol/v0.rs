@@ -1328,12 +1328,9 @@ fn encode_protocol_tcp_syn_connection() {
 
     let src = TcpSynConnection {
         sequence: TempSeq::from(rand::random::<u32>()),
-        result: rand::random::<u8>(),
         to_vport: rand::random::<u16>(),
         from_session_id: IncreaseId::default(),
         to_device_id: to_device.desc().device_id(),
-        from_device_desc: from_device,
-        reverse_endpoint: Some(eps),
         payload: TailedOwnedData::from(data),
     };
 
@@ -1353,16 +1350,9 @@ fn encode_protocol_tcp_syn_connection() {
             .unwrap();
 
     assert_eq!(dst.sequence, src.sequence);
-    assert_eq!(dst.result, src.result);
     assert_eq!(dst.to_vport, src.to_vport);
     assert_eq!(dst.from_session_id, src.from_session_id);
     assert_eq!(dst.to_device_id, src.to_device_id);
-
-    let dst_from_device_desc = dst.from_device_desc.to_hex().unwrap();
-    let src_from_device_desc = src.from_device_desc.to_hex().unwrap();
-    assert_eq!(dst_from_device_desc, src_from_device_desc);
-
-    assert_eq!(dst.reverse_endpoint, src.reverse_endpoint);
 
     let dst_payload = dst.payload.to_string();
     let src_payload = src.payload.to_string();
@@ -1377,7 +1367,6 @@ pub struct TcpAckConnection {
     pub sequence: TempSeq,
     pub to_session_id: IncreaseId,
     pub result: u8,
-    pub to_device_desc: Device,
     pub payload: TailedOwnedData,
 }
 
@@ -1401,22 +1390,6 @@ impl Package for TcpAckConnection {
     }
 }
 
-impl From<(&TcpAckConnection, DeviceId, Vec<u8>, AesKey)> for Exchange {
-    fn from(context: (&TcpAckConnection, DeviceId, Vec<u8>, AesKey)) -> Self {
-        let (tcp_ack, to_device_id, key_encrypted, mix_key) = context;
-        Exchange {
-            sequence: tcp_ack.sequence.clone(),
-            to_device_id,
-            send_time: bucky_time_now(),
-            key_encrypted,
-            sign: Signature::default(),
-            from_device_desc: tcp_ack.to_device_desc.clone(),
-            mix_key
-        }
-    }
-}
-
-
 impl<Context: merge_context::Encode> RawEncodeWithContext<Context> for TcpAckConnection {
     fn raw_measure_with_context(
         &self,
@@ -1437,7 +1410,6 @@ impl<Context: merge_context::Encode> RawEncodeWithContext<Context> for TcpAckCon
         let buf = context.check_encode(buf, "sequence", &self.sequence, flags.next())?;
         let buf = context.encode(buf, &self.to_session_id, flags.next())?;
         let buf = context.encode(buf, &self.result, flags.next())?;
-        let buf = context.check_encode(buf, "device_desc", &self.to_device_desc, flags.next())?;
         let _buf = context.encode(buf, &self.payload, flags.next())?;
         context.finish(enc_buf)
     }
@@ -1455,7 +1427,6 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
         let (sequence, buf) = context.check_decode(buf, "sequence", flags.next())?;
         let (to_session_id, buf) = context.decode(buf, "TcpAckConnection.to_session_id", flags.next())?;
         let (result, buf) = context.decode(buf, "TcpAckConnection.result", flags.next())?;
-        let (to_device_desc, buf) = context.check_decode(buf, "device_desc", flags.next())?;
         let (payload, buf) = context.decode(buf, "TcpAckConnection.payload", flags.next())?;
 
         Ok((
@@ -1463,7 +1434,6 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
                 sequence,
                 result,
                 to_session_id,
-                to_device_desc,
                 payload,
             },
             buf,
@@ -1491,7 +1461,6 @@ fn encode_protocol_tcp_ack_connection() {
         sequence: TempSeq::from(rand::random::<u32>()),
         to_session_id: IncreaseId::default(),
         result: rand::random::<u8>(),
-        to_device_desc: to_device,
         payload: TailedOwnedData::from(data),
     };
 
@@ -1513,10 +1482,6 @@ fn encode_protocol_tcp_ack_connection() {
     assert_eq!(dst.sequence, src.sequence);
     assert_eq!(dst.to_session_id, src.to_session_id);
     assert_eq!(dst.result, src.result);
-
-    let dst_device = dst.to_device_desc.to_hex().unwrap();
-    let src_device = src.to_device_desc.to_hex().unwrap();
-    assert_eq!(dst_device, src_device);
 
     let dst_payload = dst.payload.to_string();
     let src_payload = src.payload.to_string();
@@ -1874,7 +1839,7 @@ fn encode_protocol_sn_called() {
         payload: SizedOwnedData::from(data),
     };
 
-    let mut buf = [0u8; udp::MTU];
+    let mut buf = [0u8; MTU];
     let remain = src
         .raw_encode_with_context(&mut buf, &mut merge_context::OtherEncode::default(), &None)
         .unwrap();
@@ -2095,8 +2060,6 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
 
 #[test]
 fn encode_protocol_sn_ping_resp() {
-    use crate::interface::udp;
-
     let private_key = PrivateKey::generate_rsa(1024).unwrap();
     let from_device = Device::new(
         None,
@@ -2147,7 +2110,7 @@ fn encode_protocol_sn_ping_resp() {
         }),
     };
 
-    let mut buf = [0u8; udp::MTU];
+    let mut buf = [0u8; MTU];
     let remain = src
         .raw_encode_with_context(&mut buf, &mut merge_context::OtherEncode::default(), &None)
         .unwrap();
@@ -2248,8 +2211,6 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
 
 #[test]
 fn encode_protocol_ack_proxy() {
-    use crate::interface::udp;
-
     let private_key = PrivateKey::generate_rsa(1024).unwrap();
     let to_device = Device::new(
         None,
@@ -2270,7 +2231,7 @@ fn encode_protocol_ack_proxy() {
         err: None,
     };
 
-    let mut buf = [0u8; udp::MTU];
+    let mut buf = [0u8; MTU];
     let remain = src
         .raw_encode_with_context(&mut buf, &mut merge_context::OtherEncode::default(), &None)
         .unwrap();

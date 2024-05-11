@@ -6,4 +6,4 @@ mod udp_tunnel_connection;
 
 pub use tunnel_manager::*;
 pub use tunnel::*;
-pub use tunnel_connection::*;
+pub(crate) use tunnel_connection::*;
