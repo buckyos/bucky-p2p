@@ -8,6 +8,7 @@ use cyfs_base::*;
 use crate::{
     types::*,
 };
+use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult};
 use crate::sn::service::statistic::{PeerStatus, StatisticManager};
 use crate::sockets::{DataSender};
 
@@ -108,7 +109,7 @@ impl CachedPeerInfo {
         }
     }
 
-    fn update_desc(&mut self, desc: &Device) -> BuckyResult<bool> {
+    fn update_desc(&mut self, desc: &Device) -> BdtResult<bool> {
         match desc.signs().body_signs() {
             Some(sigs) if !sigs.is_empty() => {
                 if let Some(old_sigs) = self.desc.signs().body_signs() {
@@ -116,14 +117,14 @@ impl CachedPeerInfo {
                         let new_sig = sigs.get(0).unwrap();
                         match new_sig.sign_time().cmp(&old_sig.sign_time()) {
                             std::cmp::Ordering::Equal => return Ok(false), // 签名时间不变，不更新
-                            std::cmp::Ordering::Less => return Err(BuckyError::new(BuckyErrorCode::Expired, "sign expired")), // 签名时间更早，忽略
+                            std::cmp::Ordering::Less => return Err(bdt_err!(BdtErrorCode::Expired, "sign expired")), // 签名时间更早，忽略
                             std::cmp::Ordering::Greater => {}
                         }
                     }
                 }
             },
             _ => match self.desc.signs().body_signs() {
-                Some(sigs) if !sigs.is_empty() => return Err(BuckyError::new(BuckyErrorCode::NotMatch, "attempt update signed-object with no-signed")), // 未签名不能取代签名device信息，要等被淘汰后才生效
+                Some(sigs) if !sigs.is_empty() => return Err(bdt_err!(BdtErrorCode::NotMatch, "attempt update signed-object with no-signed")), // 未签名不能取代签名device信息，要等被淘汰后才生效
                 _ => {},
             }
         };

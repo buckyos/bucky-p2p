@@ -49,7 +49,7 @@ impl std::fmt::Display for SnStatus {
 impl std::str::FromStr for SnStatus {
     type Err = BuckyError;
 
-    fn from_str(s: &str) -> BuckyResult<Self> {
+    fn from_str(s: &str) -> BdtResult<Self> {
         match s {
             "online" => Ok(Self::Online),
             "offline" => Ok(Self::Offline),
@@ -69,12 +69,12 @@ pub trait PingSession: Send + Sync + std::fmt::Display {
     fn local(&self) -> Endpoint;
     fn reset(&self,  local_device: Option<Device>, sn_endpoint: Option<Endpoint>) -> Box<dyn PingSession>;
     fn clone_as_ping_session(&self) -> Box<dyn PingSession>;
-    async fn wait(&self) -> BuckyResult<PingSessionResp>;
+    async fn wait(&self) -> BdtResult<PingSessionResp>;
     fn stop(&self);
     fn on_time_escape(&self, _now: Timestamp) {
 
     }
-    fn on_udp_ping_resp(&self, _resp: &SnPingResp, _from: &Endpoint) -> BuckyResult<()> {
+    fn on_udp_ping_resp(&self, _resp: &SnPingResp, _from: &Endpoint) -> BdtResult<()> {
         Ok(())
     }
 }
@@ -354,7 +354,7 @@ impl PingClient {
         }
     }
 
-    fn sync_session_resp(&self, session: &dyn PingSession, result: BuckyResult<PingSessionResp>) {
+    fn sync_session_resp(&self, session: &dyn PingSession, result: BdtResult<PingSessionResp>) {
         if session.local().addr().is_ipv4() {
             self.sync_ipv4_session_resp(session, result);
         } else if session.local().addr().is_ipv6() {
@@ -365,7 +365,7 @@ impl PingClient {
     }
 
 
-    fn sync_ipv6_session_resp(&self, session: &dyn PingSession, result: BuckyResult<PingSessionResp>) {
+    fn sync_ipv6_session_resp(&self, session: &dyn PingSession, result: BdtResult<PingSessionResp>) {
         info!("{} wait session {} finished {:?}", self, session, result);
 
         enum NextStep {
@@ -401,7 +401,7 @@ impl PingClient {
     }
 
 
-    fn sync_ipv4_session_resp(self: &PingClientRef, session: &dyn PingSession, result: BuckyResult<PingSessionResp>) {
+    fn sync_ipv4_session_resp(self: &PingClientRef, session: &dyn PingSession, result: BdtResult<PingSessionResp>) {
         info!("{} wait session {} finished {:?}", self, session, result);
         struct NextStep {
             waiter: Option<StateWaiter>,
@@ -544,10 +544,10 @@ impl PingClient {
 
     }
 
-    pub async fn wait_offline(&self) -> BuckyResult<()> {
+    pub async fn wait_offline(&self) -> BdtResult<()> {
         enum NextStep {
             Wait(AbortRegistration),
-            Return(BuckyResult<()>)
+            Return(BdtResult<()>)
         }
 
         let next = {
@@ -578,12 +578,12 @@ impl PingClient {
         }
     }
 
-    pub async fn wait_online(self: &PingClientRef) -> BuckyResult<SnStatus> {
+    pub async fn wait_online(self: &PingClientRef) -> BdtResult<SnStatus> {
         info!("{} waiting online", self);
         enum NextStep {
             Wait(AbortRegistration),
             Start(AbortRegistration),
-            Return(BuckyResult<SnStatus>)
+            Return(BdtResult<SnStatus>)
         }
         let next = {
             let mut state = self.state.write().unwrap();

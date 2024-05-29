@@ -16,3 +16,4 @@ cyfs-debug = "0.6.6"
 cyfs-util = "0.6.8"
 cyfs-p2p = { path = "../cyfs-p2p" }
 clap = "2"
+sfo-result = { version = "0.2.4", features = ["backtrace", "log"] }

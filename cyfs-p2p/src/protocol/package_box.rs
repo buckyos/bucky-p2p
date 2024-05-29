@@ -1,3 +1,4 @@
+use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::history::keystore;
 use super::{common::*, package::*, SnCall};
 
@@ -732,7 +733,7 @@ impl RawEncodeWithContext<PackageBoxTcpEncodeContext<FirstBoxTcpEncodeContext>> 
         if buf_len < box_header_len {
             return Err(BuckyError::new(
                 BuckyErrorCode::OutOfLimit,
-                "buffer not enough",
+                "buffer not enough".to_string(),
             ));
         }
 

@@ -171,7 +171,7 @@ impl PingClients {
         }
     }
 
-    fn sync_ping_client(&self, client: &PingClient, result: BuckyResult<SnStatus>) {
+    fn sync_ping_client(&self, client: &PingClient, result: BdtResult<SnStatus>) {
         info!("{} client {} finished {:?}", self, client, result);
         if result.is_err() {
             self.stop();
@@ -297,13 +297,13 @@ impl PingClients {
         }
     }
 
-    pub async fn wait_online(&self) -> BuckyResult<SnStatus> {
+    pub async fn wait_online(&self) -> BdtResult<SnStatus> {
         log::info!("{} wait online", self);
         enum NextStep {
             Wait(AbortRegistration),
             Start(AbortRegistration, PingClient),
-            Wake(StateWaiter, BuckyResult<SnStatus>),
-            Return(BuckyResult<SnStatus>)
+            Wake(StateWaiter, BdtResult<SnStatus>),
+            Return(BdtResult<SnStatus>)
         }
         let next = {
             let mut state = self.0.state.write().unwrap();
@@ -368,11 +368,11 @@ impl PingClients {
         }
     }
 
-    pub async fn wait_offline(&self) -> BuckyResult<()> {
+    pub async fn wait_offline(&self) -> BdtResult<()> {
         info!("{} wait offline", self);
         enum NextStep {
             Wait(AbortRegistration),
-            Return(BuckyResult<()>)
+            Return(BdtResult<()>)
         }
 
         let next = {

@@ -5,6 +5,18 @@ use cyfs_base::*;
 use cyfs_p2p::{LocalDevice, sn::service::*};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
 
+#[warn(unused_imports)]
+pub(crate) use sfo_result::err as miner_err;
+pub(crate) use sfo_result::into_err as into_miner_err;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum MinerErrorCode {
+    #[default]
+    Failed
+}
+pub type MinerResult<T> = sfo_result::Result<T, MinerErrorCode>;
+pub type MinerError = sfo_result::Error<MinerErrorCode>;
+
 const APP_NAME: &str = "sn-miner";
 
 struct SnServiceContractServerImpl {}
@@ -77,9 +89,9 @@ async fn main() {
     println!("exit.");
 }
 
-fn load_device_info(folder_path: &Path) -> BuckyResult<(Device, PrivateKey)> {
-    let (mut device, _) = Device::decode_from_file(folder_path.with_extension("desc").as_path(), &mut vec![])?;
-    let (private_key, _) = PrivateKey::decode_from_file(folder_path.with_extension("sec").as_path(), &mut vec![])?;
+fn load_device_info(folder_path: &Path) -> MinerResult<(Device, PrivateKey)> {
+    let (mut device, _) = Device::decode_from_file(folder_path.with_extension("desc").as_path(), &mut vec![]).map_err(into_miner_err!(MinerErrorCode::Failed))?;
+    let (private_key, _) = PrivateKey::decode_from_file(folder_path.with_extension("sec").as_path(), &mut vec![]).map_err(into_miner_err!(MinerErrorCode::Failed))?;
 
     let eps = device.mut_connect_info().mut_endpoints();
     if eps.len() == 0 {

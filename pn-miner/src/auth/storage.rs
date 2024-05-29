@@ -35,7 +35,7 @@ struct StorageImpl {
 pub struct Storage(Arc<StorageImpl>);
 
 impl Storage {
-    pub fn new(path: &Path, config: Config) -> BuckyResult<Self> {
+    pub fn new(path: &Path, config: Config) -> BdtResult<Self> {
         let storage = Self(Arc::new(StorageImpl {
             path: path.to_owned(),
             config,
@@ -45,12 +45,12 @@ impl Storage {
         Ok(storage)
     }
 
-    fn conn(&self) -> BuckyResult<rusqlite::Connection> {
+    fn conn(&self) -> BdtResult<rusqlite::Connection> {
         let conn = rusqlite::Connection::open(self.0.path.as_path())?;
         Ok(conn)
     }
 
-    fn init(&self) -> BuckyResult<()> {
+    fn init(&self) -> BdtResult<()> {
         let conn = self.conn()?;
         let _ = conn.execute("CREATE TABLE IF NOT EXISTS auth (
             device TEXT UNIQUE NOT NULL PRIMARY KEY,
@@ -59,7 +59,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn rent(&self, device: DeviceId, bandwidth: u32) -> BuckyResult<()> {
+    pub fn rent(&self, device: DeviceId, bandwidth: u32) -> BdtResult<()> {
         let limit = self.0.config.limit_of(bandwidth)
             .ok_or_else(|| BuckyError::new(BuckyErrorCode::NotFound, "bandwith not in config"))?;
         let conn = self.conn()?;
@@ -83,7 +83,7 @@ impl Storage {
         }
     }
 
-    pub fn add_white_list(&self, device: DeviceId) -> BuckyResult<()> {
+    pub fn add_white_list(&self, device: DeviceId) -> BdtResult<()> {
         if !self.0.white_list.write().unwrap().insert(device) {
             Err(BuckyError::new(BuckyErrorCode::AlreadyExists, "device id has in white list"))
         } else {
@@ -91,7 +91,7 @@ impl Storage {
         }
     }
 
-    pub fn cancel(&self, device: DeviceId, bandwidth: u32) -> BuckyResult<()> {
+    pub fn cancel(&self, device: DeviceId, bandwidth: u32) -> BdtResult<()> {
         if self.0.white_list.write().unwrap().remove(&device) {
             return Ok(());
         }
@@ -101,7 +101,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn contract_of(&self, device: &DeviceId) -> BuckyResult<Vec<u32>> {
+    pub fn contract_of(&self, device: &DeviceId) -> BdtResult<Vec<u32>> {
         if self.0.white_list.read().unwrap().contains(device) {
             Ok(vec![self.0.config.bandwidth[0].0])
         } else {
@@ -121,7 +121,7 @@ impl Storage {
 
     }
 
-    pub fn used(&self) -> BuckyResult<Vec<(u32, usize/*used*/, usize/*limit*/)>> {
+    pub fn used(&self) -> BdtResult<Vec<(u32, usize/*used*/, usize/*limit*/)>> {
         let conn = self.conn()?;
         let mut result = vec![];
         for (bw, limit) in self.0.config.bandwidth.iter() {
@@ -143,7 +143,7 @@ impl ProxyServiceEvents for Storage {
     async fn pre_create_tunnel(
         &self,
         _mix_key: &AesKey,
-        device_pair: &(ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+        device_pair: &(ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
 
         if !self.contract_of(&device_pair.0.id)?.is_empty()
             || !self.contract_of(&device_pair.1.id)?.is_empty() {

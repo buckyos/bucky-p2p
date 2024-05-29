@@ -2,9 +2,10 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use callback_result::CallbackWaiter;
-use cyfs_base::{bucky_time_now, BuckyErrorCode, BuckyResult, Device, DeviceId, Endpoint, NamedObject, Protocol};
+use cyfs_base::{bucky_time_now, BuckyErrorCode, Device, DeviceId, Endpoint, NamedObject, Protocol};
 use futures::future::{abortable, Abortable, AbortHandle};
 use crate::{LocalDeviceRef, MixAesKey, TempSeqGenerator};
+use crate::error::BdtResult;
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
 use crate::protocol::{DynamicPackage, PackageBox, PackageCmdCode};
@@ -17,7 +18,7 @@ use crate::sockets::tcp::TCPSocket;
 
 #[async_trait::async_trait]
 pub trait SNEvent: 'static + Send + Sync {
-    async fn on_called(&self, called: &SnCalled) -> BuckyResult<()>;
+    async fn on_called(&self, called: &SnCalled) -> BdtResult<()>;
 }
 pub type SNEventRef = Arc<dyn SNEvent>;
 
@@ -104,7 +105,7 @@ impl SNClientService {
         });
     }
 
-    async fn on_called(&self, resp_sender: &'static mut RespSender, sn_called: &SnCalled) -> BuckyResult<()> {
+    async fn on_called(&self, resp_sender: &'static mut RespSender, sn_called: &SnCalled) -> BdtResult<()> {
         assert_eq!(self.local_device.device_id(), resp_sender.local_device_id());
 
         let resp = match self.listener.on_called(sn_called).await {
@@ -158,7 +159,7 @@ impl SNClientService {
         });
     }
 
-    pub async fn wait_online(&self, timeout: Option<Duration>) -> BuckyResult<()> {
+    pub async fn wait_online(&self, timeout: Option<Duration>) -> BdtResult<()> {
         loop {
             {
                 let state = self.state.read().unwrap();
@@ -185,7 +186,7 @@ impl SNClientService {
         }
     }
 
-    async fn ping(&self, sn: Device) -> BuckyResult<()> {
+    async fn ping(&self, sn: Device) -> BdtResult<()> {
         let sn_id = sn.desc().device_id();
         let mut tasks = vec![];
         let mut task_handles = vec![];
@@ -253,7 +254,7 @@ impl SNClientService {
         Ok(())
     }
 
-    async fn call(&self, remote_sn: ActiveSN) -> BuckyResult<()> {
+    async fn call(&self, remote_sn: ActiveSN) -> BdtResult<()> {
         Ok(())
     }
 }

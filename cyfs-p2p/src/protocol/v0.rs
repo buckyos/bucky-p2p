@@ -1,3 +1,4 @@
+use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 use super::common::*;
 use super::sn::*;
 
@@ -1002,17 +1003,17 @@ impl SessionData {
         self.stream_pos + self.payload.as_ref().len() as u64
     }
 
-    pub fn encode_for_raw_data(&self, buf: &mut [u8]) -> BuckyResult<usize> {
+    pub fn encode_for_raw_data(&self, buf: &mut [u8]) -> BdtResult<usize> {
         let buf_len = buf.len();
-        let buf = (Self::cmd_code() as u8).raw_encode(buf, &None)?;
+        let buf = (Self::cmd_code() as u8).raw_encode(buf, &None).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let buf =
-            self.raw_encode_with_context(buf, &mut merge_context::OtherEncode::default(), &None)?;
+            self.raw_encode_with_context(buf, &mut merge_context::OtherEncode::default(), &None).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         Ok(buf_len - buf.len())
     }
 
-    pub fn decode_from_raw_data(&self, buf: &[u8]) -> BuckyResult<Self> {
+    pub fn decode_from_raw_data(&self, buf: &[u8]) -> BdtResult<Self> {
         let (pkg, _) =
-            Self::raw_decode_with_context(buf, &mut merge_context::OtherDecode::default())?;
+            Self::raw_decode_with_context(buf, &mut merge_context::OtherDecode::default()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         Ok(pkg)
     }
     pub fn clone_with_data(&self) -> SessionData {
@@ -2147,7 +2148,7 @@ pub struct AckProxy {
     pub seq: TempSeq,
     pub to_peer_id: DeviceId,
     pub proxy_endpoint: Option<Endpoint>,
-    pub err: Option<BuckyErrorCode>,
+    pub err: Option<BdtErrorCode>,
 }
 
 impl Package for AckProxy {

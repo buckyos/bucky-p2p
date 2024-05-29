@@ -80,7 +80,7 @@ impl CallManager {
         remote: &DeviceId,
         sn_list: &Vec<DeviceId>,
         payload_generater: impl Fn(&SnCall) -> Vec<u8>
-    ) -> BuckyResult<CallSessions> {
+    ) -> BdtResult<CallSessions> {
         let seq = self.0.seq_genarator.generate();
 
         let active_pn_list = self.0.proxy_manager.active_proxies();
@@ -277,10 +277,10 @@ impl CallSessions {
         }
     }
 
-    pub async fn next(&self) -> BuckyResult<Option<CallSession>> {
+    pub async fn next(&self) -> BdtResult<Option<CallSession>> {
         enum NextStep {
             Start(AbortRegistration),
-            Return(BuckyResult<Option<CallSession>>),
+            Return(BdtResult<Option<CallSession>>),
             Wait(AbortRegistration)
         }
 
@@ -363,7 +363,7 @@ impl CallSessions {
 #[async_trait::async_trait]
 pub(super) trait CallTunnel: Send + Sync + std::fmt::Display {
     fn clone_as_call_tunnel(&self) -> Box<dyn CallTunnel>;
-    async fn wait(&self) -> (BuckyResult<Device>, Option<EndpointPair>);
+    async fn wait(&self) -> (BdtResult<Device>, Option<EndpointPair>);
     fn cancel(&self);
     fn on_time_escape(&self, _now: Timestamp) {
 
@@ -382,7 +382,7 @@ enum SessionState {
     SecondTry,
     Responsed {
         active: EndpointPair,
-        result: BuckyResult<Device>
+        result: BdtResult<Device>
     },
     Canceled(BuckyError)
 }
@@ -488,7 +488,7 @@ impl CallSession {
     }
 
 
-    fn sync_tunnel(&self, _tunnel: &dyn CallTunnel, result: BuckyResult<Device>, active: Option<EndpointPair>) {
+    fn sync_tunnel(&self, _tunnel: &dyn CallTunnel, result: BdtResult<Device>, active: Option<EndpointPair>) {
         struct NextStep {
             waiter: Option<StateWaiter>,
             to_cancel: Vec<Box<dyn CallTunnel>>,
@@ -721,7 +721,7 @@ impl CallSession {
         }
     }
 
-    pub fn result(&self) -> Option<BuckyResult<Device>> {
+    pub fn result(&self) -> Option<BdtResult<Device>> {
         let state = self.0.state.read().unwrap();
         match &state.state {
             SessionState::Responsed { result, .. } => Some(result.clone()),

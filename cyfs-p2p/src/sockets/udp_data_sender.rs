@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use cyfs_base::{BuckyError, BuckyResult, DeviceDesc, DeviceId, Endpoint, RawEncodeWithContext};
+use cyfs_base::{BuckyError, DeviceDesc, DeviceId, Endpoint, RawEncodeWithContext};
+use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::MixAesKey;
 use crate::protocol::{MTU_LARGE, PackageBox, PackageBoxEncodeContext};
 use crate::sockets::{DataSender, DataSenderFactory, ExtraParams, NetManager, SocketType};
@@ -32,16 +33,16 @@ impl UdpDataSender {
 
 #[async_trait::async_trait]
 impl DataSender for UdpDataSender {
-    async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
-        self.socket.send_to(data, &self.remote).await?;
+    async fn send_resp(&self, data: &[u8]) -> BdtResult<()> {
+        self.socket.send_to(data, &self.remote).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
         Ok(())
     }
 
-    async fn send_pkg_box(&self, pkg: &PackageBox) -> BuckyResult<()> {
+    async fn send_pkg_box(&self, pkg: &PackageBox) -> BdtResult<()> {
         let mut buf = [0u8; MTU_LARGE];
         let data = {
             let mut context = PackageBoxEncodeContext::default();
-            pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None)?
+            pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?
         };
         self.send_resp(data).await
     }
@@ -80,10 +81,10 @@ impl ExtraParams for UdpExtraParams {
 
 #[async_trait::async_trait]
 impl DataSenderFactory<UdpExtraParams, UdpDataSender> for NetManager {
-    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: UdpExtraParams) -> BuckyResult<UdpDataSender> {
+    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: UdpExtraParams) -> BdtResult<UdpDataSender> {
         let key = self.key_store.create_key(&local_device_id, &remote_device, true);
         let socket = self.get_udp_socket(&p.local_ep).ok_or_else(|| {
-            BuckyError::from("udp socket not found")
+            bdt_err!(BdtErrorCode::Failed, "udp socket not found")
         })?;
         Ok(UdpDataSender::new(socket, remote_ep, remote_device.device_id().clone(), local_device_id, key.key))
     }

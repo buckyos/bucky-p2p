@@ -16,6 +16,7 @@ use crate::{
     types::*
 };
 use std::time::{UNIX_EPOCH, SystemTime};
+use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::protocol::MTU_LARGE;
 
 #[derive(Clone)]
@@ -65,7 +66,7 @@ impl ProxyTunnel {
         }
     }
 
-    fn on_device_pair(&mut self, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+    fn on_device_pair(&mut self, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
         self.last_active = bucky_time_now();
         let (left, right) = device_pair;
         let (fl, fr) = {
@@ -75,7 +76,7 @@ impl ProxyTunnel {
                 Ok((&mut self.device_pair.1, &mut self.device_pair.0))
             } else {
                 trace!("{} ignore device pair ({:?}, {:?}) for not match {:?}", self, left, right, self.device_pair);
-                Err(BuckyError::new(BuckyErrorCode::NotMatch, "device pair not match"))
+                Err(bdt_err!(BdtErrorCode::NotMatch, "device pair not match"))
             }
         }?;
         if left.timestamp > fl.timestamp {
@@ -226,7 +227,7 @@ impl TunnelsManager {
         (min, max)
     }
 
-    fn mixkey_update(&mut self,  mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+    fn mixkey_update(&mut self,  mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
         let tunnel = self.tunnel_mixhash_map.get(&mix_key.mix_hash(None)).unwrap();
         let mut tunnel = tunnel.tunnel.clone();
         let (left, right) = device_pair;
@@ -238,7 +239,7 @@ impl TunnelsManager {
                 Ok((&mut tunnel.device_pair.1, &mut tunnel.device_pair.0))
             } else {
                 trace!("{} ignore device pair ({:?}, {:?}) for not match {:?}", tunnel, left, right, tunnel.device_pair);
-                Err(BuckyError::new(BuckyErrorCode::NotMatch, "device pair not match"))
+                Err(bdt_err!(BdtErrorCode::NotMatch, "device pair not match"))
             }
         }?;
         if left.timestamp > fl.timestamp {
@@ -255,7 +256,7 @@ impl TunnelsManager {
         Ok(())
     }
 
-    fn mixkey_add(&mut self,  mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+    fn mixkey_add(&mut self,  mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
         let mut tunnel = TunnelMixHash::new(mix_key.clone(), ProxyTunnel::new(device_pair));
 
         let (min, max) = self.minute_timestamp_range();
@@ -271,7 +272,7 @@ impl TunnelsManager {
         Ok(())
     }
 
-    pub fn create_tunnel(&mut self, mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+    pub fn create_tunnel(&mut self, mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
         let mix_hash = mix_key.mix_hash(None);
 
         if self.has_tunnel(&mix_hash) {
@@ -371,12 +372,9 @@ thread_local! {
 }
 
 impl ProxyInterface {
-    fn open(config: Config, local: SocketAddr, outer: Option<SocketAddr>) -> BuckyResult<Self> {
+    fn open(config: Config, local: SocketAddr, outer: Option<SocketAddr>) -> BdtResult<Self> {
         let socket = UdpSocket::bind(local)
-            .map_err(|e| {
-                error!("ProxyInterface bind socket on {:?} failed for {}", local, e);
-                e
-            })?;
+            .map_err(into_bdt_err!(BdtErrorCode::IoError, "ProxyInterface bind socket on {:?} failed", local))?;
         let interface = Self(Arc::new(ProxyInterfaceImpl {
             config,
             socket,
@@ -469,7 +467,7 @@ impl ProxyInterface {
         }
     }
 
-    fn create_tunnel(&self, mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+    fn create_tunnel(&self, mix_key: AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
         self.0.tunnels.lock().unwrap().create_tunnel(mix_key, device_pair)
     }
 }
@@ -485,7 +483,7 @@ impl std::fmt::Display for ProxyTunnelManager {
 }
 
 impl ProxyTunnelManager {
-    pub fn open(config: Config, listen: &[(SocketAddr, Option<SocketAddr>)]) -> BuckyResult<Self> {
+    pub fn open(config: Config, listen: &[(SocketAddr, Option<SocketAddr>)]) -> BdtResult<Self> {
         //TODO: 支持多interface扩展
         let (local, outer) = listen[0];
         let interface = ProxyInterface::open(config, local, outer)?;
@@ -494,7 +492,7 @@ impl ProxyTunnelManager {
         })
     }
 
-    pub fn create_tunnel(&self, mix_key: &AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<SocketAddr> {
+    pub fn create_tunnel(&self, mix_key: &AesKey, device_pair: (ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<SocketAddr> {
         let _ = self.interface.create_tunnel(mix_key.clone(), device_pair)?;
         Ok(self.interface.outer().clone())
     }

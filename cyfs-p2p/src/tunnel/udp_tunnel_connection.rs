@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
-use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, BuckyResult, DeviceDesc, Endpoint};
+use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, DeviceDesc, Endpoint};
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, SocketType, UdpExtraParams};
 use crate::{IncreaseId, LocalDeviceRef, TempSeq};
+use crate::error::BdtResult;
 use crate::protocol::{AckTunnel, DynamicPackage, PackageCmdCode, SynTunnel};
 use crate::protocol::v0::PingTunnel;
 use crate::tunnel::{TunnelConnection, TunnelDataReceiverRef, TunnelType};
@@ -49,7 +50,7 @@ impl UdpTunnelConnection {
         }
     }
 
-    pub async fn ping(&self) -> BuckyResult<()> {
+    pub async fn ping(&self) -> BdtResult<()> {
         let ping = PingTunnel {
             package_id: self.sequence.value(),
             send_time: bucky_time_now(),
@@ -81,11 +82,11 @@ impl TunnelConnection for UdpTunnelConnection {
         todo!()
     }
 
-    async fn accept_tunnel(&mut self) -> BuckyResult<()> {
+    async fn accept_tunnel(&mut self) -> BdtResult<()> {
         todo!()
     }
 
-    async fn connect_tunnel(&mut self) -> BuckyResult<()> {
+    async fn connect_tunnel(&mut self) -> BdtResult<()> {
         if self.data_sender.is_some() {
             return Ok(());
         }
@@ -111,7 +112,7 @@ impl TunnelConnection for UdpTunnelConnection {
         Ok(())
     }
 
-    async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId) -> BuckyResult<()> {
+    async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId) -> BdtResult<()> {
         if self.data_sender.is_some() {
             return Ok(());
         }
@@ -139,15 +140,15 @@ impl TunnelConnection for UdpTunnelConnection {
         Ok(())
     }
 
-    async fn send(&self, data: &[u8]) -> BuckyResult<()> {
+    async fn send(&self, data: &[u8]) -> BdtResult<()> {
         todo!()
     }
 
-    async fn recv(&self, data: &[u8]) -> BuckyResult<usize> {
+    async fn recv(&self, data: &[u8]) -> BdtResult<usize> {
         todo!()
     }
 
-    async fn recv_pkg(&self) -> BuckyResult<DynamicPackage> {
+    async fn recv_pkg(&self) -> BdtResult<DynamicPackage> {
         todo!()
     }
 }

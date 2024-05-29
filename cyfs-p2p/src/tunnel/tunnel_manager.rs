@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use cyfs_base::{BuckyResult, Device, DeviceDesc, DeviceId, Endpoint, NamedObject, Protocol, RawDecodeWithContext};
+use cyfs_base::{Device, DeviceDesc, DeviceId, Endpoint, NamedObject, Protocol, RawDecodeWithContext};
 use crate::{LocalDeviceRef, TempSeq, TempSeqGenerator};
+use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::protocol::{AckTunnel, DynamicPackage, MTU, PackageBox, PackageBoxDecodeContext, PackageCmdCode, SynTunnel};
@@ -11,6 +12,7 @@ use crate::protocol::v0::{AckAckTunnel, SnCalled, TcpAckAckConnection, TcpAckCon
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor, RespSender, TCPReceiver};
 use crate::sn::client::{SNClientServiceRef, SNEvent};
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, TcpExtraParams, UdpExtraParams};
+use crate::sockets::tcp::TCPSocket;
 use crate::tunnel::tunnel_connection::TunnelConnectionKey;
 use super::{Tunnel, TunnelDataReceiver, TunnelDataReceiverRef};
 
@@ -231,9 +233,29 @@ impl TunnelManager {
                 this.on_syn_tunnel(resp_sender, pkg).await
             }
         });
+
+        let this = self.clone();
+        processor.add_tcp_processor(move | socket: Arc<TCPSocket>, first_box: PackageBox,| {
+            let this = this.clone();
+            async move {
+                this.on_new_tcp_tunnel(socket, first_box).await
+            }
+        });
+
+        let this = self.clone();
+        processor.add_tcp_processor(move | socket: Arc<TCPSocket>, first_box: PackageBox,| {
+            let this = this.clone();
+            async move {
+                this.on_new_tcp_tunnel(socket, first_box).await
+            }
+        });
     }
 
-    async fn on_syn_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+    async fn on_new_tcp_tunnel(&self, socket: Arc<TCPSocket>, first_box: PackageBox) -> BdtResult<()> {
+        todo!()
+    }
+
+    async fn on_syn_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
         let (from_device_desc, seq) = {
             let ack: &SynTunnel = req.as_ref();
             (ack.from_device_desc.clone(), ack.sequence)
@@ -280,7 +302,7 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn on_ack_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+    async fn on_ack_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
         let (to_device_desc, seq) = {
             let ack: &AckTunnel = req.as_ref();
             (ack.to_device_desc.clone(), ack.sequence)
@@ -292,7 +314,7 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn on_ack_ack_sync_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+    async fn on_ack_ack_sync_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
         let seq = {
             let ack: &AckAckTunnel = req.as_ref();
             ack.seq
@@ -302,7 +324,7 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn on_tcp_sync_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+    async fn on_tcp_sync_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
         let seq = {
             let ack: &TcpSynConnection = req.as_ref();
             ack.sequence
@@ -313,7 +335,7 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn on_tcp_ack_connection(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+    async fn on_tcp_ack_connection(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
         let seq = {
             let ack: &TcpAckConnection = req.as_ref();
             ack.sequence
@@ -324,7 +346,7 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn on_tcp_ack_ack_connection(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BuckyResult<()> {
+    async fn on_tcp_ack_ack_connection(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
         let seq = {
             let ack: &TcpAckAckConnection = req.as_ref();
             ack.sequence
@@ -346,7 +368,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_tunnel(&self, remote: &Device) -> BuckyResult<TunnelGuard> {
+    pub async fn create_tunnel(&self, remote: &Device) -> BdtResult<TunnelGuard> {
         let remote_id = remote.desc().device_id();
         let tunnels = self.get_tunnels(&remote_id);
 
@@ -371,7 +393,7 @@ impl TunnelManager {
         }
     }
 
-    async fn create_data_sender(&self, remote: &Device, remote_ep: &[Endpoint]) -> BuckyResult<Vec<Arc<dyn DataSender>>> {
+    async fn create_data_sender(&self, remote: &Device, remote_ep: &[Endpoint]) -> BdtResult<Vec<Arc<dyn DataSender>>> {
         let mut data_senders: Vec<Arc<dyn DataSender>> = vec![];
         for ep in remote_ep.iter().filter(|ep| ep.is_tcp() && ep.is_static_wan()) {
             if let Ok(data_sender) = self.net_manager.create_sender(self.local_device.device_id().clone(), remote.desc().clone(), ep.clone(), TcpExtraParams {
@@ -399,7 +421,7 @@ impl TunnelManager {
 
 #[async_trait::async_trait]
 impl SNEvent for TunnelManager {
-    async fn on_called(&self, called: &SnCalled) -> BuckyResult<()> {
+    async fn on_called(&self, called: &SnCalled) -> BdtResult<()> {
         if called.payload.len() == 0 {
             warn!("{} ignore called for no payload.", self.local_device.device_id());
             return Ok(());
@@ -411,10 +433,7 @@ impl SNEvent for TunnelManager {
             called.payload.as_ref(),
             (ctx, Some(called.into())),
         ).map(|(package_box, _)| package_box)
-            .map_err(|err| {
-                error!("{} ignore decode payload failed, err={}.", self.local_device.device_id(), err);
-                err
-            })?;
+            .map_err(into_bdt_err!(BdtErrorCode::IoError, "{} ignore decode payload failed.", self.local_device.device_id()))?;
         if caller_box.has_exchange() {
             // let exchange: &Exchange = caller_box.packages()[0].as_ref();
             self.net_manager.key_store().add_key(caller_box.key(), caller_box.local(), caller_box.remote());

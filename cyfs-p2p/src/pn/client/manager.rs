@@ -113,7 +113,7 @@ impl ProxyManager {
     //                     resp_sender: &mut Box<dyn RespSender>,
     //                     remote_device_id: &DeviceId,
     //                     key: &MixAesKey,
-    //                     first_package: &DynamicPackage) -> BuckyResult<()> {
+    //                     first_package: &DynamicPackage) -> BdtResult<()> {
     //     if first_package.cmd_code() == PackageCmdCode::AckProxy {
     //         let ack_proxy: &AckProxy = first_package.as_ref();
     //         trace!("{} got {:?} from {}", self, ack_proxy, package_box.as_ref().remote());

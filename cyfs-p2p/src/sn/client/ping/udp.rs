@@ -94,7 +94,7 @@ impl UdpPingSession {
     }
 
 
-    async fn send_ping(&self, seq: TempSeq) -> BuckyResult<()> {
+    async fn send_ping(&self, seq: TempSeq) -> BdtResult<()> {
         let ping_pkg = SnPing {
             protocol_version: 0,
             stack_version: 0,
@@ -237,10 +237,10 @@ impl PingSession for UdpPingSession {
 
     }
 
-    async fn wait(&self) -> BuckyResult<PingSessionResp> {
+    async fn wait(&self) -> BdtResult<PingSessionResp> {
         enum NextStep {
             Wait(AbortRegistration),
-            Return(BuckyResult<PingSessionResp>),
+            Return(BdtResult<PingSessionResp>),
             Start(AbortRegistration, TempSeq)
         }
         let next = {
@@ -316,7 +316,7 @@ impl PingSession for UdpPingSession {
         }
     }
 
-    fn on_udp_ping_resp(&self, resp: &SnPingResp, from: &Endpoint) -> BuckyResult<()> {
+    fn on_udp_ping_resp(&self, resp: &SnPingResp, from: &Endpoint) -> BdtResult<()> {
         let now = bucky_time_now();
 
         let waiter = {

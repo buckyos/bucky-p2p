@@ -1,5 +1,6 @@
 use std::time::Duration;
-use cyfs_base::{BuckyResult, DeviceDesc, DeviceId, Endpoint, RawEncode, RawEncodeWithContext, RawFixedBytes};
+use cyfs_base::{DeviceDesc, DeviceId, Endpoint, RawEncode, RawEncodeWithContext, RawFixedBytes};
+use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 use crate::MixAesKey;
 use crate::protocol::{FirstBoxTcpEncodeContext, MTU_LARGE, OtherBoxTcpEncodeContext, PackageBox, PackageBoxEncodeContext, PackageBoxTcpEncodeContext};
 use crate::sockets::{DataSender, DataSenderFactory, ExtraParams, NetManager, SocketType};
@@ -7,19 +8,19 @@ use crate::sockets::tcp::TCPSocket;
 
 #[async_trait::async_trait]
 impl DataSender for TCPSocket {
-    async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
+    async fn send_resp(&self, data: &[u8]) -> BdtResult<()> {
         self.send(data).await?;
         Ok(())
     }
 
-    async fn send_pkg_box(&self, pkg: &PackageBox) -> BuckyResult<()> {
+    async fn send_pkg_box(&self, pkg: &PackageBox) -> BdtResult<()> {
         let mut buf = [0u8; MTU_LARGE];
         let data_buf = if pkg.has_exchange() {
             let mut context = PackageBoxTcpEncodeContext(FirstBoxTcpEncodeContext::default());
-            pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None)?
+            pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?
         } else {
             let mut context = PackageBoxTcpEncodeContext(OtherBoxTcpEncodeContext::default());
-            pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None)?
+            pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?
         };
         self.send_resp(data_buf).await
     }
@@ -57,7 +58,7 @@ impl ExtraParams for TcpExtraParams {}
 
 #[async_trait::async_trait]
 impl DataSenderFactory<TcpExtraParams, TCPSocket> for NetManager {
-    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: TcpExtraParams) -> BuckyResult<TCPSocket> {
+    async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: TcpExtraParams) -> BdtResult<TCPSocket> {
         let key = self.key_store.create_key(&local_device_id, &remote_device, true);
         TCPSocket::connect(local_device_id, remote_ep, remote_device.device_id(), remote_device, key.key, p.timeout).await
     }

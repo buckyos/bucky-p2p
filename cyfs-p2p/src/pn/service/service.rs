@@ -11,6 +11,7 @@ use crate::{
     history::keystore::{self, Keystore},
     protocol::*,
 };
+use crate::error::BdtResult;
 use super::{
     command::*,
     proxy::{self, ProxyTunnelManager, ProxyDeviceStub},
@@ -43,7 +44,7 @@ struct DefaultEvents {
 
 #[async_trait::async_trait]
 impl ProxyServiceEvents for DefaultEvents {
-    async fn pre_create_tunnel(&self, _mix_key: &AesKey, _device_pair: &(ProxyDeviceStub, ProxyDeviceStub)) -> BuckyResult<()> {
+    async fn pre_create_tunnel(&self, _mix_key: &AesKey, _device_pair: &(ProxyDeviceStub, ProxyDeviceStub)) -> BdtResult<()> {
         Ok(())
     }
 }
@@ -79,7 +80,7 @@ impl Service {
         local_secret: PrivateKey,
         proxy_ports: Vec<(SocketAddr, Option<SocketAddr>)>,
         config: Option<Config>,
-        events: Option<Box<dyn ProxyServiceEvents>>) -> BuckyResult<Service> {
+        events: Option<Box<dyn ProxyServiceEvents>>) -> BdtResult<Service> {
         info!("will start pn service device:{}", local_device.desc().device_id());
 
         let config = config.unwrap_or_default();
@@ -123,7 +124,7 @@ impl Service {
         WeakService(Arc::downgrade(&self.0))
     }
 
-    pub(crate) fn on_sync_proxy_package(&self, syn_proxy: &SynProxy, context: (&PackageBox, &SocketAddr)) -> BuckyResult<()> {
+    pub(crate) fn on_sync_proxy_package(&self, syn_proxy: &SynProxy, context: (&PackageBox, &SocketAddr)) -> BdtResult<()> {
         //TODO: 认证是否授权pn服务
         let (in_box, from) = context;
         trace!("{} got {} from {:?}", self, syn_proxy, from);

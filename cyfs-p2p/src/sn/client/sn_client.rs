@@ -1,7 +1,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use callback_result::{CallbackWaiter, WaiterError};
-use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, BuckyResult, Device, DeviceId, Endpoint, NamedObject, RawEncodeWithContext, SizedOwnedData};
+use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, Device, DeviceId, Endpoint, NamedObject, RawEncodeWithContext, SizedOwnedData};
+use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::history::keystore;
 use crate::history::keystore::Keystore;
 use crate::protocol::{Exchange, MTU_LARGE, PackageBox, PackageBoxEncodeContext, SnCall, SnPing};
@@ -18,7 +19,7 @@ pub enum SNResp {
 }
 
 impl TryInto<SnPingResp> for SNResp {
-    type Error = BuckyError;
+    type Error = BdtError;
 
     fn try_into(self) -> Result<SnPingResp, Self::Error> {
         match self {
@@ -26,14 +27,14 @@ impl TryInto<SnPingResp> for SNResp {
                 Ok(resp)
             }
             _ => {
-                Err(BuckyError::from((BuckyErrorCode::InvalidData, "SNResp::Call can't convert to PingSessionResp")))
+                Err(bdt_err!(BdtErrorCode::InvalidData, "SNResp::Call can't convert to PingSessionResp"))
             }
         }
     }
 }
 
 impl TryInto<SnCalledResp> for SNResp {
-    type Error = BuckyError;
+    type Error = BdtError;
 
     fn try_into(self) -> Result<SnCalledResp, Self::Error> {
         match self {
@@ -41,7 +42,7 @@ impl TryInto<SnCalledResp> for SNResp {
                 Ok(resp)
             }
             _ => {
-                Err(BuckyError::from((BuckyErrorCode::InvalidData, "SNResp::Ping can't convert to SnCalledResp")))
+                Err(bdt_err!(BdtErrorCode::InvalidData, "SNResp::Ping can't convert to SnCalledResp"))
             }
         }
     }
@@ -113,8 +114,8 @@ impl SNClient {
         }
     }
 
-    fn map_ret(ret: Result<SNResp, WaiterError>) -> BuckyResult<SNResp> {
-        let ret = ret.map_err(|_| BuckyError::from((BuckyErrorCode::Timeout, "ping timeout")))?;
+    fn map_ret(ret: Result<SNResp, WaiterError>) -> BdtResult<SNResp> {
+        let ret = ret.map_err(|_|bdt_err!(BdtErrorCode::Timeout, "ping timeout"))?;
         Ok(ret)
     }
 
@@ -122,7 +123,7 @@ impl SNClient {
         &self.data_sender
     }
 
-    pub async fn ping(&self) -> BuckyResult<SnPingResp> {
+    pub async fn ping(&self) -> BdtResult<SnPingResp> {
         let seq = self.gen_seq.generate();
         let ping_req = SnPing {
             protocol_version: 0,
@@ -163,7 +164,7 @@ impl SNClient {
     pub async fn call(&self,
                       reverse_endpoints: Option<&[Endpoint]>,
                       remote: &DeviceId,
-                      payload_pkg: &PackageBox) -> BuckyResult<SnCalledResp> {
+                      payload_pkg: &PackageBox) -> BdtResult<SnCalledResp> {
         let seq = self.gen_seq.generate();
         let mut call = SnCall {
             protocol_version: 0,
@@ -183,7 +184,7 @@ impl SNClient {
         let mut context = PackageBoxEncodeContext::from(&call);
         let mut buf = vec![0u8;MTU_LARGE];
         let len = {
-            let data = payload_pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None)?;
+            let data = payload_pkg.raw_tail_encode_with_context(buf.as_mut(), &mut context, &None).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
             data.len()
         };
         buf.truncate(len);

@@ -1,5 +1,6 @@
 
-use cyfs_base::{Device, BuckyResult, ObjectId};
+use cyfs_base::{Device, ObjectId};
+use crate::error::BdtResult;
 
 use super::k_bucket::{KadEntry, KBuckets, KBucketResult};
 
@@ -20,7 +21,7 @@ impl DeviceBucketes {
         }
     }
 
-    pub fn set(&mut self, id: &ObjectId, device: &Device) -> BuckyResult<()> {
+    pub fn set(&mut self, id: &ObjectId, device: &Device) -> BdtResult<()> {
         match self.array.set(id, device) {
             KBucketResult::Added(_) => {},
             _ => {},

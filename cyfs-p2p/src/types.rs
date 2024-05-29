@@ -314,61 +314,6 @@ impl EndpointPair {
     }
 }
 
-pub struct StateWaiter {
-    wakers: LinkedList<AbortHandle>,
-}
-
-impl StateWaiter {
-    pub fn new() -> Self {
-        Self { wakers: Default::default() }
-    }
-
-    pub fn transfer(&mut self) -> Self {
-        let mut waiter = Self::new();
-        self.transfer_into(&mut waiter);
-        waiter
-    }
-
-    pub fn transfer_into(&mut self, waiter: &mut Self) {
-        waiter.wakers.append(&mut self.wakers);
-    }
-
-    pub fn new_waiter(&mut self) -> AbortRegistration {
-        let (waker, waiter) = AbortHandle::new_pair();
-        self.wakers.push_back(waker);
-        waiter
-    }
-
-    pub async fn wait<T, S: FnOnce() -> T>(waiter: AbortRegistration, state: S) -> T {
-        let _ = Abortable::new(future::pending::<()>(), waiter).await;
-        state()
-    }
-
-    pub async fn abort_wait<A: futures::Future<Output = BuckyError>, T, S: FnOnce() -> T>(t: A, waiter: AbortRegistration, state: S) -> BuckyResult<T> {
-        match Abortable::new(t, waiter).await {
-            Ok(err) => {
-                //FIXME: remove waker
-                Err(err)
-            },
-            Err(_) =>  Ok(state())
-        }
-    }
-
-    pub fn wake(self) {
-        for waker in self.wakers {
-            waker.abort();
-        }
-    }
-
-    pub fn pop(&mut self) -> Option<AbortHandle> {
-        self.wakers.pop_front()
-    }
-
-    pub fn len(&self) -> usize {
-        self.wakers.len()
-    }
-}
-
 pub struct LocalDevice {
     device: Device,
     device_id: DeviceId,

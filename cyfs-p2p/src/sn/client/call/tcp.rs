@@ -23,7 +23,7 @@ enum TcpState {
         waiter: StateWaiter,
     },
     Responsed {
-        result: BuckyResult<Device>
+        result: BdtResult<Device>
     },
     Canceled(BuckyError)
 }
@@ -60,7 +60,7 @@ impl TcpCall {
         }))
     }
 
-    async fn call_proc(&self) -> BuckyResult<BuckyResult<Device>> {
+    async fn call_proc(&self) -> BdtResult<BdtResult<Device>> {
         let session = self.0.owner.to_strong()
             .ok_or_else(|| BuckyError::new(BuckyErrorCode::Interrupted, "user canceled"))?;
         let packages = session.packages();
@@ -130,14 +130,14 @@ impl CallTunnel for TcpCall {
         Box::new(self.clone())
     }
 
-    async fn wait(&self) -> (BuckyResult<Device>, Option<EndpointPair>) {
+    async fn wait(&self) -> (BdtResult<Device>, Option<EndpointPair>) {
         enum NextStep {
             Start {
                 waiter: AbortRegistration,
                 abort: AbortRegistration
             },
             Wait(AbortRegistration),
-            Return((BuckyResult<Device>, Option<EndpointPair>))
+            Return((BdtResult<Device>, Option<EndpointPair>))
         }
 
         let next = {

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
-use cyfs_base::{BuckyResult, Device, Endpoint, NamedObject, PrivateKey};
+use cyfs_base::{Device, Endpoint, NamedObject, PrivateKey};
 use once_cell::sync::OnceCell;
 use crate::executor::Executor;
 use crate::history::keystore::{Keystore};
 use crate::{LocalDevice, LocalDeviceRef, TempSeqGenerator};
+use crate::error::BdtResult;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveProcessor, ReceiveProcessorRef};
@@ -19,7 +20,7 @@ pub async fn init_p2p(
     endpoints: &[Endpoint],
     port_mapping: Option<Vec<(Endpoint, u16)>>,
     tcp_accept_timout: Duration,
-    udp_recv_buffer: usize,) -> BuckyResult<()> {
+    udp_recv_buffer: usize,) -> BdtResult<()> {
     Executor::init(None);
     let key_store = Arc::new(Keystore::new(crate::history::keystore::Config {
             active_time: Duration::from_secs(600),
@@ -45,7 +46,7 @@ pub struct P2pStack {
 pub type P2pStackRef = Arc<P2pStack>;
 
 impl P2pStack {
-    pub async fn wait_online(&self, timeout: Option<Duration>) -> BuckyResult<()> {
+    pub async fn wait_online(&self, timeout: Option<Duration>) -> BdtResult<()> {
         self.sn_service.wait_online(timeout).await
     }
 
@@ -70,7 +71,7 @@ impl SNEventListener {
 
 #[async_trait::async_trait]
 impl SNEvent for SNEventListener {
-    async fn on_called(&self, called: &SnCalled) -> BuckyResult<()> {
+    async fn on_called(&self, called: &SnCalled) -> BdtResult<()> {
         todo!()
     }
 }
@@ -91,7 +92,7 @@ impl TunnelManagerEvent for TunnelManagerEventListener {
 
     }
 }
-pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> BuckyResult<P2pStackRef> {
+pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> BdtResult<P2pStackRef> {
     let gen_seq = Arc::new(TempSeqGenerator::new());
     let mut processor = ReceiveProcessor::new();
     let net_manager = NET_MANAGER.get().unwrap().clone();

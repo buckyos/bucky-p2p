@@ -12,6 +12,7 @@ mod finder;
 mod receive_processor;
 mod stack;
 mod tunnel;
+pub mod error;
 
 #[macro_use]
 extern crate log;

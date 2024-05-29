@@ -26,7 +26,7 @@ enum UdpState {
     },
     Responsed {
         active: EndpointPair,
-        result: BuckyResult<Device>
+        result: BdtResult<Device>
     },
     Canceled(BuckyError)
 }
@@ -108,11 +108,11 @@ impl CallTunnel for UdpCall {
         Box::new(self.clone())
     }
 
-    async fn wait(&self) -> (BuckyResult<Device>, Option<EndpointPair>) {
+    async fn wait(&self) -> (BdtResult<Device>, Option<EndpointPair>) {
         enum NextStep {
             Start(AbortRegistration),
             Wait(AbortRegistration),
-            Return((BuckyResult<Device>, Option<EndpointPair>))
+            Return((BdtResult<Device>, Option<EndpointPair>))
         }
 
         let next = {

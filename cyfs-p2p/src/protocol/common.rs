@@ -13,6 +13,7 @@ mod dep {
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(super) use dep::*;
+use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 
 pub const MTU: usize = 1472;
 pub const MTU_LARGE: usize = 1024*30;
@@ -555,13 +556,13 @@ impl std::fmt::Debug for Exchange {
 }
 
 impl Exchange {
-    pub async fn sign(&mut self, signer: &impl Signer) -> BuckyResult<()> {
+    pub async fn sign(&mut self, signer: &impl Signer) -> BdtResult<()> {
         self.sign = signer
             .sign(
                 self.to_sign().as_slice(),
                 &SignatureSource::RefIndex(0),
             )
-            .await?;
+            .await.map_err(into_bdt_err!(BdtErrorCode::SignError))?;
         Ok(())
     }
 

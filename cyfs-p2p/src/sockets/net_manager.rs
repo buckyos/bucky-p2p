@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
-use cyfs_base::{BuckyResult, DeviceId, Endpoint};
+use cyfs_base::{DeviceId, Endpoint};
+use crate::error::BdtResult;
 use crate::history::keystore::Keystore;
 use crate::LocalDeviceRef;
 use crate::sockets::{NetListener, NetListenerRef};
@@ -19,7 +20,7 @@ impl NetManager {
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
         tcp_accept_timout: Duration,
-        udp_recv_buffer: usize,) -> BuckyResult<Self> {
+        udp_recv_buffer: usize,) -> BdtResult<Self> {
         Ok(Self {
             net_listener: NetListener::open(key_store.clone(), endpoints, port_mapping, tcp_accept_timout, udp_recv_buffer, false).await?,
             key_store,

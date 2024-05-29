@@ -16,6 +16,7 @@ use crate::{
     protocol::{*, v0::*},
     types::*,
 };
+use crate::error::BdtResult;
 use crate::executor::Executor;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, NetListenerRef};
@@ -119,7 +120,7 @@ impl SnService {
         service_ref
     }
 
-    pub async fn start(self: &Arc<Self>) -> BuckyResult<()> {
+    pub async fn start(self: &Arc<Self>) -> BdtResult<()> {
         Executor::init(None);
         self.net_listener.set_udp_listener_event_listener(self.clone());
         self.net_listener.set_tcp_listener_event_listener(self.clone());
@@ -166,7 +167,7 @@ impl SnService {
         &self.peer_mgr
     }
 
-    async fn send_resp(&self, mut sender: Arc<dyn DataSender>, pkg: DynamicPackage, send_log: String) -> BuckyResult<()> {
+    async fn send_resp(&self, mut sender: Arc<dyn DataSender>, pkg: DynamicPackage, send_log: String) -> BdtResult<()> {
         if let Err(e) = sender.send_dynamic_pkg(pkg).await {
             warn!("{} send failed. error: {}.", send_log, e.to_string());
             Err(e)
@@ -196,7 +197,7 @@ impl SnService {
         // }
     }
 
-    pub(super) async fn handle(&self, mut pkg_box: PackageBox, resp_sender: Arc<dyn DataSender>) -> BuckyResult<()> {
+    pub(super) async fn handle(&self, mut pkg_box: PackageBox, resp_sender: Arc<dyn DataSender>) -> BdtResult<()> {
         let first_pkg = pkg_box.pop();
         if first_pkg.is_none() {
             warn!("fetch none pkg");
@@ -280,7 +281,7 @@ impl SnService {
         ping_req: Box<SnPing>,
         resp_sender: Arc<dyn DataSender>,
         send_time: Timestamp,
-    ) -> BuckyResult<()> {
+    ) -> BdtResult<()> {
         if resp_sender.local().addr().is_ipv4() {
             self.handle_ipv4_ping(ping_req, resp_sender, send_time).await
         } else {
@@ -293,7 +294,7 @@ impl SnService {
         ping_req: Box<SnPing>,
         resp_sender: Arc<dyn DataSender>,
         _send_time: Timestamp,
-    ) -> BuckyResult<()> {
+    ) -> BdtResult<()> {
         let from_peer_id = match ping_req.from_peer_id.as_ref() {
             Some(id) => id,
             None => resp_sender.remote_device_id()
@@ -335,7 +336,7 @@ impl SnService {
         ping_req: Box<SnPing>,
         resp_sender: Arc<dyn DataSender>,
         send_time: Timestamp,
-    ) -> BuckyResult<()> {
+    ) -> BdtResult<()> {
         let from_peer_id = match ping_req.from_peer_id.as_ref() {
             Some(id) => id,
             None => resp_sender.remote_device_id()
@@ -680,7 +681,7 @@ impl UDPListenerEventListener for SnService {
 
 #[async_trait::async_trait]
 impl TcpListenerEventListener for SnService {
-    async fn on_new_connection(&self, socket: Arc<TCPSocket>, first_box: PackageBox) -> BuckyResult<()> {
+    async fn on_new_connection(&self, socket: Arc<TCPSocket>, first_box: PackageBox) -> BdtResult<()> {
         self.handle(first_box, socket).await
     }
 }

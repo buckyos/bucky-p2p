@@ -7,7 +7,8 @@ use std::time::Duration;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::{future, task};
 use async_std::io::ReadExt;
-use cyfs_base::{BuckyError, BuckyErrorCode, BuckyResult, DeviceId, Endpoint, endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
+use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
+use crate::error::BdtResult;
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
 use crate::protocol::{Exchange, FirstBoxTcpDecodeContext, MTU_LARGE, PackageBox, PackageBoxDecodeContext, PackageCmdCode};
@@ -15,13 +16,13 @@ use crate::types::LocalDeviceRef;
 use super::super::UpdateOuterResult;
 use super::TCPSocket;
 
-#[async_trait::async_trait]
+#[callback_trait::callback_trait]
 pub trait TcpListenerEventListener: Send + Sync + 'static {
     async fn on_new_connection(
         &self,
         socket: Arc<TCPSocket>,
         first_box: PackageBox,
-    ) -> BuckyResult<()>;
+    ) -> BdtResult<()>;
 }
 
 struct TCPListenerState {

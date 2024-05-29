@@ -2,10 +2,11 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use callback_result::CallbackWaiter;
-use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, BuckyResult, Device, DeviceDesc, NamedObject};
+use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, Device, DeviceDesc, NamedObject};
 use crate::protocol::{AckTunnel, DynamicPackage, PackageCmdCode, SynTunnel};
 use crate::sockets::{DataSender, NetManagerRef, SocketType};
 use crate::{LocalDeviceRef, TempSeq};
+use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::protocol::v0::PingTunnel;
 use crate::receive_processor::ReceiveDispatcherRef;
 use crate::tunnel::tunnel_connection::{TunnelConnectionKey};
@@ -70,7 +71,7 @@ impl Tunnel {
         }
     }
 
-    pub fn accept_tunnel(mut self, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BuckyResult<Self>> + Send {
+    pub fn accept_tunnel(mut self, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BdtResult<Self>> + Send {
         let mut tunnel_conn = match data_sender.socket_type() {
             SocketType::TCP => {
                 let processor = self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap();
@@ -114,7 +115,7 @@ impl Tunnel {
         self.sequence
     }
 
-    pub async fn connect_tunnel(&mut self) -> BuckyResult<()> {
+    pub async fn connect_tunnel(&mut self) -> BdtResult<()> {
         if self.tunnel_conn.is_some() {
             return Ok(());
         }
@@ -161,6 +162,6 @@ impl Tunnel {
                 }
             }
         }
-        Err(BuckyError::new(BuckyErrorCode::ConnectFailed, "No available endpoint".to_string()))
+        Err(bdt_err!(BdtErrorCode::ConnectFailed, "No available endpoint"))
     }
 }

@@ -1175,6 +1175,7 @@ dependencies = [
  "notify-future",
  "once_cell",
  "rand 0.7.3",
+ "sfo-result",
  "sha2 0.8.2",
  "socket2 0.5.6",
  "winapi",
@@ -3208,6 +3209,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sfo-result"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b313b781722fec95d117520f0b699872ec40096a1eacf5f5c25caed1a1382841"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "sha1"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3343,6 +3353,7 @@ dependencies = [
  "cyfs-p2p",
  "cyfs-util",
  "log",
+ "sfo-result",
 ]
 
 [[package]]

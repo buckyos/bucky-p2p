@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use cyfs_base::{BuckyError, BuckyErrorCode, BuckyResult, DeviceId, Endpoint, Protocol};
+use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, Protocol};
+use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
 use crate::LocalDeviceRef;
@@ -25,10 +26,10 @@ impl NetListener {
         tcp_accept_timout: Duration,
         udp_recv_buffer: usize,
         udp_sn_only: bool,
-    ) -> BuckyResult<Arc<Self>> {
+    ) -> BdtResult<Arc<Self>> {
         let ep_len = endpoints.len();
         if ep_len == 0 {
-            let err = BuckyError::new(BuckyErrorCode::InvalidParam, "no endpoint");
+            let err = bdt_err!(BdtErrorCode::InvalidParam, "no endpoint");
             warn!("NetListener bind failed for {}", err);
             return Err(err);
         }

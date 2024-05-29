@@ -3,11 +3,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use callback_result::{CallbackWaiter, SingleCallbackWaiter};
-use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, BuckyResult, Device, DeviceDesc, DeviceId, Endpoint, TailedOwnedData};
+use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, Device, DeviceDesc, DeviceId, Endpoint, TailedOwnedData};
 use notify_future::NotifyFuture;
 use crate::protocol::{AckTunnel, DynamicPackage, PackageBox, PackageCmdCode, SynTunnel};
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, SocketType, TcpExtraParams};
 use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
+use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::history::keystore::{FoundKey, Keystore};
 use crate::protocol::v0::{AckAckTunnel, TcpAckAckConnection, TcpAckConnection, TcpSynConnection};
 
@@ -53,7 +54,7 @@ impl TunnelDataReceiver {
         }
     }
 
-    pub async fn on_recv_pkg(&self, key: &TunnelConnectionKey, pkg: DynamicPackage) -> BuckyResult<()> {
+    pub async fn on_recv_pkg(&self, key: &TunnelConnectionKey, pkg: DynamicPackage) -> BdtResult<()> {
         let receiver = {
             let mut conn_receiver = self.conn_receiver.lock().unwrap();
             if let Some(receiver) = conn_receiver.get(key) {
@@ -61,17 +62,17 @@ impl TunnelDataReceiver {
                     receiver
                 } else {
                     conn_receiver.remove(key);
-                    return Err(BuckyError::from((BuckyErrorCode::ErrorState, format!("receiver {:?} is none", key))));
+                    return Err(bdt_err!(BdtErrorCode::ErrorState, "receiver {:?} is none", key));
                 }
             } else {
-                return Err(BuckyError::from((BuckyErrorCode::ErrorState, format!("receiver {:?} is none", key))));
+                return Err(bdt_err!(BdtErrorCode::ErrorState, "receiver {:?} is none", key));
             }
         };
         receiver.on_recv_pkg(pkg).await?;
         Ok(())
     }
 
-    pub async fn on_recv_pkg_with_resp(&self, key: &TunnelConnectionKey, pkg: DynamicPackage, timeout: Duration) -> BuckyResult<DynamicPackage> {
+    pub async fn on_recv_pkg_with_resp(&self, key: &TunnelConnectionKey, pkg: DynamicPackage, timeout: Duration) -> BdtResult<DynamicPackage> {
         let receiver = {
             let mut conn_receiver = self.conn_receiver.lock().unwrap();
             if let Some(receiver) = conn_receiver.get(key) {
@@ -79,10 +80,10 @@ impl TunnelDataReceiver {
                     receiver
                 } else {
                     conn_receiver.remove(key);
-                    return Err(BuckyError::from((BuckyErrorCode::ErrorState, format!("receiver {:?} is none", key))));
+                    return Err(bdt_err!(BdtErrorCode::ErrorState, "receiver {:?} is none", key));
                 }
             } else {
-                return Err(BuckyError::from((BuckyErrorCode::ErrorState, format!("receiver {:?} is none", key))));
+                return Err(bdt_err!(BdtErrorCode::ErrorState, "receiver {:?} is none", key));
             }
         };
 
@@ -105,8 +106,8 @@ pub type TunnelDataReceiverRef = Arc<TunnelDataReceiver>;
 
 #[async_trait::async_trait]
 pub trait TunnelSocketReceiver: Send + Sync + 'static {
-    async fn on_recv_pkg(&self, pkg: DynamicPackage) -> BuckyResult<()>;
-    async fn on_recv_pkg_with_resp(&self, pkg: DynamicPackage, timeout: Duration) -> BuckyResult<DynamicPackage>;
+    async fn on_recv_pkg(&self, pkg: DynamicPackage) -> BdtResult<()>;
+    async fn on_recv_pkg_with_resp(&self, pkg: DynamicPackage, timeout: Duration) -> BdtResult<DynamicPackage>;
 }
 
 type  TunnelRespFuture = NotifyFuture<DynamicPackage>;
@@ -138,9 +139,9 @@ impl TunnelSocket {
         resp_futures.push(future);
     }
 
-    pub async fn recv_resp(&self, timeout: Duration) -> BuckyResult<DynamicPackage> {
+    pub async fn recv_resp(&self, timeout: Duration) -> BdtResult<DynamicPackage> {
         let (pkg, futuer) = self.resp_waiter.create_timeout_result_future(timeout).await
-            .map_err(|_| BuckyError::from((BuckyErrorCode::Timeout, "syn timeout")))?;
+            .map_err(|_|bdt_err!(BdtErrorCode::Timeout, "syn timeout"))?;
         if let Some(future) = futuer {
             self.add_resp_future(future);
         }
@@ -156,30 +157,30 @@ impl Drop for TunnelSocket {
 }
 #[async_trait::async_trait]
 impl TunnelSocketReceiver for TunnelSocket {
-    async fn on_recv_pkg(&self, pkg: DynamicPackage) -> BuckyResult<()> {
+    async fn on_recv_pkg(&self, pkg: DynamicPackage) -> BdtResult<()> {
         self.resp_waiter.set_result_with_cache((pkg, None));
         Ok(())
     }
 
-    async fn on_recv_pkg_with_resp(&self, pkg: DynamicPackage, timeout: Duration) -> BuckyResult<DynamicPackage> {
+    async fn on_recv_pkg_with_resp(&self, pkg: DynamicPackage, timeout: Duration) -> BdtResult<DynamicPackage> {
         let future = NotifyFuture::new();
         self.resp_waiter.set_result_with_cache((pkg, Some(future.clone())));
 
         let ret = async_std::future::timeout(timeout, future).await;
         match ret {
             Ok(ret) => Ok(ret),
-            Err(_) => Err(BuckyError::from((BuckyErrorCode::Timeout, "timeout")))
+            Err(_) => Err(bdt_err!(BdtErrorCode::Timeout, "timeout"))
         }
     }
 }
 
 #[async_trait::async_trait]
 impl DataSender for TunnelSocket {
-    async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
+    async fn send_resp(&self, data: &[u8]) -> BdtResult<()> {
         self.data_sender.send_resp(data).await
     }
 
-    async fn send_dynamic_pkg(&self, dynamic_package: DynamicPackage) -> BuckyResult<()> {
+    async fn send_dynamic_pkg(&self, dynamic_package: DynamicPackage) -> BdtResult<()> {
         let future = {
             let mut resp_futures = self.resp_futures.lock().unwrap();
             resp_futures.pop()
@@ -192,11 +193,11 @@ impl DataSender for TunnelSocket {
         }
     }
 
-    async fn send_dynamic_pkgs(&self, dynamic_packages: Vec<DynamicPackage>) -> BuckyResult<()> {
+    async fn send_dynamic_pkgs(&self, dynamic_packages: Vec<DynamicPackage>) -> BdtResult<()> {
         self.data_sender.send_dynamic_pkgs(dynamic_packages).await
     }
 
-    async fn send_pkg_box(&self, pkg: &PackageBox) -> BuckyResult<()> {
+    async fn send_pkg_box(&self, pkg: &PackageBox) -> BdtResult<()> {
         self.data_sender.send_pkg_box(pkg).await
     }
 
@@ -231,12 +232,12 @@ pub trait TunnelConnection: Send + Sync + 'static {
     fn sequence(&self) -> TempSeq;
     fn socket_type(&self) -> SocketType;
     fn tunnel_type(&self) -> TunnelType;
-    async fn accept_tunnel(&mut self) -> BuckyResult<()>;
-    async fn connect_tunnel(&mut self) -> BuckyResult<()>;
-    async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId) -> BuckyResult<()>;
-    async fn send(&self, data: &[u8]) -> BuckyResult<()>;
-    async fn recv(&self, data: &[u8]) -> BuckyResult<usize>;
-    async fn recv_pkg(&self) -> BuckyResult<DynamicPackage>;
+    async fn accept_tunnel(&mut self) -> BdtResult<()>;
+    async fn connect_tunnel(&mut self) -> BdtResult<()>;
+    async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId) -> BdtResult<()>;
+    async fn send(&self, data: &[u8]) -> BdtResult<()>;
+    async fn recv(&self, data: &[u8]) -> BdtResult<usize>;
+    async fn recv_pkg(&self) -> BdtResult<DynamicPackage>;
 }
 //
 // pub(crate) async fn connect_tunnel<T: DataSender>(
@@ -246,7 +247,7 @@ pub trait TunnelConnection: Send + Sync + 'static {
 //     stack_version: u32,
 //     sequence: TempSeq,
 //     from_device_desc: Device,
-//     conn_timeout: Duration) -> BuckyResult<()> {
+//     conn_timeout: Duration) -> BdtResult<()> {
 //     let syn = SynTunnel {
 //         protocol_version,
 //         stack_version,
@@ -285,7 +286,7 @@ pub trait TunnelConnection: Send + Sync + 'static {
 //     from_device_desc: Device,
 //     to_vport: u16,
 //     session_id: IncreaseId,
-//     conn_timeout: Duration) -> BuckyResult<()> {
+//     conn_timeout: Duration) -> BdtResult<()> {
 //
 //     let syn = SynTunnel {
 //         protocol_version,

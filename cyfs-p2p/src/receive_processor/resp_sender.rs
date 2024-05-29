@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use cyfs_base::{BuckyResult, DeviceId, Endpoint};
+use cyfs_base::{DeviceId, Endpoint};
+use crate::error::BdtResult;
 use crate::MixAesKey;
 use crate::protocol::DynamicPackage;
 use crate::sockets::{DataSender, SocketType};
@@ -17,21 +18,21 @@ impl RespSender {
         }
     }
 
-    pub async fn send_resp(&self, data: &[u8]) -> BuckyResult<()> {
+    pub async fn send_resp(&self, data: &[u8]) -> BdtResult<()> {
         self.data_sender.send_resp(data).await
     }
 
-    pub async fn send_dynamic_pkgs(&mut self, pkgs: Vec<DynamicPackage>) -> BuckyResult<()> {
+    pub async fn send_dynamic_pkgs(&mut self, pkgs: Vec<DynamicPackage>) -> BdtResult<()> {
         self.pkg_cache.extend(pkgs);
         Ok(())
     }
 
-    pub async fn send_dynamic_pkg(&mut self, pkg: DynamicPackage) -> BuckyResult<()> {
+    pub async fn send_dynamic_pkg(&mut self, pkg: DynamicPackage) -> BdtResult<()> {
         self.pkg_cache.push(pkg);
         Ok(())
     }
 
-    pub(super) async fn send_cache(&mut self) -> BuckyResult<()> {
+    pub(super) async fn send_cache(&mut self) -> BdtResult<()> {
         if self.pkg_cache.is_empty() {
             return Ok(());
         }

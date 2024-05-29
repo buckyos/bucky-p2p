@@ -1,14 +1,14 @@
 use std::str::FromStr;
 use async_std::sync::Arc;
 use serde::{
-    Serializer, 
-    Deserializer, 
+    Serializer,
+    Deserializer,
     de::{self, Visitor}
 };
 use tide::{
-    Request, 
-    Response, 
-    Body, 
+    Request,
+    Response,
+    Body,
     prelude::*
 };
 use cyfs_base::*;
@@ -32,7 +32,7 @@ body: {
 */
 
 struct ServerImpl {
-    pn: DeviceId, 
+    pn: DeviceId,
     storage: Storage
 }
 
@@ -42,7 +42,7 @@ struct Server(Arc<ServerImpl>);
 impl Server {
     fn new(pn: DeviceId, storage: Storage) -> Self {
         Self(Arc::new(ServerImpl {
-            pn, 
+            pn,
             storage
         }))
     }
@@ -56,13 +56,13 @@ impl Server {
     }
 }
 
-pub async fn listen(port: u16, pn: DeviceId, storage: Option<Storage>) -> BuckyResult<()> {
+pub async fn listen(port: u16, pn: DeviceId, storage: Option<Storage>) -> BdtResult<()> {
     if storage.is_none() {
         return Ok(());
     }
     let storage = storage.unwrap();
 
-    let mut server = tide::with_state(Server::new(pn, storage));  
+    let mut server = tide::with_state(Server::new(pn, storage));
 
     /*
     获取PN列表
@@ -72,9 +72,9 @@ pub async fn listen(port: u16, pn: DeviceId, storage: Option<Storage>) -> BuckyR
 
     resp
     body: [{
-        id: DeviceId, 
+        id: DeviceId,
         bandwidth: 10M/20M, 带宽
-        limit: Number, 总共多少 
+        limit: Number, 总共多少
         used: Number, 用了多少
     },]
     */
@@ -111,7 +111,7 @@ pub async fn listen(port: u16, pn: DeviceId, storage: Option<Storage>) -> BuckyR
 
     resp
     body: [{
-        pn: DeviceId, 
+        pn: DeviceId,
         bandwith: 10M/20M, 带宽
     }] 没有的话是空数组
     */
@@ -166,18 +166,18 @@ where
     s.serialize_str(id.to_string().as_str())
 }
 
-fn device_id_deserialize<'de, D>(d: D) -> Result<DeviceId, D::Error> 
-where 
-    D: Deserializer<'de>,  
+fn device_id_deserialize<'de, D>(d: D) -> Result<DeviceId, D::Error>
+where
+    D: Deserializer<'de>,
 {
     struct DeviceIdVisitor {}
     impl<'de> Visitor<'de> for DeviceIdVisitor {
         type Value = DeviceId;
-    
+
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("device id")
         }
-    
+
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
         where
             E: de::Error,
@@ -195,18 +195,18 @@ async fn list_pn(req: Request<Server>) -> tide::Result {
     #[derive(Serialize)]
     struct PnInfo {
         #[serde(serialize_with = "device_id_serialize")]
-        id: DeviceId, 
-        bandwidth: u32, 
-        used: usize, 
+        id: DeviceId,
+        bandwidth: u32,
+        used: usize,
         limit: usize
     }
 
     let resp: Vec<PnInfo> = req.state().storage().used()
         .map(|u| u.into_iter().map(
             |(bandwidth, used, limit)| PnInfo {
-                id: req.state().pn().clone(), 
-                bandwidth, 
-                used, 
+                id: req.state().pn().clone(),
+                bandwidth,
+                used,
                 limit
             }).collect())?;
 
@@ -217,9 +217,9 @@ async fn rent_pn(mut req: Request<Server>) -> tide::Result {
     #[derive(Deserialize)]
     struct RentReq {
         #[serde(deserialize_with = "device_id_deserialize")]
-        device: DeviceId, 
+        device: DeviceId,
         #[serde(deserialize_with = "device_id_deserialize")]
-        pn: DeviceId, 
+        pn: DeviceId,
         bandwidth: u32
     }
 
@@ -227,27 +227,27 @@ async fn rent_pn(mut req: Request<Server>) -> tide::Result {
     struct RentResp {
         err: u16
     }
-    
+
     let rent_req: RentReq = req.body_json().await?;
     let err_code = {
         if rent_req.pn.eq(req.state().pn()) {
             match req.state().storage().rent(rent_req.device, rent_req.bandwidth) {
-                Ok(_) => Ok(BuckyErrorCode::Ok), 
+                Ok(_) => Ok(BuckyErrorCode::Ok),
                 Err(err) => {
                     match err.code() {
-                        BuckyErrorCode::NotFound => Ok(err.code()), 
-                        BuckyErrorCode::AlreadyExists => Ok(err.code()), 
-                        BuckyErrorCode::OutOfLimit => Ok(err.code()), 
+                        BuckyErrorCode::NotFound => Ok(err.code()),
+                        BuckyErrorCode::AlreadyExists => Ok(err.code()),
+                        BuckyErrorCode::OutOfLimit => Ok(err.code()),
                         _ => Err(err)
                     }
                 }
-            }   
+            }
         } else {
             Ok(BuckyErrorCode::NotFound)
         }
     }?;
-    
-    
+
+
     Ok(Response::from(Body::from_json(&RentResp {
         err: err_code.into()
     })?))
@@ -264,16 +264,16 @@ async fn query_pn(mut req: Request<Server>) -> tide::Result {
     #[derive(Serialize)]
     struct RentInfo {
         #[serde(serialize_with = "device_id_serialize")]
-        id: DeviceId, 
-        bandwidth: u32, 
+        id: DeviceId,
+        bandwidth: u32,
     }
 
     let query_req: QueryReq = req.body_json().await?;
-    
+
     let resp: Vec<RentInfo> = req.state().storage().contract_of(&query_req.device).
         map(|v| v.into_iter().map(|bandwidth| RentInfo {id: req.state().pn().clone(), bandwidth}).collect())?;
-    
-    
+
+
     Ok(Response::from(Body::from_json(&resp)?))
 }
 
@@ -283,9 +283,9 @@ async fn cancel_pn(mut req: Request<Server>) -> tide::Result {
     #[derive(Deserialize)]
     struct CancelReq {
         #[serde(deserialize_with = "device_id_deserialize")]
-        device: DeviceId, 
+        device: DeviceId,
         #[serde(deserialize_with = "device_id_deserialize")]
-        pn: DeviceId, 
+        pn: DeviceId,
         bandwidth: u32
     }
 
@@ -293,25 +293,25 @@ async fn cancel_pn(mut req: Request<Server>) -> tide::Result {
     struct CancelResp {
         err: u16
     }
-    
+
     let cancel_req: CancelReq = req.body_json().await?;
     let err_code = {
         if cancel_req.pn.eq(req.state().pn()) {
             match req.state().storage().cancel(cancel_req.device, cancel_req.bandwidth) {
-                Ok(_) => Ok(BuckyErrorCode::Ok), 
+                Ok(_) => Ok(BuckyErrorCode::Ok),
                 Err(err) => {
                     match err.code() {
-                        BuckyErrorCode::NotFound => Ok(err.code()), 
+                        BuckyErrorCode::NotFound => Ok(err.code()),
                         _ => Err(err)
                     }
                 }
-            }   
+            }
         } else {
             Ok(BuckyErrorCode::NotFound)
         }
     }?;
-    
-    
+
+
     Ok(Response::from(Body::from_json(&CancelResp {
         err: err_code.into()
     })?))
@@ -323,9 +323,9 @@ async fn add_pn_white_list(mut req: Request<Server>) -> tide::Result {
     #[derive(Deserialize)]
     struct RentReq {
         #[serde(deserialize_with = "device_id_deserialize")]
-        device: DeviceId, 
+        device: DeviceId,
         #[serde(deserialize_with = "device_id_deserialize")]
-        pn: DeviceId, 
+        pn: DeviceId,
         bandwidth: u32
     }
 
@@ -333,27 +333,27 @@ async fn add_pn_white_list(mut req: Request<Server>) -> tide::Result {
     struct RentResp {
         err: u16
     }
-    
+
     let rent_req: RentReq = req.body_json().await?;
     let err_code = {
         if rent_req.pn.eq(req.state().pn()) {
             match req.state().storage().add_white_list(rent_req.device) {
-                Ok(_) => Ok(BuckyErrorCode::Ok), 
+                Ok(_) => Ok(BuckyErrorCode::Ok),
                 Err(err) => {
                     match err.code() {
-                        BuckyErrorCode::NotFound => Ok(err.code()), 
-                        BuckyErrorCode::AlreadyExists => Ok(err.code()), 
-                        BuckyErrorCode::OutOfLimit => Ok(err.code()), 
+                        BuckyErrorCode::NotFound => Ok(err.code()),
+                        BuckyErrorCode::AlreadyExists => Ok(err.code()),
+                        BuckyErrorCode::OutOfLimit => Ok(err.code()),
                         _ => Err(err)
                     }
                 }
-            }   
+            }
         } else {
             Ok(BuckyErrorCode::NotFound)
         }
     }?;
-    
-    
+
+
     Ok(Response::from(Body::from_json(&RentResp {
         err: err_code.into()
     })?))

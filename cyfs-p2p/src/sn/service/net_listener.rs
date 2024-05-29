@@ -129,11 +129,11 @@ impl NetListener {
         service: SnService,
         close_waiter: async_std::channel::Receiver<()>) {
 
-        let mut udp_listen_futures: Vec<Pin<Box<dyn Future<Output = BuckyResult<(PackageBox, MessageSender)>> + Send>>> = Vec::with_capacity(udp_listeners.len());
+        let mut udp_listen_futures: Vec<Pin<Box<dyn Future<Output = BdtResult<(PackageBox, MessageSender)>> + Send>>> = Vec::with_capacity(udp_listeners.len());
         for udp in udp_listeners.as_slice() {
             udp_listen_futures.push(Box::pin(udp.recv()));
         }
-        let mut tcp_listen_futures: Vec<Pin<Box<dyn Future<Output = BuckyResult<(PackageBox, MessageSender)>> + Send>>> = Vec::with_capacity(tcp_listeners.len());
+        let mut tcp_listen_futures: Vec<Pin<Box<dyn Future<Output = BdtResult<(PackageBox, MessageSender)>> + Send>>> = Vec::with_capacity(tcp_listeners.len());
         for tcp in tcp_listeners.as_slice() {
             tcp_listen_futures.push(Box::pin(tcp.accept()));
         }
@@ -168,7 +168,7 @@ impl NetListener {
                     close_wait_future_container = Some(close_wait_future);
                     match listen_result {
                         Either::Left(((result, index, mut remain_futures), tcp_futures)) => {
-                            let new_future: Pin<Box<dyn Future<Output = BuckyResult<(PackageBox, MessageSender)>> + Send>> = match result.as_ref() {
+                            let new_future: Pin<Box<dyn Future<Output = BdtResult<(PackageBox, MessageSender)>> + Send>> = match result.as_ref() {
                                 Ok(_) => {
                                     Box::pin(udp_listeners.get(index).unwrap().recv())
                                 }
@@ -193,7 +193,7 @@ impl NetListener {
                             result
                         },
                         Either::Right(((result, index, mut remain_futures), udp_futures)) => {
-                            let new_future: Pin<Box<dyn Future<Output = BuckyResult<(PackageBox, MessageSender)>> + Send>> = match result.as_ref() {
+                            let new_future: Pin<Box<dyn Future<Output = BdtResult<(PackageBox, MessageSender)>> + Send>> = match result.as_ref() {
                                 Ok(_) => {
                                     Box::pin(tcp_listeners.get(index).unwrap().accept())
                                 }
@@ -274,7 +274,7 @@ impl NetListener {
     }
     */
 
-    async fn bind(endpoints: &[Endpoint], local_device_id: &DeviceId, key_store: &Keystore) -> (Vec<BuckyResult<UdpListener>>, Vec<BuckyResult<TcpAcceptor>>) {
+    async fn bind(endpoints: &[Endpoint], local_device_id: &DeviceId, key_store: &Keystore) -> (Vec<BdtResult<UdpListener>>, Vec<BdtResult<TcpAcceptor>>) {
         let mut udp_futures = vec![];
         let mut tcp_futures = vec![];
 
@@ -308,7 +308,7 @@ impl NetListener {
     pub async fn listen(
         endpoints_v6: &[Endpoint],
         endpoints_v4: &[Endpoint],
-        service: SnService) -> BuckyResult<(NetListener, usize, usize)> {
+        service: SnService) -> BdtResult<(NetListener, usize, usize)> {
 
         let (mut udp_results, mut tcp_results) = Self::bind(endpoints_v6, service.local_device_id(), service.key_store()).await;
         let (mut udp_results_v4, mut tcp_results_v4) = Self::bind(endpoints_v4, service.local_device_id(), service.key_store()).await;
@@ -403,7 +403,7 @@ struct UdpInterface {
 struct UdpListener(Arc<UdpInterface>);
 
 impl UdpListener {
-    async fn bind(addr: SocketAddr, key_store: Keystore) -> BuckyResult<UdpListener> {
+    async fn bind(addr: SocketAddr, key_store: Keystore) -> BdtResult<UdpListener> {
         let addr_str = addr.to_string();
 
         match UdpSocket::bind(addr.clone()).await {
@@ -430,7 +430,7 @@ impl UdpListener {
         }
     }
 
-    async fn recv(&self) -> BuckyResult<(PackageBox, MessageSender)> {
+    async fn recv(&self) -> BdtResult<(PackageBox, MessageSender)> {
         loop {
             let mut recv_buf = [0; MTU_LARGE];
             let rr = self.0.socket.recv_from(&mut recv_buf).await;
@@ -486,7 +486,7 @@ struct TcpAcceptor {
 }
 
 impl TcpAcceptor {
-    async fn bind(local_device_id: DeviceId, addr: SocketAddr, key_store: Keystore) -> BuckyResult<TcpAcceptor> {
+    async fn bind(local_device_id: DeviceId, addr: SocketAddr, key_store: Keystore) -> BdtResult<TcpAcceptor> {
         match TcpListener::bind(addr.clone()).await {
             Err(e) => {
                 warn!("tcp-listener({}) bind failed, err: {}", addr, e);
@@ -504,7 +504,7 @@ impl TcpAcceptor {
         }
     }
 
-    async fn accept(&self) -> BuckyResult<(PackageBox, MessageSender)> {
+    async fn accept(&self) -> BdtResult<(PackageBox, MessageSender)> {
         loop {
             match self.socket.accept().await {
                 Ok((socket, from_addr)) => {
@@ -567,7 +567,7 @@ impl UdpSender {
     }
 
     pub async fn send(&self,
-                  pkg_box: &PackageBox) -> BuckyResult<()> {
+                  pkg_box: &PackageBox) -> BdtResult<()> {
 
         let mut encode_buf = [0; MTU_LARGE];
         let send_buf = {
@@ -623,7 +623,7 @@ pub struct TcpSender {
 }
 
 impl TcpSender {
-    pub async fn send(&mut self, pkg: DynamicPackage) -> BuckyResult<()> {
+    pub async fn send(&mut self, pkg: DynamicPackage) -> BdtResult<()> {
         let mut send_buf = [0; MTU_LARGE];
 
         match self.handle.send_package(&mut send_buf, pkg, false).await {
@@ -661,7 +661,7 @@ pub enum MessageSender {
 }
 
 impl MessageSender {
-    pub async fn send(&mut self, pkg: DynamicPackage) -> BuckyResult<()> {
+    pub async fn send(&mut self, pkg: DynamicPackage) -> BdtResult<()> {
         match self {
             MessageSender::Udp(u) => {
                 let pkg_box = u.box_pkg(pkg);
@@ -702,7 +702,7 @@ impl RecvPending {
 }
 
 impl Future for RecvPending {
-    type Output = BuckyResult<(PackageBox, MessageSender)>;
+    type Output = BdtResult<(PackageBox, MessageSender)>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Pending
