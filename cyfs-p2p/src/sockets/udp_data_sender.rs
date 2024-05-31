@@ -39,7 +39,6 @@ impl DataSender for UdpDataSender {
     }
 
     async fn send_pkg_box(&self, pkg: &PackageBox) -> BdtResult<()> {
-        log::info!("send_pkg_box local {} remote {}", pkg.local(), pkg.remote());
         let mut buf = [0u8; MTU_LARGE];
         let data = {
             let mut context = PackageBoxEncodeContext::default();

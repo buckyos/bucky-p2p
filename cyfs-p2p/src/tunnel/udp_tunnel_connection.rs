@@ -9,7 +9,7 @@ use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::history::keystore::EncryptedKey;
 use crate::protocol::{AckTunnel, DynamicPackage, Exchange, MTU, PackageBox, PackageCmdCode, SynTunnel};
-use crate::protocol::v0::{AckAckTunnel, PingTunnel, SessionData, SESSIONDATA_FLAG_ACK, SESSIONDATA_FLAG_FINACK, SESSIONDATA_FLAG_SACK, SESSIONDATA_FLAG_SYN, SessionSynInfo};
+use crate::protocol::v0::{AckAckTunnel, PingTunnel, SessionData, SESSIONDATA_FLAG_ACK, SESSIONDATA_FLAG_ACK_ACK, SESSIONDATA_FLAG_SYN, SessionSynInfo};
 use crate::tunnel::{TunnelConnection, TunnelType};
 use crate::tunnel::tunnel_connection::TunnelConnectionKey;
 
@@ -285,9 +285,11 @@ impl UdpTunnelConnection {
             return Ok(());
         } else if result.cmd_code() == PackageCmdCode::SessionData {
             let syn: &SessionData = result.as_ref();
-            if !syn.is_flags_contain(SESSIONDATA_FLAG_SYN) {
+            if !syn.is_flags_contain(SESSIONDATA_FLAG_SYN) || syn.syn_info.is_none() {
                 return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
             }
+            let vport = syn.syn_info.as_ref().unwrap().to_vport;
+
             let ack = SessionData {
                 stream_pos: 0,
                 ack_stream_pos: 0,
@@ -302,7 +304,7 @@ impl UdpTunnelConnection {
                 to_session_id: Some(syn.session_id),
                 id_part: None,
                 payload: TailedOwnedData::from(Vec::new()),
-                flags: SESSIONDATA_FLAG_SYN | SESSIONDATA_FLAG_ACK,
+                flags: SESSIONDATA_FLAG_ACK,
             };
             self.data_socket.as_ref().unwrap().send_dynamic_pkg(DynamicPackage::from(ack)).await?;
 
@@ -316,10 +318,10 @@ impl UdpTunnelConnection {
                 return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
             }
             let tcp_ack_ack: &SessionData = result.as_ref();
-            if !tcp_ack_ack.is_flags_contain(SESSIONDATA_FLAG_SACK) {
+            if !tcp_ack_ack.is_flags_contain(SESSIONDATA_FLAG_ACK_ACK) {
                 return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
             }
-            self.tunnel_type = TunnelType::STREAM;
+            self.tunnel_type = TunnelType::STREAM(vport);
             Ok(())
         } else {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid ack tunnel"));
@@ -327,7 +329,7 @@ impl UdpTunnelConnection {
     }
 
     pub async fn send_pkgs(&self, pkgs: Vec<DynamicPackage>) -> BdtResult<()> {
-        if self.tunnel_type != TunnelType::STREAM {
+        if !self.tunnel_type.is_stream() {
             return Err(bdt_err!(BdtErrorCode::ErrorState, "invalid tunnel type"));
         }
 
@@ -335,7 +337,7 @@ impl UdpTunnelConnection {
     }
 
     pub async fn recv_session_data(&self) -> BdtResult<DynamicPackage> {
-        if self.tunnel_type != TunnelType::STREAM {
+        if !self.tunnel_type.is_stream() {
             return Err(bdt_err!(BdtErrorCode::ErrorState, "invalid tunnel type"));
         }
 
@@ -486,6 +488,11 @@ impl TunnelConnection for UdpTunnelConnection {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "ack tunnel failed"));
         }
 
+        let syn_ack_ack = AckAckTunnel {
+            seq: self.sequence
+        };
+        data_socket.send_dynamic_pkg(DynamicPackage::from(syn_ack_ack)).await?;
+
         let result = data_socket.recv_resp(self.conn_timeout).await?;
         if result.cmd_code() != PackageCmdCode::SessionData {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tcp ack tunnel"));
@@ -495,10 +502,6 @@ impl TunnelConnection for UdpTunnelConnection {
         if !ack.is_flags_contain(SESSIONDATA_FLAG_ACK) {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tcp ack tunnel"));
         }
-
-        let syn_ack_ack = AckAckTunnel {
-            seq: self.sequence
-        };
 
         let tcp_ack_ack = SessionData {
             stream_pos: 0,
@@ -514,10 +517,10 @@ impl TunnelConnection for UdpTunnelConnection {
             to_session_id: None,
             id_part: None,
             payload: TailedOwnedData::from(Vec::new()),
-            flags: SESSIONDATA_FLAG_SACK,
+            flags: SESSIONDATA_FLAG_ACK_ACK,
         };
 
-        data_socket.send_dynamic_pkgs(vec![DynamicPackage::from(syn_ack_ack), DynamicPackage::from(tcp_ack_ack)]).await?;
+        data_socket.send_dynamic_pkg(DynamicPackage::from(tcp_ack_ack)).await?;
 
         self.data_socket = Some(data_socket);
 

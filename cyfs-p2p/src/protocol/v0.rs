@@ -856,6 +856,7 @@ pub const SESSIONDATA_FLAG_SACK: u16 = 1 << 4;
 pub const SESSIONDATA_FLAG_SPEEDLIMIT: u16 = 1 << 5;
 pub const SESSIONDATA_FLAG_SENDTIME: u16 = 1 << 6;
 pub const SESSIONDATA_FLAG_PAYLOAD: u16 = 1 << 7;
+pub const SESSIONDATA_FLAG_ACK_ACK: u16 = 1 << 8;
 pub const SESSIONDATA_FLAG_FIN: u16 = 1 << 10;
 pub const SESSIONDATA_FLAG_FINACK: u16 = 1 << 11;
 pub const SESSIONDATA_FLAG_RESET: u16 = 1 << 12;
@@ -1085,7 +1086,7 @@ impl<Context: merge_context::Encode> RawEncodeWithContext<Context> for SessionDa
         let buf = context.encode(buf, &self.session_id, context::FLAG_ALWAYS_ENCODE)?;
         let buf =
             context.check_encode(buf, "send_time", &self.send_time, SESSIONDATA_FLAG_SENDTIME)?;
-        let buf = context.option_encode(buf, &self.syn_info, SESSIONDATA_FLAG_SYN)?;
+        let buf = context.option_encode(buf, &self.syn_info, 0)?;
         let buf =
             context.option_encode(buf, &self.to_session_id, SESSIONDATA_FLAG_TO_SESSION_ID)?;
         let id_flag = if self.is_flags_contain(SESSIONDATA_FLAG_PACKAGEID) {
@@ -1111,7 +1112,7 @@ impl<'de, Context: merge_context::Decode> RawDecodeWithContext<'de, &mut Context
         let (sack, buf) = context.option_decode(buf, SESSIONDATA_FLAG_SACK)?;
         let (session_id, buf) = context.decode(buf, "SessionData.session_id", context::FLAG_ALWAYS_DECODE)?;
         let (send_time, buf) = context.check_decode(buf, "send_time", SESSIONDATA_FLAG_SENDTIME)?;
-        let (syn_info, buf) = context.option_decode(buf, SESSIONDATA_FLAG_SYN)?;
+        let (syn_info, buf) = context.option_decode(buf, SESSIONDATA_FLAG_SYN | SESSIONDATA_FLAG_ACK | SESSIONDATA_FLAG_ACK_ACK)?;
         let (to_session_id, buf) = context.option_decode(buf, SESSIONDATA_FLAG_TO_SESSION_ID)?;
         let (id_part, buf) = context.option_decode(
             buf,

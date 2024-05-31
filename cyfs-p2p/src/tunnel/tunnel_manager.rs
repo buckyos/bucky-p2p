@@ -3,7 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use cyfs_base::{Device, DeviceDesc, DeviceId, Endpoint, NamedObject, Protocol, RawDecodeWithContext};
-use crate::{LocalDeviceRef, TempSeq, TempSeqGenerator};
+use crate::{IncreaseId, LocalDeviceRef, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
@@ -223,7 +223,7 @@ impl TunnelManager {
                                                                              pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                this.on_syn_tunnel(resp_sender, pkg).await
+                this.on_session_data(resp_sender, pkg).await
             }
         });
 
@@ -232,7 +232,7 @@ impl TunnelManager {
                                                                              pkg: DynamicPackage| {
             let this = this.clone();
             async move {
-                this.on_syn_tunnel(resp_sender, pkg).await
+                this.on_tcp_sync_tunnel(resp_sender, pkg).await
             }
         });
 
@@ -455,6 +455,31 @@ impl TunnelManager {
                 self.data_receiver.clone(),
             );
             tunnel.connect_tunnel().await?;
+            tunnels.add_tunnel(&tunnel);
+            Ok(TunnelGuard::new(tunnel, tunnels.clone()))
+        }
+    }
+
+    pub async fn create_stream_tunnel(&self, remote: &Device, vport: u16, session_id: IncreaseId) -> BdtResult<TunnelGuard> {
+        let remote_id = remote.desc().device_id();
+        let tunnels = self.get_tunnels(&remote_id);
+
+        if let Some(tunnel) = tunnels.get_idle_tunnel() {
+            Ok(TunnelGuard::new(tunnel, tunnels.clone()))
+        } else {
+            let seq = self.gen_seq.generate();
+            let mut tunnel = Tunnel::new(
+                self.net_manager.clone(),
+                self.receive_dispatcher.clone(),
+                seq,
+                self.protocol_version,
+                self.stack_version,
+                remote.clone(),
+                self.local_device.clone(),
+                self.conn_timeout,
+                self.data_receiver.clone(),
+            );
+            tunnel.connect_stream_tunnel(vport, session_id).await?;
             tunnels.add_tunnel(&tunnel);
             Ok(TunnelGuard::new(tunnel, tunnels.clone()))
         }

@@ -175,7 +175,7 @@ impl TcpTunnelConnection {
                 if result.cmd_code() != PackageCmdCode::TcpAckAckConnection {
                     return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel"));
                 }
-                self.tunnel_type = TunnelType::STREAM;
+                self.tunnel_type = TunnelType::STREAM(syn.to_vport);
                 Ok(())
             } else {
                 return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tcp tunnel"));
@@ -184,14 +184,14 @@ impl TcpTunnelConnection {
     }
 
     pub async fn send(&self, data: &[u8]) -> BdtResult<()> {
-        if self.tunnel_type != TunnelType::STREAM {
+        if !self.tunnel_type.is_stream() {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel type"));
         }
         self.data_socket.as_ref().unwrap().send_resp(data).await
     }
 
     pub async fn recv(&self, data: &mut [u8]) -> BdtResult<usize> {
-        if self.tunnel_type != TunnelType::STREAM {
+        if !self.tunnel_type.is_stream() {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel type"));
         }
         self.data_socket.as_ref().unwrap().recv(data).await
@@ -280,6 +280,8 @@ impl TunnelConnection for TcpTunnelConnection {
         data_socket.send_dynamic_pkg(DynamicPackage::from(syn_ack_ack)).await?;
 
         self.data_socket = Some(data_socket);
+        self.tunnel_type = TunnelType::TUNNEL;
+
         Ok(())
     }
 
@@ -362,6 +364,7 @@ impl TunnelConnection for TcpTunnelConnection {
         data_socket.send_dynamic_pkgs(vec![DynamicPackage::from(syn_ack_ack), DynamicPackage::from(tcp_ack_ack)]).await?;
 
         self.data_socket = Some(data_socket);
+        self.tunnel_type = TunnelType::STREAM(vport);
 
         Ok(())
     }

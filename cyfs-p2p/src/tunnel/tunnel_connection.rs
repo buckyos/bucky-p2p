@@ -41,7 +41,24 @@ impl Hash for TunnelConnectionKey {
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 pub enum TunnelType {
     TUNNEL,
-    STREAM,
+    STREAM(u16),
+}
+
+impl TunnelType {
+    pub fn is_tunnel(&self) -> bool {
+        matches!(self, TunnelType::TUNNEL)
+    }
+
+    pub fn is_stream(&self) -> bool {
+        matches!(self, TunnelType::STREAM(_))
+    }
+
+    pub fn get_vport(&self) -> Option<u16> {
+        match self {
+            TunnelType::STREAM(vport) => Some(*vport),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait::async_trait]
