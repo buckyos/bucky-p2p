@@ -28,6 +28,7 @@ impl Default for Config {
         Self {
             keystore: keystore::Config {
                 active_time: Duration::from_secs(300),
+                key_expire: Duration::from_secs(120),
                 capacity: 10000,
             },
             tunnel: proxy::Config {

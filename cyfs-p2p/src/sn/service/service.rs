@@ -18,6 +18,7 @@ use crate::{
 };
 use crate::error::BdtResult;
 use crate::executor::Executor;
+use crate::history::keystore::EncryptedKey;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, NetListenerRef};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
@@ -64,6 +65,7 @@ impl SnService {
             keystore::Config {
                 // <TODO>提供配置
                 active_time: Duration::from_secs(600),
+                key_expire: Duration::from_secs(120),
                 capacity: 100000,
             },
         ));
@@ -208,9 +210,9 @@ impl SnService {
         let first_pkg = first_pkg.unwrap();
         let cmd_pkg = match first_pkg.cmd_code() {
             PackageCmdCode::Exchange => {
-                let exchg = <Box<dyn Any + Send>>::downcast::<Exchange>(first_pkg.into_any()); // pkg.into_any().downcast::<Exchange>();
-                if let Ok(_) = exchg {
-                    self.key_store().add_key(pkg_box.key(), pkg_box.local(), pkg_box.remote());
+                let exchg = first_pkg.into_any().downcast::<Exchange>(); // pkg.into_any().downcast::<Exchange>();
+                if let Ok(exchg) = exchg {
+                    self.key_store().add_key(pkg_box.key(), pkg_box.local(), pkg_box.remote(), EncryptedKey::Unconfirmed(exchg.key_encrypted));
                 } else {
                     warn!("fetch exchange failed, from: {:?}.", resp_sender.remote().addr());
                     return Ok(());

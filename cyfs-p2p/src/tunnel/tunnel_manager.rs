@@ -4,17 +4,19 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use cyfs_base::{Device, DeviceDesc, DeviceId, Endpoint, NamedObject, Protocol, RawDecodeWithContext};
 use crate::{LocalDeviceRef, TempSeq, TempSeqGenerator};
-use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
-use crate::protocol::{AckTunnel, DynamicPackage, MTU, PackageBox, PackageBoxDecodeContext, PackageCmdCode, SynTunnel};
-use crate::protocol::v0::{AckAckTunnel, SnCalled, TcpAckAckConnection, TcpAckConnection, TcpSynConnection};
+use crate::history::keystore::EncryptedKey;
+use crate::protocol::{AckTunnel, DynamicPackage, Exchange, MTU, PackageBox, PackageBoxDecodeContext, PackageCmdCode, SynTunnel};
+use crate::protocol::v0::{AckAckTunnel, SessionData, SESSIONDATA_FLAG_ACK, SESSIONDATA_FLAG_SYN, SnCalled, TcpAckAckConnection, TcpAckConnection, TcpSynConnection};
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor, RespSender, TCPReceiver};
 use crate::sn::client::{SNClientServiceRef, SNEvent};
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, TcpExtraParams, UdpExtraParams};
 use crate::sockets::tcp::TCPSocket;
 use crate::tunnel::tunnel_connection::TunnelConnectionKey;
-use super::{Tunnel, TunnelDataReceiver, TunnelDataReceiverRef};
+use crate::tunnel::udp_tunnel_connection::{UdpTunnelDataReceiver, UdpTunnelDataReceiverRef};
+use super::{Tunnel};
 
 pub struct TunnelGuard {
     tunnel: Option<Tunnel>,
@@ -112,7 +114,7 @@ pub struct TunnelManager {
     device_cache: Arc<DeviceCache>,
     conn_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
-    data_receiver: TunnelDataReceiverRef,
+    data_receiver: UdpTunnelDataReceiverRef,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
@@ -139,7 +141,7 @@ impl TunnelManager {
             device_cache,
             conn_timeout,
             gen_seq: Arc::new(TempSeqGenerator::new()),
-            data_receiver: Arc::new(TunnelDataReceiver::new()),
+            data_receiver: Arc::new(UdpTunnelDataReceiver::new()),
         })
     }
 
@@ -252,7 +254,51 @@ impl TunnelManager {
     }
 
     async fn on_new_tcp_tunnel(&self, socket: Arc<TCPSocket>, first_box: PackageBox) -> BdtResult<()> {
-        todo!()
+        let pkgs = first_box.packages_no_exchange();
+        if pkgs.len() == 0 {
+            return Err(bdt_err!(BdtErrorCode::InvalidInput, "no package in first box"));
+        }
+
+        let syn: &SynTunnel = pkgs[0].as_ref();
+
+        let (from_device_desc, seq) = {
+            (syn.from_device_desc.clone(), syn.sequence)
+        };
+
+        self.device_cache.add(&from_device_desc.desc().device_id(), &from_device_desc);
+
+        let tunnels = self.get_tunnels(&from_device_desc.desc().device_id());
+        if tunnels.tunnel_exist(seq) {
+            return Ok(());
+        }
+
+        let mut tunnel = Tunnel::new(
+            self.net_manager.clone(),
+            self.receive_dispatcher.clone(),
+            seq,
+            self.protocol_version,
+            self.stack_version,
+            from_device_desc.clone(),
+            self.local_device.clone(),
+            self.conn_timeout,
+            self.data_receiver.clone()
+        );
+
+        tunnels.add_tunnel(&tunnel);
+        let listener = self.listener.clone();
+        let future = tunnel.accept_tcp_tunnel(socket, first_box);
+        Executor::spawn(async move {
+            match future.await {
+                Ok(tunnel) => {
+                    listener.on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                }
+                Err(_) => {
+                    tunnels.remove_tunnel(seq);
+                }
+            }
+        });
+
+        Ok(())
     }
 
     async fn on_syn_tunnel(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
@@ -283,7 +329,7 @@ impl TunnelManager {
         tunnels.add_tunnel(&tunnel);
         let data_sender = resp_sender.clone_data_sender();
         let listener = self.listener.clone();
-        let future = tunnel.accept_tunnel(data_sender);
+        let future = tunnel.accept_udp_tunnel(data_sender);
         Executor::spawn(async move {
             match future.await {
                 Ok(tunnel) => {
@@ -295,7 +341,7 @@ impl TunnelManager {
             }
         });
 
-        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()),
+        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
                                                                req, self.conn_timeout).await?;
         resp_sender.send_dynamic_pkg(result).await?;
 
@@ -307,7 +353,7 @@ impl TunnelManager {
             let ack: &AckTunnel = req.as_ref();
             (ack.to_device_desc.clone(), ack.sequence)
         };
-        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()),
+        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
                                                        req, self.conn_timeout).await?;
         resp_sender.send_dynamic_pkg(result).await?;
         self.device_cache.add(&to_device_desc.desc().device_id(), &to_device_desc);
@@ -319,7 +365,7 @@ impl TunnelManager {
             let ack: &AckAckTunnel = req.as_ref();
             ack.seq
         };
-        self.data_receiver.on_recv_pkg(&TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()),
+        self.data_receiver.on_recv_pkg(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
                                                                req).await?;
         Ok(())
     }
@@ -329,7 +375,7 @@ impl TunnelManager {
             let ack: &TcpSynConnection = req.as_ref();
             ack.sequence
         };
-        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()),
+        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
                                                        req, self.conn_timeout).await?;
         resp_sender.send_dynamic_pkg(result).await?;
         Ok(())
@@ -340,7 +386,7 @@ impl TunnelManager {
             let ack: &TcpAckConnection = req.as_ref();
             ack.sequence
         };
-        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()),
+        let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
                                                        req, self.conn_timeout).await?;
         resp_sender.send_dynamic_pkg(result).await?;
         Ok(())
@@ -351,8 +397,29 @@ impl TunnelManager {
             let ack: &TcpAckAckConnection = req.as_ref();
             ack.sequence
         };
-        self.data_receiver.on_recv_pkg(&TunnelConnectionKey::new(seq, resp_sender.local().clone(), resp_sender.remote().clone()),
+        self.data_receiver.on_recv_pkg(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
                                        req).await?;
+        Ok(())
+    }
+
+    async fn on_session_data(&self, resp_sender: &'static mut RespSender, req: DynamicPackage) -> BdtResult<()> {
+        let (seq, need_resp) = {
+            let data: &SessionData = req.as_ref();
+            if data.syn_info.is_none() {
+                return Err(BdtError::new(BdtErrorCode::InvalidInput, "no syn info in session data".to_string()));
+            }
+            let need_resp = data.is_flags_contain(SESSIONDATA_FLAG_ACK) || data.is_flags_contain(SESSIONDATA_FLAG_SYN);
+            (data.syn_info.as_ref().unwrap().sequence, need_resp)
+        };
+
+        if need_resp {
+            let result =  self.data_receiver.on_recv_pkg_with_resp(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
+                                                                   req, self.conn_timeout).await?;
+            resp_sender.send_dynamic_pkg(result).await?;
+        } else {
+            self.data_receiver.on_recv_pkg(&TunnelConnectionKey::new(seq, resp_sender.local_device_id().clone(), resp_sender.remote_device_id().clone()),
+                                           req).await?;
+        }
         Ok(())
     }
 
@@ -435,8 +502,8 @@ impl SNEvent for TunnelManager {
         ).map(|(package_box, _)| package_box)
             .map_err(into_bdt_err!(BdtErrorCode::IoError, "{} ignore decode payload failed.", self.local_device.device_id()))?;
         if caller_box.has_exchange() {
-            // let exchange: &Exchange = caller_box.packages()[0].as_ref();
-            self.net_manager.key_store().add_key(caller_box.key(), caller_box.local(), caller_box.remote());
+            let exchange: &Exchange = caller_box.packages()[0].as_ref();
+            self.net_manager.key_store().add_key(caller_box.key(), caller_box.local(), caller_box.remote(), EncryptedKey::Unconfirmed(exchange.key_encrypted.clone()));
         }
         Ok(())
     }

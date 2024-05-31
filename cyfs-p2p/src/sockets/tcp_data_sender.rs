@@ -59,7 +59,7 @@ impl ExtraParams for TcpExtraParams {}
 #[async_trait::async_trait]
 impl DataSenderFactory<TcpExtraParams, TCPSocket> for NetManager {
     async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: TcpExtraParams) -> BdtResult<TCPSocket> {
-        let key = self.key_store.create_key(&local_device_id, &remote_device, true);
+        let key = self.key_store.create_key(&local_device_id, &remote_device);
         TCPSocket::connect(local_device_id, remote_ep, remote_device.device_id(), remote_device, key.key, p.timeout).await
     }
 }

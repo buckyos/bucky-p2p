@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::Ordering;
+use as_any::Downcast;
 use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
 use futures::future::AbortHandle;
 use crate::error::BdtResult;
 use crate::executor::Executor;
-use crate::history::keystore::Keystore;
+use crate::history::keystore::{EncryptedKey, Keystore};
 use crate::protocol::{DynamicPackage, Exchange, merge_context, MTU_LARGE, OtherBoxTcpDecodeContext, PackageBox, PackageCmdCode};
 use crate::receive_processor::RespSender;
 use crate::sockets::{DataSender, SocketType, UdpDataSender};
@@ -98,6 +99,7 @@ impl UDPListenerEventListener for ReceiveDispatcher {
         let pkg_list: Vec<DynamicPackage> = pkg.into();
         for pkg in pkg_list {
             let cmd_code = pkg.cmd_code();
+            log::info!("recv package cmd_code: {:?} local {:?} remote {:?}", cmd_code, resp_sender.local_device_id(), resp_sender.remote_device_id());
             if let Some(handle) = processor.get_package_box_processor(cmd_code) {
                 if let Err(err) = handle.on_package(&mut resp_sender, pkg).await {
                     log::error!("on_package error: {:?}", err);
@@ -127,17 +129,7 @@ impl TcpListenerEventListener for ReceiveDispatcher {
         }
         let processor = processor.unwrap();
         let pkg: PackageBox = first_box.into();
-        if pkg.has_exchange() {
-            let key_store = self.key_store.clone();
-            let key = pkg.key().clone();
-            let local = pkg.local().clone();
-            let remote = pkg.remote().clone();
-            key_store.add_key(
-                &key,
-                &local,
-                &remote,
-            );
-        }
+
         if let Some(tcp_processor) = processor.get_tcp_processor() {
             tcp_processor.on_new_connection(socket, pkg).await?;
         } else {
@@ -198,6 +190,7 @@ impl TCPReceiver {
                     match recv_box {
                         RecvBox::Package(package_box) => {
                             if package_box.has_exchange() {
+                                let exchg = package_box.packages()[0].downcast_ref::<Exchange>().unwrap();
                                 let key_store = self.key_store.clone();
                                 let key = package_box.key().clone();
                                 let local = package_box.local().clone();
@@ -205,7 +198,8 @@ impl TCPReceiver {
                                 key_store.add_key(
                                     &key,
                                     &local,
-                                    &remote
+                                    &remote,
+                                    EncryptedKey::Unconfirmed(exchg.key_encrypted.clone()),
                                 );
                             }
                             let mut resp_sender = RespSender::new(self.clone());

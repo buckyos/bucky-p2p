@@ -1,18 +1,21 @@
+use std::any::Any;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use as_any::Downcast;
 use callback_result::CallbackWaiter;
 use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, Device, DeviceDesc, NamedObject};
-use crate::protocol::{AckTunnel, DynamicPackage, PackageCmdCode, SynTunnel};
+use crate::protocol::{AckTunnel, DynamicPackage, PackageBox, PackageCmdCode, SynTunnel};
 use crate::sockets::{DataSender, NetManagerRef, SocketType};
 use crate::{LocalDeviceRef, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::protocol::v0::PingTunnel;
 use crate::receive_processor::ReceiveDispatcherRef;
+use crate::sockets::tcp::TCPSocket;
 use crate::tunnel::tunnel_connection::{TunnelConnectionKey};
-use crate::tunnel::{TunnelConnection, TunnelDataReceiverRef, TunnelSocketReceiver};
+use crate::tunnel::{TunnelConnection};
 use crate::tunnel::tcp_tunnel_connection::TcpTunnelConnection;
-use crate::tunnel::udp_tunnel_connection::UdpTunnelConnection;
+use crate::tunnel::udp_tunnel_connection::{UdpTunnelConnection, UdpTunnelDataReceiverRef};
 
 
 pub enum TunnelStatus {
@@ -34,7 +37,7 @@ pub struct Tunnel {
     receive_dispatcher: ReceiveDispatcherRef,
     sequence: TempSeq,
     tunnel_conn: Option<Box<dyn TunnelConnection>>,
-    data_receiver: TunnelDataReceiverRef,
+    data_receiver: UdpTunnelDataReceiverRef,
     state: Mutex<TunnelState>,
     protocol_version: u8,
     stack_version: u32,
@@ -54,7 +57,7 @@ impl Tunnel {
         remote_device: Device,
         local_device: LocalDeviceRef,
         conn_timeout: Duration,
-        data_receiver: TunnelDataReceiverRef, ) -> Self {
+        data_receiver: UdpTunnelDataReceiverRef, ) -> Self {
         Self {
             net_manager,
             receive_dispatcher,
@@ -71,22 +74,28 @@ impl Tunnel {
         }
     }
 
-    pub fn accept_tunnel(mut self, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BdtResult<Self>> + Send {
+    pub fn accept_tcp_tunnel(mut self, socket: Arc<TCPSocket>, first_box: PackageBox) -> impl Future<Output=BdtResult<Self>> + Send {
+        let mut tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
+                                                       self.sequence,
+                                                       self.local_device.clone(),
+                                                       self.remote_device.desc().clone(),
+                                                       socket.remote().clone(),
+                                                       self.conn_timeout,
+                                                       self.protocol_version,
+                                                       self.stack_version,
+                                                       Some(socket),
+                                                       self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap());
+        async move {
+            tunnel_conn.accept_tunnel(first_box.packages_no_exchange()).await?;
+            self.tunnel_conn = Some(Box::new(tunnel_conn));
+            Ok(self)
+        }
+    }
+
+    pub fn accept_udp_tunnel(mut self, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BdtResult<Self>> + Send {
         let mut tunnel_conn = match data_sender.socket_type() {
             SocketType::TCP => {
-                let processor = self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap();
-                let tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
-                                                           self.data_receiver.clone(),
-                                                           self.sequence,
-                                                           self.local_device.clone(),
-                                                           self.remote_device.desc().clone(),
-                                                           data_sender.remote().clone(),
-                                                           self.conn_timeout,
-                                                           self.protocol_version,
-                                                           self.stack_version,
-                                                           Some(data_sender),
-                                                           processor);
-                Box::new(tunnel_conn) as Box<dyn TunnelConnection>
+                unreachable!("TCP socket is not supported")
             }
             SocketType::UDP => {
                 let tunnel_conn = UdpTunnelConnection::new(self.net_manager.clone(),
@@ -100,7 +109,7 @@ impl Tunnel {
                                                            self.stack_version,
                                                            data_sender.local().clone(),
                                                            Some(data_sender));
-                Box::new(tunnel_conn) as Box<dyn TunnelConnection>
+                Box::new(tunnel_conn)
             }
         };
 
@@ -114,6 +123,11 @@ impl Tunnel {
     pub fn get_sequence(&self) -> TempSeq {
         self.sequence
     }
+    pub fn get_tunnel_connection<T: TunnelConnection>(&self) -> Option<&T> {
+        self.tunnel_conn.as_ref().and_then(|conn| {
+            conn.downcast_ref::<T>()
+        })
+    }
 
     pub async fn connect_tunnel(&mut self) -> BdtResult<()> {
         if self.tunnel_conn.is_some() {
@@ -126,7 +140,6 @@ impl Tunnel {
                 if ep.is_static_wan() {
                     let processor = self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap();
                     let mut tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
-                                                                   self.data_receiver.clone(),
                                                                    self.sequence,
                                                                    self.local_device.clone(),
                                                                    self.remote_device.desc().clone(),

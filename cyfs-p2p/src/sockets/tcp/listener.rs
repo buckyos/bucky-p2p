@@ -10,7 +10,7 @@ use async_std::io::ReadExt;
 use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
 use crate::error::BdtResult;
 use crate::executor::Executor;
-use crate::history::keystore::Keystore;
+use crate::history::keystore::{EncryptedKey, Keystore};
 use crate::protocol::{Exchange, FirstBoxTcpDecodeContext, MTU_LARGE, PackageBox, PackageBoxDecodeContext, PackageCmdCode};
 use crate::types::LocalDeviceRef;
 use super::super::UpdateOuterResult;
@@ -229,6 +229,7 @@ impl TCPListener {
                     "sign-verify failed",
                 ));
             }
+            self.key_store.add_key(first_box.key(), first_box.local(), first_box.remote(), EncryptedKey::Unconfirmed(exchg.key_encrypted.clone()));
         }
         info!("recv key {}", first_box.key());
         Ok((Arc::new(TCPSocket::new(socket, first_box.local().clone(), first_box.remote().clone(), local, remote, first_box.key().clone())), first_box))

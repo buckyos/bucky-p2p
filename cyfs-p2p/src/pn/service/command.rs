@@ -4,6 +4,7 @@ use std::{
     cell::RefCell,
     thread
 };
+use as_any::Downcast;
 use async_std::{
     sync::Arc
 };
@@ -14,6 +15,7 @@ use crate::{
 };
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
+use crate::history::keystore::EncryptedKey;
 use super::service::{Service, WeakService};
 
 struct CommandTunnelImpl {
@@ -112,11 +114,12 @@ impl CommandTunnel {
                 let tunnel = self.clone();
                 if package_box.has_exchange() {
                     Executor::spawn(async move {
-                        // let exchange: &Exchange = package_box.packages()[0].as_ref();
+                        let exchange = package_box.packages()[0].downcast_ref::<Exchange>().unwrap();
                         service.keystore().add_key(
                             package_box.key(),
                             package_box.local(),
                             package_box.remote(),
+                            EncryptedKey::Unconfirmed(exchange.key_encrypted.clone())
                         );
                         let _ = tunnel.on_package_box(package_box, from);
                     });

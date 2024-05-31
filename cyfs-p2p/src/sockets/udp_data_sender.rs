@@ -39,6 +39,7 @@ impl DataSender for UdpDataSender {
     }
 
     async fn send_pkg_box(&self, pkg: &PackageBox) -> BdtResult<()> {
+        log::info!("send_pkg_box local {} remote {}", pkg.local(), pkg.remote());
         let mut buf = [0u8; MTU_LARGE];
         let data = {
             let mut context = PackageBoxEncodeContext::default();
@@ -82,7 +83,7 @@ impl ExtraParams for UdpExtraParams {
 #[async_trait::async_trait]
 impl DataSenderFactory<UdpExtraParams, UdpDataSender> for NetManager {
     async fn create_sender(&self, local_device_id: DeviceId, remote_device: DeviceDesc, remote_ep: Endpoint, p: UdpExtraParams) -> BdtResult<UdpDataSender> {
-        let key = self.key_store.create_key(&local_device_id, &remote_device, true);
+        let key = self.key_store.create_key(&local_device_id, &remote_device);
         let socket = self.get_udp_socket(&p.local_ep).ok_or_else(|| {
             bdt_err!(BdtErrorCode::Failed, "udp socket not found")
         })?;

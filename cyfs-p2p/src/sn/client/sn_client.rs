@@ -137,7 +137,7 @@ impl SNClient {
             receipt: None,
         };
 
-        let key_stub = self.key_store.create_key(self.local_device.device_id(), self.sn.desc(), true);
+        let key_stub = self.key_store.create_key(self.local_device.device_id(), self.sn.desc());
 
         info!("{} send sn ping, seq={:?} key={}", self, seq, key_stub.key);
         let mut pkg_box = PackageBox::encrypt_box(
@@ -190,7 +190,7 @@ impl SNClient {
         buf.truncate(len);
         call.payload = SizedOwnedData::from(buf);
 
-        let key_stub = self.key_store.create_key(self.local_device.device_id(), self.sn.desc(), true);
+        let key_stub = self.key_store.create_key(self.local_device.device_id(), self.sn.desc());
         info!("{} send sn call, seq={:?} key={}", self, seq, key_stub.key);
         let mut packages = PackageBox::encrypt_box(self.local_device.device_id().clone(), self.sn_id.clone(), key_stub.key.clone());
         if let keystore::EncryptedKey::Unconfirmed(encrypted) = &key_stub.encrypted {

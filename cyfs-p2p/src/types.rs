@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use std::sync::Arc;
+use sha2::Digest;
 
 #[derive(Clone)]
 pub struct MixAesKey {
@@ -27,8 +28,13 @@ impl std::fmt::Display for MixAesKey {
 
 
 impl MixAesKey {
-    pub fn mix_hash(&self) -> KeyMixHash {
-        self.mix_key.mix_hash(Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 60))
+    pub fn mix_hash(&self, local_id: &DeviceId, remote_id: &DeviceId) -> KeyMixHash {
+        let mut sha = sha2::Sha256::new();
+        sha.input(local_id.object_id().as_slice());
+        sha.input(remote_id.object_id().as_slice());
+        let hash = sha.result();
+        let salt = u64::from_be_bytes([hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]]);
+        self.mix_key.mix_hash(Some(salt))
     }
 }
 

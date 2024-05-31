@@ -9,17 +9,15 @@ use sha2::{Digest, Sha256};
 use crate::{
     types::*
 };
+use crate::error::{BdtError, BdtErrorCode, BdtResult};
 
 
 const MIX_HASH_LIVE_MINUTES: usize = 31;
 
 pub struct Keystore {
     local_encryptor: RwLock<HashMap<DeviceId, (PrivateKey, DeviceDesc)>>,
-    key_manager: Arc<Mutex<KeyManager>>,
+    key_manager: KeyManager,
 }
-
-unsafe impl Send for Keystore {}
-unsafe impl Sync for Keystore {}
 
 #[derive(Clone)]
 pub enum EncryptedKey {
@@ -53,6 +51,7 @@ pub struct FoundKey {
 #[derive(Clone)]
 pub struct Config {
     pub active_time: Duration,
+    pub key_expire: Duration,
     pub capacity: usize,
 }
 
@@ -67,7 +66,7 @@ impl Keystore {
     pub fn new(config: Config) -> Self {
         Keystore {
             local_encryptor: RwLock::new(HashMap::new()),
-            key_manager: Arc::new(Mutex::new(KeyManager::new(config))),
+            key_manager: KeyManager::new(config),
         }
     }
 
@@ -87,21 +86,18 @@ impl Keystore {
         self.local_encryptor.read().unwrap().get(device_id).map(|v| v.1.public_key().clone())
     }
 
-    pub fn get_key_by_remote(&self, local_id: &DeviceId, remote_id: &DeviceId, is_touch: bool) -> Option<FoundKey> {
-        let mut mgr = self.key_manager.lock().unwrap();
-        mgr.find_by_peerid(&device_pair_hash(local_id, remote_id), is_touch).map(|found| found.as_ref().borrow().found())
+    pub fn get_key_by_remote(&self, local_id: &DeviceId, remote_id: &DeviceId) -> Option<FoundKey> {
+        self.key_manager.find_by_peerid(&device_pair_hash(local_id, remote_id)).map(|found| found.found())
     }
 
-    pub fn get_key_by_mix_hash(&self, mix_hash: &KeyMixHash, is_touch: bool, is_confirmed: bool) -> Option<FoundKey> {
-        let mut mgr = self.key_manager.lock().unwrap();
-        mgr.find_by_mix_hash(mix_hash, is_touch, is_confirmed).map(|found| found.as_ref().borrow().found())
+    pub fn get_key_by_mix_hash(&self, mix_hash: &KeyMixHash) -> Option<FoundKey> {
+        self.key_manager.find_by_mix_hash(mix_hash).map(|found| found.found())
     }
 
-    pub fn create_key(&self, local_id: &DeviceId, peer_desc: &DeviceDesc, is_touch: bool) -> FoundKey {
+    pub fn create_key(&self, local_id: &DeviceId, peer_desc: &DeviceDesc) -> FoundKey {
         let pair_hash = device_pair_hash(local_id, &peer_desc.device_id());
-        let mut mgr = self.key_manager.lock().unwrap();
-        match mgr.find_by_peerid(&pair_hash, is_touch) {
-            Some(found) => found.as_ref().borrow().found(),
+        match self.key_manager.find_by_peerid(&pair_hash) {
+            Some(found) => found.found(),
             None => {
                 let (enc_key, encrypted) = peer_desc.public_key().gen_aeskey_and_encrypt().unwrap();
                 let mix_key = AesKey::random();
@@ -110,7 +106,7 @@ impl Keystore {
                     enc_key,
                     mix_key,
                 };
-                mgr.add_key(&key, local_id, &peer_desc.device_id(), encrypted.clone());
+                self.key_manager.add_key(&key, local_id, &peer_desc.device_id(), encrypted.clone());
                 FoundKey {
                     local_id: local_id.clone(),
                     key,
@@ -121,29 +117,21 @@ impl Keystore {
         }
     }
 
-    pub fn add_key(&self, key: &MixAesKey, local: &DeviceId, remote: &DeviceId) {
-        let mut mgr = self.key_manager.lock().unwrap();
-        mgr.add_key(key, local, remote, EncryptedKey::None)
+    pub fn add_key(&self, key: &MixAesKey, local_id: &DeviceId, remote_id: &DeviceId, encrypted: EncryptedKey)  {
+        self.key_manager.add_key(key, local_id, remote_id, encrypted)
     }
 
     pub fn reset_peer(&self, local_id: &DeviceId, device_id: &DeviceId) {
         info!("keystore reset local {} peer {}", local_id, device_id);
-        let mut mgr = self.key_manager.lock().unwrap();
-        mgr.reset_peer(&device_pair_hash(local_id, device_id));
+        self.key_manager.reset_peer(&device_pair_hash(local_id, device_id));
     }
 }
 
 struct KeyManager {
     // 按peer pair hash索引的key
-    peerid_key_map: HashMap<HashValue, Vec<Rc<RefCell<HashedKeyInfo>>>>,
+    peerid_key_map: mini_moka::sync::Cache<HashValue, Arc<HashedKeyInfo>>,
     // 按hash索引的key
-    mixhash_key_map: HashMap<KeyMixHash, Rc<RefCell<HashedKeyInfo>>>,
-    // 最近使用key列表，用于mixhash命中失败时优先重算最近使用的hash
-    latest_use_key_list: LatestUseKeyList,
-    // hash超时的key，等待重算
-    timeout_hash_key_list: LinkedList<Rc<RefCell<HashedKeyInfo>>>,
-    // 将要被丢弃的hash
-    will_drop_hash_list: LinkedList<KeyMixHash>,
+    mixhash_key_map: mini_moka::sync::Cache<KeyMixHash, Arc<HashedKeyInfo>>,
 
     config: Config,
 }
@@ -151,367 +139,56 @@ struct KeyManager {
 impl KeyManager {
     fn new(config: Config) -> Self {
         KeyManager {
-            peerid_key_map: HashMap::default(),
-            mixhash_key_map: HashMap::default(),
-            latest_use_key_list: LatestUseKeyList::new(),
-            timeout_hash_key_list: Default::default(),
-            will_drop_hash_list: Default::default(),
+            peerid_key_map: mini_moka::sync::CacheBuilder::new(config.capacity as u64).time_to_live(config.active_time).build(),
+            mixhash_key_map: mini_moka::sync::CacheBuilder::new(config.capacity as u64 * 20).time_to_idle(config.active_time).build(),
             config
         }
     }
 
-    fn find_by_mix_hash(&mut self, mix_hash: &KeyMixHash, is_touch: bool, is_confirmed: bool) -> Option<Rc<RefCell<HashedKeyInfo>>> {
-        let mut found = None;
-        let now = SystemTime::now();
-
+    fn find_by_mix_hash(&self, mix_hash: &KeyMixHash) -> Option<Arc<HashedKeyInfo>> {
         let found_map = self.mixhash_key_map.get(mix_hash);
-        if let Some(target) = found_map {
-            let target = target.clone();
-            self.rehash(target.clone());
-            found = Some(target);
-        } else {
-            let minute_timestamp = now.duration_since(UNIX_EPOCH).unwrap().as_secs() / 60;
-            let mut timeout_keys = self.latest_use_key_list.try_remove_all(minute_timestamp);
-            timeout_keys.append(&mut self.timeout_hash_key_list);
-            self.timeout_hash_key_list = timeout_keys;
-
-            // 这里计算hash可能时间比较长，占用锁的时间可能也比较长
-            while let Some(rehash) = self.timeout_hash_key_list.pop_front() {
-                if rehash.as_ref().borrow().info.expire_time <= now {
-                    continue;
-                }
-                let new_hashs = self.rehash(rehash.clone());
-                if new_hashs.iter().find(|h| **h == *mix_hash).is_some() {
-                    self.latest_use_key_list.push_front(rehash.clone());
-                    found = Some(rehash.clone());
-                    break;
-                } else {
-                    self.latest_use_key_list.push_back(rehash.clone());
-                }
-            }
-
-            self.check_mixhash_capacity();
-        }
-
-        let mut _is_changed = false;
-        if let Some(target) = found {
-            log::trace!("found by mix-hash: {}", mix_hash.to_string());
-
-            let target_info = &mut target.as_ref().borrow_mut().info;
-            target_info.last_access_time = now;
-            let expire_time = if is_touch { now + self.config.active_time } else { target_info.expire_time };
-            _is_changed = target_info.update(is_confirmed, expire_time);
-            Some(target.clone())
-
-            // <TODO>持久化
-        } else {
-            log::trace!("found by mix-hash: {} failed.", mix_hash.to_string());
-            None
-        }
+        found_map
     }
 
-    fn find_by_peerid(&mut self, peerid: &HashValue, is_touch: bool) -> Option<Rc<RefCell<HashedKeyInfo>>> {
-        let found_map = self.peerid_key_map.get_mut(peerid);
-        if let Some(found_key_list) = found_map {
-            if found_key_list.len() == 0 {
-                return None;
-            }
-
-            let now = SystemTime::now();
-            let mut expired = Vec::with_capacity(found_key_list.len());
-            let mut active: Vec<Rc<RefCell<HashedKeyInfo>>> = Default::default();
-            let mut last = found_key_list.first().unwrap().clone();
-            for key in found_key_list.iter() {
-                if now >= key.as_ref().borrow().info.expire_time {
-                    expired.push(key.clone());
-                } else {
-                    active.push(key.clone());
-                    if key.as_ref().borrow().info.last_access_time > last.as_ref().borrow().info.last_access_time {
-                        last = key.clone();
-                    }
-                }
-            }
-
-            *found_key_list = active;
-
-            if found_key_list.len() == 0 {
-                self.peerid_key_map.remove(peerid);
-            }
-            // 清理
-            for rm in expired {
-                let rm = rm.as_ref().borrow();
-                self.mixhash_key_map.remove(&rm.original_hash);
-                for mix_hash in rm.mix_hash.as_slice() {
-                    self.mixhash_key_map.remove(&mix_hash.hash);
-                }
-            }
-
-            let last_info = &mut last.as_ref().borrow_mut().info;
-            if now < last_info.expire_time {
-                last_info.last_access_time = now;
-                let expire_time = if is_touch { now + self.config.active_time } else { last_info.expire_time };
-                let _is_changed = last_info.update(false, expire_time);
-
-                // <TODO>持久化
-
-                Some(last.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    fn find_by_peerid(&self, peerid: &HashValue) -> Option<Arc<HashedKeyInfo>> {
+        let found_map = self.peerid_key_map.get(peerid);
+        found_map
     }
 
-    fn add_key(&mut self, key: &MixAesKey, local_id: &DeviceId, remote_id: &DeviceId, encrypted: EncryptedKey) {
-        let now = SystemTime::now();
-        let expire_time = now + self.config.active_time;
-
+    fn add_key(&self, key: &MixAesKey, local_id: &DeviceId, remote_id: &DeviceId, encrypted: EncryptedKey) {
         let pair_hash = device_pair_hash(local_id, remote_id);
-        let target_peer_key_list = self.peerid_key_map.entry(pair_hash).or_insert(Vec::default());
 
-        let mut target_key = None;
-        if !encrypted.is_unconfirmed() { // 确定是新key就不搜索了
-            target_key = target_peer_key_list.iter().find(|k| k.as_ref().borrow().info.key.mix_key == key.mix_key).map(|f| f.clone());
-        }
-
-        let is_new_key = target_key.is_none();
-        let target_key = match target_key {
-            Some(exist) => {
-                let target = exist.clone();
-                let mut exist = exist.as_ref().borrow_mut();
-                let info = &mut exist.info;
-                info.last_access_time = now;
-                let _is_changed = info.update(false, expire_time);
-                // <TODO>持久化
-                target
-            },
-            None => {
-                info!("keystore add remote key local={} remote={} key={} confirmed={}", local_id, remote_id, key, !encrypted.is_unconfirmed());
-
-                let new_key = KeyInfo {
-                    key: key.clone(),
-                    local_id: local_id.clone(),
-                    remote_id: remote_id.clone(),
-                    encrypted,
-                    is_storaged: false,
-                    expire_time,
-                    last_access_time: now,
-                };
-                Rc::new(RefCell::new(HashedKeyInfo {
-                    info: new_key,
-                    original_hash: key.mix_key.mix_hash(None),
-                    mix_hash: vec![],
-                }))
-
-                // <TODO>持久化
-            }
+        let new_key = KeyInfo {
+            key: key.clone(),
+            local_id: local_id.clone(),
+            remote_id: remote_id.clone(),
+            encrypted,
         };
+        let new_info = Arc::new(HashedKeyInfo {
+            info: new_key,
+            original_hash: key.mix_key.mix_hash(None),
+        });
 
-        if is_new_key {
-            log::trace!("create new key mix-hash: {}, local: {}, remote: {}, key: {}",
-                target_key.as_ref().borrow().original_hash.to_string(), local_id, remote_id, key);
-
-            target_peer_key_list.push(target_key.clone());
-            self.latest_use_key_list.push_front(target_key.clone());
-            self.mixhash_key_map.insert(target_key.as_ref().borrow().original_hash.clone(), target_key.clone());
-        }
-
-        self.rehash(target_key);
-        self.check_key_capacity();
+        self.peerid_key_map.insert(pair_hash, new_info.clone());
+        self.mixhash_key_map.insert(key.mix_hash(local_id, remote_id), new_info.clone());
     }
 
-    fn rehash(&mut self, target: Rc<RefCell<HashedKeyInfo>>) -> Vec<KeyMixHash> {
-        let (new_hash, drop_hash) = target.as_ref().borrow_mut().rehash();
-        for add in new_hash.as_slice() {
-            self.mixhash_key_map.insert(add.clone(), target.clone());
-        }
-
-        for rm in drop_hash {
-            self.will_drop_hash_list.push_back(rm);
-        }
-
-        new_hash
-    }
-
-    fn check_mixhash_capacity(&mut self) {
-        // 容量
-        let max_hash_count = self.config.capacity * (MIX_HASH_LIVE_MINUTES + 1) * 5 / 4;
-        let hash_count = self.mixhash_key_map.len();
-        if hash_count >= max_hash_count {
-            let mut drop_hashs = Default::default();
-            std::mem::swap(&mut self.will_drop_hash_list, &mut drop_hashs);
-            for hash in drop_hashs {
-                self.mixhash_key_map.remove(&hash);
-            }
-        }
-    }
-
-    fn check_key_capacity(&mut self) {
-        self.check_mixhash_capacity();
-
-        // 容量
-        let max_key_count = (self.config.capacity * 5 / 4) as usize;
-        let key_count = self.latest_use_key_list.count() + self.timeout_hash_key_list.len();
-        if key_count >= max_key_count {
-            let mut drop_count = max_key_count - self.config.capacity as usize;
-            while drop_count > 0 && !self.timeout_hash_key_list.is_empty() {
-                let key = self.timeout_hash_key_list.pop_back().unwrap();
-                self.remove_key(&*key.as_ref().borrow());
-                drop_count -= 1;
-            }
-            while drop_count > 0 && self.latest_use_key_list.count() > 0 {
-                let key = self.latest_use_key_list.pop_back().unwrap();
-                self.remove_key(&*key.as_ref().borrow());
-                drop_count -= 1;
-            }
-        }
-    }
-
-    fn remove_key(&mut self, key: &HashedKeyInfo) {
-        self.mixhash_key_map.remove(&key.original_hash);
-        for hash in key.mix_hash.as_slice() {
-            self.mixhash_key_map.remove(&hash.hash);
-        }
+    fn remove_key(&self, key: &HashedKeyInfo) {
         let pair_hash = device_pair_hash(&key.info.local_id, &key.info.remote_id);
-        let peer_key_list = self.peerid_key_map.get_mut(&pair_hash);
-        if peer_key_list.is_none() {
-            return;
-        }
-        let peer_key_list = peer_key_list.unwrap();
-        for i in 0..peer_key_list.len() {
-            let idx = peer_key_list.len() - i - 1;
-            let check_key = peer_key_list.get(idx).unwrap();
-            if check_key.as_ref().borrow().info.key.mix_key == key.info.key.mix_key {
-                peer_key_list.remove(idx);
-                break;
-            }
-        }
-        if peer_key_list.is_empty() {
-            self.peerid_key_map.remove(&pair_hash);
-        }
+        self.peerid_key_map.invalidate(&pair_hash);
     }
 
-    fn reset_peer(&mut self, device_id: &HashValue) {
-        let found_map = self.peerid_key_map.get_mut(device_id);
-        if let Some(found_key_list) = found_map {
-            let mut remain = vec![];
-            for exist in found_key_list.iter() {
-                let reserve = {
-                    let mut mut_ref = exist.borrow_mut();
-                    if let Some(encrypted) = match &mut_ref.info.encrypted {
-                        EncryptedKey::Unconfirmed(encrypted) => Some(encrypted.clone()),
-                        EncryptedKey::Confirmed(encrypted) => Some(encrypted.clone()),
-                        EncryptedKey::None => None
-                    } {
-                        info!("keystore reset key remote={} key={}", device_id, mut_ref.info.key);
-                        mut_ref.info.encrypted = EncryptedKey::Unconfirmed(encrypted);
-                        true
-                    } else {
-                        info!("keystore drop key remote={} key={}", device_id, mut_ref.info.key);
-                        false
-                    }
-                };
-
-                if reserve {
-                    remain.push(exist.clone());
-                }
-            }
-            std::mem::swap(&mut remain, found_key_list);
-        }
-    }
-}
-
-struct LatestUseKeyList {
-    // 最近使用的key排靠前(不严格)
-    key_list: LinkedList<Rc<RefCell<HashedKeyInfo>>>,
-    // 第一个hash计算的分钟时间戳
-    first_hash_minute_timestamp: u64,
-}
-
-impl LatestUseKeyList {
-    fn new() -> LatestUseKeyList {
-        LatestUseKeyList {
-            key_list: Default::default(),
-            first_hash_minute_timestamp: 0
-        }
-    }
-
-    fn try_remove_all(&mut self, now_minute_timestamp: u64) -> LinkedList<Rc<RefCell<HashedKeyInfo>>> {
-        if now_minute_timestamp != self.first_hash_minute_timestamp {
-            let mut ret = LinkedList::default();
-            std::mem::swap(&mut self.key_list, &mut ret);
-            self.first_hash_minute_timestamp = 0;
-            ret
-        } else {
-            LinkedList::default()
-        }
-    }
-
-    fn push_front(&mut self, key_info: Rc<RefCell<HashedKeyInfo>>) {
-        self.key_list.push_front(key_info);
-        if self.key_list.len() == 1 {
-            self.first_hash_minute_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 60;
-        }
-    }
-
-    fn push_back(&mut self, key_info: Rc<RefCell<HashedKeyInfo>>) {
-        self.key_list.push_back(key_info);
-        if self.key_list.len() == 1 {
-            self.first_hash_minute_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 60;
-        }
-    }
-
-    fn pop_back(&mut self) -> Option<Rc<RefCell<HashedKeyInfo>>> {
-        self.key_list.pop_back()
-    }
-
-    fn count(&self) -> usize {
-        self.key_list.len()
+    fn reset_peer(&self, device_id: &HashValue) {
+        self.peerid_key_map.invalidate(device_id);
     }
 }
 
 struct HashedKeyInfo {
     info: KeyInfo,
     original_hash: KeyMixHash,
-    mix_hash: Vec<HashInfo>,
 }
 
 impl HashedKeyInfo {
-    // 重算hash, 返回(新增hash,失效hash)
-    fn rehash(&mut self) -> (Vec<KeyMixHash>, Vec<KeyMixHash>) {
-        let minute_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 60;
-        let min = minute_timestamp - (MIX_HASH_LIVE_MINUTES as u64 - 1) / 2;
-        let max = minute_timestamp + (MIX_HASH_LIVE_MINUTES as u64 - 1) / 2;
-
-        let mut timeout_count = 0;
-        let mut next_timestamp = min;
-        for h in self.mix_hash.as_slice() {
-            if h.minute_timestamp < min {
-                timeout_count += 1;
-            } else if h.minute_timestamp >= next_timestamp {
-                next_timestamp = h.minute_timestamp + 1;
-            }
-        };
-
-        let removed: Vec<HashInfo> = self.mix_hash.splice(..timeout_count, vec![].iter().cloned()).collect();
-        let removed = removed.iter().map(|hi| hi.hash.clone()).collect();
-
-        let mut added = vec![];
-        if next_timestamp < max {
-            for t in next_timestamp..(max + 1) {
-                let hash = HashInfo {
-                    hash: self.info.key.mix_key.mix_hash(Some(t)),
-                    minute_timestamp: t
-                };
-                added.push(hash.hash.clone());
-                self.mix_hash.push(hash);
-            }
-        }
-
-        (added, removed)
-    }
-
     fn found(&self) -> FoundKey {
         FoundKey {
             local_id: self.info.local_id.clone(),
@@ -527,44 +204,6 @@ struct KeyInfo {
     local_id: DeviceId,
     remote_id: DeviceId,
     encrypted: EncryptedKey,
-    is_storaged: bool,
-    expire_time: SystemTime,
-    last_access_time: SystemTime,
-}
-
-impl KeyInfo {
-    fn update(&mut self, is_confirmed: bool, expire_time: SystemTime) -> bool {
-        let mut is_changed = false;
-        if is_confirmed {
-            match &self.encrypted {
-                EncryptedKey::Unconfirmed(ecrypted) => {
-                    self.encrypted = EncryptedKey::Confirmed(ecrypted.clone());
-                    is_changed = true;
-                },
-                _ => {}
-            }
-        }
-
-        // 超时时间更新频率一般跟收包频率有关，可能很大，要控制一下，不然可能要频繁地持久化
-        if expire_time < self.expire_time {
-            self.expire_time = expire_time;
-            is_changed = true;
-        } else {
-            let now = SystemTime::now();
-            if self.expire_time >= now {
-                let delta = expire_time.duration_since(self.expire_time).unwrap();
-                if delta >= Duration::from_secs(60) || self.expire_time.duration_since(now).unwrap() < delta {
-                    self.expire_time = expire_time;
-                    is_changed = true;
-                }
-            } else {
-                self.expire_time = expire_time;
-                is_changed = true;
-            }
-        }
-
-        is_changed
-    }
 }
 
 #[derive(Clone)]

@@ -2,7 +2,7 @@ use std::sync::{Arc, RwLock};
 use cyfs_base::{AesKey, BuckyError, BuckyErrorCode, DeviceId, Endpoint, KeyMixHash, NamedObject, PrivateKey, PublicKey, RawDecode, RawDecodeWithContext, RawEncode, RawEncodePurpose, RawEncodeWithContext};
 use crate::executor::Executor;
 use crate::history::keystore;
-use crate::history::keystore::Keystore;
+use crate::history::keystore::{EncryptedKey, Keystore};
 use crate::protocol::{DynamicPackage, Exchange, merge_context, MTU_LARGE, PackageBox, PackageBoxDecodeContext, SnCall};
 use crate::sockets::udp::udp_socket::{UDPSocket};
 use super::super::UpdateOuterResult;
@@ -189,7 +189,7 @@ impl UDPListener {
                 Ok((mut mix_hash, raw_data)) => {
                     mix_hash.as_mut()[0] &= 0x7f;
                     if let Some(found_key) =
-                        self.key_store.get_key_by_mix_hash(&mix_hash, true, true) {
+                        self.key_store.get_key_by_mix_hash(&mix_hash) {
                         if self.sn_only {
                             return;
                         }
@@ -232,6 +232,7 @@ impl UDPListener {
                             warn!("{} exchg verify failed, from {}.", socket, from);
                             return;
                         }
+                        this.key_store.add_key(package_box.key(), package_box.local(), package_box.remote(), EncryptedKey::Unconfirmed(exchange.key_encrypted.clone()));
                         if listener.is_none() {
                             return;
                         }

@@ -23,6 +23,7 @@ pub async fn init_p2p(
     udp_recv_buffer: usize,) -> BdtResult<()> {
     Executor::init(None);
     let key_store = Arc::new(Keystore::new(crate::history::keystore::Config {
+        key_expire: Duration::from_secs(120),
             active_time: Duration::from_secs(600),
             capacity: 256,
         }));

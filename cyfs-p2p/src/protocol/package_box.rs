@@ -267,7 +267,7 @@ impl<'de> PackageBoxDecodeContext<'de> {
 
     pub fn key_from_mixhash(&self, mix_hash: &KeyMixHash) -> Option<(DeviceId, DeviceId, MixAesKey)> {
         self.keystore
-            .get_key_by_mix_hash(mix_hash, true, true)
+            .get_key_by_mix_hash(mix_hash)
             .map(|k| (k.local_id, k.remote_id, k.key))
     }
 
@@ -322,7 +322,7 @@ impl RawEncodeWithContext<PackageBoxEncodeContext> for PackageBox {
         }
 
         // 写入 key的mixhash
-        let mixhash = self.key().mix_hash();
+        let mixhash = self.key().mix_hash(self.remote(), self.local());
         let _ = mixhash.raw_encode(buf, purpose)?;
         if context.plaintext {
             buf[0] |= 0x80;
@@ -425,6 +425,9 @@ RawDecodeWithContext<
                     }, hash_buf)
                 },
                 None => {
+                    if buf.len() <= 50 {
+                        return Err(BuckyError::new(BuckyErrorCode::InvalidData, "invalid data"));
+                    }
                     let (confusion, buf) = u16::raw_decode(buf)?;
                     let mut hash = hash_data(confusion.to_le_bytes().as_slice()).as_slice().to_vec();
                     hash.extend(&hash_data(hash.as_slice()).as_slice()[0..16]);
