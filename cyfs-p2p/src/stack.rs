@@ -87,12 +87,7 @@ impl TunnelManagerEventListener {
     }
 
 }
-#[async_trait::async_trait]
-impl TunnelManagerEvent for TunnelManagerEventListener {
-    async fn on_new_tunnel(&self, tunnel: TunnelGuard) {
 
-    }
-}
 pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> BdtResult<P2pStackRef> {
     let gen_seq = Arc::new(TempSeqGenerator::new());
     let mut processor = ReceiveProcessor::new();
@@ -123,7 +118,6 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         local_device.clone(),
         0,
         0,
-        Arc::new(TunnelManagerEventListener::new()),
         device_cache.clone(),
         Duration::from_secs(300),
     );

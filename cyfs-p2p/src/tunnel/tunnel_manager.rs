@@ -16,7 +16,7 @@ use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, TcpExtraParam
 use crate::sockets::tcp::TCPSocket;
 use crate::tunnel::tunnel_connection::TunnelConnectionKey;
 use crate::tunnel::udp_tunnel_connection::{UdpTunnelDataReceiver, UdpTunnelDataReceiverRef};
-use super::{Tunnel};
+use super::{Tunnel, TunnelType};
 
 pub struct TunnelGuard {
     tunnel: Option<Tunnel>,
@@ -96,11 +96,17 @@ impl Tunnels {
     }
 }
 
-#[async_trait::async_trait]
+#[callback_trait::callback_trait]
 pub trait TunnelManagerEvent: 'static + Send + Sync {
-    async fn on_new_tunnel(&self, tunnel: TunnelGuard);
+    async fn on_new_tunnel(&self, tunnel: TunnelGuard) -> ();
 }
 pub type TunnelManagerEventRef = Arc<dyn TunnelManagerEvent>;
+
+#[derive(Clone)]
+struct TunnelManagerEventListener {
+    tunnel_listener: Option<TunnelManagerEventRef>,
+    stream_listener: Option<TunnelManagerEventRef>,
+}
 
 pub struct TunnelManager {
     tunnels: RwLock<HashMap<DeviceId, Arc<Tunnels>>>,
@@ -110,11 +116,12 @@ pub struct TunnelManager {
     local_device: LocalDeviceRef,
     protocol_version: u8,
     stack_version: u32,
-    listener: TunnelManagerEventRef,
+    listener: Mutex<TunnelManagerEventListener>,
     device_cache: Arc<DeviceCache>,
     conn_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
     data_receiver: UdpTunnelDataReceiverRef,
+    listen_ports: Mutex<HashSet<u16>>,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
@@ -126,7 +133,6 @@ impl TunnelManager {
         local_device: LocalDeviceRef,
         protocol_version: u8,
         stack_version: u32,
-        listener: TunnelManagerEventRef,
         device_cache: Arc<DeviceCache>,
         conn_timeout: Duration,) -> Arc<Self> {
         Arc::new(Self {
@@ -137,15 +143,39 @@ impl TunnelManager {
             local_device,
             protocol_version,
             stack_version,
-            listener,
+            listener: Mutex::new(TunnelManagerEventListener {
+                tunnel_listener: None,
+                stream_listener: None,
+            }),
             device_cache,
             conn_timeout,
             gen_seq: Arc::new(TempSeqGenerator::new()),
             data_receiver: Arc::new(UdpTunnelDataReceiver::new()),
+            listen_ports: Mutex::new(Default::default()),
         })
     }
 
-    pub fn register_pkg_processor(self: &Arc<Self>, processor: &mut ReceiveProcessor) {
+    pub(crate) fn set_tunnel_listener(&self, listener: impl TunnelManagerEvent) {
+        let mut listeners = self.listener.lock().unwrap();
+        listeners.tunnel_listener = Some(Arc::new(listener));
+    }
+
+    pub(crate) fn set_stream_listener(&self, listener: impl TunnelManagerEvent) {
+        let mut listeners = self.listener.lock().unwrap();
+        listeners.stream_listener = Some(Arc::new(listener));
+    }
+
+    pub(crate) fn add_listen_port(&self, port: u16) {
+        let mut listen_ports = self.listen_ports.lock().unwrap();
+        listen_ports.insert(port);
+    }
+
+    pub(crate) fn remove_listen_port(&self, port: u16) {
+        let mut listen_ports = self.listen_ports.lock().unwrap();
+        listen_ports.remove(&port);
+    }
+
+    pub(crate) fn register_pkg_processor(self: &Arc<Self>, processor: &mut ReceiveProcessor) {
         let this = self.clone();
         processor.add_package_box_processor(PackageCmdCode::SynTunnel, move |resp_sender: &'static mut RespSender,
                                                                              pkg: DynamicPackage| {
@@ -285,12 +315,28 @@ impl TunnelManager {
         );
 
         tunnels.add_tunnel(&tunnel);
-        let listener = self.listener.clone();
-        let future = tunnel.accept_tcp_tunnel(socket, first_box);
+        let listener = {
+            self.listener.lock().unwrap().clone()
+        };
+        let listen_ports = {
+            self.listen_ports.lock().unwrap().clone()
+        };
+        let future = tunnel.accept_tcp_tunnel(listen_ports, socket, first_box);
         Executor::spawn(async move {
             match future.await {
                 Ok(tunnel) => {
-                    listener.on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                    match tunnel.tunnel_type() {
+                        TunnelType::TUNNEL => {
+                            if listener.tunnel_listener.is_some() {
+                                listener.tunnel_listener.as_ref().unwrap().on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                            }
+                        }
+                        TunnelType::STREAM(_) => {
+                            if listener.stream_listener.is_some() {
+                                listener.stream_listener.as_ref().unwrap().on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                            }
+                        }
+                    }
                 }
                 Err(_) => {
                     tunnels.remove_tunnel(seq);
@@ -328,12 +374,28 @@ impl TunnelManager {
 
         tunnels.add_tunnel(&tunnel);
         let data_sender = resp_sender.clone_data_sender();
-        let listener = self.listener.clone();
-        let future = tunnel.accept_udp_tunnel(data_sender);
+        let listener = {
+            self.listener.lock().unwrap().clone()
+        };
+        let listen_ports = {
+            self.listen_ports.lock().unwrap().clone()
+        };
+        let future = tunnel.accept_udp_tunnel(listen_ports, data_sender);
         Executor::spawn(async move {
             match future.await {
                 Ok(tunnel) => {
-                    listener.on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                    match tunnel.tunnel_type() {
+                        TunnelType::TUNNEL => {
+                            if listener.tunnel_listener.is_some() {
+                                listener.tunnel_listener.as_ref().unwrap().on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                            }
+                        }
+                        TunnelType::STREAM(_) => {
+                            if listener.stream_listener.is_some() {
+                                listener.stream_listener.as_ref().unwrap().on_new_tunnel(TunnelGuard::new(tunnel, tunnels.clone())).await;
+                            }
+                        }
+                    }
                 }
                 Err(_) => {
                     tunnels.remove_tunnel(seq);
@@ -460,7 +522,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_stream_tunnel(&self, remote: &Device, vport: u16, session_id: IncreaseId) -> BdtResult<TunnelGuard> {
+    pub async fn create_stream_tunnel(&self, remote: &Device, vport: u16) -> BdtResult<TunnelGuard> {
         let remote_id = remote.desc().device_id();
         let tunnels = self.get_tunnels(&remote_id);
 
@@ -468,6 +530,7 @@ impl TunnelManager {
             Ok(TunnelGuard::new(tunnel, tunnels.clone()))
         } else {
             let seq = self.gen_seq.generate();
+            let session_id = IncreaseId::default();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
                 self.receive_dispatcher.clone(),

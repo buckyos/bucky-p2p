@@ -1,12 +1,13 @@
 use cyfs_base::*;
+use num_derive::{FromPrimitive, ToPrimitive};
 use sfo_result::Result;
 pub(crate) use sfo_result::err as bdt_err;
 pub(crate) use sfo_result::into_err as into_bdt_err;
 
 #[repr(u16)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, RawEncode, RawDecode)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, FromPrimitive, ToPrimitive, RawEncode, RawDecode)]
 pub enum BdtErrorCode {
-    Ok,
+    Ok = 0,
 
     #[default]
     Failed,
@@ -88,6 +89,7 @@ pub enum BdtErrorCode {
     NotHandled,
     RawCodecError,
     SignError,
+    StreamPortAlreadyListen,
 }
 
 impl BdtErrorCode {

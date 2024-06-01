@@ -13,6 +13,7 @@ mod receive_processor;
 mod stack;
 mod tunnel;
 pub mod error;
+pub mod stream;
 
 #[macro_use]
 extern crate log;

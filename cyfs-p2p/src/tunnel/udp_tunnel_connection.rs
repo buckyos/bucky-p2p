@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use callback_result::SingleCallbackWaiter;
@@ -262,7 +262,7 @@ impl UdpTunnelConnection {
         Ok(())
     }
 
-    pub async fn accept_tunnel(&mut self) -> BdtResult<()> {
+    pub async fn accept_tunnel(&mut self, listen_ports: HashSet<u16>) -> BdtResult<()> {
         let result = self.data_socket.as_ref().unwrap().recv_resp(self.conn_timeout).await?;
         if result.cmd_code() != PackageCmdCode::SynTunnel {
             return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
@@ -289,6 +289,12 @@ impl UdpTunnelConnection {
                 return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
             }
             let vport = syn.syn_info.as_ref().unwrap().to_vport;
+
+            let mut result = 0;
+            if !listen_ports.contains(&vport) {
+                log::debug!("unaccepted vport: {}", vport);
+                result = BdtErrorCode::ConnectionRefused.into_u8();
+            }
 
             let ack = SessionData {
                 stream_pos: 0,

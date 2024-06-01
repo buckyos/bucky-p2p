@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,12 +9,12 @@ use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, Device, DeviceDesc, 
 use crate::protocol::{AckTunnel, DynamicPackage, PackageBox, PackageCmdCode, SynTunnel};
 use crate::sockets::{DataSender, NetManagerRef, SocketType};
 use crate::{IncreaseId, LocalDeviceRef, TempSeq};
-use crate::error::{bdt_err, BdtErrorCode, BdtResult};
+use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::protocol::v0::PingTunnel;
 use crate::receive_processor::ReceiveDispatcherRef;
 use crate::sockets::tcp::TCPSocket;
 use crate::tunnel::tunnel_connection::{TunnelConnectionKey};
-use crate::tunnel::{TunnelConnection};
+use crate::tunnel::{TunnelConnection, TunnelType};
 use crate::tunnel::tcp_tunnel_connection::TcpTunnelConnection;
 use crate::tunnel::udp_tunnel_connection::{UdpTunnelConnection, UdpTunnelDataReceiverRef};
 
@@ -74,7 +75,7 @@ impl Tunnel {
         }
     }
 
-    pub fn accept_tcp_tunnel(mut self, socket: Arc<TCPSocket>, first_box: PackageBox) -> impl Future<Output=BdtResult<Self>> + Send {
+    pub(crate) fn accept_tcp_tunnel(mut self, listen_ports: HashSet<u16>, socket: Arc<TCPSocket>, first_box: PackageBox) -> impl Future<Output=BdtResult<Self>> + Send {
         let mut tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
                                                        self.sequence,
                                                        self.local_device.clone(),
@@ -86,13 +87,13 @@ impl Tunnel {
                                                        Some(socket),
                                                        self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap());
         async move {
-            tunnel_conn.accept_tunnel(first_box.packages_no_exchange()).await?;
+            tunnel_conn.accept_tunnel(listen_ports, first_box.packages_no_exchange()).await?;
             self.tunnel_conn = Some(Box::new(tunnel_conn));
             Ok(self)
         }
     }
 
-    pub fn accept_udp_tunnel(mut self, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BdtResult<Self>> + Send {
+    pub(crate) fn accept_udp_tunnel(mut self, listen_ports: HashSet<u16>, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BdtResult<Self>> + Send {
         let mut tunnel_conn = match data_sender.socket_type() {
             SocketType::TCP => {
                 unreachable!("TCP socket is not supported")
@@ -114,7 +115,7 @@ impl Tunnel {
         };
 
         async move {
-            tunnel_conn.accept_tunnel().await?;
+            tunnel_conn.accept_tunnel(listen_ports).await?;
             self.tunnel_conn = Some(tunnel_conn);
             Ok(self)
         }
@@ -123,6 +124,15 @@ impl Tunnel {
     pub fn get_sequence(&self) -> TempSeq {
         self.sequence
     }
+
+    pub fn socket_type(&self) -> SocketType {
+        self.tunnel_conn.as_ref().unwrap().socket_type()
+    }
+
+    pub fn tunnel_type(&self) -> TunnelType {
+        self.tunnel_conn.as_ref().unwrap().tunnel_type()
+    }
+
     pub fn get_tunnel_connection<T: TunnelConnection>(&self) -> Option<&T> {
         self.tunnel_conn.as_ref().and_then(|conn| {
             conn.downcast_ref::<T>()
@@ -149,7 +159,7 @@ impl Tunnel {
                                                                    self.stack_version,
                                                                    None,
                                                                    processor);
-                    tunnel_conn.connect_tunnel().await?;
+                    tunnel_conn.connect_tunnel().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
                     self.tunnel_conn = Some(Box::new(tunnel_conn));
                     return Ok(());
                 }
@@ -168,7 +178,7 @@ impl Tunnel {
                                                                        self.stack_version,
                                                                        local_ep.clone(),
                                                                        None);
-                        tunnel_conn.connect_tunnel().await?;
+                        tunnel_conn.connect_tunnel().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
                         self.tunnel_conn = Some(Box::new(tunnel_conn));
                         return Ok(());
                     }
@@ -198,7 +208,7 @@ impl Tunnel {
                                                                    self.stack_version,
                                                                    None,
                                                                    processor);
-                    tunnel_conn.connect_stream(vport, session_id).await?;
+                    tunnel_conn.connect_stream(vport, session_id).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
                     self.tunnel_conn = Some(Box::new(tunnel_conn));
                     return Ok(());
                 }
@@ -217,7 +227,7 @@ impl Tunnel {
                                                                        self.stack_version,
                                                                        local_ep.clone(),
                                                                        None);
-                        tunnel_conn.connect_stream(vport, session_id).await?;
+                        tunnel_conn.connect_stream(vport, session_id).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
                         self.tunnel_conn = Some(Box::new(tunnel_conn));
                         return Ok(());
                     }
