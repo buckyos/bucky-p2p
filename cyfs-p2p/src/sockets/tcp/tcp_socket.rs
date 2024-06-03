@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::net::Shutdown;
 use std::ops::Deref;
 use std::sync::{Arc};
 use std::time::Duration;
@@ -35,7 +36,7 @@ impl std::fmt::Display for TCPSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TcpInterface{{local:{},remote:{}}}",
+            "TcpSocket {{local:{},remote:{}}}",
             self.local, self.remote
         )
     }
@@ -106,15 +107,19 @@ impl TCPSocket {
 
     pub async fn send(&self, data: &[u8]) -> BdtResult<()> {
         let _locker = self.write_lock.lock().await;
-        (&mut &self.socket).write_all(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError))
+        (&mut &self.socket).write_all(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+    }
+
+    pub async fn flush(&self) -> BdtResult<()> {
+        (&mut &self.socket).flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
     }
 
     pub async fn recv(&self, buf: &mut [u8]) -> BdtResult<usize> {
-        (&mut &self.socket).read(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError))
+        (&mut &self.socket).read(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
     }
 
     pub async fn recv_exact(&self, buf: &mut [u8]) -> BdtResult<()> {
-        (&mut &self.socket).read_exact(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError))
+        (&mut &self.socket).read_exact(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
     }
 
     pub(crate) async fn receive_package<'a>(&self, recv_buf: &'a mut [u8]) -> BdtResult<RecvBox<'a>> {
@@ -129,7 +134,7 @@ impl TCPSocket {
                     self.key(),
                 );
                 let package = PackageBox::raw_decode_with_context(box_buf, context)
-                    .map(|(package_box, _)| package_box).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                    .map(|(package_box, _)| package_box).map_err(into_bdt_err!(BdtErrorCode::RawCodecError, "{}", self))?;
                 Ok(RecvBox::Package(package))
             }
             BoxType::RawData => Ok(RecvBox::RawData(box_buf)),
@@ -140,7 +145,7 @@ impl TCPSocket {
         let header_len = u16::raw_bytes().unwrap();
         let box_header = &mut recv_buf[..header_len];
         self.recv_exact(box_header).await?;
-        let mut box_len = u16::raw_decode(box_header).map(|(v, _)| v as usize).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        let mut box_len = u16::raw_decode(box_header).map(|(v, _)| v as usize).map_err(into_bdt_err!(BdtErrorCode::RawCodecError, "{}", self))?;
         let box_type = if box_len > 32768 {
             box_len -= 32768;
             BoxType::RawData
@@ -158,4 +163,7 @@ impl TCPSocket {
         Ok((box_type, box_buf))
     }
 
+    pub async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
+        self.socket.shutdown(how).map_err(into_bdt_err!(BdtErrorCode::IoError))
+    }
 }

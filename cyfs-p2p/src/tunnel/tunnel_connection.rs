@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::net::Shutdown;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use as_any::AsAny;
@@ -66,8 +67,10 @@ pub trait TunnelConnection: AsAny + Send + Sync + 'static {
     fn sequence(&self) -> TempSeq;
     fn socket_type(&self) -> SocketType;
     fn tunnel_type(&self) -> TunnelType;
+    fn tunnel_key(&self) -> &MixAesKey;
     async fn connect_tunnel(&mut self) -> BdtResult<()>;
     async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId) -> BdtResult<()>;
+    async fn shutdown(&self, how: Shutdown) -> BdtResult<()>;
 }
 //
 // pub(crate) async fn connect_tunnel<T: DataSender>(

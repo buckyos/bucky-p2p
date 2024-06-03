@@ -97,16 +97,25 @@ impl Deref for StreamListenerGuard {
 
 pub struct StreamManager {
     tunnel_manager: TunnelManagerRef,
-    listeners: Mutex<HashMap<u16, StreamListenerRef>>
+    listeners: Mutex<HashMap<u16, StreamListenerRef>>,
+    send_buffer: usize,
+    min_box: u16,
+    max_box: u16
 }
 
 pub type StreamManagerRef = Arc<StreamManager>;
 
 impl StreamManager {
-    pub fn new(tunnel_manager: TunnelManagerRef) -> Arc<Self> {
+    pub fn new(tunnel_manager: TunnelManagerRef,
+               send_buffer: usize,
+               min_box: u16,
+               max_box: u16) -> Arc<Self> {
         let stream = Arc::new(Self {
             tunnel_manager: tunnel_manager.clone(),
-            listeners: Mutex::new(HashMap::new())
+            listeners: Mutex::new(HashMap::new()),
+            send_buffer,
+            min_box,
+            max_box,
         });
 
         let weak = Arc::downgrade(&stream);
@@ -117,7 +126,7 @@ impl StreamManager {
                     if let Some(stream_manager) = weak.upgrade() {
                         let mut listeners = stream_manager.listeners.lock().unwrap();
                         if let Some(listener) = listeners.get(&vport) {
-                            listener.waiter.set_result_with_cache(StreamGuard::new(Arc::new(TcpStream::new(tunnel))));
+                            listener.waiter.set_result_with_cache(StreamGuard::new(Arc::new(TcpStream::new(tunnel, stream_manager.send_buffer, stream_manager.min_box, stream_manager.max_box))));
                         }
                     }
                 }
@@ -130,7 +139,7 @@ impl StreamManager {
         let tunnel = self.tunnel_manager.create_stream_tunnel(remote, port).await?;
         let stream = match tunnel.socket_type() {
             SocketType::TCP => {
-                StreamGuard::new(Arc::new(TcpStream::new(tunnel)))
+                StreamGuard::new(Arc::new(TcpStream::new(tunnel, self.send_buffer, self.min_box, self.max_box)))
             },
             SocketType::UDP => {
                 StreamGuard::new(Arc::new(UdpStream::new(tunnel)))

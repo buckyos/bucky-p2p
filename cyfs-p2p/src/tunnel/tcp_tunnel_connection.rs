@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
 use async_std::future;
@@ -79,6 +80,18 @@ impl TcpTunnelSocket {
     async fn recv(&self, buf: &mut [u8]) -> BdtResult<usize> {
         self.socket.recv(buf).await
     }
+
+    async fn recv_exact(&self, buf: &mut [u8]) -> BdtResult<()> {
+        self.socket.recv_exact(buf).await
+    }
+
+    async fn flush(&self) -> BdtResult<()> {
+        self.socket.flush().await
+    }
+
+    async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
+        self.socket.shutdown(how).await
+    }
 }
 
 pub struct TcpTunnelConnection {
@@ -123,11 +136,11 @@ impl TcpTunnelConnection {
 
     pub(crate) async fn accept_tunnel(&mut self, listen_ports: HashSet<u16>, pkgs: &[DynamicPackage]) -> BdtResult<()> {
         if pkgs.len() == 0 {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid syn tunnel, self.sequence", self.sequence));
         }
         let result = pkgs.get(0).unwrap();
         if result.cmd_code() != PackageCmdCode::SynTunnel {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid syn tunnel"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid syn tunnel, self.sequence", self.sequence));
         }
         let req: &SynTunnel = result.as_ref();
         let ack = AckTunnel {
@@ -143,14 +156,14 @@ impl TcpTunnelConnection {
             self.data_socket.as_ref().unwrap().send_dynamic_pkg(DynamicPackage::from(ack)).await?;
             let resp_pkgs = self.data_socket.as_ref().unwrap().recv_resp_pkgs(self.conn_timeout).await?;
             if resp_pkgs.len() != 1 {
-                return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid ack tunnel"));
+                return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid ack tunnel, self.sequence", self.sequence));
             }
             let result = resp_pkgs.get(0).unwrap();
             if result.cmd_code() == PackageCmdCode::AckAckTunnel {
                 self.tunnel_type = TunnelType::TUNNEL;
                 return Ok(());
             } else {
-                return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel"));
+                return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel, self.sequence", self.sequence));
             }
         } else {
             let result = pkgs.get(1).unwrap();
@@ -170,51 +183,65 @@ impl TcpTunnelConnection {
                 self.data_socket.as_ref().unwrap().send_dynamic_pkgs(vec![DynamicPackage::from(ack), DynamicPackage::from(tcp_ack)]).await?;
                 let resp_pkgs = self.data_socket.as_ref().unwrap().recv_resp_pkgs(self.conn_timeout).await?;
                 if resp_pkgs.len() != 2 {
-                    return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel resp"));
+                    return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel resp", self.sequence));
                 }
 
                 let result = resp_pkgs.get(0).unwrap();
                 if result.cmd_code() != PackageCmdCode::AckAckTunnel {
-                    return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel"));
+                    return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel", self.sequence));
                 }
 
                 let result = resp_pkgs.get(1).unwrap();
                 if result.cmd_code() != PackageCmdCode::TcpAckAckConnection {
-                    return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel"));
+                    return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel", self.sequence));
                 }
                 self.tunnel_type = TunnelType::STREAM(syn.to_vport);
                 Ok(())
             } else {
-                return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tcp tunnel"));
+                return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tcp tunnel", self.sequence));
             }
         }
     }
 
-    pub async fn send(&mut self, data: &[u8]) -> BdtResult<()> {
+    pub async fn send(&self, data: &[u8]) -> BdtResult<()> {
         if !self.tunnel_type.is_stream() {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel type"));
+            return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid tunnel type", self.sequence));
         }
-        self.data_socket.as_ref().unwrap().send_resp(data).await
+        self.data_socket.as_ref().unwrap().send_resp(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "tunnel {:?}", self.sequence))
     }
 
-    pub async fn recv(&mut self, data: &mut [u8]) -> BdtResult<usize> {
+    pub async fn flush(&self) -> BdtResult<()> {
         if !self.tunnel_type.is_stream() {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel type"));
+            return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid tunnel type", self.sequence));
         }
-        self.data_socket.as_ref().unwrap().recv(data).await
+        self.data_socket.as_ref().unwrap().flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "tunnel {:?}", self.sequence))
+    }
+
+    pub async fn recv(&self, data: &mut [u8]) -> BdtResult<usize> {
+        if !self.tunnel_type.is_stream() {
+            return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid tunnel type", self.sequence));
+        }
+        self.data_socket.as_ref().unwrap().recv(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "tunnel {:?}", self.sequence))
+    }
+
+    pub async fn recv_exact(&self, data: &mut [u8]) -> BdtResult<()> {
+        if !self.tunnel_type.is_stream() {
+            return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid tunnel type", self.sequence));
+        }
+        self.data_socket.as_ref().unwrap().recv_exact(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "tunnel {:?}", self.sequence))
     }
 
     pub async fn send_pkgs(&mut self, pkgs: Vec<DynamicPackage>) -> BdtResult<()> {
         if self.tunnel_type != TunnelType::TUNNEL {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel type"));
+            return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid tunnel type", self.sequence));
         }
-        self.data_socket.as_ref().unwrap().send_dynamic_pkgs(pkgs).await
+        self.data_socket.as_ref().unwrap().send_dynamic_pkgs(pkgs).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "tunnel {:?}", self.sequence))
     }
     pub async fn recv_pkgs(&mut self) -> BdtResult<Vec<DynamicPackage>> {
         if self.tunnel_type != TunnelType::TUNNEL {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel type"));
+            return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid tunnel type", self.sequence));
         }
-        self.data_socket.as_ref().unwrap().recv_resp_pkgs(self.conn_timeout).await
+        self.data_socket.as_ref().unwrap().recv_resp_pkgs(self.conn_timeout).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "tunnel {:?}", self.sequence))
     }
 }
 
@@ -232,6 +259,10 @@ impl TunnelConnection for TcpTunnelConnection {
         self.tunnel_type
     }
 
+    fn tunnel_key(&self) -> &MixAesKey {
+        self.data_socket.as_ref().unwrap().socket.key()
+    }
+
     async fn connect_tunnel(&mut self) -> BdtResult<()> {
         if self.data_socket.is_some() {
             return Ok(());
@@ -247,7 +278,7 @@ impl TunnelConnection for TcpTunnelConnection {
 
         let key_stub = self.net_manager.key_store().get_key_by_mix_hash(&data_socket.key().mix_hash(data_socket.local_device_id(), data_socket.remote_device_id()));
         if key_stub.is_none() {
-            return Err(bdt_err!(BdtErrorCode::NotFound, "key not found"));
+            return Err(bdt_err!(BdtErrorCode::NotFound, "tunnel {:?} key not found", self.sequence));
         }
         let key_stub = key_stub.unwrap();
         let mut pkgs = Vec::new();
@@ -269,16 +300,16 @@ impl TunnelConnection for TcpTunnelConnection {
         data_socket.send_dynamic_pkgs(pkgs).await?;
         let resp_pkgs = data_socket.recv_resp_pkgs(self.conn_timeout).await?;
         if resp_pkgs.len() != 1 {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel resp pkgs"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel resp pkgs", self.sequence));
         }
         let result = resp_pkgs.get(0).unwrap();
         if result.cmd_code() != PackageCmdCode::AckTunnel {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel resp"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel resp", self.sequence));
         }
 
         let ack: &AckTunnel = result.as_ref();
         if BdtErrorCode::from_u8(ack.result).unwrap_or(BdtErrorCode::Failed) != BdtErrorCode::Ok {
-            return Err(bdt_err!(BdtErrorCode::ConnectionRefused, "ack tunnel failed result {}", ack.result));
+            return Err(bdt_err!(BdtErrorCode::ConnectionRefused, "tunnel {:?} ack tunnel failed result {}", self.sequence, ack.result));
         }
 
         let syn_ack_ack = AckAckTunnel {
@@ -307,7 +338,7 @@ impl TunnelConnection for TcpTunnelConnection {
 
         let key_stub = self.net_manager.key_store().get_key_by_mix_hash(&data_socket.key().mix_hash(data_socket.local_device_id(), data_socket.remote_device_id()));
         if key_stub.is_none() {
-            return Err(bdt_err!(BdtErrorCode::NotFound, "key not found"));
+            return Err(bdt_err!(BdtErrorCode::NotFound, "tunnel {:?} key not found", self.sequence));
         }
         let key_stub = key_stub.unwrap();
         let mut pkgs = Vec::new();
@@ -338,17 +369,17 @@ impl TunnelConnection for TcpTunnelConnection {
         data_socket.send_dynamic_pkgs(pkgs).await?;
         let resp_pkgs = data_socket.recv_resp_pkgs(self.conn_timeout).await?;
         if resp_pkgs.len() != 2 {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tunnel resp pkgs"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tunnel resp pkgs", self.sequence));
         }
         let result = resp_pkgs.get(0).unwrap();
         if result.cmd_code() != PackageCmdCode::AckTunnel {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid ack tunnel"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid ack tunnel", self.sequence));
         }
 
         let ack: &AckTunnel = result.as_ref();
         if BdtErrorCode::from_u8(ack.result).unwrap_or(BdtErrorCode::Failed) != BdtErrorCode::Ok {
             let err = BdtErrorCode::from_u8(ack.result).unwrap_or(BdtErrorCode::Failed);
-            return Err(bdt_err!(err, "ack tunnel failed"));
+            return Err(bdt_err!(err, "tunnel {:?} ack tunnel failed", self.sequence));
         }
 
         let syn_ack_ack = AckAckTunnel {
@@ -357,13 +388,13 @@ impl TunnelConnection for TcpTunnelConnection {
 
         let result = resp_pkgs.get(1).unwrap();
         if result.cmd_code() != PackageCmdCode::TcpAckConnection {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "invalid tcp ack tunnel"));
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid tcp ack tunnel", self.sequence));
         }
 
         let ack: &TcpAckConnection = result.as_ref();
         if BdtErrorCode::from_u8(ack.result).unwrap_or(BdtErrorCode::Failed) != BdtErrorCode::Ok {
             let err = BdtErrorCode::from_u8(ack.result).unwrap_or(BdtErrorCode::Failed);
-            return Err(bdt_err!(err, "tcp ack tunnel failed"));
+            return Err(bdt_err!(err, "tunnel {:?} tcp ack tunnel failed", self.sequence));
         }
 
         let tcp_ack_ack = TcpAckAckConnection {
@@ -378,4 +409,7 @@ impl TunnelConnection for TcpTunnelConnection {
         Ok(())
     }
 
+    async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
+        self.data_socket.as_ref().unwrap().shutdown(how).await
+    }
 }

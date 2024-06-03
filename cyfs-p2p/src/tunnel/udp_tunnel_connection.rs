@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::Shutdown;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use callback_result::SingleCallbackWaiter;
@@ -370,6 +371,10 @@ impl TunnelConnection for UdpTunnelConnection {
         self.tunnel_type
     }
 
+    fn tunnel_key(&self) -> &MixAesKey {
+        self.data_socket.as_ref().unwrap().data_sender.key()
+    }
+
     async fn connect_tunnel(&mut self) -> BdtResult<()> {
         if self.data_socket.is_some() {
             return Ok(());
@@ -531,5 +536,9 @@ impl TunnelConnection for UdpTunnelConnection {
         self.data_socket = Some(data_socket);
 
         Ok(())
+    }
+
+    async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
+        todo!()
     }
 }

@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::future::Future;
+use std::net::Shutdown;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use as_any::Downcast;
@@ -8,7 +9,7 @@ use callback_result::CallbackWaiter;
 use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, Device, DeviceDesc, NamedObject};
 use crate::protocol::{AckTunnel, DynamicPackage, PackageBox, PackageCmdCode, SynTunnel};
 use crate::sockets::{DataSender, NetManagerRef, SocketType};
-use crate::{IncreaseId, LocalDeviceRef, TempSeq};
+use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::protocol::v0::PingTunnel;
 use crate::receive_processor::ReceiveDispatcherRef;
@@ -133,6 +134,10 @@ impl Tunnel {
         self.tunnel_conn.as_ref().unwrap().tunnel_type()
     }
 
+    pub fn key(&self) -> &MixAesKey {
+        self.tunnel_conn.as_ref().unwrap().tunnel_key()
+    }
+
     pub fn get_tunnel_connection<T: TunnelConnection>(&self) -> Option<&T> {
         self.tunnel_conn.as_ref().and_then(|conn| {
             conn.downcast_ref::<T>()
@@ -235,5 +240,13 @@ impl Tunnel {
             }
         }
         Err(bdt_err!(BdtErrorCode::ConnectFailed, "No available endpoint"))
+    }
+
+    pub async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
+        if self.tunnel_conn.is_some() {
+            self.tunnel_conn.as_ref().unwrap().shutdown(how).await
+        } else {
+            Ok(())
+        }
     }
 }
