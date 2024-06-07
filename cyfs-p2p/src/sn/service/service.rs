@@ -1,4 +1,3 @@
-use async_std::task;
 use log::*;
 use std::{
     any::Any,
@@ -138,7 +137,7 @@ impl SnService {
                     }
                     service.clean_timeout_resource().await;
                 }
-                async_std::task::sleep(Duration::from_secs(100)).await;
+                crate::runtime::sleep(Duration::from_secs(100)).await;
             }
         });
 

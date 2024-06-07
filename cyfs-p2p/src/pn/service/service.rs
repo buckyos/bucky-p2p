@@ -2,16 +2,14 @@
 use std::{
     time::Duration,
 };
-use async_std::{
-    sync::{Arc, Weak},
-    task
-};
+use std::sync::{Arc, Weak};
 use cyfs_base::*;
 use crate::{
     history::keystore::{self, Keystore},
     protocol::*,
 };
 use crate::error::BdtResult;
+use crate::executor::Executor;
 use super::{
     command::*,
     proxy::{self, ProxyTunnelManager, ProxyDeviceStub},
@@ -133,7 +131,7 @@ impl Service {
         let syn_proxy = syn_proxy.clone();
         let from = *from;
         let key = in_box.key().clone();
-        task::spawn(async move {
+        Executor::spawn(async move {
             let stub_pair = (ProxyDeviceStub {
                 id: syn_proxy.from_peer_info.desc().device_id(),
                 timestamp: syn_proxy.from_peer_info.body().as_ref().unwrap().update_time(),

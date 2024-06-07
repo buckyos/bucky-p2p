@@ -1,4 +1,3 @@
-use async_std::future;
 use cyfs_base::*;
 use futures::future::{AbortHandle, AbortRegistration, Abortable};
 use rand::Rng;

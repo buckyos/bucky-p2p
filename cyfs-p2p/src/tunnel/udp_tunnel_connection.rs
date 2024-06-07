@@ -6,7 +6,7 @@ use callback_result::SingleCallbackWaiter;
 use cyfs_base::{bucky_time_now, BuckyError, BuckyErrorCode, DeviceDesc, DeviceId, Endpoint, TailedOwnedData};
 use notify_future::NotifyFuture;
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, SocketType, UdpExtraParams};
-use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
+use crate::{IncreaseId, LocalDeviceRef, MixAesKey, runtime, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::history::keystore::EncryptedKey;
 use crate::protocol::{AckTunnel, DynamicPackage, Exchange, MTU, PackageBox, PackageCmdCode, SynTunnel};
@@ -139,7 +139,7 @@ impl UdpTunnelSocketReceiver for UdpTunnelSocket {
         let future = NotifyFuture::new();
         self.resp_waiter.set_result_with_cache((pkg, Some(future.clone())));
 
-        let ret = async_std::future::timeout(timeout, future).await;
+        let ret = runtime::timeout(timeout, future).await;
         match ret {
             Ok(ret) => Ok(ret),
             Err(_) => Err(bdt_err!(BdtErrorCode::Timeout, "timeout"))

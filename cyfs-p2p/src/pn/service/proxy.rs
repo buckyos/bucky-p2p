@@ -5,18 +5,13 @@ use std::{
     thread,
     time::Duration,
 };
+use std::sync::Arc;
 use cyfs_debug::Mutex;
-use async_std::{
-    sync::{Arc},
-    task,
-    future
-};
 use cyfs_base::*;
-use crate::{
-    types::*
-};
+use crate::{runtime, types::*};
 use std::time::{UNIX_EPOCH, SystemTime};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::executor::Executor;
 use crate::protocol::MTU_LARGE;
 
 #[derive(Clone)]
@@ -393,7 +388,7 @@ impl ProxyInterface {
 
         {
             let interface = interface.clone();
-            task::spawn(async move {
+            Executor::spawn(async move {
                 interface.timer().await;
             });
         }
@@ -418,7 +413,7 @@ impl ProxyInterface {
                 tunnels.rehash();
             }
 
-            let _ = future::timeout(Duration::from_secs(tick_sec), future::pending::<()>()).await;
+            let _ = runtime::timeout(Duration::from_secs(tick_sec), std::future::pending::<()>()).await;
         }
     }
 

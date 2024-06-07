@@ -4,7 +4,7 @@ use std::time::Duration;
 use callback_result::CallbackWaiter;
 use cyfs_base::{bucky_time_now, BuckyErrorCode, Device, DeviceId, Endpoint, NamedObject, Protocol};
 use futures::future::{abortable, Abortable, AbortHandle};
-use crate::{LocalDeviceRef, MixAesKey, TempSeqGenerator};
+use crate::{LocalDeviceRef, MixAesKey, runtime, TempSeqGenerator};
 use crate::error::BdtResult;
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
@@ -167,7 +167,7 @@ impl SNClientService {
                     break;
                 }
             }
-            async_std::task::sleep(Duration::from_secs(1)).await;
+            runtime::sleep(Duration::from_secs(1)).await;
         }
         Ok(())
     }
@@ -182,7 +182,7 @@ impl SNClientService {
                     log::error!("ping sn {} failed: {}", sn.desc().device_id(), e);
                 }
             }
-            async_std::task::sleep(Duration::from_secs(30)).await;
+            runtime::sleep(Duration::from_secs(30)).await;
         }
     }
 

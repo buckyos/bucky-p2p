@@ -2,11 +2,10 @@ use std::collections::HashSet;
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
-use async_std::future;
 use cyfs_base::{bucky_time_now, DeviceDesc, DeviceId, Endpoint, RawDecode, RawFixedBytes, TailedOwnedData};
 use num_traits::FromPrimitive;
 use crate::sockets::{DataSender, DataSenderFactory, NetManagerRef, SocketType, TcpExtraParams};
-use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
+use crate::{IncreaseId, LocalDeviceRef, MixAesKey, runtime, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::history::keystore::{EncryptedKey, Keystore};
 use crate::protocol::{AckTunnel, DynamicPackage, Exchange, MTU, MTU_LARGE, OtherBoxTcpDecodeContext, PackageBox, PackageCmdCode, SynTunnel};
@@ -66,7 +65,7 @@ impl TcpTunnelSocket {
 
     pub(crate) async fn recv_resp_pkgs(&self, timeout: Duration) -> BdtResult<Vec<DynamicPackage>> {
         let mut recv_buf = [0u8; MTU_LARGE];
-        let recv_box = future::timeout(timeout, self.socket.receive_package(&mut recv_buf)).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))??;
+        let recv_box = runtime::timeout(timeout, self.socket.receive_package(&mut recv_buf)).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))??;
         match recv_box {
             RecvBox::Package(pkgs) => {
                 Ok(pkgs.into())

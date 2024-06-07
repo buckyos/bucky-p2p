@@ -4,14 +4,13 @@ use log::*;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
-use async_std::net::{TcpListener, TcpStream};
-use async_std::{future, task};
-use async_std::io::ReadExt;
+use crate::runtime::{TcpListener, TcpStream};
 use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
-use crate::error::BdtResult;
+use crate::error::{BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::history::keystore::{EncryptedKey, Keystore};
 use crate::protocol::{Exchange, FirstBoxTcpDecodeContext, MTU_LARGE, PackageBox, PackageBoxDecodeContext, PackageCmdCode};
+use crate::runtime;
 use crate::types::LocalDeviceRef;
 use super::super::UpdateOuterResult;
 use super::TCPSocket;
@@ -167,15 +166,39 @@ impl TCPListener {
         Ok(())
     }
 
+    #[cfg(feature = "runtime-tokio")]
+    async fn read_exact(socket: &TcpStream, buf: &mut [u8]) -> Result<(), BdtError> {
+        let mut data: &mut [u8] = buf;
+        while data.len() > 0 {
+            socket.readable().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+            match socket.try_read(data) {
+                Ok(n) => {
+                    data = &mut data[n..];
+                },
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Err(BdtError::from((BdtErrorCode::IoError, "", e)));
+                }
+            }
+        }
+        Ok(())
+    }
     async fn receive_box<'a>(
         socket: &TcpStream,
         recv_buf: &'a mut [u8],
-    ) -> Result<(BoxType, &'a mut [u8]), BuckyError> {
-        let mut socket = socket.clone();
+    ) -> Result<(BoxType, &'a mut [u8]), BdtError> {
         let header_len = u16::raw_bytes().unwrap();
         let box_header = &mut recv_buf[..header_len];
-        socket.read_exact(box_header).await?;
-        let mut box_len = u16::raw_decode(box_header).map(|(v, _)| v as usize)?;
+        #[cfg(feature = "runtime-async-std")]
+        {
+            use async_std::io::ReadExt;
+            socket.clone().read_exact(box_header).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        }
+        #[cfg(feature = "runtime-tokio")]
+        Self::read_exact(socket, box_header).await?;
+        let mut box_len = u16::raw_decode(box_header).map(|(v, _)| v as usize).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let box_type = if box_len > 32768 {
             box_len -= 32768;
             BoxType::RawData
@@ -183,35 +206,41 @@ impl TCPListener {
             BoxType::Package
         };
         if box_len + header_len > recv_buf.len() {
-            return Err(BuckyError::new(
-                BuckyErrorCode::OutOfLimit,
-                "buffer not enough",
+            return Err(BdtError::new(
+                BdtErrorCode::OutOfLimit,
+                "buffer not enough".to_string(),
             ));
         }
         let box_buf = &mut recv_buf[header_len..(header_len + box_len)];
-        socket.read_exact(box_buf).await?;
+        #[cfg(feature = "runtime-async-std")]
+        {
+            use async_std::io::ReadExt;
+            socket.clone().read_exact(box_buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        }
+        #[cfg(feature = "runtime-tokio")]
+        Self::read_exact(socket, box_buf).await?;
         Ok((box_type, box_buf))
     }
 
-    async fn accept(&self, socket: TcpStream) -> Result<(Arc<TCPSocket>, PackageBox), BuckyError> {
-        let remote = socket.peer_addr().map_err(|e| BuckyError::from(e))?;
-        let local = socket.local_addr().map_err(|e| BuckyError::from(e))?;
+    async fn accept(&self, socket: TcpStream) -> Result<(Arc<TCPSocket>, PackageBox), BdtError> {
+        let remote = socket.peer_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
+        let local = socket.local_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
         let remote = Endpoint::from((endpoint::Protocol::Tcp, remote));
         let local = Endpoint::from((endpoint::Protocol::Tcp, local));
 
         let mut recv_buf = [0u8; MTU_LARGE];
         let (box_type, box_buf) =
-            future::timeout(self.accept_timout, Self::receive_box(&socket, &mut recv_buf)).await??;
+            runtime::timeout(self.accept_timout, Self::receive_box(&socket, &mut recv_buf)).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))??;
         if box_type != BoxType::Package {
             let msg = format!("recv first box raw data from {}", remote);
             error!("{}", msg);
-            return Err(BuckyError::new(BuckyErrorCode::InvalidData, msg));
+            return Err(BdtError::new(BdtErrorCode::InvalidData, msg));
         }
         let first_box = {
             let context =
                 FirstBoxTcpDecodeContext::new_inplace(box_buf.as_mut_ptr(), box_buf.len(), self.key_store.as_ref());
             PackageBox::raw_decode_with_context(box_buf, context)
-                .map(|(package_box, _)| package_box)?
+                .map(|(package_box, _)| package_box).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?
         };
 
         let exchg = match first_box.packages().get(0) {
@@ -219,14 +248,14 @@ impl TCPListener {
                 PackageCmdCode::Exchange => first_pkg.as_any().downcast_ref::<Exchange>(),
                 _ => None,
             },
-            None => return Err(BuckyError::new(BuckyErrorCode::InvalidData, "no package")),
+            None => return Err(BdtError::new(BdtErrorCode::InvalidData, "no package".to_string())),
         };
         if let Some(exchg) = exchg {
             if !exchg.verify(first_box.local()).await {
                 warn!("tcp exchg verify failed.");
-                return Err(BuckyError::new(
-                    BuckyErrorCode::InvalidData,
-                    "sign-verify failed",
+                return Err(BdtError::new(
+                    BdtErrorCode::InvalidData,
+                    "sign-verify failed".to_string(),
                 ));
             }
             self.key_store.add_key(first_box.key(), first_box.local(), first_box.remote(), EncryptedKey::Unconfirmed(exchg.key_encrypted.clone()));
@@ -247,7 +276,7 @@ impl TCPListener {
                             let tcp_listener = tcp_listener.clone();
                             let this = this.clone();
                             Executor::spawn(async move {
-                                match this.accept(socket.clone()).await {
+                                match this.accept(socket).await {
                                     Ok((socket, first_box)) => {
                                         if let Err(e) = tcp_listener.on_new_connection(socket, first_box).await {
                                             error!("tcp-listener accept error({}).", e);
@@ -255,7 +284,6 @@ impl TCPListener {
                                     }
                                     Err(e) => {
                                         warn!("tcp-listener accept a stream, but the first package read failed. err: {}", e);
-                                        let _ = socket.shutdown(Shutdown::Both);
                                     }
                                 }
                             });

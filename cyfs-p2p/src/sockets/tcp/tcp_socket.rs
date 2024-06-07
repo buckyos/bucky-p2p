@@ -3,12 +3,12 @@ use std::net::Shutdown;
 use std::ops::Deref;
 use std::sync::{Arc};
 use std::time::Duration;
-use async_std::net::{TcpListener, TcpStream};
-use async_std::sync::Mutex;
+use crate::runtime::{Mutex, TcpStream};
 use cyfs_base::{BuckyError, BuckyErrorCode, DeviceDesc, DeviceId, Endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
 use futures::{AsyncReadExt, AsyncWriteExt};
-use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::protocol::{OtherBoxTcpDecodeContext, PackageBox};
+use crate::runtime;
 use crate::types::MixAesKey;
 
 #[derive(Eq, PartialEq)]
@@ -63,8 +63,9 @@ impl TCPSocket {
         remote_device_desc: DeviceDesc,
         key: MixAesKey,
         timeout: Duration,) -> BdtResult<TCPSocket> {
-        let socket = async_std::io::timeout(timeout, TcpStream::connect(remote_ep.addr()))
+        let socket = runtime::timeout(timeout, TcpStream::connect(remote_ep.addr()))
             .await
+            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?
             .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?;
         let local = socket.local_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
         let local = Endpoint::from((cyfs_base::endpoint::Protocol::Tcp, local));
@@ -107,19 +108,89 @@ impl TCPSocket {
 
     pub async fn send(&self, data: &[u8]) -> BdtResult<()> {
         let _locker = self.write_lock.lock().await;
-        (&mut &self.socket).write_all(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        #[cfg(feature = "runtime-async-std")]
+        {
+            (&mut &self.socket).write_all(data).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        }
+        #[cfg(feature = "runtime-tokio")]
+        {
+            let mut buf = data;
+            self.socket.writable().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))?;
+            while buf.len() > 0 {
+                match self.socket.try_write(buf) {
+                    Ok(n) => {
+                        buf = &buf[n..];
+                        break;
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(BdtError::from((BdtErrorCode::IoError, "", e)));
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     pub async fn flush(&self) -> BdtResult<()> {
-        (&mut &self.socket).flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        #[cfg(feature = "runtime-async-std")]
+        {
+            (&mut &self.socket).flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        }
+        #[cfg(feature = "runtime-tokio")]
+        {
+            Ok(())
+        }
     }
 
     pub async fn recv(&self, buf: &mut [u8]) -> BdtResult<usize> {
-        (&mut &self.socket).read(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        #[cfg(feature = "runtime-async-std")]
+        {
+            (&mut &self.socket).read(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        }
+        #[cfg(feature = "runtime-tokio")]
+        {
+            loop {
+                self.socket.writable().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))?;
+                match self.socket.try_read(buf) {
+                    Ok(n) => return Ok(n),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(BdtError::from((BdtErrorCode::IoError, "", e)));
+                    }
+                }
+            }
+        }
     }
 
     pub async fn recv_exact(&self, buf: &mut [u8]) -> BdtResult<()> {
-        (&mut &self.socket).read_exact(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        #[cfg(feature = "runtime-async-std")]
+        {
+            (&mut &self.socket).read_exact(buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))
+        }
+        #[cfg(feature = "runtime-tokio")]
+        {
+            let mut data: &mut [u8] = buf;
+            while data.len() > 0 {
+                self.socket.readable().await.map_err(into_bdt_err!(BdtErrorCode::IoError, "{}", self))?;
+                match self.socket.try_read(data) {
+                    Ok(n) => {
+                        data = &mut data[n..];
+                    },
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(BdtError::from((BdtErrorCode::IoError, "", e)));
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     pub(crate) async fn receive_package<'a>(&self, recv_buf: &'a mut [u8]) -> BdtResult<RecvBox<'a>> {
@@ -164,6 +235,13 @@ impl TCPSocket {
     }
 
     pub async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
-        self.socket.shutdown(how).map_err(into_bdt_err!(BdtErrorCode::IoError))
+        #[cfg(feature = "runtime-async-std")]
+        {
+            self.socket.shutdown(how).map_err(into_bdt_err!(BdtErrorCode::IoError))
+        }
+        #[cfg(feature = "runtime-tokio")]
+        {
+            Ok(())
+        }
     }
 }

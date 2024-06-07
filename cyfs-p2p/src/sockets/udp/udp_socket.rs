@@ -1,9 +1,9 @@
 use std::sync::RwLock;
-use async_std::net::UdpSocket;
 use cyfs_base::{BuckyError, BuckyErrorCode, Endpoint, Protocol, RawEncodeWithContext};
 use socket2::{Socket, Domain, Type};
 use crate::protocol::{PackageBox, PackageBoxEncodeContext};
 use crate::types::MixAesKey;
+use crate::runtime::UdpSocket;
 
 pub struct UDPSocket {
     local: Endpoint,
@@ -43,7 +43,16 @@ impl UDPSocket {
 
             let _ = socket.set_recv_buffer_size(recv_buffer);
             match socket.bind(&bind_addr.addr().clone().into()) {
-                Ok(_) => Ok(UdpSocket::from(std::net::UdpSocket::from(socket))),
+                Ok(_) => {
+                    #[cfg(feature = "runtime-async-std")]
+                    {
+                        Ok(UdpSocket::from(std::net::UdpSocket::from(socket)))
+                    }
+                    #[cfg(feature = "runtime-tokio")]
+                    {
+                        Ok(UdpSocket::try_from(std::net::UdpSocket::from(socket)).unwrap())
+                    }
+                },
                 Err(err) => Err(BuckyError::from(err))
             }
         }
