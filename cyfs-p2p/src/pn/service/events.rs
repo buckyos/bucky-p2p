@@ -1,4 +1,4 @@
-use cyfs_base::*;
+use bucky_crypto::AesKey;
 use crate::error::BdtResult;
 use super::proxy::ProxyDeviceStub;
 

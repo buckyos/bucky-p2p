@@ -1,8 +1,9 @@
 use std::future::Future;
 use futures::executor::ThreadPool;
 use futures::future::RemoteHandle;
-use futures::task::{Spawn, SpawnError, SpawnExt};
+use futures::task::{Spawn, SpawnExt};
 use once_cell::sync::OnceCell;
+use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 
 pub struct Executor;
 
@@ -19,17 +20,18 @@ impl Executor {
         });
     }
 
-    pub fn spawn_with_handle<Fut>(future: Fut) -> Result<RemoteHandle<Fut::Output>, SpawnError>
+    pub fn spawn_with_handle<Fut>(future: Fut) -> BdtResult<RemoteHandle<Fut::Output>>
         where
             Fut: Future + Send + 'static,
             Fut::Output: Send, {
-        EXECUTOR.get().unwrap().spawn_with_handle(future)
+        EXECUTOR.get().unwrap().spawn_with_handle(future).map_err(into_bdt_err!(BdtErrorCode::ExecuteError))
     }
 
-    pub fn spawn<Fut>(future: Fut) -> Result<(), SpawnError>
+    pub fn spawn<Fut>(future: Fut) -> BdtResult<()>
         where
             Fut: Future<Output = ()> + Send + 'static,{
-        EXECUTOR.get().unwrap().spawn(future)
+        EXECUTOR.get().unwrap().spawn(future);
+        Ok(())
     }
 
     pub fn spawn_ok<Fut>(future: Fut)

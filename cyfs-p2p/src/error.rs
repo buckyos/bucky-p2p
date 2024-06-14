@@ -1,4 +1,4 @@
-use cyfs_base::*;
+use bucky_raw_codec::{RawDecode, RawEncode};
 use num_derive::{FromPrimitive, ToPrimitive};
 use sfo_result::Result;
 pub(crate) use sfo_result::err as bdt_err;

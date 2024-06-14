@@ -4,8 +4,10 @@ use log::*;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
+use bucky_error::BuckyError;
+use bucky_objects::{Endpoint, Protocol};
+use bucky_raw_codec::{RawDecode, RawDecodeWithContext, RawFixedBytes};
 use crate::runtime::{TcpListener, TcpStream};
-use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
 use crate::error::{BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::history::keystore::{EncryptedKey, Keystore};
@@ -225,8 +227,8 @@ impl TCPListener {
     async fn accept(&self, socket: TcpStream) -> Result<(Arc<TCPSocket>, PackageBox), BdtError> {
         let remote = socket.peer_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
         let local = socket.local_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
-        let remote = Endpoint::from((endpoint::Protocol::Tcp, remote));
-        let local = Endpoint::from((endpoint::Protocol::Tcp, local));
+        let remote = Endpoint::from((Protocol::Tcp, remote));
+        let local = Endpoint::from((Protocol::Tcp, local));
 
         let mut recv_buf = [0u8; MTU_LARGE];
         let (box_type, box_buf) =

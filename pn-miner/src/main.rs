@@ -1,6 +1,5 @@
 use async_std::task;
 use clap::{App, Arg};
-use cyfs_base::*;
 use cyfs_p2p::pn::{self, service::ProxyServiceEvents};
 use std::{
     io::Read,
@@ -9,6 +8,10 @@ use std::{
     str::FromStr,
     time::Duration,
 };
+use bucky_crypto::PrivateKey;
+use bucky_error::BuckyError;
+use bucky_objects::{Device, NamedObject};
+
 mod auth;
 
 const APP_NAME: &str = "pn-miner";
@@ -37,7 +40,6 @@ fn load_device_info(folder_path: &Path) -> Result<(Device, PrivateKey), BuckyErr
 async fn main() {
     let command = App::new(APP_NAME)
         .about("pn miner demo")
-        .version(cyfs_base::get_version())
         .arg(
             Arg::with_name("port")
                 .short("p")
@@ -46,17 +48,17 @@ async fn main() {
                 .help("auth server port")
                 .default_value("80"),
         );
-    cyfs_debug::CyfsLoggerBuilder::new_app(APP_NAME)
-        .level("info")
-        .console("warn")
-        .build()
-        .unwrap()
-        .start();
-
-    cyfs_debug::PanicBuilder::new(APP_NAME, APP_NAME)
-        .exit_on_panic(true)
-        .build()
-        .start();
+    // cyfs_debug::CyfsLoggerBuilder::new_app(APP_NAME)
+    //     .level("info")
+    //     .console("warn")
+    //     .build()
+    //     .unwrap()
+    //     .start();
+    //
+    // cyfs_debug::PanicBuilder::new(APP_NAME, APP_NAME)
+    //     .exit_on_panic(true)
+    //     .build()
+    //     .start();
 
     let matches = command.get_matches();
     let auth_port = u16::from_str(matches.value_of("port").unwrap())
@@ -64,7 +66,7 @@ async fn main() {
         .unwrap();
 
     task::block_on(async {
-        let data_folder = ::cyfs_util::get_app_data_dir(APP_NAME);
+        let data_folder = std::env::current_dir().unwrap().join(APP_NAME);
 
         if let Ok((local_device, private_key)) = load_device_info(data_folder.as_path()) {
             log::info!(

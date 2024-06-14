@@ -1,5 +1,5 @@
 use std::time::SystemTime;
-use cyfs_base::*;
+use bucky_objects::{Device, DeviceId};
 use crate::protocol::{ReceiptWithSignature, SnServiceReceipt};
 
 pub type IsRequestReceipt = bool;

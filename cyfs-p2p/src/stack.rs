@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
-use cyfs_base::{Device, Endpoint, NamedObject, PrivateKey};
+use bucky_crypto::PrivateKey;
+use bucky_objects::{Device, Endpoint, NamedObject};
 use once_cell::sync::OnceCell;
 use crate::executor::Executor;
 use crate::history::keystore::{Keystore};

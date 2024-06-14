@@ -6,7 +6,8 @@ use std::{
 };
 use std::sync::Arc;
 use as_any::Downcast;
-use cyfs_base::*;
+use bucky_objects::{Endpoint, NamedObject, Protocol};
+use bucky_raw_codec::{RawDecodeWithContext, RawEncodeWithContext};
 use crate::{
     types::*,
     protocol::{*, v0::*},

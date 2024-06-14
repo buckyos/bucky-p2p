@@ -1,5 +1,7 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
+use bucky_crypto::PrivateKey;
+use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol};
 
 use cyfs_base::*;
 use cyfs_p2p::{LocalDevice, sn::service::*};
@@ -45,9 +47,9 @@ impl SnServiceContractServer for SnServiceContractServerImpl {
 
 #[async_std::main]
 async fn main() {
-    let data_folder = cyfs_util::get_app_data_dir(APP_NAME);
+    let data_folder = std::env::current_dir().unwrap().join(APP_NAME);
     let default_desc_path = data_folder.join(APP_NAME);
-    let matches = clap::App::new(APP_NAME).version(cyfs_base::get_version())
+    let matches = clap::App::new(APP_NAME)
         .arg(clap::Arg::with_name("desc").short("d").long("desc").takes_value(true)
             .default_value(default_desc_path.to_str().unwrap())
             .help("sn desc/sec files, exclude extension")).get_matches();
@@ -55,17 +57,17 @@ async fn main() {
     match load_device_info(Path::new(matches.value_of("desc").unwrap())) {
         Ok((device, private_key)) => {
             let unique_id = String::from_utf8_lossy(device.desc().unique_id().as_slice());
-            cyfs_debug::CyfsLoggerBuilder::new_app(APP_NAME)
-                .level("info")
-                .console("warn")
-                .build()
-                .unwrap()
-                .start();
-
-            cyfs_debug::PanicBuilder::new(APP_NAME, unique_id.as_ref())
-                .exit_on_panic(true)
-                .build()
-                .start();
+            // cyfs_debug::CyfsLoggerBuilder::new_app(APP_NAME)
+            //     .level("info")
+            //     .console("warn")
+            //     .build()
+            //     .unwrap()
+            //     .start();
+            //
+            // cyfs_debug::PanicBuilder::new(APP_NAME, unique_id.as_ref())
+            //     .exit_on_panic(true)
+            //     .build()
+            //     .start();
 
             log::info!("sn-miner load device from {}, id {}", matches.value_of("desc").unwrap(), device.desc().object_id());
 

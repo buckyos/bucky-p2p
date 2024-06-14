@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
-use cyfs_base::{DeviceId, Endpoint};
+use bucky_objects::Endpoint;
 use crate::error::BdtResult;
 use crate::history::keystore::Keystore;
 use crate::LocalDeviceRef;

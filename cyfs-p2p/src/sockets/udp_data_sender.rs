@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use cyfs_base::{BuckyError, DeviceDesc, DeviceId, Endpoint, RawEncodeWithContext};
+use bucky_objects::{DeviceDesc, DeviceId, Endpoint};
+use bucky_raw_codec::RawEncodeWithContext;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::MixAesKey;
 use crate::protocol::{MTU_LARGE, PackageBox, PackageBoxEncodeContext};

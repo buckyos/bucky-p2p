@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use cyfs_base::{DeviceId, Endpoint};
+use bucky_objects::{DeviceId, Endpoint};
 use crate::error::BdtResult;
 use crate::MixAesKey;
 use crate::protocol::DynamicPackage;

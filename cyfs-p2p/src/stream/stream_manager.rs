@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use bucky_objects::Device;
 use callback_result::SingleCallbackWaiter;
-use cyfs_base::Device;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::sockets::SocketType;

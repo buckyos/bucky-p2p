@@ -1,7 +1,8 @@
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::AtomicPtr;
-use cyfs_base::{AesKey, RawDecode, RawEncode, RawFixedBytes};
+use bucky_crypto::AesKey;
+use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::stream::{Stream, StreamReader, StreamWriter};

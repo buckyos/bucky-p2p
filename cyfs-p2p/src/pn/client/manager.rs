@@ -4,7 +4,7 @@ use std::{
     collections::BTreeSet
 };
 use std::sync::Arc;
-use cyfs_base::*;
+use bucky_objects::{Device, DeviceId, NamedObject};
 use crate::{
     protocol::{*, v0::*},
 };

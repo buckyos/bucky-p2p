@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use cyfs_base::{BuckyError, BuckyErrorCode, DeviceId, Endpoint, Protocol};
+use bucky_error::{BuckyError, BuckyErrorCode};
+use bucky_objects::{Endpoint, Protocol};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;

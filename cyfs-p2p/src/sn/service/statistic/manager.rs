@@ -1,10 +1,12 @@
 
 use std::{sync::{RwLock, Arc}, collections::{BTreeMap, }, time::Duration};
+use std::net::SocketAddr;
+use bucky_objects::DeviceId;
+use bucky_time::bucky_time_now;
 
-use cyfs_base::{DeviceId, bucky_time_now, SocketAddr, };
-use cyfs_util::SqliteStorage;
 use once_cell::sync::OnceCell;
 use crate::executor::Executor;
+use super::super::storage::SqliteStorage;
 
 use crate::Timestamp;
 
@@ -104,11 +106,11 @@ impl StatisticManager {
 }
 
 mod test {
+    use bucky_objects::DeviceId;
+    use bucky_time::bucky_time_now;
 
     #[test]
     fn test() {
-        use cyfs_base::{DeviceId, bucky_time_now};
-
         use crate::TempSeq;
 
         use super::StatisticManager;

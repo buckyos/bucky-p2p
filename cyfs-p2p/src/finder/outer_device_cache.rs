@@ -1,7 +1,7 @@
-use cyfs_base::*;
 use async_trait::async_trait;
 
 use std::sync::Arc;
+use bucky_objects::{AnyNamedObject, Device, DeviceId, ObjectId};
 use crate::error::BdtResult;
 
 #[async_trait]

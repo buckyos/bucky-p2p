@@ -11,9 +11,9 @@ description = "Rust sn-miner-rust package"
 [dependencies]
 log = "0.4"
 async-std = "1.11"
-cyfs-base = "0.6.12"
-cyfs-debug = "0.6.6"
-cyfs-util = "0.6.8"
 cyfs-p2p = { path = "../cyfs-p2p" }
 clap = "2"
 sfo-result = { version = "0.2.4", features = ["backtrace", "log"] }
+bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
+bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
+bucky-error = {git = "https://github.com/buckyos/bucky-error.git"}

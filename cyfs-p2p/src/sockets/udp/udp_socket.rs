@@ -1,9 +1,11 @@
 use std::sync::RwLock;
-use cyfs_base::{BuckyError, BuckyErrorCode, Endpoint, Protocol, RawEncodeWithContext};
+use bucky_error::BuckyError;
+use bucky_objects::{Endpoint, Protocol};
 use socket2::{Socket, Domain, Type};
 use crate::protocol::{PackageBox, PackageBoxEncodeContext};
 use crate::types::MixAesKey;
 use crate::runtime::UdpSocket;
+use crate::sockets::net_util::init_udp_socket;
 
 pub struct UDPSocket {
     local: Endpoint,
@@ -66,7 +68,7 @@ impl UDPSocket {
                     match bind_socket(&default_local, recv_buffer) {
                         Ok(socket) => {
                             // 避免udp被对端reset
-                            cyfs_util::init_udp_socket(&socket).map(|_| socket)
+                            init_udp_socket(&socket).map(|_| socket)
                         }
                         Err(err) => Err(BuckyError::from(err)),
                     }

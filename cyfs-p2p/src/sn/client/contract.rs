@@ -3,9 +3,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
     collections::{HashMap, hash_map::Entry}
 };
-use cyfs_base::*;
+use bucky_crypto::PrivateKey;
+use bucky_objects::{Device, DeviceId, NamedObject};
 use crate::{
-    types::*, 
+    types::*,
     protocol::{*, v0::*}
 };
 use super::super::types::*;
@@ -16,10 +17,10 @@ pub trait ServiceAppraiser: Send + Sync {
     // local_receipt：从上次向SN提供服务清单后产生的服务清单
     // last_receipt: 上次向SN提供的可能丢失的服务清单
     fn appraise(
-        &self, 
-        sn: &Device, 
-        local_receipt: &Option<SnServiceReceipt>, 
-        last_receipt: &Option<SnServiceReceipt>, 
+        &self,
+        sn: &Device,
+        local_receipt: &Option<SnServiceReceipt>,
+        last_receipt: &Option<SnServiceReceipt>,
         receipt_from_sn: &Option<SnServiceReceipt>
     ) -> SnServiceGrade;
 }

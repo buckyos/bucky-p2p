@@ -1,6 +1,6 @@
+use bucky_error::BuckyErrorCode;
+use bucky_objects::Endpoint;
 use crate::protocol::*;
-use cyfs_base::Endpoint;
-use cyfs_base::BuckyErrorCode;
 
 #[derive(Clone, Debug)]
 pub struct PingSessionResp {

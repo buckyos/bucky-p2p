@@ -3,8 +3,9 @@ use std::net::Shutdown;
 use std::ops::Deref;
 use std::sync::{Arc};
 use std::time::Duration;
+use bucky_objects::{DeviceDesc, DeviceId, Endpoint, Protocol};
+use bucky_raw_codec::{RawDecode, RawDecodeWithContext, RawFixedBytes};
 use crate::runtime::{Mutex, TcpStream};
-use cyfs_base::{BuckyError, BuckyErrorCode, DeviceDesc, DeviceId, Endpoint, RawDecode, RawDecodeWithContext, RawFixedBytes};
 use futures::{AsyncReadExt, AsyncWriteExt};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::protocol::{OtherBoxTcpDecodeContext, PackageBox};
@@ -68,7 +69,7 @@ impl TCPSocket {
             .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?
             .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?;
         let local = socket.local_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
-        let local = Endpoint::from((cyfs_base::endpoint::Protocol::Tcp, local));
+        let local = Endpoint::from((Protocol::Tcp, local));
         let socket = Self {
             socket,
             local,

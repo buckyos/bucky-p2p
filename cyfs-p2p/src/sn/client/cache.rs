@@ -2,7 +2,7 @@ use std::{
     sync::{RwLock},
     collections::{BTreeSet, BTreeMap}
 };
-use cyfs_base::*;
+use bucky_objects::DeviceId;
 use crate::{
     types::*,
 };

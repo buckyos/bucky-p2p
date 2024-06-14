@@ -1,5 +1,4 @@
-
-use cyfs_base::{Device, ObjectId};
+use bucky_objects::{Device, ObjectId};
 use crate::error::BdtResult;
 
 use super::k_bucket::{KadEntry, KBuckets, KBucketResult};

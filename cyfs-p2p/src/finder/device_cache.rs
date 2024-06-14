@@ -3,7 +3,7 @@ use std::{
     time::Duration,
     collections::{BTreeMap}
 };
-use cyfs_base::*;
+use bucky_objects::{Device, DeviceId, NamedObject};
 use mini_moka::sync::{Cache, CacheBuilder};
 use crate::executor::Executor;
 use super::outer_device_cache::*;

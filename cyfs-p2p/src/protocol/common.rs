@@ -6,12 +6,15 @@ mod dep {
     pub use std::rc::Rc;
     pub use std::str::FromStr;
 
-    pub use cyfs_base::*;
-
     pub use crate::types::*;
 }
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use bucky_crypto::{AesKey, HashValue, PrivateKey};
+use bucky_error::{BuckyError, BuckyErrorCode};
+use bucky_objects::{Area, Device, DeviceCategory, DeviceId, NamedObject, RsaCPUObjectVerifier, Signature, SignatureSource, Signer, SingleKeyObjectDesc, UniqueId, Verifier};
+use bucky_raw_codec::{RawConvertTo, RawDecode, RawDecodeWithContext, RawEncode, RawEncodePurpose, RawEncodeWithContext};
+use bucky_time::bucky_time_now;
 pub(super) use dep::*;
 use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 
@@ -19,6 +22,7 @@ pub const MTU: usize = 1472;
 pub const MTU_LARGE: usize = 1024*30;
 
 pub mod merge_context {
+    use bucky_raw_codec::{RawEncode, RawMergable};
     use super::dep::*;
 
     pub trait Encode {
@@ -207,6 +211,8 @@ pub mod merge_context {
 }
 
 pub(super) mod context {
+    use bucky_error::{BuckyError, BuckyErrorCode};
+    use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes, RawMergable};
     use super::dep::*;
     use super::merge_context;
     use super::*;
