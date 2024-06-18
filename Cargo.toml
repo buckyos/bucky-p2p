@@ -4,5 +4,6 @@ members = [
     "./cyfs-p2p",
     "./pn-miner",
     "./sn-miner-rust",
+    "bucky-rustls",
     "cyfs-p2p-test",
 ]

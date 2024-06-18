@@ -11,6 +11,7 @@ bucky-error = {git = "https://github.com/buckyos/bucky-error.git", features = ["
 bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
 bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
 bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
+bucky-rustls = { path = "../bucky-rustls" }
 
 async-std = { version = '1.12', features = ['unstable', 'attributes'], optional = true }
 tokio = { version = "1.37.0", optional = true}
