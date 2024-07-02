@@ -14,7 +14,7 @@ impl ServerCertVerifier for BuckyServerCertVerifier {
     fn verify_server_cert(&self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], server_name: &ServerName<'_>, _ocsp_response: &[u8], _now: UnixTime) -> Result<ServerCertVerified, Error> {
         let device = Device::clone_from_slice(end_entity.as_ref()).map_err(|_e| Error::InvalidCertificate(CertificateError::BadEncoding))?;
         let server_name = server_name.to_str().to_string();
-        if device.desc().device_id().to_string() == server_name {
+        if device.desc().device_id().object_id().to_base36() == server_name {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(Error::General("Invalid server name".to_string()))

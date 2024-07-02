@@ -10,7 +10,7 @@ use bucky_error::BuckyErrorCode;
 use bucky_time::bucky_time_now;
 use crate::{
     types::*,
-    protocol::{DynamicPackage, PackageBox}
+    protocol::{Package, PackageBox}
 };
 use crate::protocol::MTU_LARGE;
 use crate::sockets::DataSender;
@@ -59,7 +59,7 @@ impl ResendQueue {
     pub async fn send(
         &self,
         sender: Arc<dyn DataSender>,
-        pkg: DynamicPackage,
+        pkg: Package,
         pkg_id: u32,
         pkg_nick_name: String) {
         let now = bucky_time_now();

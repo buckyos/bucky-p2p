@@ -5,11 +5,10 @@ use bucky_objects::Device;
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
-use crate::sockets::SocketType;
 use crate::stream::StreamGuard;
 use crate::stream::udp_stream::UdpStream;
 use super::tcp_stream::TcpStream;
-use crate::tunnel::{TunnelGuard, TunnelManagerRef, TunnelType};
+use crate::tunnel::{SocketType, TunnelGuard, TunnelManagerRef, TunnelType};
 
 struct StreamListenerState {
     abort_handle: Option<AbortHandle>,

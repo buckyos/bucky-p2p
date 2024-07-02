@@ -6,7 +6,7 @@ use bucky_raw_codec::{RawDecode, RawDecodeWithContext};
 use crate::executor::Executor;
 use crate::history::keystore;
 use crate::history::keystore::{EncryptedKey, Keystore};
-use crate::protocol::{DynamicPackage, Exchange, merge_context, MTU_LARGE, PackageBox, PackageBoxDecodeContext, SnCall};
+use crate::protocol::{Package, Exchange, merge_context, MTU_LARGE, PackageBox, PackageBoxDecodeContext, SnCall};
 use crate::sockets::udp::udp_socket::{UDPSocket};
 use super::super::UpdateOuterResult;
 use crate::types::{LocalDeviceRef, MixAesKey};

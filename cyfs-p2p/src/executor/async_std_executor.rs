@@ -7,6 +7,7 @@ use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 
 pub struct Executor;
 
+pub type SpawnHandle<Output> = RemoteHandle<Output>;
 static EXECUTOR: OnceCell<ThreadPool> = OnceCell::new();
 
 impl Executor {
@@ -20,7 +21,7 @@ impl Executor {
         });
     }
 
-    pub fn spawn_with_handle<Fut>(future: Fut) -> BdtResult<RemoteHandle<Fut::Output>>
+    pub fn spawn_with_handle<Fut>(future: Fut) -> BdtResult<SpawnHandle<Fut::Output>>
         where
             Fut: Future + Send + 'static,
             Fut::Output: Send, {

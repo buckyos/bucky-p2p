@@ -7,12 +7,21 @@ use rustls::sign::{Signer, SigningKey};
 use rustls::{SignatureAlgorithm, SignatureScheme};
 
 #[derive(Clone, Debug)]
-pub struct EcdsaSigningKeyP256 {
+pub struct BuckyKey {
     key: PrivateKey,
     scheme: SignatureScheme,
 }
 
-impl TryFrom<PrivateKeyDer<'_>> for EcdsaSigningKeyP256 {
+impl BuckyKey {
+    pub fn new(key: PrivateKey) -> Self {
+        Self {
+            key,
+            scheme: SignatureScheme::RSA_PSS_SHA256,
+        }
+    }
+}
+
+impl TryFrom<PrivateKeyDer<'_>> for BuckyKey {
     type Error = BuckyError;
 
     fn try_from(value: PrivateKeyDer<'_>) -> Result<Self, Self::Error> {
@@ -29,7 +38,7 @@ impl TryFrom<PrivateKeyDer<'_>> for EcdsaSigningKeyP256 {
     }
 }
 
-impl SigningKey for EcdsaSigningKeyP256 {
+impl SigningKey for BuckyKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
         if offered.contains(&self.scheme) {
             Some(Box::new(self.clone()))
@@ -43,7 +52,7 @@ impl SigningKey for EcdsaSigningKeyP256 {
     }
 }
 
-impl Signer for EcdsaSigningKeyP256 {
+impl Signer for BuckyKey {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
         let sign = self.key.sign(message).map_err(|e| {
             rustls::Error::General(format!("sign error: {:?}", e))

@@ -3,25 +3,28 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use bucky_error::{BuckyError, BuckyErrorCode};
 use bucky_objects::{Endpoint, Protocol};
+use bucky_rustls::ServerCertResolverRef;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::executor::Executor;
+use crate::finder::DeviceCache;
 use crate::history::keystore::Keystore;
 use crate::LocalDeviceRef;
-use crate::protocol::{DynamicPackage, PackageCmdCode};
+use crate::protocol::{Package, PackageCmdCode};
+use crate::sockets::quic::{QuicListener, QuicListenerEventListener, QuicListenerRef};
 use crate::types::MixAesKey;
 use super::tcp::{TCPListener, TcpListenerEventListener, TCPListenerRef};
-use super::udp::{UDPListener, UDPListenerEventListener, UDPListenerRef, UdpPackageBox, UDPSocket};
 use super::UpdateOuterResult;
 
 pub struct NetListener {
-    udp: Vec<UDPListenerRef>,
+    udp: Vec<QuicListenerRef>,
     tcp: Vec<TCPListenerRef>,
 }
 pub type NetListenerRef = Arc<NetListener>;
 
 impl NetListener {
     pub async fn open(
-        key_store: Arc<Keystore>,
+        device_cache: Arc<DeviceCache>,
+        cert_resolver: ServerCertResolverRef,
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
         tcp_accept_timout: Duration,
@@ -91,11 +94,11 @@ impl NetListener {
                             dst_port
                         })
                     };
-                    let udp_listener = UDPListener::new(
-                                                        key_store.clone(),
-                                                        udp_sn_only,
-                                                        udp_recv_buffer);
-                    let ret= udp_listener.bind(&local, out, mapping_port).await;
+                    let udp_listener = QuicListener::new(
+                        device_cache.clone(),
+                        cert_resolver.clone(),
+                        tcp_accept_timout);
+                    let ret= udp_listener.bind(local.clone(), out, mapping_port).await;
                     listener.udp.push(udp_listener);
                     ret
                 },
@@ -113,7 +116,7 @@ impl NetListener {
                             dst_port
                         })
                     };
-                    let mut tcp_listener = TCPListener::new(key_store.clone(), tcp_accept_timout);
+                    let mut tcp_listener = TCPListener::new(device_cache.clone(), cert_resolver.clone(), tcp_accept_timout);
                     let ret = tcp_listener.bind(local, out, mapping_port).await;
                     listener.tcp.push(tcp_listener);
                     ret
@@ -136,7 +139,7 @@ impl NetListener {
         Ok(Arc::new(listener))
     }
 
-    pub fn set_udp_listener_event_listener(&self, listener: Arc<dyn UDPListenerEventListener>) {
+    pub fn set_udp_listener_event_listener(&self, listener: Arc<dyn QuicListenerEventListener>) {
         for udp in self.udp.iter() {
             udp.set_listener(listener.clone());
         }
@@ -275,7 +278,7 @@ impl NetListener {
     }
 
 
-    pub fn udp_of(&self, ep: &Endpoint) -> Option<&UDPListenerRef> {
+    pub fn udp_of(&self, ep: &Endpoint) -> Option<&QuicListenerRef> {
         for i in &self.udp {
             if i.local() == *ep {
                 return Some(i);
@@ -284,7 +287,7 @@ impl NetListener {
         None
     }
 
-    pub fn udp(&self) -> &Vec<UDPListenerRef> {
+    pub fn udp(&self) -> &Vec<QuicListenerRef> {
         &self.udp
     }
 

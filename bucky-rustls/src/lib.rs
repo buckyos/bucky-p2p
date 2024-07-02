@@ -5,15 +5,18 @@ mod sign;
 mod kx;
 mod server_cert_verifier;
 mod client_cert_verifier;
+mod server_cert_resolver;
 
 use std::sync::Arc;
 use rustls::crypto::{CryptoProvider, GetRandomFailed, WebPkiSupportedAlgorithms};
+use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
 use rustls::Error;
 use rustls::pki_types::PrivateKeyDer;
 use rustls::sign::SigningKey;
-use crate::sign::EcdsaSigningKeyP256;
+use crate::sign::BuckyKey;
 pub use server_cert_verifier::*;
 pub use client_cert_verifier::*;
+pub use server_cert_resolver::*;
 
 pub fn provider() -> CryptoProvider {
     CryptoProvider {
@@ -42,7 +45,7 @@ impl rustls::crypto::SecureRandom for Provider {
 
 impl rustls::crypto::KeyProvider for Provider {
     fn load_private_key(&self, key_der: PrivateKeyDer<'static>) -> Result<Arc<dyn SigningKey>, Error> {
-        EcdsaSigningKeyP256::try_from(key_der)
+        BuckyKey::try_from(key_der)
             .map(|key| Arc::new(key) as Arc<dyn SigningKey>).map_err(|e| Error::General(e.to_string()))
     }
 }
@@ -50,15 +53,3 @@ impl rustls::crypto::KeyProvider for Provider {
 static ALL_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     TLS13_AES_128_GCM_SHA256,
 ];
-
-pub static TLS13_AES_128_GCM_SHA256: rustls::SupportedCipherSuite =
-    rustls::SupportedCipherSuite::Tls13(&rustls::Tls13CipherSuite {
-        common: rustls::crypto::CipherSuiteCommon {
-            suite: rustls::CipherSuite::TLS13_AES_128_GCM_SHA256,
-            hash_provider: &hash::Sha256,
-            confidentiality_limit: u64::MAX,
-        },
-        hkdf_provider: &rustls::crypto::tls13::HkdfUsingHmac(&hmac::Sha256Hmac),
-        aead_alg: &aead::AesPoly,
-        quic: None,
-    });

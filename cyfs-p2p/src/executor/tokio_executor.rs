@@ -4,7 +4,7 @@ use tokio::task::JoinHandle;
 use crate::error::BdtResult;
 
 pub struct Executor;
-
+pub type SpawnHandle<Output> = JoinHandle<Output>;
 static EXECUTOR: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 
 impl Executor {

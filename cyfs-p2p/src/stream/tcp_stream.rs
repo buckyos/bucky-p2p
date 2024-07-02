@@ -167,7 +167,7 @@ impl TcpStreamReader {
         let tunnel = self.tunnel.clone();
         let tcp_tunnel = tunnel.get_tunnel_connection::<TcpTunnelConnection>().unwrap();
         let mut header_buf = [0u8; 16];
-        tcp_tunnel.recv_exact(&mut header_buf[..box_header_len()]).await?;
+        tcp_tunnel.read_exact(&mut header_buf[..box_header_len()]).await?;
         let (len, _) = u16::raw_decode(header_buf.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError, "tunnel {:?} raw decode box", self.tunnel.get_sequence()))?;
         let len = len as usize;
         if len > buffer.len() - box_header_len() {

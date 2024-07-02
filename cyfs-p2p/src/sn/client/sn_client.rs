@@ -7,11 +7,9 @@ use callback_result::{CallbackWaiter, WaiterError};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::history::keystore;
 use crate::history::keystore::Keystore;
-use crate::protocol::{Exchange, MTU_LARGE, PackageBox, PackageBoxEncodeContext, SnCall, SnPing};
+use crate::protocol::{MTU_LARGE, SnCall, SnPing};
 use crate::protocol::v0::{SnCalledResp, SnPingResp};
-use crate::sockets::DataSender;
 use super::super::types::PingSessionResp;
-use crate::sockets::udp::UDPSocket;
 use crate::types::{LocalDeviceRef, TempSeqGenerator};
 
 #[derive(Clone)]

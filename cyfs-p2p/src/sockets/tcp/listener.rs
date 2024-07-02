@@ -1,17 +1,22 @@
 use std::io::ErrorKind;
-use std::net::Shutdown;
+use std::str::FromStr;
 use log::*;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 use bucky_error::BuckyError;
-use bucky_objects::{Endpoint, Protocol};
-use bucky_raw_codec::{RawDecode, RawDecodeWithContext, RawFixedBytes};
-use crate::runtime::{TcpListener, TcpStream};
-use crate::error::{BdtError, BdtErrorCode, BdtResult, into_bdt_err};
+use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, Protocol};
+use bucky_raw_codec::{RawConvertTo, RawDecode, RawDecodeWithContext, RawFixedBytes, RawFrom};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::ServerConfig;
+use rustls::version::TLS13;
+use bucky_rustls::ServerCertResolverRef;
+use crate::runtime::{TcpListener, TcpStream, TlsAcceptor};
+use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
+use crate::finder::DeviceCache;
 use crate::history::keystore::{EncryptedKey, Keystore};
-use crate::protocol::{Exchange, FirstBoxTcpDecodeContext, MTU_LARGE, PackageBox, PackageBoxDecodeContext, PackageCmdCode};
+use crate::protocol::{MTU_LARGE, PackageCmdCode};
 use crate::runtime;
 use crate::types::LocalDeviceRef;
 use super::super::UpdateOuterResult;
@@ -21,8 +26,7 @@ use super::TCPSocket;
 pub trait TcpListenerEventListener: Send + Sync + 'static {
     async fn on_new_connection(
         &self,
-        socket: Arc<TCPSocket>,
-        first_box: PackageBox,
+        socket: TCPSocket,
     ) -> BdtResult<()>;
 }
 
@@ -34,10 +38,12 @@ struct TCPListenerState {
 }
 
 pub(crate) struct TCPListener {
-    key_store: Arc<Keystore>,
+    device_cache: Arc<DeviceCache>,
+    cert_resolver: ServerCertResolverRef,
     accept_timout: Duration,
     state: RwLock<TCPListenerState>,
     tcp_listener: RwLock<Option<Arc<dyn TcpListenerEventListener>>>,
+    tls_acceptor: TlsAcceptor,
 }
 pub(crate) type TCPListenerRef = Arc<TCPListener>;
 
@@ -49,11 +55,22 @@ enum BoxType {
 
 impl TCPListener {
     pub fn new(
-        key_store: Arc<Keystore>,
+        device_cache: Arc<DeviceCache>,
+        cert_resolver: ServerCertResolverRef,
         accept_timout: Duration,
     ) -> Arc<Self> {
+        let mut server_config =
+            ServerConfig::builder_with_provider(bucky_rustls::provider().into())
+                .with_protocol_versions(&[&TLS13])
+                .unwrap()
+                .with_client_cert_verifier(Arc::new(bucky_rustls::BuckyClientCertVerifier::new()))
+                .with_cert_resolver(cert_resolver.clone());
+
+        server_config.key_log = Arc::new(rustls::KeyLogFile::new());
+
         Arc::new(Self {
-            key_store,
+            device_cache,
+            cert_resolver,
             accept_timout,
             state: RwLock::new(TCPListenerState {
                 local: None,
@@ -62,6 +79,7 @@ impl TCPListener {
                 mapping_port: None,
             }),
             tcp_listener: RwLock::new(None),
+            tls_acceptor: TlsAcceptor::from(Arc::new(server_config)),
         })
     }
 
@@ -102,14 +120,15 @@ impl TCPListener {
         self.state.read().unwrap().mapping_port
     }
 
-    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> Result<(), BuckyError> {
+    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> Result<(), BdtError> {
         let socket = {
             if local.addr().is_ipv6() {
                 #[cfg(windows)]
                 {
                     let mut default_local = Endpoint::default_tcp(&local);
                     default_local.mut_addr().set_port(local.addr().port());
-                    TcpListener::bind(default_local.addr()).await.map_err(|err| BuckyError::from(err))
+                    TcpListener::bind(default_local.addr()).await
+                        .map_err(into_bdt_err!(BdtErrorCode::AlreadyExists, "bind port failed"))
                 }
                 #[cfg(not(windows))]
                 {
@@ -141,7 +160,7 @@ impl TCPListener {
                                 .unwrap(),
                         ) < 0
                         {
-                            Err(BuckyError::from((
+                            Err(BdtError::from((
                                 BuckyErrorCode::AlreadyExists,
                                 "bind port failed",
                             )))
@@ -153,9 +172,9 @@ impl TCPListener {
             } else if local.is_sys_default() {
                 let mut default_local = Endpoint::default_tcp(&local);
                 default_local.mut_addr().set_port(local.addr().port());
-                TcpListener::bind(default_local.addr()).await.map_err(|err| BuckyError::from(err))
+                TcpListener::bind(default_local.addr()).await.map_err(into_bdt_err!(BdtErrorCode::AlreadyExists, "bind port failed"))
             } else {
-                TcpListener::bind(local.addr()).await.map_err(|err| BuckyError::from(err))
+                TcpListener::bind(local.addr()).await.map_err(into_bdt_err!(BdtErrorCode::AlreadyExists, "bind port failed"))
             }
         }?;
 
@@ -168,141 +187,65 @@ impl TCPListener {
         Ok(())
     }
 
-    #[cfg(feature = "runtime-tokio")]
-    async fn read_exact(socket: &TcpStream, buf: &mut [u8]) -> Result<(), BdtError> {
-        let mut data: &mut [u8] = buf;
-        while data.len() > 0 {
-            socket.readable().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-            match socket.try_read(data) {
-                Ok(n) => {
-                    data = &mut data[n..];
-                },
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(BdtError::from((BdtErrorCode::IoError, "", e)));
-                }
-            }
-        }
-        Ok(())
-    }
-    async fn receive_box<'a>(
-        socket: &TcpStream,
-        recv_buf: &'a mut [u8],
-    ) -> Result<(BoxType, &'a mut [u8]), BdtError> {
-        let header_len = u16::raw_bytes().unwrap();
-        let box_header = &mut recv_buf[..header_len];
-        #[cfg(feature = "runtime-async-std")]
-        {
-            use async_std::io::ReadExt;
-            socket.clone().read_exact(box_header).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        }
-        #[cfg(feature = "runtime-tokio")]
-        Self::read_exact(socket, box_header).await?;
-        let mut box_len = u16::raw_decode(box_header).map(|(v, _)| v as usize).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-        let box_type = if box_len > 32768 {
-            box_len -= 32768;
-            BoxType::RawData
-        } else {
-            BoxType::Package
-        };
-        if box_len + header_len > recv_buf.len() {
-            return Err(BdtError::new(
-                BdtErrorCode::OutOfLimit,
-                "buffer not enough".to_string(),
-            ));
-        }
-        let box_buf = &mut recv_buf[header_len..(header_len + box_len)];
-        #[cfg(feature = "runtime-async-std")]
-        {
-            use async_std::io::ReadExt;
-            socket.clone().read_exact(box_buf).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        }
-        #[cfg(feature = "runtime-tokio")]
-        Self::read_exact(socket, box_buf).await?;
-        Ok((box_type, box_buf))
-    }
-
-    async fn accept(&self, socket: TcpStream) -> Result<(Arc<TCPSocket>, PackageBox), BdtError> {
+    async fn accept(&self, socket: TcpStream) -> Result<TCPSocket, BdtError> {
         let remote = socket.peer_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
         let local = socket.local_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
         let remote = Endpoint::from((Protocol::Tcp, remote));
         let local = Endpoint::from((Protocol::Tcp, local));
 
-        let mut recv_buf = [0u8; MTU_LARGE];
-        let (box_type, box_buf) =
-            runtime::timeout(self.accept_timout, Self::receive_box(&socket, &mut recv_buf)).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))??;
-        if box_type != BoxType::Package {
-            let msg = format!("recv first box raw data from {}", remote);
-            error!("{}", msg);
-            return Err(BdtError::new(BdtErrorCode::InvalidData, msg));
+        let tls_stream = self.tls_acceptor.accept(socket).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+        let (_, tls_conn) = tls_stream.get_ref();
+        let cert = tls_conn.peer_certificates();
+        if cert.is_none() {
+            return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
         }
-        let first_box = {
-            let context =
-                FirstBoxTcpDecodeContext::new_inplace(box_buf.as_mut_ptr(), box_buf.len(), self.key_store.as_ref());
-            PackageBox::raw_decode_with_context(box_buf, context)
-                .map(|(package_box, _)| package_box).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?
-        };
+        let cert = cert.unwrap();
+        if cert.len() == 0 {
+            return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
+        }
 
-        let exchg = match first_box.packages().get(0) {
-            Some(first_pkg) => match first_pkg.cmd_code() {
-                PackageCmdCode::Exchange => first_pkg.as_any().downcast_ref::<Exchange>(),
-                _ => None,
-            },
-            None => return Err(BdtError::new(BdtErrorCode::InvalidData, "no package".to_string())),
-        };
-        if let Some(exchg) = exchg {
-            if !exchg.verify(first_box.local()).await {
-                warn!("tcp exchg verify failed.");
-                return Err(BdtError::new(
-                    BdtErrorCode::InvalidData,
-                    "sign-verify failed".to_string(),
-                ));
-            }
-            self.key_store.add_key(first_box.key(), first_box.local(), first_box.remote(), EncryptedKey::Unconfirmed(exchg.key_encrypted.clone()));
-        }
-        info!("recv key {}", first_box.key());
-        Ok((Arc::new(TCPSocket::new(socket, first_box.local().clone(), first_box.remote().clone(), local, remote, first_box.key().clone())), first_box))
+        let local_device_id = DeviceId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "decode cert failed."))?;
+        let remote_device = Device::clone_from_slice(cert[0].as_ref()).map_err(into_bdt_err!(BdtErrorCode::CertError, "decode cert failed."))?;
+        let remote_id = remote_device.desc().device_id();
+        self.device_cache.add(&remote_id, &remote_device);
+        Ok(TCPSocket::new(runtime::TlsStream::from(tls_stream), local_device_id, remote_id, local, remote))
     }
 
     pub fn start(self: &Arc<Self>) {
         let this = self.clone();
-        let socket = self.state.read().unwrap().socket.clone().unwrap();
+        let socket: Arc<TcpListener> = self.state.read().unwrap().socket.clone().unwrap();
         let tcp_listener = self.tcp_listener.read().unwrap().as_ref().unwrap().clone();
-        thread::spawn(move || {
-            Executor::block_on(async move {
-                loop {
-                    match socket.accept().await {
-                        Ok((socket, _from_addr)) => {
-                            let tcp_listener = tcp_listener.clone();
-                            let this = this.clone();
-                            Executor::spawn(async move {
-                                match this.accept(socket).await {
-                                    Ok((socket, first_box)) => {
-                                        if let Err(e) = tcp_listener.on_new_connection(socket, first_box).await {
-                                            error!("tcp-listener accept error({}).", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("tcp-listener accept a stream, but the first package read failed. err: {}", e);
+        Executor::spawn(async move {
+            loop {
+                match socket.accept().await {
+                    Ok((socket, _from_addr)) => {
+                        let tcp_listener = tcp_listener.clone();
+                        let this = this.clone();
+                        Executor::spawn(async move {
+                            match this.accept(socket).await {
+                                Ok(socket) => {
+                                    if let Err(e) = tcp_listener.on_new_connection(socket).await {
+                                        error!("tcp-listener accept error({}).", e);
                                     }
                                 }
-                            });
-                        }
-                        Err(e) => match e.kind() {
-                            ErrorKind::Interrupted
-                            | ErrorKind::WouldBlock
-                            | ErrorKind::AlreadyExists
-                            | ErrorKind::TimedOut => continue,
-                            _ => {
-                                warn!("tcp-listener accept fatal error({}). will stop.", e);
-                                break;
+                                Err(e) => {
+                                    warn!("tcp-listener accept a stream, but the first package read failed. err: {}", e);
+                                }
                             }
-                        },
+                        });
                     }
+                    Err(e) => match e.kind() {
+                        ErrorKind::Interrupted
+                        | ErrorKind::WouldBlock
+                        | ErrorKind::AlreadyExists
+                        | ErrorKind::TimedOut => continue,
+                        _ => {
+                            warn!("tcp-listener accept fatal error({}). will stop.", e);
+                            break;
+                        }
+                    },
                 }
-            });
+            }
         });
     }
 

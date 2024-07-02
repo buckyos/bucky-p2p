@@ -11,13 +11,20 @@ pub struct BuckyClientCertVerifier {
     pub subjects: Vec<DistinguishedName>,
 }
 
+impl BuckyClientCertVerifier {
+    pub fn new() -> Self {
+        Self {
+            subjects: vec![],
+        }
+    }
+}
+
 impl ClientCertVerifier for BuckyClientCertVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         self.subjects.as_slice()
     }
 
-    fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
-        let _device = Device::clone_from_slice(end_entity.as_ref()).map_err(|_e| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+    fn verify_client_cert(&self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
         Ok(ClientCertVerified::assertion())
     }
 

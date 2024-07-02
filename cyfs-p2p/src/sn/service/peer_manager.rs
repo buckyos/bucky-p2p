@@ -12,7 +12,6 @@ use crate::{
 };
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult};
 use crate::sn::service::statistic::{PeerStatus, StatisticManager};
-use crate::sockets::{DataSender};
 
 struct Config {
     pub client_ping_interval: Duration,
@@ -31,7 +30,7 @@ impl Default for Config {
 
 pub struct FoundPeer {
     pub desc: Device,
-    pub sender: Arc<dyn DataSender>,
+    // pub sender: Arc<dyn DataSender>,
     pub is_wan: bool,
     pub peer_status: PeerStatus,
 }
@@ -39,7 +38,7 @@ pub struct FoundPeer {
 
 struct CachedPeerInfo {
     pub desc: Device,
-    pub sender: Arc<dyn DataSender>,
+    // pub sender: Arc<dyn DataSender>,
     pub aes_key: Option<MixAesKey>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
@@ -74,7 +73,7 @@ fn contain_addr(dev: &Device, addr: &SocketAddr) -> bool {
 impl CachedPeerInfo {
     fn new(
         desc: Device,
-        sender: Arc<dyn DataSender>,
+        // sender: Arc<dyn DataSender>,
         aes_key: Option<&MixAesKey>,
         send_time: Timestamp,
         seq: TempSeq,
@@ -83,7 +82,7 @@ impl CachedPeerInfo {
             is_wan: has_wan_endpoint(&desc),
             last_ping_seq: seq,
             desc,
-            sender,
+            // sender,
             aes_key: aes_key.map(|k| k.clone()),
             last_send_time: send_time,
             last_call_time: 0,
@@ -97,7 +96,7 @@ impl CachedPeerInfo {
     fn to_found_peer(&self) -> FoundPeer {
         FoundPeer {
             desc: self.desc.clone(),
-            sender: self.sender.clone(),
+            // sender: self.sender.clone(),
             is_wan: self.is_wan,
             peer_status: self.peer_status.clone(),
         }
@@ -204,100 +203,101 @@ impl PeerManager {
         &self,
         peerid: DeviceId,
         peer_desc: &Option<Device>,
-        sender: Arc<dyn DataSender>,
+        // sender: Arc<dyn DataSender>,
         aes_key: Option<&MixAesKey>,
         send_time: Timestamp,
         seq: TempSeq) -> bool {
-
-        let exist_cache_found = |cached_peer: &mut CachedPeerInfo| -> bool {
-            if cached_peer.last_send_time > send_time {
-                log::warn!("ping send-time little.");
-                return false;
-            }
-            if let Some(desc) = peer_desc {
-                if let Err(e) = cached_peer.update_desc(desc) {
-                    log::warn!("ping update device-info failed, err: {:?}", e);
-                    return false;
-                }
-                log::debug!("ping update device-info, endpoints: {:?}", desc.connect_info().endpoints());
-            } else {
-                log::debug!("ping without device-info.");
-            }
-
-
-            let recount_req = match (send_time - cached_peer.last_send_time) / self.config.client_ping_interval.as_micros() as u64 {
-
-                0 => {
-                    let recode = if cached_peer.last_ping_seq >= seq {
-                        false
-                    } else {
-                        (seq.value() - cached_peer.last_ping_seq.value()) > 50
-                    };
-
-                    cached_peer.peer_status.wait_online(send_time, recode);
-
-                    recode
-                }
-                _ => {
-                    cached_peer.peer_status.online(seq, send_time);
-                    true
-                }
-            };
-
-            cached_peer.last_send_time = send_time;
-            if recount_req {
-                cached_peer.last_ping_seq = seq;
-            }
-
-            // 客户端被签名的地址才被更新，避免恶意伪装
-            if contain_addr(&cached_peer.desc, sender.remote().addr())
-                || cached_peer.sender.key().mix_key != sender.key().mix_key {
-                cached_peer.sender = sender.clone();
-            }
-
-            if let Some(k) = aes_key {
-                cached_peer.update_key(k);
-            }
-
-            true
-        };
-
-        let mut peers = self.peers.lock().unwrap();
-        // 1.从活跃peer中搜索已有cache
-        if let Some(p) = peers.active_peers.get_mut(&peerid) {
-            return exist_cache_found(p);
-        }
-
-        // 2.从待淘汰peer中搜索已有cache
-        let to_active = if let hash_map::Entry::Occupied(mut entry) = peers.knock_peers.entry(peerid.clone()) {
-            if !exist_cache_found(entry.get_mut()) {
-                return false;
-            }
-            Some(entry.remove())
-        } else {
-            None
-        };
-        if let Some(to_active) = to_active {
-            let old = peers.active_peers.insert(peerid.clone(), to_active);
-            assert!(old.is_none());
-            return true;
-        }
-
-        // 3.新建cache
-        match peer_desc {
-            Some(desc) => {
-                let old = peers.active_peers.insert(peerid.clone(),
-                                                    CachedPeerInfo::new(desc.clone(),
-                                                                        sender,
-                                                                        aes_key,
-                                                                        send_time,
-                                                                        seq,
-                                                                        self.statistic_manager.get_peer_status(peerid.clone(), send_time)));
-                assert!(old.is_none());
-                true
-            }
-            None => false
-        }
+        todo!()
+        //
+        // let exist_cache_found = |cached_peer: &mut CachedPeerInfo| -> bool {
+        //     if cached_peer.last_send_time > send_time {
+        //         log::warn!("ping send-time little.");
+        //         return false;
+        //     }
+        //     if let Some(desc) = peer_desc {
+        //         if let Err(e) = cached_peer.update_desc(desc) {
+        //             log::warn!("ping update device-info failed, err: {:?}", e);
+        //             return false;
+        //         }
+        //         log::debug!("ping update device-info, endpoints: {:?}", desc.connect_info().endpoints());
+        //     } else {
+        //         log::debug!("ping without device-info.");
+        //     }
+        //
+        //
+        //     let recount_req = match (send_time - cached_peer.last_send_time) / self.config.client_ping_interval.as_micros() as u64 {
+        //
+        //         0 => {
+        //             let recode = if cached_peer.last_ping_seq >= seq {
+        //                 false
+        //             } else {
+        //                 (seq.value() - cached_peer.last_ping_seq.value()) > 50
+        //             };
+        //
+        //             cached_peer.peer_status.wait_online(send_time, recode);
+        //
+        //             recode
+        //         }
+        //         _ => {
+        //             cached_peer.peer_status.online(seq, send_time);
+        //             true
+        //         }
+        //     };
+        //
+        //     cached_peer.last_send_time = send_time;
+        //     if recount_req {
+        //         cached_peer.last_ping_seq = seq;
+        //     }
+        //
+        //     // 客户端被签名的地址才被更新，避免恶意伪装
+        //     if contain_addr(&cached_peer.desc, sender.remote().addr())
+        //         || cached_peer.sender.key().mix_key != sender.key().mix_key {
+        //         cached_peer.sender = sender.clone();
+        //     }
+        //
+        //     if let Some(k) = aes_key {
+        //         cached_peer.update_key(k);
+        //     }
+        //
+        //     true
+        // };
+        //
+        // let mut peers = self.peers.lock().unwrap();
+        // // 1.从活跃peer中搜索已有cache
+        // if let Some(p) = peers.active_peers.get_mut(&peerid) {
+        //     return exist_cache_found(p);
+        // }
+        //
+        // // 2.从待淘汰peer中搜索已有cache
+        // let to_active = if let hash_map::Entry::Occupied(mut entry) = peers.knock_peers.entry(peerid.clone()) {
+        //     if !exist_cache_found(entry.get_mut()) {
+        //         return false;
+        //     }
+        //     Some(entry.remove())
+        // } else {
+        //     None
+        // };
+        // if let Some(to_active) = to_active {
+        //     let old = peers.active_peers.insert(peerid.clone(), to_active);
+        //     assert!(old.is_none());
+        //     return true;
+        // }
+        //
+        // // 3.新建cache
+        // match peer_desc {
+        //     Some(desc) => {
+        //         let old = peers.active_peers.insert(peerid.clone(),
+        //                                             CachedPeerInfo::new(desc.clone(),
+        //                                                                 sender,
+        //                                                                 aes_key,
+        //                                                                 send_time,
+        //                                                                 seq,
+        //                                                                 self.statistic_manager.get_peer_status(peerid.clone(), send_time)));
+        //         assert!(old.is_none());
+        //         true
+        //     }
+        //     None => false
+        // }
     }
 
     pub fn try_knock_timeout(&self, now: Timestamp) -> Option<Vec<DeviceId>> {

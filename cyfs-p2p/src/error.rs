@@ -90,6 +90,10 @@ pub enum BdtErrorCode {
     RawCodecError,
     SignError,
     StreamPortAlreadyListen,
+    CertError,
+    TlsError,
+    QuicError,
+    TunnelNotConnected,
 }
 
 impl BdtErrorCode {

@@ -22,9 +22,8 @@ use crate::error::BdtResult;
 use crate::executor::Executor;
 use crate::history::keystore::EncryptedKey;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sockets::{NetListener, DataSender, SocketType, UdpDataSender, NetListenerRef};
+use crate::sockets::{NetListener, NetListenerRef};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
-use crate::sockets::udp::{UDPListenerEventListener, UdpPackageBox, UDPSocket};
 
 use super::{
     call_stub::CallStub,
@@ -72,7 +71,7 @@ impl SnService {
             },
         ));
         let net_listener = NetListener::open(
-            key_store.clone(),
+            local_device.clone(),
             local_device.device().connect_info().endpoints().as_slice(),
             None,
             Duration::from_secs(30),
@@ -102,22 +101,22 @@ impl SnService {
 
         let peer_manager = service.peer_manager().clone();
         let mut resend_queue = ResendQueue::new(Duration::from_millis(200), 5);
-        resend_queue.set_callback(move |pkg: Arc<PackageBox>, errno: BuckyErrorCode| {
-            let peer_manager = peer_manager.clone();
-            async move {
-                if let Some(p) = pkg.packages_no_exchange()
-                    .get(0)
-                    .map(| p | {
-                        let p: &SnCalled = p.as_ref();
-                        p
-                    }) {
-                    peer_manager.find_peer(&p.peer_info.desc().device_id())
-                        .map(| requestor | {
-                            requestor.peer_status.record(p.to_peer_id.clone(), p.call_seq, errno);
-                        });
-                }
-            }
-        });
+        // resend_queue.set_callback(move |pkg: Arc<PackageBox>, errno: BuckyErrorCode| {
+        //     let peer_manager = peer_manager.clone();
+        //     async move {
+        //         if let Some(p) = pkg.packages_no_exchange()
+        //             .get(0)
+        //             .map(| p | {
+        //                 let p: &SnCalled = p.as_ref();
+        //                 p
+        //             }) {
+        //             peer_manager.find_peer(&p.peer_info.desc().device_id())
+        //                 .map(| requestor | {
+        //                     requestor.peer_status.record(p.to_peer_id.clone(), p.call_seq, errno);
+        //                 });
+        //         }
+        //     }
+        // });
         service.resend_queue = Some(resend_queue);
         let service_ref = Arc::new(service);
 
@@ -171,7 +170,7 @@ impl SnService {
         &self.peer_mgr
     }
 
-    async fn send_resp(&self, mut sender: Arc<dyn DataSender>, pkg: DynamicPackage, send_log: String) -> BdtResult<()> {
+    async fn send_resp(&self, mut sender: Arc<dyn DataSender>, pkg: Package, send_log: String) -> BdtResult<()> {
         if let Err(e) = sender.send_dynamic_pkg(pkg).await {
             warn!("{} send failed. error: {}.", send_log, e.to_string());
             Err(e)
@@ -328,7 +327,7 @@ impl SnService {
 
         self.send_resp(
             resp_sender,
-            DynamicPackage::from(ping_resp),
+            Package::from(ping_resp),
             format!("{}", log_key),
         ).await?;
 
@@ -400,7 +399,7 @@ impl SnService {
 
         self.send_resp(
             resp_sender,
-            DynamicPackage::from(ping_resp),
+            Package::from(ping_resp),
             format!("{}", log_key),
         ).await?;
         Ok(())
@@ -589,7 +588,7 @@ impl SnService {
                             );
                             self.resend_queue().send(
                                 to_peer_cache.sender.clone(),
-                                DynamicPackage::from(called_req),
+                                Package::from(called_req),
                                 called_seq.value(),
                                 called_log,
                             ).await;
@@ -638,7 +637,7 @@ impl SnService {
 
         self.send_resp(
             resp_sender,
-            DynamicPackage::from(call_resp),
+            Package::from(call_resp),
             format!("{} call-resp", log_key),
         );
     }

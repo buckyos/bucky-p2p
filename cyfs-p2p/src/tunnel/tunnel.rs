@@ -5,19 +5,17 @@ use std::net::Shutdown;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use as_any::Downcast;
-use bucky_objects::{Device, NamedObject};
+use bucky_objects::{Device, DeviceId, NamedObject};
 use callback_result::CallbackWaiter;
-use crate::protocol::{AckTunnel, DynamicPackage, PackageBox, PackageCmdCode, SynTunnel};
-use crate::sockets::{DataSender, NetManagerRef, SocketType};
+use crate::protocol::{AckTunnel, Package, PackageCmdCode, SynTunnel};
+use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::protocol::v0::PingTunnel;
 use crate::receive_processor::ReceiveDispatcherRef;
 use crate::sockets::tcp::TCPSocket;
-use crate::tunnel::tunnel_connection::{TunnelConnectionKey};
-use crate::tunnel::{TunnelConnection, TunnelType};
+use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
 use crate::tunnel::tcp_tunnel_connection::TcpTunnelConnection;
-use crate::tunnel::udp_tunnel_connection::{UdpTunnelConnection, UdpTunnelDataReceiverRef};
+use crate::tunnel::quic_tunnel_connection::{QuicTunnelConnection};
 
 
 pub enum TunnelStatus {
@@ -36,90 +34,77 @@ pub struct TunnelReceiver {
 
 pub struct Tunnel {
     net_manager: NetManagerRef,
-    receive_dispatcher: ReceiveDispatcherRef,
     sequence: TempSeq,
     tunnel_conn: Option<Box<dyn TunnelConnection>>,
-    data_receiver: UdpTunnelDataReceiverRef,
     state: Mutex<TunnelState>,
     protocol_version: u8,
     stack_version: u32,
-    duration: Duration,
     local_device: LocalDeviceRef,
-    remote_device: Device,
+    remote: Device,
     conn_timeout: Duration,
+    listen_ports: TunnelListenPortsRef,
 }
 
 impl Tunnel {
     pub fn new(
         net_manager: NetManagerRef,
-        receive_dispatcher: ReceiveDispatcherRef,
         sequence: TempSeq,
         protocol_version: u8,
         stack_version: u32,
-        remote_device: Device,
+        remote: Device,
         local_device: LocalDeviceRef,
         conn_timeout: Duration,
-        data_receiver: UdpTunnelDataReceiverRef, ) -> Self {
+        listen_ports: TunnelListenPortsRef,) -> Self {
         Self {
             net_manager,
-            receive_dispatcher,
             sequence,
             tunnel_conn: None,
-            data_receiver,
             state: Mutex::new(TunnelState { status: TunnelStatus::Connecting }),
             protocol_version,
             stack_version,
-            duration: Default::default(),
             local_device,
-            remote_device,
+            remote,
             conn_timeout,
+            listen_ports,
         }
     }
 
-    pub(crate) fn accept_tcp_tunnel(mut self, listen_ports: HashSet<u16>, socket: Arc<TCPSocket>, first_box: PackageBox) -> impl Future<Output=BdtResult<Self>> + Send {
-        let mut tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
-                                                       self.sequence,
-                                                       self.local_device.clone(),
-                                                       self.remote_device.desc().clone(),
-                                                       socket.remote().clone(),
-                                                       self.conn_timeout,
-                                                       self.protocol_version,
-                                                       self.stack_version,
-                                                       Some(socket),
-                                                       self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap());
-        async move {
-            tunnel_conn.accept_tunnel(listen_ports, first_box.packages_no_exchange()).await?;
-            self.tunnel_conn = Some(Box::new(tunnel_conn));
-            Ok(self)
-        }
+    pub(crate) fn accept_tcp_tunnel(&mut self, socket: TCPSocket) -> BdtResult<()> {
+        let mut tunnel_conn = TcpTunnelConnection::new(
+            self.sequence,
+            self.local_device.clone(),
+            self.remote.desc().device_id(),
+            socket.remote().clone(),
+            self.conn_timeout,
+            self.protocol_version,
+            self.stack_version,
+            Some(socket),
+            self.listen_ports.clone())?;
+        // tunnel_conn.accept_tunnel(listen_ports).await?;
+        self.tunnel_conn = Some(Box::new(tunnel_conn));
+        Ok(())
     }
 
-    pub(crate) fn accept_udp_tunnel(mut self, listen_ports: HashSet<u16>, data_sender: Arc<dyn DataSender>) -> impl Future<Output=BdtResult<Self>> + Send {
-        let mut tunnel_conn = match data_sender.socket_type() {
-            SocketType::TCP => {
-                unreachable!("TCP socket is not supported")
-            }
-            SocketType::UDP => {
-                let tunnel_conn = UdpTunnelConnection::new(self.net_manager.clone(),
-                                                           self.data_receiver.clone(),
-                                                           self.sequence,
-                                                           self.local_device.clone(),
-                                                           self.remote_device.desc().clone(),
-                                                           data_sender.remote().clone(),
-                                                           self.conn_timeout,
-                                                           self.protocol_version,
-                                                           self.stack_version,
-                                                           data_sender.local().clone(),
-                                                           Some(data_sender));
-                Box::new(tunnel_conn)
-            }
-        };
+    pub(crate) fn accept_quic_tunnel(&mut self, data_sender: QuicSocket) -> BdtResult<()> {
+        let tunnel_conn = QuicTunnelConnection::new(
+            self.net_manager.clone(),
+            self.sequence,
+            self.local_device.clone(),
+            self.remote.desc().device_id(),
+            data_sender.remote().clone(),
+            self.conn_timeout,
+            self.protocol_version,
+            self.stack_version,
+            data_sender.local().clone(),
+            Some(data_sender),
+            self.listen_ports.clone());
 
-        async move {
-            tunnel_conn.accept_tunnel(listen_ports).await?;
-            self.tunnel_conn = Some(tunnel_conn);
-            Ok(self)
-        }
+        self.tunnel_conn = Some(Box::new(tunnel_conn));
+        Ok(())
+    }
+
+    pub(crate) async fn accept_instance(&self) -> BdtResult<TunnelInstance> {
+        self.tunnel_conn.as_ref().unwrap().accept_instance().await
     }
 
     pub fn get_sequence(&self) -> TempSeq {
@@ -130,41 +115,29 @@ impl Tunnel {
         self.tunnel_conn.as_ref().unwrap().socket_type()
     }
 
-    pub fn tunnel_type(&self) -> TunnelType {
-        self.tunnel_conn.as_ref().unwrap().tunnel_type()
+    pub fn is_idle(&self) -> bool {
+        self.tunnel_conn.as_ref().unwrap().is_idle()
     }
 
-    pub fn key(&self) -> &MixAesKey {
-        self.tunnel_conn.as_ref().unwrap().tunnel_key()
-    }
-
-    pub fn get_tunnel_connection<T: TunnelConnection>(&self) -> Option<&T> {
-        self.tunnel_conn.as_ref().and_then(|conn| {
-            conn.downcast_ref::<T>()
-        })
-    }
-
-    pub async fn connect_tunnel(&mut self) -> BdtResult<()> {
+    pub async fn connect(&mut self) -> BdtResult<()> {
         if self.tunnel_conn.is_some() {
             return Ok(());
         }
 
-        let ep_list = self.remote_device.connect_info().endpoints();
+        let ep_list = self.remote.connect_info().endpoints();
         for ep in ep_list.iter() {
             if ep.is_tcp() {
                 if ep.is_static_wan() {
-                    let processor = self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap();
-                    let mut tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
-                                                                   self.sequence,
-                                                                   self.local_device.clone(),
-                                                                   self.remote_device.desc().clone(),
-                                                                   ep.clone(),
-                                                                   self.conn_timeout,
-                                                                   self.protocol_version,
-                                                                   self.stack_version,
-                                                                   None,
-                                                                   processor);
-                    tunnel_conn.connect_tunnel().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                    let mut tunnel_conn = TcpTunnelConnection::new(
+                        self.sequence,
+                        self.local_device.clone(),
+                        self.remote.desc().device_id(),
+                        ep.clone(),
+                        self.conn_timeout,
+                        self.protocol_version,
+                        self.stack_version,
+                        None, self.listen_ports.clone())?;
+                    tunnel_conn.connect().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
                     self.tunnel_conn = Some(Box::new(tunnel_conn));
                     return Ok(());
                 }
@@ -172,18 +145,18 @@ impl Tunnel {
                 if ep.is_static_wan() {
                     for listener in self.net_manager.udp_listeners().iter() {
                         let local_ep = listener.local();
-                        let mut tunnel_conn = UdpTunnelConnection::new(self.net_manager.clone(),
-                                                                       self.data_receiver.clone(),
-                                                                       self.sequence,
-                                                                       self.local_device.clone(),
-                                                                       self.remote_device.desc().clone(),
-                                                                       ep.clone(),
-                                                                       self.conn_timeout,
-                                                                       self.protocol_version,
-                                                                       self.stack_version,
-                                                                       local_ep.clone(),
-                                                                       None);
-                        tunnel_conn.connect_tunnel().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                        let mut tunnel_conn = QuicTunnelConnection::new(self.net_manager.clone(),
+                                                                        self.sequence,
+                                                                        self.local_device.clone(),
+                                                                        self.remote.desc().device_id(),
+                                                                        ep.clone(),
+                                                                        self.conn_timeout,
+                                                                        self.protocol_version,
+                                                                        self.stack_version,
+                                                                        local_ep.clone(),
+                                                                        None,
+                                                                        self.listen_ports.clone());
+                        tunnel_conn.connect().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
                         self.tunnel_conn = Some(Box::new(tunnel_conn));
                         return Ok(());
                     }
@@ -193,58 +166,25 @@ impl Tunnel {
         Err(bdt_err!(BdtErrorCode::ConnectFailed, "No available endpoint"))
     }
 
-    pub async fn connect_stream_tunnel(&mut self, vport: u16, session_id: IncreaseId) -> BdtResult<()> {
-        if self.tunnel_conn.is_some() {
-            return Ok(());
+    pub async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+        if self.tunnel_conn.is_none() {
+            return Err(bdt_err!(BdtErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
-        let ep_list = self.remote_device.connect_info().endpoints();
-        for ep in ep_list.iter() {
-            if ep.is_tcp() {
-                if ep.is_static_wan() {
-                    let processor = self.receive_dispatcher.get_processor(self.local_device.device_id()).unwrap();
-                    let mut tunnel_conn = TcpTunnelConnection::new(self.net_manager.clone(),
-                                                                   self.sequence,
-                                                                   self.local_device.clone(),
-                                                                   self.remote_device.desc().clone(),
-                                                                   ep.clone(),
-                                                                   self.conn_timeout,
-                                                                   self.protocol_version,
-                                                                   self.stack_version,
-                                                                   None,
-                                                                   processor);
-                    tunnel_conn.connect_stream(vport, session_id).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
-                    self.tunnel_conn = Some(Box::new(tunnel_conn));
-                    return Ok(());
-                }
-            } else if ep.is_udp() {
-                if ep.is_static_wan() {
-                    for listener in self.net_manager.udp_listeners().iter() {
-                        let local_ep = listener.local();
-                        let mut tunnel_conn = UdpTunnelConnection::new(self.net_manager.clone(),
-                                                                       self.data_receiver.clone(),
-                                                                       self.sequence,
-                                                                       self.local_device.clone(),
-                                                                       self.remote_device.desc().clone(),
-                                                                       ep.clone(),
-                                                                       self.conn_timeout,
-                                                                       self.protocol_version,
-                                                                       self.stack_version,
-                                                                       local_ep.clone(),
-                                                                       None);
-                        tunnel_conn.connect_stream(vport, session_id).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
-                        self.tunnel_conn = Some(Box::new(tunnel_conn));
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        Err(bdt_err!(BdtErrorCode::ConnectFailed, "No available endpoint"))
+        self.tunnel_conn.as_ref().unwrap().open_stream(vport, session_id).await
     }
 
-    pub async fn shutdown(&self, how: Shutdown) -> BdtResult<()> {
+    pub async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+        if self.tunnel_conn.is_none() {
+            return Err(bdt_err!(BdtErrorCode::TunnelNotConnected, "Tunnel not connected"));
+        }
+
+        self.tunnel_conn.as_ref().unwrap().open_datagram().await
+    }
+
+    pub async fn shutdown(&self) -> BdtResult<()> {
         if self.tunnel_conn.is_some() {
-            self.tunnel_conn.as_ref().unwrap().shutdown(how).await
+            self.tunnel_conn.as_ref().unwrap().shutdown().await
         } else {
             Ok(())
         }

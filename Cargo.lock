@@ -1168,6 +1168,7 @@ dependencies = [
  "callback-result",
  "callback-trait",
  "futures",
+ "futures-rustls",
  "libc",
  "log",
  "md5",
@@ -1186,6 +1187,7 @@ dependencies = [
  "sha2 0.8.2",
  "socket2 0.5.7",
  "tokio",
+ "tokio-rustls",
  "winapi",
  "x509-cert",
 ]
@@ -1198,6 +1200,7 @@ dependencies = [
  "bucky-objects",
  "clap",
  "cyfs-p2p",
+ "flexi_logger",
  "serde",
  "serde_json",
  "tokio",
@@ -1458,6 +1461,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdeb3aa5e95cf9aabc17f060cfa0ced7b83f042390760ca53bf09df9968acaa1"
 
 [[package]]
+name = "flexi_logger"
+version = "0.28.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cca927478b3747ba47f98af6ba0ac0daea4f12d12f55e9104071b3dc00276310"
+dependencies = [
+ "chrono",
+ "glob",
+ "log",
+ "nu-ansi-term",
+ "regex",
+ "thiserror",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1558,6 +1575,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.66",
+]
+
+[[package]]
+name = "futures-rustls"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f2f12607f92c69b12ed746fabf9ca4f5c482cba46679c1a75b874ed7c26adb"
+dependencies = [
+ "futures-io",
+ "rustls",
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -2325,6 +2353,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6554346f0032fd123eb39eb7b05aa65ee122bc51090bae1291c86e8d077a8a65"
 
 [[package]]
+name = "nu-ansi-term"
+version = "0.50.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd2800e1520bdc966782168a627aa5d1ad92e33b984bf7c7615d31280c83ff14"
+dependencies = [
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2834,6 +2871,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rustc-hash",
+ "rustls",
  "thiserror",
  "tokio",
  "tracing",
@@ -2847,7 +2885,9 @@ checksum = "ddf517c03a109db8100448a4be38d498df8a210a99fe0e1b9eaf39e78c640efe"
 dependencies = [
  "bytes",
  "rand 0.8.5",
+ "ring",
  "rustc-hash",
+ "rustls",
  "rustls-platform-verifier",
  "slab",
  "thiserror",
@@ -3869,6 +3909,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba4f4a02a7a80d6f274636f0aa95c7e383b912d41fe721a31f29e29698585a4a"
 dependencies = [
  "backtrace",
+ "bytes",
  "libc",
  "mio",
  "num_cpus",
@@ -3887,6 +3928,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.66",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c7bc40d0e5a97695bb96e27995cd3a08538541b0a846f65bba7a359f36700d4"
+dependencies = [
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
 ]
 
 [[package]]

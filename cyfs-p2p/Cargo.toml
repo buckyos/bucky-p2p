@@ -14,7 +14,9 @@ bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
 bucky-rustls = { path = "../bucky-rustls" }
 
 async-std = { version = '1.12', features = ['unstable', 'attributes'], optional = true }
+futures-rustls = { version = "0.26", default-features = false, optional = true }
 tokio = { version = "1.37.0", optional = true}
+tokio-rustls = {  version = "0.26.0", default-features = false, optional = true }
 async-trait = "0.1.74"
 log = "0.4.20"
 futures = { version = '0.3', features = ['default', 'thread-pool'] }
@@ -35,7 +37,7 @@ sfo-result = { version = "0.2.4", features = ["backtrace", "log"] }
 as-any = "0.3.1"
 num-traits = "0.2"
 num-derive = "0.3"
-quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier"]}
+quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "rustls", "ring"] }
 quinn-proto = { version = "0.11", default-features = false, features = ["log"] }
 rustls = { version = "0.23.5", default-features = false, features = ["ring", "std"] }
 x509-cert = { version = "0.2.5", features = ["builder"] }
@@ -48,5 +50,5 @@ nix = '0.24'
 
 [features]
 default = ["runtime-tokio"]
-runtime-tokio = ["quinn/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net"]
-runtime-async-std = ["quinn/runtime-async-std", "async-std"]
+runtime-tokio = ["quinn/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/io-std", "tokio/io-util", "tokio-rustls"]
+runtime-async-std = ["quinn/runtime-async-std", "async-std", "futures-rustls"]

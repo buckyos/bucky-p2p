@@ -156,7 +156,7 @@ impl CommandTunnel {
             syn_proxy.from_peer_info.desc().device_id(),
             syn_proxy.to_peer_id.clone(),
             key.clone());
-        package_box.append(vec![DynamicPackage::from(ack_proxy)]);
+        package_box.append(vec![Package::from(ack_proxy)]);
 
         let mut context = PackageBoxEncodeContext::default();
         let _ = BOX_CRYPTO_BUFFER.with(|thread_crypto_buf| {

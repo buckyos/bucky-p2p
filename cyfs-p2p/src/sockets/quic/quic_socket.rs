@@ -1,0 +1,88 @@
+use std::sync::Arc;
+use bucky_objects::{DeviceId, Endpoint, Protocol};
+use bucky_raw_codec::RawConvertTo;
+use quinn_proto::crypto::rustls::QuicClientConfig;
+use quinn_proto::VarInt;
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::version::TLS13;
+use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::LocalDeviceRef;
+
+#[derive(Clone)]
+pub struct QuicSocket {
+    socket: quinn::Connection,
+    remote_device_id: DeviceId,
+    local_device_id: DeviceId,
+    local: Endpoint,
+    remote: Endpoint,
+}
+
+impl QuicSocket {
+    pub fn new(
+        socket: quinn::Connection,
+        local_device_id: DeviceId,
+        remote_device_id: DeviceId,
+        local: Endpoint,
+        remote: Endpoint,
+    ) -> Self {
+        Self {
+            socket,
+            local_device_id,
+            remote_device_id,
+            local,
+            remote,
+        }
+    }
+
+    pub async fn connect(local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint) -> BdtResult<Self> {
+        let client_key = local_device_ref.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        let client_cert = local_device_ref.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        let mut config =
+            rustls::ClientConfig::builder_with_provider(bucky_rustls::provider().into())
+                .with_protocol_versions(&[&TLS13])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(bucky_rustls::BuckyServerCertVerifier{}))
+                .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
+                .map_err(into_bdt_err!(BdtErrorCode::TlsError))?;
+        config.enable_early_data = true;
+
+        let mut client_config =
+            quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+        transport_config.max_concurrent_bidi_streams(1_u8.into());
+        transport_config.max_concurrent_uni_streams(1_u8.into());
+        client_config.transport_config(Arc::new(transport_config));
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+
+        let conn = endpoint.connect(remote.addr().clone(), remote_device_id.object_id().to_base36().as_str()).unwrap().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+        Ok(Self::new(conn, local_device_ref.device_id().clone(), remote_device_id, bucky_objects::Endpoint::from((Protocol::Udp, endpoint.local_addr().map_err(into_bdt_err!(BdtErrorCode::TlsError))?)), remote))
+    }
+    pub fn socket(&self) -> &quinn::Connection {
+        &self.socket
+    }
+
+    pub fn local(&self) -> &Endpoint {
+        &self.local
+    }
+
+    pub fn remote(&self) -> &Endpoint {
+        &self.remote
+    }
+
+    pub fn local_device_id(&self) -> &DeviceId {
+        &self.local_device_id
+    }
+
+    pub fn remote_device_id(&self) -> &DeviceId {
+        &self.remote_device_id
+    }
+
+    pub async fn shutdown(&self) -> BdtResult<()> {
+        self.socket.close(VarInt::from_u32(0), &[]);
+        Ok(())
+    }
+}
+

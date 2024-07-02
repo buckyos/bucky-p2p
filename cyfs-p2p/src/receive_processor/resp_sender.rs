@@ -2,12 +2,12 @@ use std::sync::Arc;
 use bucky_objects::{DeviceId, Endpoint};
 use crate::error::BdtResult;
 use crate::MixAesKey;
-use crate::protocol::DynamicPackage;
+use crate::protocol::Package;
 use crate::sockets::{DataSender, SocketType};
 
 pub struct RespSender {
     data_sender: Arc<dyn DataSender>,
-    pkg_cache: Vec<DynamicPackage>,
+    pkg_cache: Vec<Package>,
 }
 
 impl RespSender {
@@ -22,12 +22,12 @@ impl RespSender {
         self.data_sender.send_resp(data).await
     }
 
-    pub async fn send_dynamic_pkgs(&mut self, pkgs: Vec<DynamicPackage>) -> BdtResult<()> {
+    pub async fn send_dynamic_pkgs(&mut self, pkgs: Vec<Package>) -> BdtResult<()> {
         self.pkg_cache.extend(pkgs);
         Ok(())
     }
 
-    pub async fn send_dynamic_pkg(&mut self, pkg: DynamicPackage) -> BdtResult<()> {
+    pub async fn send_dynamic_pkg(&mut self, pkg: Package) -> BdtResult<()> {
         self.pkg_cache.push(pkg);
         Ok(())
     }

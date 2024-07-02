@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use std::sync::Arc;
-use bucky_crypto::{AesKey, KeyMixHash};
+use bucky_crypto::{AesKey, KeyMixHash, PrivateKey};
 use bucky_error::BuckyError;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, Protocol};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
@@ -325,14 +325,15 @@ impl EndpointPair {
 
 pub struct LocalDevice {
     device: Device,
+    private_key: PrivateKey,
     device_id: DeviceId,
 }
 pub type LocalDeviceRef = Arc<LocalDevice>;
 
 impl LocalDevice {
-    pub fn new(device: Device) -> Arc<Self> {
+    pub fn new(device: Device, private_key: PrivateKey) -> Arc<Self> {
         let device_id = device.desc().device_id();
-        Arc::new(Self { device, device_id })
+        Arc::new(Self { device, device_id, private_key })
     }
 
     pub fn device(&self) -> &Device {
@@ -341,5 +342,9 @@ impl LocalDevice {
 
     pub fn device_id(&self) -> &DeviceId {
         &self.device_id
+    }
+
+    pub fn key(&self) -> &PrivateKey {
+        &self.private_key
     }
 }
