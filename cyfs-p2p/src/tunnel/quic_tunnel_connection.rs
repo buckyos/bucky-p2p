@@ -14,7 +14,7 @@ use bucky_time::bucky_time_now;
 use callback_result::SingleCallbackWaiter;
 use notify_future::NotifyFuture;
 use quinn::{ReadError, RecvStream, SendStream};
-use quinn_proto::VarInt;
+use quinn::VarInt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::{IncreaseId, LocalDeviceRef, MixAesKey, runtime, TempSeq};
@@ -23,7 +23,7 @@ use crate::executor::Executor;
 use crate::history::keystore::EncryptedKey;
 use crate::protocol::{AckTunnel, Package, MTU, PackageCmdCode, SynTunnel, PackageHeader, MTU_LARGE};
 use crate::protocol::v0::{AckStream, SynStream};
-use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
+use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStat, TunnelStatRef, TunnelStream, TunnelType};
 
 #[derive(Debug, Eq, PartialEq)]
 enum TunnelState {
@@ -47,6 +47,7 @@ pub struct QuicTunnelConnectionImpl {
     local_ep: Endpoint,
     tunnel_state: TunnelState,
     listen_ports: TunnelListenPortsRef,
+    tunnel_stat: TunnelStatRef,
 }
 
 impl QuicTunnelConnectionImpl {
@@ -80,6 +81,7 @@ impl QuicTunnelConnectionImpl {
             local_ep,
             tunnel_state,
             listen_ports,
+            tunnel_stat: TunnelStat::new(),
         }
     }
 
@@ -98,7 +100,15 @@ impl QuicTunnelConnectionImpl {
         Ok((cmd_code, cmd_body))
     }
 
-    async fn open_stream_inner(socket: &quinn::Connection, sequence: TempSeq, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+    async fn open_stream_inner(socket: &quinn::Connection,
+                               sequence: TempSeq,
+                               vport: u16,
+                               session_id: IncreaseId,
+                               remote_id: DeviceId,
+                               local_id: DeviceId,
+                               remote_ep: Endpoint,
+                               local_ep: Endpoint,
+                               tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelStream>> {
         let (mut send, mut recv) = socket.open_bi().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
         let syn = SynStream {
             sequence,
@@ -110,23 +120,29 @@ impl QuicTunnelConnectionImpl {
         send.write_all(pkg.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
         send.flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
 
-        let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
-        if cmd_code != PackageCmdCode::AckStream {
-            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
-        }
+        // let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
+        // if cmd_code != PackageCmdCode::AckStream {
+        //     return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+        // }
+        //
+        // let ack = AckStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        // if ack.result != 0 {
+        //     return Err(bdt_err!(BdtErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+        // }
 
-        let ack = AckStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-        if ack.result != 0 {
-            return Err(bdt_err!(BdtErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
-        }
-
-        Ok(Box::new(QuicTunnelStream::new(vport, session_id, send, recv)))
+        Ok(Box::new(QuicTunnelStream::new(vport, session_id, sequence, remote_id, local_id, remote_ep, local_ep, send, recv, tunnel_stat)))
     }
 
-    async fn open_datagram_inner(socket: &quinn::Connection) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    async fn open_datagram_inner(socket: &quinn::Connection,
+                                 sequence: TempSeq,
+                                 remote_id: DeviceId,
+                                 local_id: DeviceId,
+                                 remote_ep: Endpoint,
+                                 local_ep: Endpoint,
+                                 tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelDatagramSend>> {
         let send = socket.open_uni().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
 
-        Ok(Box::new(QuicTunnelDatagramSend::new(send)))
+        Ok(Box::new(QuicTunnelDatagramSend::new(send, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat)))
     }
 }
 
@@ -174,6 +190,11 @@ impl TunnelConnection for QuicTunnelConnection {
         inner.tunnel_state == TunnelState::Idle
     }
 
+    fn tunnel_stat(&self) -> TunnelStatRef {
+        let inner = self.inner.lock().unwrap();
+        inner.tunnel_stat.clone()
+    }
+
     async fn connect(&self) -> BdtResult<()> {
         let (local_device, remote_id, remote_ep) = {
             let mut inner = self.inner.lock().unwrap();
@@ -187,20 +208,27 @@ impl TunnelConnection for QuicTunnelConnection {
         {
             let mut inner = self.inner.lock().unwrap();
             inner.data_socket = Some(socket);
+            inner.tunnel_state = TunnelState::Idle;
         }
 
         Ok(())
     }
 
     async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (conn, sequence) = {
+        let (conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error"));
+                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error {:?}", inner.tunnel_state));
             }
-            (inner.data_socket.as_ref().unwrap().socket().clone(), inner.sequence.clone())
+            (inner.data_socket.as_ref().unwrap().socket().clone(),
+             inner.sequence.clone(),
+             inner.remote_id.clone(),
+             inner.local_device.device_id().clone(),
+             inner.remote_ep.clone(),
+             inner.local_ep.clone(),
+             inner.tunnel_stat.clone())
         };
-        match QuicTunnelConnectionImpl::open_stream_inner(&conn, sequence, vport, session_id).await {
+        match QuicTunnelConnectionImpl::open_stream_inner(&conn, sequence, vport, session_id, remote_id, local_id, remote_ep, local_ep, tunnel_stat).await {
             Ok(stream) => {
                 Ok(stream)
             }
@@ -213,14 +241,20 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
-        let conn = {
+        let (conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat) = {
             let inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
                 return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error"));
             }
-            inner.data_socket.as_ref().unwrap().socket().clone()
+            (inner.data_socket.as_ref().unwrap().socket().clone(),
+             inner.sequence.clone(),
+             inner.remote_id.clone(),
+             inner.local_device.device_id().clone(),
+             inner.remote_ep.clone(),
+             inner.local_ep.clone(),
+             inner.tunnel_stat.clone())
         };
-        match QuicTunnelConnectionImpl::open_datagram_inner(&conn).await {
+        match QuicTunnelConnectionImpl::open_datagram_inner(&conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat).await {
             Ok(data) => {
                 Ok(data)
             }
@@ -233,9 +267,15 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn accept_instance(&self) -> BdtResult<TunnelInstance> {
-        let socket = {
+        let (socket, sequence, remote_id, remote_ep, local_id, local_ep, tunnel_stat) = {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket.as_ref().unwrap().socket().clone()
+            (inner.data_socket.as_ref().unwrap().socket().clone(),
+                inner.sequence,
+                inner.remote_id.clone(),
+                inner.remote_ep.clone(),
+                inner.local_device.device_id().clone(),
+                inner.local_ep.clone(),
+             inner.tunnel_stat.clone())
         };
         let (bi_accept, uni_accept) = {
             let bi_accept = socket.accept_bi();
@@ -252,23 +292,38 @@ impl TunnelConnection for QuicTunnelConnection {
                             return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel invalid syn stream"));
                         }
                         let syn = SynStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-                        return Ok(TunnelInstance::Stream(Box::new(QuicTunnelStream::new(syn.to_vport, syn.session_id, send, recv))))
+                        return Ok(TunnelInstance::Stream(Box::new(QuicTunnelStream::new(syn.to_vport,
+                            syn.session_id,
+                            sequence,
+                            remote_id,
+                            local_id,
+                            remote_ep,
+                            local_ep,
+                            send,
+                            recv,
+                            tunnel_stat))))
                     }
                     Err(e) => {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Error;
-                        return Err(bdt_err!(BdtErrorCode::IoError, "{}", e));
+                        return Err(bdt_err!(BdtErrorCode::IoError, "{:?}", e));
                     }}
             },
             ret = uni_accept => {
                 match ret {
                     Ok(recv) => {
-                        return Ok(TunnelInstance::Datagram(Box::new(QuicTunnelDatagramRecv::new(recv))))
+                        return Ok(TunnelInstance::Datagram(Box::new(QuicTunnelDatagramRecv::new(sequence,
+                            remote_id,
+                            local_id,
+                            remote_ep,
+                            local_ep,
+                            recv,
+                            tunnel_stat))))
                     }
                     Err(e) => {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Error;
-                        return Err(bdt_err!(BdtErrorCode::IoError, "{}", e));
+                        return Err(bdt_err!(BdtErrorCode::IoError, "{:?}", e));
                     }
                 }
             }
@@ -296,17 +351,39 @@ impl TunnelConnection for QuicTunnelConnection {
 pub struct QuicTunnelStream {
     port: u16,
     session_id: IncreaseId,
+    sequence: TempSeq,
+    remote_id: DeviceId,
+    local_id: DeviceId,
+    remote_ep: Endpoint,
+    local_ep: Endpoint,
     send: SendStream,
     recv: RecvStream,
+    tunnel_stat: TunnelStatRef,
 }
 
 impl QuicTunnelStream {
-    fn new(port: u16, session_id: IncreaseId, send: SendStream, recv: RecvStream) -> Self {
+    fn new(port: u16,
+           session_id: IncreaseId,
+           sequence: TempSeq,
+           remote_id: DeviceId,
+           local_id: DeviceId,
+           remote_ep: Endpoint,
+           local_ep: Endpoint,
+           send: SendStream,
+           recv: RecvStream,
+           tunnel_stat: TunnelStatRef,) -> Self {
+        tunnel_stat.increase_work_instance();
         Self {
             port,
             session_id,
+            sequence,
+            remote_id,
+            local_id,
+            remote_ep,
+            local_ep,
             send,
             recv,
+            tunnel_stat,
         }
     }
 }
@@ -380,6 +457,30 @@ impl TunnelStream for QuicTunnelStream {
         self.port
     }
 
+    fn session_id(&self) -> IncreaseId {
+        self.session_id
+    }
+
+    fn sequence(&self) -> TempSeq {
+        self.sequence
+    }
+
+    fn remote_device_id(&self) -> DeviceId {
+        self.remote_id.clone()
+    }
+
+    fn local_device_id(&self) -> DeviceId {
+        self.local_id.clone()
+    }
+
+    fn remote_endpoint(&self) -> Endpoint {
+        self.remote_ep.clone()
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        self.local_ep.clone()
+    }
+
     async fn close(&mut self) -> BdtResult<()> {
         self.send.finish().map_err(into_bdt_err!(BdtErrorCode::IoError))?;
         self.send.stopped().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
@@ -390,18 +491,39 @@ impl TunnelStream for QuicTunnelStream {
 
 impl Drop for QuicTunnelStream {
     fn drop(&mut self) {
+        log::info!("drop quic tunnel stream {:?}", self.sequence);
+        self.tunnel_stat.decrease_work_instance();
         let _ = Executor::block_on(self.close());
     }
 }
 
 pub struct QuicTunnelDatagramSend {
-    send: SendStream
+    sequence: TempSeq,
+    remote_id: DeviceId,
+    local_id: DeviceId,
+    remote_ep: Endpoint,
+    local_ep: Endpoint,
+    send: SendStream,
+    tunnel_stat: TunnelStatRef,
 }
 
 impl QuicTunnelDatagramSend {
-    fn new(send: SendStream) -> Self {
+    fn new(send: SendStream,
+           sequence: TempSeq,
+           remote_id: DeviceId,
+           local_id: DeviceId,
+           remote_ep: Endpoint,
+           local_ep: Endpoint,
+           tunnel_stat: TunnelStatRef,) -> Self {
+        tunnel_stat.increase_work_instance();
         Self {
-            send
+            sequence,
+            remote_id,
+            local_id,
+            remote_ep,
+            local_ep,
+            send,
+            tunnel_stat,
         }
     }
 }
@@ -453,6 +575,26 @@ impl AsyncWrite for QuicTunnelDatagramSend {
 
 #[async_trait::async_trait]
 impl TunnelDatagramSend for QuicTunnelDatagramSend {
+    fn sequence(&self) -> TempSeq {
+        self.sequence
+    }
+
+    fn remote_device_id(&self) -> DeviceId {
+        self.remote_id.clone()
+    }
+
+    fn local_device_id(&self) -> DeviceId {
+        self.local_id.clone()
+    }
+
+    fn remote_endpoint(&self) -> Endpoint {
+        self.remote_ep.clone()
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        self.local_ep.clone()
+    }
+
     async fn close(&mut self) -> BdtResult<()> {
         self.send.finish().map_err(into_bdt_err!(BdtErrorCode::IoError))?;
         self.send.stopped().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
@@ -462,19 +604,41 @@ impl TunnelDatagramSend for QuicTunnelDatagramSend {
 
 impl Drop for QuicTunnelDatagramSend {
     fn drop(&mut self) {
+        log::info!("drop quic tunnel datagram {:?}", self.sequence);
+        self.tunnel_stat.decrease_work_instance();
         let _ = Executor::block_on(self.close());
     }
 
 }
 
 pub struct QuicTunnelDatagramRecv {
+    sequence: TempSeq,
+    remote_id: DeviceId,
+    local_id: DeviceId,
+    remote_ep: Endpoint,
+    local_ep: Endpoint,
     recv: RecvStream,
+    tunnel_stat: TunnelStatRef,
 }
 
 impl QuicTunnelDatagramRecv {
-    fn new(recv: RecvStream) -> Self {
+    fn new(
+        sequence: TempSeq,
+        remote_id: DeviceId,
+        local_id: DeviceId,
+        remote_ep: Endpoint,
+        local_ep: Endpoint,
+        recv: RecvStream,
+        tunnel_stat: TunnelStatRef,) -> Self {
+        tunnel_stat.increase_work_instance();
         Self {
-            recv
+            sequence,
+            remote_id,
+            local_id,
+            remote_ep,
+            local_ep,
+            recv,
+            tunnel_stat,
         }
     }
 }
@@ -499,6 +663,25 @@ impl AsyncRead for QuicTunnelDatagramRecv {
 
 #[async_trait::async_trait]
 impl TunnelDatagramRecv for QuicTunnelDatagramRecv {
+    fn sequence(&self) -> TempSeq {
+        self.sequence
+    }
+
+    fn remote_device_id(&self) -> DeviceId {
+        self.remote_id.clone()
+    }
+
+    fn local_device_id(&self) -> DeviceId {
+        self.local_id.clone()
+    }
+
+    fn remote_endpoint(&self) -> Endpoint {
+        self.remote_ep.clone()
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        self.local_ep.clone()
+    }
     async fn close(&mut self) -> BdtResult<()> {
         self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(BdtErrorCode::IoError))?;
         Ok(())
@@ -507,6 +690,8 @@ impl TunnelDatagramRecv for QuicTunnelDatagramRecv {
 
 impl Drop for QuicTunnelDatagramRecv {
     fn drop(&mut self) {
+        log::info!("drop quic tunnel datagram {:?}", self.sequence);
+        self.tunnel_stat.decrease_work_instance();
         let _ = self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(BdtErrorCode::IoError));
     }
 }

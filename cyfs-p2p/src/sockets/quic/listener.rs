@@ -5,8 +5,8 @@ use as_any::{AsAny, Downcast};
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, Protocol};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use quinn::Incoming;
-use quinn_proto::crypto::rustls::{HandshakeData, QuicServerConfig};
-use quinn_proto::ServerConfig;
+use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
+use quinn::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use tokio::net::TcpListener;
@@ -114,7 +114,7 @@ impl QuicListener {
         let mut server_config =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_config).map_err(into_bdt_err!(BdtErrorCode::TlsError, "create quic server config failed"))?));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-        transport_config.max_concurrent_uni_streams(0_u8.into());
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
 
         let endpoint = quinn::Endpoint::server(server_config, local.addr().clone()).map_err(into_bdt_err!(BdtErrorCode::QuicError, "Create quic server error"))?;
 
@@ -133,7 +133,7 @@ impl QuicListener {
         if handshake_data.is_none() {
             return Err(bdt_err!(BdtErrorCode::TlsError, "no handshake data"));
         }
-        let handshake_data = handshake_data.as_ref().unwrap().downcast_ref::<HandshakeData>();
+        let handshake_data = handshake_data.as_ref().unwrap().as_ref().downcast_ref::<HandshakeData>();
         if handshake_data.is_none() {
             return Err(bdt_err!(BdtErrorCode::TlsError, "no handshake data"));
         }
@@ -145,11 +145,11 @@ impl QuicListener {
 
         let local_id = DeviceId::from_str(serve_name.unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "parse device id error"))?;
         let peer_identity = connection.peer_identity();
-        let remote_cert = peer_identity.as_ref().unwrap().downcast_ref::<CertificateDer>();
-        if remote_cert.is_none() {
+        let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
+        if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {
             return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
         }
-        let remote_device = Device::clone_from_slice(remote_cert.unwrap().as_ref())
+        let remote_device = Device::clone_from_slice(remote_cert.unwrap()[0].as_ref())
             .map_err(into_bdt_err!(BdtErrorCode::CertError, "parse cert error"))?;
         self.device_cache.add(&remote_device.desc().device_id(), &remote_device);
         let remote_addr = connection.remote_address();

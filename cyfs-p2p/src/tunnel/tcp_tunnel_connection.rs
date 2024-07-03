@@ -23,7 +23,7 @@ use crate::protocol::{AckTunnel, Package, MTU, MTU_LARGE, PackageCmdCode, SynTun
 use crate::protocol::v0::{AckStream, SynStream, SynDatagram, AckDatagram, SynClose, AckClose};
 use crate::receive_processor::{ReceiveProcessorRef};
 use crate::sockets::tcp::{TCPRead, TCPSocket, TCPWrite};
-use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPortsRef, TunnelStream, TunnelType};
+use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPortsRef, TunnelStat, TunnelStatRef, TunnelStream, TunnelType};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum TunnelState {
@@ -102,17 +102,32 @@ fn create_accept_handle(read: TCPRead,
 ) -> BdtResult<SpawnHandle<()>> {
     Executor::spawn_with_handle(async move {
         let ret = accept_first_pkg(read).await;
-        {
-            let mut recv_future = recv_future.lock().unwrap();
-            if recv_future.is_some() {
-                recv_future.take().unwrap().set_complete(ret);
-                return;
+        if ret.is_ok() {
+            {
+                let mut recv_future = recv_future.lock().unwrap();
+                if recv_future.is_some() {
+                    recv_future.take().unwrap().set_complete(ret);
+                    return;
+                }
             }
-        }
-        {
-            let mut accept_future = accept_future.lock().unwrap();
-            if accept_future.is_some() {
-                accept_future.take().unwrap().set_complete(ret);
+            {
+                let mut accept_future = accept_future.lock().unwrap();
+                if accept_future.is_some() {
+                    accept_future.take().unwrap().set_complete(ret);
+                }
+            }
+        } else {
+            {
+                let mut recv_future = recv_future.lock().unwrap();
+                if recv_future.is_some() {
+                    recv_future.take().unwrap().set_complete(ret);
+                }
+            }
+            {
+                let mut accept_future = accept_future.lock().unwrap();
+                if accept_future.is_some() {
+                    accept_future.take().unwrap().set_complete(Err(bdt_err!(BdtErrorCode::Interrupted, "accept handle abort")));
+                }
             }
         }
     })
@@ -133,6 +148,7 @@ pub struct TcpTunnelConnectionImpl {
     write: Option<TCPWrite>,
     accept_future: Arc<Mutex<Option<NotifyFuture<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>>>>,
     recv_future: Arc<Mutex<Option<NotifyFuture<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>>>>,
+    tunnel_stat: TunnelStatRef,
 }
 
 impl TcpTunnelConnectionImpl {
@@ -161,6 +177,7 @@ impl TcpTunnelConnectionImpl {
             write: None,
             accept_future: Arc::new(Mutex::new(None)),
             recv_future: Arc::new(Mutex::new(None)),
+            tunnel_stat: TunnelStat::new(),
         };
         obj.enter_idle_mode()?;
         Ok(obj)
@@ -271,6 +288,11 @@ impl TunnelConnection for TcpTunnelConnection {
     fn is_idle(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.tunnel_state == TunnelState::Idle
+    }
+
+    fn tunnel_stat(&self) -> TunnelStatRef {
+        let inner = self.inner.lock().unwrap();
+        inner.tunnel_stat.clone()
     }
 
     async fn connect(&self) -> BdtResult<()> {
@@ -434,19 +456,44 @@ impl TunnelConnection for TcpTunnelConnection {
     }
 
     async fn shutdown(&self) -> BdtResult<()> {
-        let accept_handle = {
+        {
+            log::info!("tunnel {:?} shutdown", self.inner.lock().unwrap().sequence);
+        }
+        let (accept_handle, recv_future, accept_future) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
                 return Ok(());
             }
-            inner.accept_handle.take()
+            (inner.accept_handle.take(), inner.recv_future.clone(), inner.accept_future.clone())
         };
 
         if accept_handle.is_some() {
             accept_handle.unwrap().abort();
         }
+
+        {
+            let mut future = recv_future.lock().unwrap();
+            if future.is_some() {
+                future.take().unwrap().set_complete(Err(bdt_err!(BdtErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().sequence)));
+            }
+        }
+        {
+            let mut future = accept_future.lock().unwrap();
+            if future.is_some() {
+                future.take().unwrap().set_complete(Err(bdt_err!(BdtErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().sequence)));
+
+            }
+        }
         // inner.data_socket.as_ref().unwrap().shutdown().await?;
         Ok(())
+    }
+
+}
+
+impl Drop for TcpTunnelConnection {
+    fn drop(&mut self) {
+        log::info!("drop tunnel {:?}", self.inner.lock().unwrap().sequence);
+        Executor::block_on(self.shutdown());
     }
 
 }
@@ -532,6 +579,10 @@ impl TcpTunnelStream {
         write: TCPWrite,
         session_id: IncreaseId,
         port: u16,) -> Self {
+        {
+            let tunnel = tunnel.lock().unwrap();
+            tunnel.tunnel_stat.increase_work_instance();
+        }
         Self {
             tunnel,
             session_id,
@@ -554,7 +605,7 @@ impl TcpTunnelStream {
             self.write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
             let mut tunnel = self.tunnel.lock().unwrap();
             tunnel.data_socket.as_mut().unwrap().unsplit(self.read.take().unwrap(), self.write.take().unwrap());
-            tunnel.tunnel_state = TunnelState::Idle;
+            tunnel.enter_idle_mode();
             Ok(())
         } else {
             let mut tunnel = self.tunnel.lock().unwrap();
@@ -592,6 +643,12 @@ impl TcpTunnelStream {
     }
 
     async fn recv_inner(&mut self, buf: &mut [u8]) -> BdtResult<usize> {
+        {
+            let tunnel = self.tunnel.lock().unwrap();
+            if tunnel.tunnel_state != TunnelState::Worked {
+                return Ok(0);
+            }
+        }
         if self.remainder == 0 {
             let mut buf_header = [0u8; 16];
             let header = self.read.as_mut().unwrap().read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
@@ -698,6 +755,35 @@ impl TunnelStream for TcpTunnelStream {
         self.port
     }
 
+    fn session_id(&self) -> IncreaseId {
+        self.session_id
+    }
+
+    fn sequence(&self) -> TempSeq {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.sequence
+    }
+
+    fn remote_device_id(&self) -> DeviceId {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.remote_id.clone()
+    }
+
+    fn local_device_id(&self) -> DeviceId {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.local_device.device_id().clone()
+    }
+
+    fn remote_endpoint(&self) -> Endpoint {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.remote_ep.clone()
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.data_socket.as_ref().unwrap().local().clone()
+    }
+
     async fn close(&mut self) -> BdtResult<()> {
         let conn_timeout = {
             self.tunnel.lock().unwrap().conn_timeout
@@ -716,6 +802,19 @@ impl TunnelStream for TcpTunnelStream {
     }
 }
 
+impl Drop for TcpTunnelStream {
+    fn drop(&mut self) {
+        {
+            log::info!("drop tcp tunnel stream {:?}", self.tunnel.lock().unwrap().sequence);
+        }
+        {
+            let tunnel = self.tunnel.lock().unwrap();
+            tunnel.tunnel_stat.decrease_work_instance();
+        }
+        Executor::block_on(self.close());
+    }
+}
+
 
 pub struct TcpTunnelDatagramSend {
     tunnel: Arc<Mutex<TcpTunnelConnectionImpl>>,
@@ -726,6 +825,10 @@ pub struct TcpTunnelDatagramSend {
 
 impl TcpTunnelDatagramSend {
     pub fn new(tunnel: Arc<Mutex<TcpTunnelConnectionImpl>>, read: TCPRead, write: TCPWrite) -> Self {
+        {
+            let tunnel = tunnel.lock().unwrap();
+            tunnel.tunnel_stat.increase_work_instance();
+        }
         Self {
             tunnel,
             read: Some(read),
@@ -872,6 +975,31 @@ impl AsyncWrite for TcpTunnelDatagramSend {
 
 #[async_trait::async_trait]
 impl TunnelDatagramSend for TcpTunnelDatagramSend {
+    fn sequence(&self) -> TempSeq {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.sequence
+    }
+
+    fn remote_device_id(&self) -> DeviceId {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.remote_id.clone()
+    }
+
+    fn local_device_id(&self) -> DeviceId {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.local_device.device_id().clone()
+    }
+
+    fn remote_endpoint(&self) -> Endpoint {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.remote_ep.clone()
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.data_socket.as_ref().unwrap().local().clone()
+    }
+
     async fn close(&mut self) -> BdtResult<()> {
         let conn_timeout = {
             self.tunnel.lock().unwrap().conn_timeout
@@ -890,6 +1018,19 @@ impl TunnelDatagramSend for TcpTunnelDatagramSend {
     }
 }
 
+impl Drop for TcpTunnelDatagramSend {
+    fn drop(&mut self) {
+        {
+            log::info!("drop tcp tunnel datagram {:?}", self.tunnel.lock().unwrap().sequence);
+        }
+        {
+            let tunnel = self.tunnel.lock().unwrap();
+            tunnel.tunnel_stat.decrease_work_instance();
+        }
+        Executor::block_on(self.close());
+    }
+}
+
 pub struct TcpTunnelDatagramRecv {
     tunnel: Arc<Mutex<TcpTunnelConnectionImpl>>,
     read: Option<TCPRead>,
@@ -900,6 +1041,10 @@ pub struct TcpTunnelDatagramRecv {
 
 impl TcpTunnelDatagramRecv {
     pub fn new(tunnel: Arc<Mutex<TcpTunnelConnectionImpl>>, read: TCPRead, write: TCPWrite) -> Self {
+        {
+            let tunnel = tunnel.lock().unwrap();
+            tunnel.tunnel_stat.increase_work_instance();
+        }
         Self {
             tunnel,
             read: Some(read),
@@ -1057,6 +1202,31 @@ impl AsyncRead for TcpTunnelDatagramRecv {
 
 #[async_trait::async_trait]
 impl TunnelDatagramRecv for TcpTunnelDatagramRecv {
+    fn sequence(&self) -> TempSeq {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.sequence
+    }
+
+    fn remote_device_id(&self) -> DeviceId {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.remote_id.clone()
+    }
+
+    fn local_device_id(&self) -> DeviceId {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.local_device.device_id().clone()
+    }
+
+    fn remote_endpoint(&self) -> Endpoint {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.remote_ep.clone()
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        let tunnel = self.tunnel.lock().unwrap();
+        tunnel.data_socket.as_ref().unwrap().local().clone()
+    }
+
     async fn close(&mut self) -> BdtResult<()> {
         let conn_timeout = {
             self.tunnel.lock().unwrap().conn_timeout
@@ -1072,5 +1242,18 @@ impl TunnelDatagramRecv for TcpTunnelDatagramRecv {
                 Err(bdt_err!(BdtErrorCode::Timeout, "{}", err))
             }
         }
+    }
+}
+
+impl Drop for TcpTunnelDatagramRecv {
+    fn drop(&mut self) {
+        {
+            log::info!("drop tcp tunnel datagram {:?}", self.tunnel.lock().unwrap().sequence);
+        }
+        {
+            let tunnel = self.tunnel.lock().unwrap();
+            tunnel.tunnel_stat.decrease_work_instance();
+        }
+        Executor::block_on(self.close());
     }
 }

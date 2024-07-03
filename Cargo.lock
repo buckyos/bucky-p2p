@@ -1179,7 +1179,6 @@ dependencies = [
  "num-traits",
  "once_cell",
  "quinn",
- "quinn-proto",
  "rand 0.7.3",
  "rusqlite",
  "rustls",

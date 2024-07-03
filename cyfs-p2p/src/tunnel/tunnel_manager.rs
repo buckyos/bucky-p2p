@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
 use bucky_raw_codec::RawDecodeWithContext;
+use bucky_time::bucky_time_now;
 use crate::{IncreaseId, LocalDeviceRef, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::executor::Executor;
+use crate::executor::{Executor, SpawnHandle};
 use crate::finder::DeviceCache;
 use crate::history::keystore::EncryptedKey;
 use crate::protocol::{AckTunnel, Package, MTU, PackageCmdCode, SynTunnel};
@@ -100,11 +101,25 @@ impl Tunnels {
                     Ok(instance) => {
                         match instance {
                             TunnelInstance::Stream(stream) => {
+                                log::info!("accept stream tunnel {:?} stream_id {} port {} remote_id {} remote_ep {} local_id {} local_ep {}",
+                                    stream.sequence(),
+                                    stream.session_id(),
+                                    stream.port(),
+                                    stream.remote_device_id().to_string(),
+                                    stream.remote_endpoint().to_string(),
+                                    stream.local_device_id().to_string(),
+                                    stream.local_endpoint().to_string());
                                 if listener.is_some() {
                                     listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
                                 }
                             }
                             TunnelInstance::Datagram(datagram) => {
+                                log::info!("accept datagram tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                                    datagram.sequence(),
+                                    datagram.remote_device_id().to_string(),
+                                    datagram.remote_endpoint().to_string(),
+                                    datagram.local_device_id().to_string(),
+                                    datagram.local_endpoint().to_string());
                                 if listener.is_some() {
                                     listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
                                 }
@@ -171,7 +186,7 @@ impl TunnelListenPorts for ListenPorts {
 }
 
 pub struct TunnelManager {
-    tunnels: RwLock<HashMap<DeviceId, Arc<Tunnels>>>,
+    tunnels: Arc<RwLock<HashMap<DeviceId, Arc<Tunnels>>>>,
     net_manager: NetManagerRef,
     receive_dispatcher: ReceiveDispatcherRef,
     // sn_service: SNClientServiceRef,
@@ -182,6 +197,7 @@ pub struct TunnelManager {
     conn_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
     listen_ports: Arc<ListenPorts>,
+    clear_handle: SpawnHandle<()>,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
@@ -194,8 +210,18 @@ impl TunnelManager {
         protocol_version: u8,
         stack_version: u32,
         conn_timeout: Duration,) -> Arc<Self> {
-        Arc::new(Self {
-            tunnels: Default::default(),
+        let tunnels = Arc::new(RwLock::new(HashMap::<DeviceId, Arc<Tunnels>>::new()));
+        let tmp = tunnels.clone();
+        let handle = Executor::spawn_with_handle(async move {
+            loop {
+                runtime::sleep(Duration::from_secs(120)).await;
+                Self::clear_idle_tunnel(tmp.clone()).await;
+            }
+            ()
+        }).unwrap();
+
+        let manager = Arc::new(Self {
+            tunnels,
             net_manager,
             receive_dispatcher,
             // sn_service,
@@ -206,7 +232,36 @@ impl TunnelManager {
             conn_timeout,
             gen_seq: Arc::new(TempSeqGenerator::new()),
             listen_ports: ListenPorts::new(),
-        })
+            clear_handle: handle,
+        });
+
+        manager
+    }
+
+    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<DeviceId, Arc<Tunnels>>>>) {
+        let tunnels_map = tunnels.read().unwrap();
+        for (_, tunnels) in tunnels_map.iter() {
+            let mut remove_list = Vec::new();
+            {
+                let mut state = tunnels.state.lock().unwrap();
+                for (seq, tunnel) in state.tunnels.iter() {
+                    let tunnel_stat = tunnel.tunnel_stat();
+                    if tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > 250 * 1000 * 1000 {
+                        remove_list.push(tunnel.clone());
+                    }
+                }
+            }
+            for tunnel in remove_list.into_iter() {
+                let seq = tunnel.get_sequence();
+                Executor::spawn_ok(async move {
+                    if let Err(e) = tunnel.shutdown().await {
+                        log::error!("shutdown tunnel error: {:?}", e);
+                    }
+                });
+                let mut state = tunnels.state.lock().unwrap();
+                state.tunnels.remove(&seq);
+            }
+        }
     }
 
     pub(crate) fn register_pkg_processor(self: &Arc<Self>, processor: &mut ReceiveProcessor) {
@@ -229,6 +284,9 @@ impl TunnelManager {
 
     async fn on_new_tcp_tunnel(&self, socket: TCPSocket) -> BdtResult<()> {
         let remote_id = socket.remote_device_id().clone();
+        let remote_ep = socket.remote().clone();
+        let local_id = socket.local_device_id().clone();
+        let local_ep = socket.local().clone();
         let remote = self.net_manager.get_device_cache().get(&remote_id).await.unwrap();
         let mut tunnel = Tunnel::new(
             self.net_manager.clone(),
@@ -241,6 +299,13 @@ impl TunnelManager {
             self.listen_ports.clone());
         tunnel.accept_tcp_tunnel(socket)?;
 
+        log::info!("new tcp tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+            tunnel.get_sequence(),
+            remote_id.to_string(),
+            remote_ep.to_string(),
+            local_id.to_string(),
+            local_ep.to_string());
+
         let listener = self.listener.lock().unwrap().clone();
         self.get_tunnels(&remote_id).add_tunnel(tunnel, listener);
         Ok(())
@@ -248,6 +313,9 @@ impl TunnelManager {
 
     async fn on_new_quic_tunnel(&self, socket: QuicSocket) -> BdtResult<()> {
         let remote_id = socket.remote_device_id().clone();
+        let remote_ep = socket.remote().clone();
+        let local_id = socket.local_device_id().clone();
+        let local_ep = socket.local().clone();
         let remote = self.net_manager.get_device_cache().get(&remote_id).await.unwrap();
         let mut tunnel = Tunnel::new(
             self.net_manager.clone(),
@@ -259,6 +327,13 @@ impl TunnelManager {
             self.conn_timeout.clone(),
             self.listen_ports.clone());
         tunnel.accept_quic_tunnel(socket)?;
+
+        log::info!("new quic tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+            tunnel.get_sequence(),
+            remote_id.to_string(),
+            remote_ep.to_string(),
+            local_id.to_string(),
+            local_ep.to_string());
 
         let listener = self.listener.lock().unwrap().clone();
         self.get_tunnels(&remote_id).add_tunnel(tunnel, listener);
@@ -342,6 +417,12 @@ impl TunnelManager {
         }
     }
 
+}
+
+impl Drop for TunnelManager {
+    fn drop(&mut self) {
+        self.clear_handle.abort();
+    }
 }
 
 // #[async_trait::async_trait]

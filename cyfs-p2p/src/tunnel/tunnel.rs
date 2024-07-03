@@ -13,7 +13,7 @@ use crate::{IncreaseId, LocalDeviceRef, MixAesKey, TempSeq};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::receive_processor::ReceiveDispatcherRef;
 use crate::sockets::tcp::TCPSocket;
-use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
+use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStatRef, TunnelStream, TunnelType};
 use crate::tunnel::tcp_tunnel_connection::TcpTunnelConnection;
 use crate::tunnel::quic_tunnel_connection::{QuicTunnelConnection};
 
@@ -115,6 +115,10 @@ impl Tunnel {
         self.tunnel_conn.as_ref().unwrap().socket_type()
     }
 
+    pub(crate) fn tunnel_stat(&self) -> TunnelStatRef {
+        self.tunnel_conn.as_ref().unwrap().tunnel_stat()
+    }
+
     pub fn is_idle(&self) -> bool {
         self.tunnel_conn.as_ref().unwrap().is_idle()
     }
@@ -171,7 +175,17 @@ impl Tunnel {
             return Err(bdt_err!(BdtErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
-        self.tunnel_conn.as_ref().unwrap().open_stream(vport, session_id).await
+        let stream = self.tunnel_conn.as_ref().unwrap().open_stream(vport, session_id).await?;
+        log::info!("Open stream tunnel {:?} session_id {:?} vport {} remote_id {} remote_ep {} local_id {} local_ep {}",
+            stream.sequence(),
+            stream.session_id(),
+            vport,
+            stream.remote_device_id().to_string(),
+            stream.remote_endpoint().to_string(),
+            stream.local_device_id().to_string(),
+            stream.local_endpoint().to_string());
+
+        Ok(stream)
     }
 
     pub async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
@@ -179,14 +193,30 @@ impl Tunnel {
             return Err(bdt_err!(BdtErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
-        self.tunnel_conn.as_ref().unwrap().open_datagram().await
+        let datagram = self.tunnel_conn.as_ref().unwrap().open_datagram().await?;
+
+        log::info!("Open stream tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+            datagram.sequence(),
+            datagram.remote_device_id().to_string(),
+            datagram.remote_endpoint().to_string(),
+            datagram.local_device_id().to_string(),
+            datagram.local_endpoint().to_string());
+
+        Ok(datagram)
     }
 
     pub async fn shutdown(&self) -> BdtResult<()> {
+        log::info!("shutdown tunnel {:?}", self.sequence);
         if self.tunnel_conn.is_some() {
             self.tunnel_conn.as_ref().unwrap().shutdown().await
         } else {
             Ok(())
         }
+    }
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        log::info!("drop tunnel {:?}", self.sequence);
     }
 }

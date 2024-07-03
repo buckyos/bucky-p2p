@@ -1,5 +1,6 @@
 use std::future::Future;
 use once_cell::sync::OnceCell;
+use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use crate::error::BdtResult;
 
@@ -38,6 +39,12 @@ impl Executor {
         EXECUTOR.get().unwrap().spawn(future);
     }
     pub fn block_on<F: Future>(f: F) -> F::Output {
-        EXECUTOR.get().unwrap().block_on(f)
+        if Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| {
+                EXECUTOR.get().unwrap().block_on(f)
+            })
+        } else {
+            EXECUTOR.get().unwrap().block_on(f)
+        }
     }
 }

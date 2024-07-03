@@ -38,7 +38,7 @@ as-any = "0.3.1"
 num-traits = "0.2"
 num-derive = "0.3"
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "rustls", "ring"] }
-quinn-proto = { version = "0.11", default-features = false, features = ["log"] }
+#quinn-proto = { version = "0.11", default-features = false, features = ["log"] }
 rustls = { version = "0.23.5", default-features = false, features = ["ring", "std"] }
 x509-cert = { version = "0.2.5", features = ["builder"] }
 libc = '0.2'

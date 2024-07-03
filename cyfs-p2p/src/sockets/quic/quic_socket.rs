@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use bucky_objects::{DeviceId, Endpoint, Protocol};
 use bucky_raw_codec::RawConvertTo;
-use quinn_proto::crypto::rustls::QuicClientConfig;
-use quinn_proto::VarInt;
+use quinn::crypto::rustls::QuicClientConfig;
+use quinn::VarInt;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
@@ -50,9 +50,9 @@ impl QuicSocket {
         let mut client_config =
             quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-        transport_config.max_concurrent_bidi_streams(1_u8.into());
-        transport_config.max_concurrent_uni_streams(1_u8.into());
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
+        // transport_config.max_concurrent_bidi_streams(1_u8.into());
+        // transport_config.max_concurrent_uni_streams(1_u8.into());
         client_config.transport_config(Arc::new(transport_config));
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
         endpoint.set_default_client_config(client_config);
