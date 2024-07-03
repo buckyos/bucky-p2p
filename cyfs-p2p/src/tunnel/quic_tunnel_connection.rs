@@ -491,7 +491,8 @@ impl TunnelStream for QuicTunnelStream {
 
 impl Drop for QuicTunnelStream {
     fn drop(&mut self) {
-        log::info!("drop quic tunnel stream {:?}", self.sequence);
+        log::info!("drop quic tunnel stream {:?} local_id {} remote_id {}",
+            self.sequence, self.local_id.to_string(), self.remote_id.to_string());
         self.tunnel_stat.decrease_work_instance();
         let _ = Executor::block_on(self.close());
     }
@@ -604,7 +605,8 @@ impl TunnelDatagramSend for QuicTunnelDatagramSend {
 
 impl Drop for QuicTunnelDatagramSend {
     fn drop(&mut self) {
-        log::info!("drop quic tunnel datagram {:?}", self.sequence);
+        log::info!("drop quic tunnel datagram {:?} local_id {} remote_id {}",
+            self.sequence, self.local_id.to_string(), self.remote_id.to_string());
         self.tunnel_stat.decrease_work_instance();
         let _ = Executor::block_on(self.close());
     }
@@ -690,7 +692,8 @@ impl TunnelDatagramRecv for QuicTunnelDatagramRecv {
 
 impl Drop for QuicTunnelDatagramRecv {
     fn drop(&mut self) {
-        log::info!("drop quic tunnel datagram {:?}", self.sequence);
+        log::info!("drop quic tunnel datagram {:?} local_id {} remote_id {}",
+            self.sequence, self.local_id.to_string(), self.remote_id.to_string());
         self.tunnel_stat.decrease_work_instance();
         let _ = self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(BdtErrorCode::IoError));
     }

@@ -805,7 +805,9 @@ impl TunnelStream for TcpTunnelStream {
 impl Drop for TcpTunnelStream {
     fn drop(&mut self) {
         {
-            log::info!("drop tcp tunnel stream {:?}", self.tunnel.lock().unwrap().sequence);
+            let tunnel = self.tunnel.lock().unwrap();
+            log::info!("drop tcp tunnel stream {:?} local_id {} remote_id {}",
+                tunnel.sequence, tunnel.local_device.device_id().to_string(), tunnel.remote_id.to_string());
         }
         {
             let tunnel = self.tunnel.lock().unwrap();
@@ -1021,7 +1023,9 @@ impl TunnelDatagramSend for TcpTunnelDatagramSend {
 impl Drop for TcpTunnelDatagramSend {
     fn drop(&mut self) {
         {
-            log::info!("drop tcp tunnel datagram {:?}", self.tunnel.lock().unwrap().sequence);
+            let tunnel = self.tunnel.lock().unwrap();
+            log::info!("drop tcp tunnel datagram {:?} local_id {} remote_id {}",
+                tunnel.sequence, tunnel.local_device.device_id().to_string(), tunnel.remote_id.to_string());
         }
         {
             let tunnel = self.tunnel.lock().unwrap();
@@ -1248,7 +1252,9 @@ impl TunnelDatagramRecv for TcpTunnelDatagramRecv {
 impl Drop for TcpTunnelDatagramRecv {
     fn drop(&mut self) {
         {
-            log::info!("drop tcp tunnel datagram {:?}", self.tunnel.lock().unwrap().sequence);
+            let tunnel = self.tunnel.lock().unwrap();
+            log::info!("drop tcp tunnel datagram {:?} local_id {} remote_id {}",
+                tunnel.sequence, tunnel.local_device.device_id().to_string(), tunnel.remote_id.to_string());
         }
         {
             let tunnel = self.tunnel.lock().unwrap();
