@@ -27,7 +27,7 @@ impl NetManager {
         udp_recv_buffer: usize,) -> BdtResult<Self> {
         let cert_resolver = ServerCertResolver::new();
         Ok(Self {
-            net_listener: NetListener::open(device_cache.clone(), cert_resolver.clone(), endpoints, port_mapping, tcp_accept_timout, udp_recv_buffer, false).await?,
+            net_listener: NetListener::open(device_cache.clone(), cert_resolver.clone(), endpoints, port_mapping, tcp_accept_timout).await?,
             cert_resolver,
             device_cache,
         })

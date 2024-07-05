@@ -21,7 +21,7 @@ pub struct SnCall {
     pub active_pn_list: Option<Vec<DeviceId>>,
     pub peer_info: Option<Device>,
     pub send_time: Timestamp,
-    pub payload: SizedOwnedData<SizeU16>,
+    pub payload: Vec<u8>,
     pub is_always_call: bool,
 }
 

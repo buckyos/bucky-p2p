@@ -28,8 +28,6 @@ impl NetListener {
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
         tcp_accept_timout: Duration,
-        udp_recv_buffer: usize,
-        udp_sn_only: bool,
     ) -> BdtResult<Arc<Self>> {
         let ep_len = endpoints.len();
         if ep_len == 0 {

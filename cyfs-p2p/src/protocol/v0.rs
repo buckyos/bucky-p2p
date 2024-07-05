@@ -163,7 +163,7 @@ pub struct SnCalled {
     pub peer_info: Device,
     pub call_seq: TempSeq,
     pub call_send_time: Timestamp,
-    pub payload: SizedOwnedData<SizeU16>,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]

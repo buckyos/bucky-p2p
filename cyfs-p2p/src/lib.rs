@@ -9,7 +9,7 @@ mod sockets;
 mod executor;
 pub mod protocol;
 // pub mod pn;
-// pub mod sn;
+pub mod sn;
 // mod dht;
 mod finder;
 mod receive_processor;

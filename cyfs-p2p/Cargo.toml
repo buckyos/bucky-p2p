@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", branch="main", features = ["derive"]}
+bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
 bucky-error = {git = "https://github.com/buckyos/bucky-error.git", features = ["rusqlite"]}
 bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
 bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
@@ -50,5 +50,5 @@ nix = '0.24'
 
 [features]
 default = ["runtime-tokio"]
-runtime-tokio = ["quinn/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/io-std", "tokio/io-util", "tokio-rustls"]
+runtime-tokio = ["quinn/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/macros", "tokio/io-std", "tokio/io-util", "tokio-rustls"]
 runtime-async-std = ["quinn/runtime-async-std", "async-std", "futures-rustls"]

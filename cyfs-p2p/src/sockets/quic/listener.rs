@@ -79,6 +79,10 @@ impl QuicListener {
         self.state.write().unwrap().local = Some(local);
     }
 
+    pub fn quic_ep(&self) -> quinn::Endpoint {
+        self.state.read().unwrap().socket.clone().unwrap()
+    }
+
     pub async fn reset(&self, new_ep: &Endpoint) -> Arc<Self> {
         todo!()
     }

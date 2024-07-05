@@ -2,8 +2,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
 use bucky_crypto::PrivateKey;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol};
+use bucky_raw_codec::{FileDecoder, RawDecode, RawFrom};
 
-use cyfs_base::*;
 use cyfs_p2p::{LocalDevice, sn::service::*};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
 
@@ -45,7 +45,7 @@ impl SnServiceContractServer for SnServiceContractServerImpl {
     }
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() {
     let data_folder = std::env::current_dir().unwrap().join(APP_NAME);
     let default_desc_path = data_folder.join(APP_NAME);
@@ -72,15 +72,13 @@ async fn main() {
             log::info!("sn-miner load device from {}, id {}", matches.value_of("desc").unwrap(), device.desc().object_id());
 
             let service = SnService::new(
-                LocalDevice::new(device),
-                private_key,
-                4096,
+                LocalDevice::new(device, private_key),
                 Box::new(SnServiceContractServerImpl::new()),
             ).await;
 
             let _ = service.start().await;
 
-            async_std::future::pending::<u8>().await;
+            std::future::pending::<u8>().await;
         }
         Err(e) => {
             println!("ERROR: read desc/sec file err {}, path {}", e, matches.value_of("desc").unwrap());

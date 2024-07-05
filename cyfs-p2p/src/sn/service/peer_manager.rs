@@ -7,11 +7,11 @@ use std::net::SocketAddr;
 use std::sync::Mutex;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
 use bucky_time::bucky_time_now;
-use crate::{
-    types::*,
-};
+use crate::{runtime, types::*};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult};
+use crate::sn::service::peer_connection::PeerConnection;
 use crate::sn::service::statistic::{PeerStatus, StatisticManager};
+use crate::sockets::QuicSocket;
 
 struct Config {
     pub client_ping_interval: Duration,
@@ -30,22 +30,19 @@ impl Default for Config {
 
 pub struct FoundPeer {
     pub desc: Device,
-    // pub sender: Arc<dyn DataSender>,
+    pub conn_id: TempSeq,
     pub is_wan: bool,
     pub peer_status: PeerStatus,
 }
 
 
-struct CachedPeerInfo {
+#[derive(Clone)]
+pub(crate) struct CachedPeerInfo {
+    pub conn_list: Vec<TempSeq>,
     pub desc: Device,
-    // pub sender: Arc<dyn DataSender>,
-    pub aes_key: Option<MixAesKey>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
     pub is_wan: bool,
-
-    pub last_ping_seq: TempSeq,
-    pub peer_status: PeerStatus,
     // pub call_peers: HashMap<DeviceId, TempSeq>, // <peerid, last_call_seq>
     // pub receipt: SnServiceReceipt,
     // pub last_receipt_request_time: ReceiptRequestTime,
@@ -73,41 +70,30 @@ fn contain_addr(dev: &Device, addr: &SocketAddr) -> bool {
 impl CachedPeerInfo {
     fn new(
         desc: Device,
-        // sender: Arc<dyn DataSender>,
-        aes_key: Option<&MixAesKey>,
-        send_time: Timestamp,
-        seq: TempSeq,
-        peer_status: PeerStatus) -> CachedPeerInfo {
+        conn_id: TempSeq,
+        send_time: Timestamp) -> CachedPeerInfo {
         CachedPeerInfo {
+            conn_list: vec![conn_id],
             is_wan: has_wan_endpoint(&desc),
-            last_ping_seq: seq,
             desc,
-            // sender,
-            aes_key: aes_key.map(|k| k.clone()),
             last_send_time: send_time,
             last_call_time: 0,
-            peer_status,
             // call_peers: Default::default(),
             // receipt: Default::default(),
             // last_receipt_request_time: ReceiptRequestTime::None,
         }
     }
 
-    fn to_found_peer(&self) -> FoundPeer {
-        FoundPeer {
-            desc: self.desc.clone(),
-            // sender: self.sender.clone(),
-            is_wan: self.is_wan,
-            peer_status: self.peer_status.clone(),
-        }
+    fn add_conn(&mut self, conn_id: TempSeq) {
+        self.conn_list.push(conn_id);
     }
 
-    fn update_key(&mut self, aes_key: &MixAesKey) {
-        if let Some(k) = self.aes_key.as_mut() {
-            *k = aes_key.clone();
-        } else {
-            self.aes_key = Some(aes_key.clone());
-        }
+    fn remove_conn(&mut self, conn_id: TempSeq) {
+        self.conn_list.retain(|c| c != &conn_id);
+    }
+
+    fn conn_count(&self) -> usize {
+        self.conn_list.len()
     }
 
     fn update_desc(&mut self, desc: &Device) -> BdtResult<bool> {
@@ -173,10 +159,11 @@ impl Peers {
 
 
 pub struct PeerManager {
-    peers: Mutex<Peers>,
-    last_knock_time: AtomicU64,
     config: Config,
     statistic_manager: &'static StatisticManager,
+    conn_cache: Mutex<HashMap<TempSeq, (DeviceId, Arc<runtime::Mutex<PeerConnection>>)>>,
+    device_conn_map: Mutex<HashMap<DeviceId, CachedPeerInfo>>,
+    conn_id_generator: TempSeqGenerator,
 }
 pub type PeerManagerRef = Arc<PeerManager>;
 
@@ -189,138 +176,64 @@ enum FindPeerReason {
 impl PeerManager {
     pub fn new() -> PeerManagerRef {
         Arc::new(PeerManager {
-            peers: Mutex::new(Peers {
-                active_peers: Default::default(),
-                knock_peers: Default::default(),
-            }),
-            last_knock_time: AtomicU64::new(bucky_time_now()),
             config: Default::default(),
             statistic_manager: StatisticManager::get_instance(),
+            conn_cache: Mutex::new(Default::default()),
+            device_conn_map: Mutex::new(Default::default()),
+            conn_id_generator: TempSeqGenerator::new(),
         })
     }
 
-    pub fn peer_heartbeat(
-        &self,
-        peerid: DeviceId,
-        peer_desc: &Option<Device>,
-        // sender: Arc<dyn DataSender>,
-        aes_key: Option<&MixAesKey>,
-        send_time: Timestamp,
-        seq: TempSeq) -> bool {
-        todo!()
-        //
-        // let exist_cache_found = |cached_peer: &mut CachedPeerInfo| -> bool {
-        //     if cached_peer.last_send_time > send_time {
-        //         log::warn!("ping send-time little.");
-        //         return false;
-        //     }
-        //     if let Some(desc) = peer_desc {
-        //         if let Err(e) = cached_peer.update_desc(desc) {
-        //             log::warn!("ping update device-info failed, err: {:?}", e);
-        //             return false;
-        //         }
-        //         log::debug!("ping update device-info, endpoints: {:?}", desc.connect_info().endpoints());
-        //     } else {
-        //         log::debug!("ping without device-info.");
-        //     }
-        //
-        //
-        //     let recount_req = match (send_time - cached_peer.last_send_time) / self.config.client_ping_interval.as_micros() as u64 {
-        //
-        //         0 => {
-        //             let recode = if cached_peer.last_ping_seq >= seq {
-        //                 false
-        //             } else {
-        //                 (seq.value() - cached_peer.last_ping_seq.value()) > 50
-        //             };
-        //
-        //             cached_peer.peer_status.wait_online(send_time, recode);
-        //
-        //             recode
-        //         }
-        //         _ => {
-        //             cached_peer.peer_status.online(seq, send_time);
-        //             true
-        //         }
-        //     };
-        //
-        //     cached_peer.last_send_time = send_time;
-        //     if recount_req {
-        //         cached_peer.last_ping_seq = seq;
-        //     }
-        //
-        //     // 客户端被签名的地址才被更新，避免恶意伪装
-        //     if contain_addr(&cached_peer.desc, sender.remote().addr())
-        //         || cached_peer.sender.key().mix_key != sender.key().mix_key {
-        //         cached_peer.sender = sender.clone();
-        //     }
-        //
-        //     if let Some(k) = aes_key {
-        //         cached_peer.update_key(k);
-        //     }
-        //
-        //     true
-        // };
-        //
-        // let mut peers = self.peers.lock().unwrap();
-        // // 1.从活跃peer中搜索已有cache
-        // if let Some(p) = peers.active_peers.get_mut(&peerid) {
-        //     return exist_cache_found(p);
-        // }
-        //
-        // // 2.从待淘汰peer中搜索已有cache
-        // let to_active = if let hash_map::Entry::Occupied(mut entry) = peers.knock_peers.entry(peerid.clone()) {
-        //     if !exist_cache_found(entry.get_mut()) {
-        //         return false;
-        //     }
-        //     Some(entry.remove())
-        // } else {
-        //     None
-        // };
-        // if let Some(to_active) = to_active {
-        //     let old = peers.active_peers.insert(peerid.clone(), to_active);
-        //     assert!(old.is_none());
-        //     return true;
-        // }
-        //
-        // // 3.新建cache
-        // match peer_desc {
-        //     Some(desc) => {
-        //         let old = peers.active_peers.insert(peerid.clone(),
-        //                                             CachedPeerInfo::new(desc.clone(),
-        //                                                                 sender,
-        //                                                                 aes_key,
-        //                                                                 send_time,
-        //                                                                 seq,
-        //                                                                 self.statistic_manager.get_peer_status(peerid.clone(), send_time)));
-        //         assert!(old.is_none());
-        //         true
-        //     }
-        //     None => false
-        // }
+    pub fn generate_conn_id(&self) -> TempSeq {
+        self.conn_id_generator.generate()
     }
 
-    pub fn try_knock_timeout(&self, now: Timestamp) -> Option<Vec<DeviceId>> {
-        let last_knock_time = self.last_knock_time.load(Ordering::SeqCst);
-        let drop_maps = if now > last_knock_time && Duration::from_micros(now - last_knock_time) > self.config.client_ping_timeout {
-            let mut peers = self.peers.lock().unwrap();
-            let mut knock_peers = Default::default();
-            std::mem::swap(&mut knock_peers, &mut peers.active_peers);
-            std::mem::swap(&mut knock_peers, &mut peers.knock_peers);
-            self.last_knock_time.store(now, Ordering::SeqCst);
-
-            Some(knock_peers.into_keys().collect())
+    pub fn add_peer_connection(&self, peer_desc: Device, conn: PeerConnection) {
+        let conn_id = conn.conn_id();
+        let remote_id = conn.remote_device_id().clone();
+        let conn = Arc::new(runtime::Mutex::new(conn));
+        let mut conn_cache = self.conn_cache.lock().unwrap();
+        conn_cache.insert(conn_id, (remote_id.clone(), conn.clone()));
+        let mut device_conn_map = self.device_conn_map.lock().unwrap();
+        if !device_conn_map.contains_key(&remote_id) {
+            device_conn_map.insert(remote_id.clone(), CachedPeerInfo::new(peer_desc, conn_id, bucky_time_now()));
         } else {
-            None
-        };
-
-        self.statistic_manager.on_time_escape(now);
-
-        drop_maps
-
+            let mut peer_info = device_conn_map.get_mut(&remote_id).unwrap();
+            let _ = peer_info.update_desc(&peer_desc);
+            peer_info.add_conn(conn_id);
+        }
     }
 
-    pub fn find_peer(&self, id: &DeviceId) -> Option<FoundPeer> {
-        self.peers.lock().unwrap().find_peer(id, FindPeerReason::Other).map(|c| c.to_found_peer())
+    pub fn remove_peer_connection(&self, conn_id: TempSeq) {
+        let mut conn_cache = self.conn_cache.lock().unwrap();
+        if let Some(conn) = conn_cache.remove(&conn_id) {
+            let remote_id = conn.0.clone();
+            let mut device_conn_map = self.device_conn_map.lock().unwrap();
+            if let Some(conns) = device_conn_map.get_mut(&remote_id) {;
+                conns.remove_conn(conn_id);
+                if conns.conn_list.len() == 0 {
+                    device_conn_map.remove(&remote_id);
+                }
+            }
+        }
+    }
+
+    pub fn find_connection(&self, conn_id: TempSeq) -> Option<Arc<runtime::Mutex<PeerConnection>>> {
+        let conn_cache = self.conn_cache.lock().unwrap();
+        conn_cache.get(&conn_id).map(|c| c.1.clone())
+    }
+
+    pub fn find_connections(&self, device_id: &DeviceId) -> Vec<Arc<runtime::Mutex<PeerConnection>>> {
+        let conn_cache = self.conn_cache.lock().unwrap();
+        let device_conn_map = self.device_conn_map.lock().unwrap();
+        device_conn_map.get(device_id).map(|conns| {
+            conns.conn_list.iter().filter_map(|c| conn_cache.get(c).map(|c| c.1.clone())).collect()
+        }).unwrap_or_default()
+    }
+
+    pub fn find_peer(&self, id: &DeviceId) -> Option<CachedPeerInfo> {
+        self.device_conn_map.lock().unwrap().get(id).map(|v| {
+            v.clone()
+        })
     }
 }

@@ -10,26 +10,28 @@ use std::{
 use bucky_crypto::PrivateKey;
 use bucky_error::{BuckyError, BuckyErrorCode};
 use bucky_objects::{DeviceId, Endpoint, endpoints_to_string, NamedObject, Protocol};
-use bucky_raw_codec::SizedOwnedData;
+use bucky_raw_codec::{RawFrom, SizedOwnedData};
 use bucky_time::bucky_time_now;
+use bucky_rustls::ServerCertResolver;
 
 use crate::{
     history::keystore::{self, Keystore},
     protocol::{*, v0::*},
     types::*,
 };
-use crate::error::BdtResult;
+use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
+use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::history::keystore::EncryptedKey;
+use crate::sn::service::peer_connection::PeerConnection;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sockets::{NetListener, NetListenerRef};
+use crate::sockets::{NetListener, NetListenerRef, QuicListenerEventListener, QuicSocket};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
 
 use super::{
     call_stub::CallStub,
     peer_manager::PeerManager,
     receipt::*,
-    resend_queue::{ResendQueue, ResendCallbackTrait},
 };
 
 // const TRACKER_INTERVAL: Duration = Duration::from_secs(60);
@@ -40,16 +42,14 @@ use super::{
 
 pub struct SnService {
     seq_generator: TempSeqGenerator,
-    key_store: Arc<Keystore>,
+    device_cache: Arc<DeviceCache>,
     local_device: LocalDeviceRef,
     stopped: AtomicBool,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
 
     // call_tracker: CallTracker,
     peer_mgr: PeerManagerRef,
-    resend_queue: Option<ResendQueue>,
     call_stub: CallStub,
-    udp_recv_buffer: usize,
     net_listener: NetListenerRef,
 }
 
@@ -58,30 +58,23 @@ pub type SnServiceRef = Arc<SnService>;
 impl SnService {
     pub async fn new(
         local_device: LocalDeviceRef,
-        local_secret: PrivateKey,
-        udp_recv_buffer: usize,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
-        let key_store = Arc::new(Keystore::new(
-            keystore::Config {
-                // <TODO>提供配置
-                active_time: Duration::from_secs(600),
-                key_expire: Duration::from_secs(120),
-                capacity: 100000,
-            },
-        ));
+        let device_cache = Arc::new(DeviceCache::new(&DeviceCacheConfig {
+            expire: Duration::from_secs(600),
+            capacity: 10240,
+        }, None));
+        let cert_resolver = ServerCertResolver::new();
+        cert_resolver.add_device(local_device.device().clone(), local_device.key().clone());
         let net_listener = NetListener::open(
-            local_device.clone(),
+            device_cache.clone(),
+            cert_resolver,
             local_device.device().connect_info().endpoints().as_slice(),
             None,
             Duration::from_secs(30),
-            udp_recv_buffer,
-            false,
         ).await.unwrap();
         let mut service = SnService {
             seq_generator: TempSeqGenerator::new(),
-            key_store,
-            resend_queue: None,/* ResendQueue::new(thread_pool.clone(), Duration::from_millis(200), 5), */
             local_device: local_device.clone(),
             stopped: AtomicBool::new(false),
             peer_mgr: PeerManager::new(),
@@ -91,33 +84,11 @@ impl SnService {
             //     calls: Default::default(),
             //     begin_time: Instant::now()
             // }
-            udp_recv_buffer,
             net_listener,
+            device_cache,
         };
 
-        service.key_store.add_local_key(local_device.device_id().clone(),
-                                        local_secret.clone(),
-                                        local_device.device().desc().clone());
-
         let peer_manager = service.peer_manager().clone();
-        let mut resend_queue = ResendQueue::new(Duration::from_millis(200), 5);
-        // resend_queue.set_callback(move |pkg: Arc<PackageBox>, errno: BuckyErrorCode| {
-        //     let peer_manager = peer_manager.clone();
-        //     async move {
-        //         if let Some(p) = pkg.packages_no_exchange()
-        //             .get(0)
-        //             .map(| p | {
-        //                 let p: &SnCalled = p.as_ref();
-        //                 p
-        //             }) {
-        //             peer_manager.find_peer(&p.peer_info.desc().device_id())
-        //                 .map(| requestor | {
-        //                     requestor.peer_status.record(p.to_peer_id.clone(), p.call_seq, errno);
-        //                 });
-        //         }
-        //     }
-        // });
-        service.resend_queue = Some(resend_queue);
         let service_ref = Arc::new(service);
 
         service_ref
@@ -125,8 +96,35 @@ impl SnService {
 
     pub async fn start(self: &Arc<Self>) -> BdtResult<()> {
         Executor::init(None);
-        self.net_listener.set_udp_listener_event_listener(self.clone());
-        self.net_listener.set_tcp_listener_event_listener(self.clone());
+        let this = self.clone();
+        self.net_listener.set_udp_listener_event_listener(Arc::new(move |socket: QuicSocket| {
+            let this = this.clone();
+            async move {
+                let id = this.peer_mgr.generate_conn_id();
+                let tmp = this.clone();
+                match PeerConnection::accept(id, socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
+                    let this = tmp.clone();
+                    async move {
+                        this.handle(cmd_code, cmd_body.as_slice(), conn_id).await
+                    }
+                }).await {
+                    Ok(conn) => {
+                        let peer_desc = this.device_cache.get(conn.remote_device_id()).await;
+                        if peer_desc.is_some() {
+                            this.peer_mgr.add_peer_connection(peer_desc.unwrap(), conn);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        log::error!("accept error: {:?}", e);
+                        Err(e)
+                    }
+                }
+            }
+        }));
+        // self.net_listener.set_tcp_listener_event_listener(Arc::new(move |socket: TCPSocket| {
+        //
+        // }));
         self.net_listener.start();
 
         // 清理过期数据
@@ -158,38 +156,13 @@ impl SnService {
         &self.local_device.device_id()
     }
 
-    pub(super) fn key_store(&self) -> &Keystore {
-        &self.key_store
-    }
-
-    fn resend_queue(&self) -> &ResendQueue {
-        self.resend_queue.as_ref().unwrap()
-    }
-
     fn peer_manager(&self) -> &PeerManagerRef {
         &self.peer_mgr
-    }
-
-    async fn send_resp(&self, mut sender: Arc<dyn DataSender>, pkg: Package, send_log: String) -> BdtResult<()> {
-        if let Err(e) = sender.send_dynamic_pkg(pkg).await {
-            warn!("{} send failed. error: {}.", send_log, e.to_string());
-            Err(e)
-        } else {
-            debug!("{} send ok.", send_log);
-            Ok(())
-        }
     }
 
     async fn clean_timeout_resource(&self) {
         let now = bucky_time_now();
 
-        if let Some(drops) = self.peer_manager().try_knock_timeout(now) {
-            for device in &drops {
-                self.key_store().reset_peer(self.local_device.device_id(), device)
-            }
-        }
-
-        self.resend_queue().try_resend(now).await;
         self.call_stub.recycle(now);
         // {
         //     let tracker = &mut self.call_tracker;
@@ -200,210 +173,25 @@ impl SnService {
         // }
     }
 
-    pub(super) async fn handle(&self, mut pkg_box: PackageBox, resp_sender: Arc<dyn DataSender>) -> BdtResult<()> {
-        let first_pkg = pkg_box.pop();
-        if first_pkg.is_none() {
-            warn!("fetch none pkg");
-            return Ok(());
-        }
-
-        let send_time = bucky_time_now();
-        let first_pkg = first_pkg.unwrap();
-        let cmd_pkg = match first_pkg.cmd_code() {
-            PackageCmdCode::Exchange => {
-                let exchg = first_pkg.into_any().downcast::<Exchange>(); // pkg.into_any().downcast::<Exchange>();
-                if let Ok(exchg) = exchg {
-                    self.key_store().add_key(pkg_box.key(), pkg_box.local(), pkg_box.remote(), EncryptedKey::Unconfirmed(exchg.key_encrypted));
-                } else {
-                    warn!("fetch exchange failed, from: {:?}.", resp_sender.remote().addr());
-                    return Ok(());
-                }
-
-                match pkg_box.pop() {
-                    Some(pkg) => pkg,
-                    None => {
-                        warn!("fetch none cmd-pkg, from: {:?}.", resp_sender.remote().addr());
-                        return Ok(());
-                    }
-                }
-            }
-            _ => first_pkg,
-        };
-
-        match cmd_pkg.cmd_code() {
-            PackageCmdCode::SnPing => {
-                let ping_req = <Box<dyn Any + Send>>::downcast::<SnPing>(cmd_pkg.into_any());
-                return if let Ok(ping_req) = ping_req {
-                    self.handle_ping(
-                        ping_req,
-                        resp_sender.clone(),
-                        send_time,
-                    ).await?;
-                    Ok(())
-                } else {
-                    warn!("fetch ping-req failed, from: {:?}.", resp_sender.remote());
-                    Ok(())
-                }
-            }
+    pub(super) async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TempSeq) -> BdtResult<()> {
+        match cmd_code {
             PackageCmdCode::SnCall => {
-                let call_req = <Box<dyn Any + Send>>::downcast::<SnCall>(cmd_pkg.into_any());
-                return if let Ok(call_req) = call_req {
-                    self.handle_call(
-                        call_req,
-                        resp_sender,
-                        send_time,
-                    ).await;
-                    Ok(())
-                } else {
-                    warn!("fetch sn-call failed, from: {:?}.", resp_sender.remote());
-                    Ok(())
-                }
+                let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                self.handle_call(
+                    call_req,
+                    conn_id,
+                    bucky_time_now(),
+                ).await;
             }
             PackageCmdCode::SnCalledResp => {
-                let called_resp =
-                    <Box<dyn Any + Send>>::downcast::<SnCalledResp>(cmd_pkg.into_any());
-                return if let Ok(called_resp) = called_resp {
-                    self.handle_called_resp(called_resp, Some(pkg_box.key())).await;
-                    Ok(())
-                } else {
-                    warn!(
-                        "fetch sn-called-resp failed, from: {:?}.",
-                        resp_sender.remote()
-                    );
-                    Ok(())
-                }
+                let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                self.handle_called_resp(called_resp).await;
             }
-            _ => warn!("invalid cmd-package, from: {:?}.", resp_sender.remote()),
+            _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
         }
         Ok(())
     }
 
-
-    async fn handle_ping(
-        &self,
-        ping_req: Box<SnPing>,
-        resp_sender: Arc<dyn DataSender>,
-        send_time: Timestamp,
-    ) -> BdtResult<()> {
-        if resp_sender.local().addr().is_ipv4() {
-            self.handle_ipv4_ping(ping_req, resp_sender, send_time).await
-        } else {
-            self.handle_ipv6_ping(ping_req, resp_sender, send_time).await
-        }
-    }
-
-    async fn handle_ipv6_ping(
-        &self,
-        ping_req: Box<SnPing>,
-        resp_sender: Arc<dyn DataSender>,
-        _send_time: Timestamp,
-    ) -> BdtResult<()> {
-        let from_peer_id = match ping_req.from_peer_id.as_ref() {
-            Some(id) => id,
-            None => resp_sender.remote_device_id()
-        };
-
-        let aes_key = resp_sender.key();
-
-        let log_key = format!(
-            "[ping from {} seq({})]",
-            from_peer_id.to_string(),
-            ping_req.seq.value()
-        );
-
-        info!("{}", log_key);
-
-        let ping_resp = SnPingResp {
-            seq: ping_req.seq,
-            sn_peer_id: self.local_device_id().clone(),
-            result: BuckyErrorCode::Ok.into_u8(),
-            peer_info: None,
-            end_point_array: vec![Endpoint::from((
-                Protocol::Udp,
-                resp_sender.remote().addr().clone(),
-            ))],
-            receipt: None,
-        };
-
-        self.send_resp(
-            resp_sender,
-            Package::from(ping_resp),
-            format!("{}", log_key),
-        ).await?;
-
-        Ok(())
-    }
-
-    async fn handle_ipv4_ping(
-        &self,
-        ping_req: Box<SnPing>,
-        resp_sender: Arc<dyn DataSender>,
-        send_time: Timestamp,
-    ) -> BdtResult<()> {
-        let from_peer_id = match ping_req.from_peer_id.as_ref() {
-            Some(id) => id,
-            None => resp_sender.remote_device_id()
-        };
-
-        let aes_key = resp_sender.key();
-
-        let log_key = format!(
-            "[ping from {} seq({})]",
-            from_peer_id.to_string(),
-            ping_req.seq.value()
-        );
-
-        info!("{}", log_key);
-
-        // let (result, endpoints, receipt) = if let Some((accept, local_receipt)) = self.ping_receipt(&ping_req, from_peer_id) {
-        //     let receipt = match accept {
-        //         IsAcceptClient::Refuse => {
-        //             return;
-        //         }
-        //         IsAcceptClient::Accept(is_request_receipt) => if is_request_receipt {
-        //             Some(local_receipt)
-        //         } else {
-        //             None
-        //         }
-        //     };
-
-        //     info!("{} from-endpoint: {}", log_key, resp_sender.remote());
-        //     (BuckyErrorCode::Ok as u8, vec![Endpoint::from((Protocol::Udp, resp_sender.remote().clone()))], receipt)
-        // } else {
-        //     (BuckyErrorCode::NotFound as u8, vec![], None)
-        // };
-
-        if !self.peer_manager().peer_heartbeat(
-            from_peer_id.clone(),
-            &ping_req.peer_info,
-            resp_sender.clone(),
-            Some(aes_key),
-            send_time,
-            ping_req.seq,
-        ) {
-            warn!("{} cache peer failed. the ping maybe is timeout.", log_key);
-            return Ok(());
-        };
-
-        let ping_resp = SnPingResp {
-            seq: ping_req.seq,
-            sn_peer_id: self.local_device_id().clone(),
-            result: BuckyErrorCode::Ok.into_u8(),
-            peer_info: Some(self.local_device.device().clone()),
-            end_point_array: vec![Endpoint::from((
-                Protocol::Udp,
-                resp_sender.remote().addr().clone(),
-            ))],
-            receipt: None,
-        };
-
-        self.send_resp(
-            resp_sender,
-            Package::from(ping_resp),
-            format!("{}", log_key),
-        ).await?;
-        Ok(())
-    }
 
     // fn verify_receipt_sign(
     //     &self,
@@ -492,8 +280,8 @@ impl SnService {
 
     async fn handle_call(
         &self,
-        mut call_req: Box<SnCall>,
-        mut resp_sender: Arc<dyn DataSender>,
+        mut call_req: SnCall,
+        conn_id: TempSeq,
         _send_time: Timestamp,
     ) {
         let from_peer_id = &call_req.from_peer_id;
@@ -504,38 +292,8 @@ impl SnService {
             call_req.seq.value()
         );
         info!("{}.", log_key);
-        // if let IsAcceptClient::Refuse = self.contract.verify_auth(&call_req.to_peer_id) {
-        //     warn!("{} refused by contract.", log_key);
-        //     send_responce(self,
-        //                   resp_sender,
-        //                   call_req.seq,
-        //                   BuckyErrorCode::PermissionDenied,
-        //                   None,
-        //                   log_key.as_str()
-        //     );
-        //     return;
-        // }
-
-        // if let Some(cached_from) = self.peer_mgr.find_peer(from_peer_id, FindPeerReason::CallFrom(*send_time)) {
-        //     if &cached_from.last_call_time > send_time {
-        //         warn!("{} ignore for timeout.", log_key);
-        //         return;
-        //     } else {
-        //         if from_peer_desc.is_none() {
-        //             from_peer_desc = Some(cached_from.desc.clone());
-        //         }
-        //     }
-        // } else {
-        //     warn!("{} without from-desc.", log_key);
-        //     call_result = BuckyErrorCode::NotFound;
-        // };
-
 
         let call_requestor = self.peer_manager().find_peer(&call_req.from_peer_id);
-
-        if let Some(call_requestor) = call_requestor.as_ref() {
-            call_requestor.peer_status.add_record(call_req.to_peer_id.clone(), call_req.seq);
-        }
 
         let call_resp =
             if let Some(to_peer_cache) = self.peer_manager().find_peer(&call_req.to_peer_id) {
@@ -565,7 +323,7 @@ impl SnService {
                                 peer_info: from_peer_desc,
                                 call_seq: call_req.seq,
                                 call_send_time: call_req.send_time,
-                                payload: SizedOwnedData::from(vec![]),
+                                payload: vec![],
                                 reverse_endpoint_array: vec![],
                                 active_pn_list: vec![],
                             };
@@ -586,12 +344,16 @@ impl SnService {
                                 called_req.payload.len(),
                                 called_req.active_pn_list
                             );
-                            self.resend_queue().send(
-                                to_peer_cache.sender.clone(),
-                                Package::from(called_req),
-                                called_seq.value(),
-                                called_log,
-                            ).await;
+                            for conn_id in to_peer_cache.conn_list.iter() {
+                                let conn = self.peer_mgr.find_connection(*conn_id);
+                                if conn.is_some() {
+                                    let mut peer_conn = conn.as_ref().unwrap().lock().await;
+                                    if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnCalled, called_req.clone())).await {
+                                        log::debug!("send called-req failed, conn_id: {:?}, error: {:?}", conn_id, e);
+                                        continue;
+                                    }
+                                }
+                            }
                             // self.call_tracker.calls.insert(called_seq, (call_req.send_time, Instant::now(), call_req.to_peer_id.clone()));
                         }
                     } else {
@@ -624,27 +386,17 @@ impl SnService {
                 }
             };
 
-        match &call_resp.result {
-            0 => { /* wait confirm */ },
-
-            _ => {
-                if let Some(call_requestor) = call_requestor.as_ref() {
-                    call_requestor.peer_status.record(call_req.to_peer_id.clone(), call_req.seq, BuckyErrorCode::from(call_resp.result as u16));
-                }
+        let conn = self.peer_mgr.find_connection(conn_id);
+        if conn.is_some() {
+            let mut conn = conn.as_ref().unwrap().lock().await;
+            if let Err(e) = conn.send(Package::new(PackageCmdCode::SnCallResp, call_resp)).await {
+                log::debug!("send call-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
             }
-
         }
-
-        self.send_resp(
-            resp_sender,
-            Package::from(call_resp),
-            format!("{} call-resp", log_key),
-        );
     }
 
-    async fn handle_called_resp(&self, called_resp: Box<SnCalledResp>, _aes_key: Option<&MixAesKey>) {
+    async fn handle_called_resp(&self, called_resp: SnCalledResp) {
         info!("called-resp seq {}.", called_resp.seq.value());
-        self.resend_queue().confirm_pkg(called_resp.seq.value()).await;
 
         // 统计性能
         // if let Some((call_send_time, called_send_time, peerid)) = self.call_tracker.calls.remove(&called_resp.seq) {
@@ -662,29 +414,9 @@ impl SnService {
     }
 }
 
-#[async_trait::async_trait]
-impl UDPListenerEventListener for SnService {
-    async fn on_udp_package_box(&self, socket: Arc<UDPSocket>, package_box: UdpPackageBox) {
-        let remote_ep = package_box.remote().clone();
-        let pkg: PackageBox = package_box.into();
-        let resp_sender = Arc::new(UdpDataSender::new(socket,
-                                             remote_ep,
-                                             pkg.remote().clone(),
-                                             pkg.local().clone(),
-                                             pkg.key().clone()));
-        if let Err(e) = self.handle(pkg, resp_sender).await {
-            error!("handle udp package failed, e:{}", e);
-        }
-    }
-
-    async fn on_udp_raw_data(&self, data: &[u8], context: (Arc<UDPSocket>, DeviceId, MixAesKey, Endpoint)) -> Result<(), BuckyError> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl TcpListenerEventListener for SnService {
-    async fn on_new_connection(&self, socket: Arc<TCPSocket>, first_box: PackageBox) -> BdtResult<()> {
-        self.handle(first_box, socket).await
-    }
-}
+// #[async_trait::async_trait]
+// impl TcpListenerEventListener for SnService {
+//     async fn on_new_connection(&self, socket: TCPSocket) -> BdtResult<()> {
+//         self.handle(socket).await
+//     }
+// }
