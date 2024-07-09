@@ -18,3 +18,4 @@ bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
 bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
 bucky-error = {git = "https://github.com/buckyos/bucky-error.git"}
 bucky-raw-codec = {git = "https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
+flexi_logger = "0.28.5"

@@ -1,8 +1,11 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
+use std::thread;
 use bucky_crypto::PrivateKey;
-use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol};
-use bucky_raw_codec::{FileDecoder, RawDecode, RawFrom};
+use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId};
+use bucky_raw_codec::{FileDecoder, FileEncoder, RawDecode, RawFrom};
+use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming};
+use log::Record;
 
 use cyfs_p2p::{LocalDevice, sn::service::*};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
@@ -10,6 +13,8 @@ use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
 #[warn(unused_imports)]
 pub(crate) use sfo_result::err as miner_err;
 pub(crate) use sfo_result::into_err as into_miner_err;
+use cyfs_p2p::error::{BdtError, BdtErrorCode};
+use cyfs_p2p::executor::Executor;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MinerErrorCode {
@@ -45,8 +50,40 @@ impl SnServiceContractServer for SnServiceContractServerImpl {
     }
 }
 
+fn custom_format(writer: &mut dyn std::io::Write, now: &mut DeferredNow, record: &Record) -> std::io::Result<()> {
+    let file = match record.file() {
+        None => {
+            "<unknown>".to_string()
+        }
+        Some(path) => {
+            Path::new(path).file_name().map(|v| v.to_string_lossy().to_string()).unwrap_or("<unknown>".to_string())
+        }
+    };
+    write!(
+        writer,
+        "{} [{}] [{}:{}] [{}] - {}",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        record.level(),
+        file,
+        record.line().unwrap_or(0),
+        thread::current().name().unwrap_or("<unnamed>"),
+        &record.args()
+    )
+}
+
 #[tokio::main]
 async fn main() {
+    flexi_logger::Logger::try_with_str("debug")
+        .unwrap()
+        .log_to_file(FileSpec::default().directory(std::env::current_dir().unwrap().join("logs")))
+        .duplicate_to_stderr(Duplicate::All)
+        .rotate(Criterion::Size(10 * 1024 * 1024), // 文件大小达到 10MB 时轮转
+                Naming::Numbers, // 使用数字命名轮转文件
+                Cleanup::KeepLogFiles(7), // 保留最近 7 个日志文件
+        ).format(custom_format)
+        .start().unwrap();
+
+    Executor::init(None);
     let data_folder = std::env::current_dir().unwrap().join(APP_NAME);
     let default_desc_path = data_folder.join(APP_NAME);
     let matches = clap::App::new(APP_NAME)
@@ -90,6 +127,13 @@ async fn main() {
 }
 
 fn load_device_info(folder_path: &Path) -> MinerResult<(Device, PrivateKey)> {
+    if !folder_path.with_extension("desc").exists() {
+        let private_key = PrivateKey::generate_rsa(1024).map_err(into_miner_err!(MinerErrorCode::Failed))?;
+        let public_key = private_key.public();
+        let device = Device::new(None, UniqueId::default(), vec![], vec![], vec![], public_key, Area::default(), DeviceCategory::Server).build();
+        device.encode_to_file(folder_path.with_extension("desc").as_path(), true).map_err(into_miner_err!(MinerErrorCode::Failed))?;
+        private_key.encode_to_file(folder_path.with_extension("sec").as_path(), true).map_err(into_miner_err!(MinerErrorCode::Failed))?;
+    }
     let (mut device, _) = Device::decode_from_file(folder_path.with_extension("desc").as_path(), &mut vec![]).map_err(into_miner_err!(MinerErrorCode::Failed))?;
     let (private_key, _) = PrivateKey::decode_from_file(folder_path.with_extension("sec").as_path(), &mut vec![]).map_err(into_miner_err!(MinerErrorCode::Failed))?;
 

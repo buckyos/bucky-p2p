@@ -10,6 +10,7 @@ use crate::error::BdtResult;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveProcessor, ReceiveProcessorRef};
+use crate::sn::client::{SNClientService, SNClientServiceRef, SNEvent};
 use crate::sockets::{NetManager, NetManagerRef};
 use crate::tunnel::{TunnelGuard, TunnelManager, TunnelManagerEvent, TunnelManagerRef};
 
@@ -45,7 +46,7 @@ pub async fn init_p2p(
 
 pub struct P2pStack {
     local_device: LocalDeviceRef,
-    // sn_service: SNClientServiceRef,
+    sn_service: SNClientServiceRef,
     tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
 }
@@ -54,20 +55,20 @@ pub type P2pStackRef = Arc<P2pStack>;
 impl P2pStack {
     pub(crate) fn new(
         local_device: LocalDeviceRef,
-        // sn_service: SNClientServiceRef,
+        sn_service: SNClientServiceRef,
         tunnel_manager: TunnelManagerRef,
         net_manager: NetManagerRef,) -> Self {
         net_manager.add_listen_device(local_device.device().clone(), local_device.key().clone());
         Self {
             local_device,
-            // sn_service,
+            sn_service,
             tunnel_manager,
             net_manager,
         }
     }
 
     pub async fn wait_online(&self, timeout: Option<Duration>) -> BdtResult<()> {
-        // self.sn_service.wait_online(timeout).await
+        self.sn_service.wait_online(timeout).await?;
         Ok(())
     }
 
@@ -96,12 +97,12 @@ impl SNEventListener {
     }
 }
 
-// #[async_trait::async_trait]
-// impl SNEvent for SNEventListener {
-//     async fn on_called(&self, called: &SnCalled) -> BdtResult<()> {
-//         todo!()
-//     }
-// }
+#[async_trait::async_trait]
+impl SNEvent for SNEventListener {
+    async fn on_called(&self, called: &SnCalled) -> BdtResult<()> {
+        todo!()
+    }
+}
 
 pub struct TunnelManagerEventListener {
 
@@ -122,21 +123,21 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
     // net_manager.key_store().add_local_key(device_id.clone(), local_key, local_device.desc().clone());
 
     let local_device = LocalDevice::new(local_device, local_key.clone());
-    // let sn_service = SNClientService::new(
-    //     net_manager.clone(),
-    //     sn_list,
-    //     local_device.clone(),
-    //     gen_seq.clone(),
-    //     Arc::new(SNEventListener::new()),
-    //     Duration::from_secs(300),
-    //     Duration::from_secs(300),
-    //     Duration::from_secs(300),
-    // );
+    let sn_service = SNClientService::new(
+        net_manager.clone(),
+        sn_list,
+        local_device.clone(),
+        gen_seq.clone(),
+        Arc::new(SNEventListener::new()),
+        Duration::from_secs(300),
+        Duration::from_secs(300),
+        Duration::from_secs(300),
+    );
 
     let tunnel_manager = TunnelManager::new(
         net_manager.clone(),
         RECEIVE_DISPATCHER.get().unwrap().clone(),
-        // sn_service.clone(),
+        sn_service.clone(),
         local_device.clone(),
         0,
         0,
@@ -147,11 +148,11 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
     tunnel_manager.register_pkg_processor(&mut processor);
     let processor = Arc::new(processor);
     RECEIVE_DISPATCHER.get().unwrap().add_processor(device_id, processor.clone());
-    // sn_service.start().await;
+    sn_service.start().await;
 
     Ok(Arc::new(P2pStack::new(
         local_device.clone(),
-        // sn_service,
+        sn_service,
         tunnel_manager,
         net_manager.clone(),)))
 }

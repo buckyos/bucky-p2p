@@ -16,7 +16,7 @@ use crate::{LocalDeviceRef, MixAesKey, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
-use crate::protocol::{Package, PackageCmdCode, SnCall};
+use crate::protocol::{Package, PackageCmdCode, SnCall, ReportSn};
 use crate::protocol::v0::{SnCalled, SnCalledResp, SnCallResp, SnPingResp};
 use crate::receive_processor::{ReceiveProcessor, ReceiveProcessorRef};
 use crate::sn::service::PeerConnection;
@@ -42,6 +42,7 @@ pub struct ActiveSN {
 pub struct SNServiceState {
     pub pinging_tasks: Vec<AbortHandle>,
     pub active_sn_list: Vec<ActiveSN>,
+    pub latest_sn_interval: u64,
 }
 
 pub struct SNClientService {
@@ -77,6 +78,7 @@ impl SNClientService {
             state: RwLock::new(SNServiceState {
                 pinging_tasks: vec![],
                 active_sn_list: vec![],
+                latest_sn_interval: 0,
             }),
             listener,
         })
@@ -142,14 +144,6 @@ impl SNClientService {
         None
     }
 
-    fn clear_timeout_active_sn(&self) {
-        let mut state = self.state.write().unwrap();
-        let now = bucky_time_now();
-        state.active_sn_list.retain(|sn| {
-            now - sn.latest_time < 60
-        });
-    }
-
     pub async fn start(self: &Arc<Self>) {
         let this = self.clone();
         let handle = Executor::spawn_with_handle(async move {
@@ -158,29 +152,75 @@ impl SNClientService {
     }
 
     async fn ping_proc(self: &Arc<Self>) {
-        for listener in self.net_manager.udp_listeners().iter() {
-            let quic_ep = listener.quic_ep();
-            for sn in self.sn_list.iter() {
-                for sn_ep in sn.connect_info().endpoints().iter() {
-                    let peer_conn = match self.create_connection(listener.local(), quic_ep.clone(), sn, sn_ep).await {
-                        Ok(peer_conn) => peer_conn,
-                        Err(e) => {
-                            log::error!("connect to sn {} failed: {:?}", sn.desc().device_id(), e);
+        loop {
+            {
+                let (active_sn_count, latest_sn_interval, cur_sn_interval) = {
+                    let mut state = self.state.write().unwrap();
+                    if state.active_sn_list.len() > 0 {
+                        state.latest_sn_interval = 10;
+                        (state.active_sn_list.len(), state.latest_sn_interval, state.latest_sn_interval)
+                    } else {
+                        let cur_sn_interval = state.latest_sn_interval;
+                        if state.latest_sn_interval == 0 {
+                            state.latest_sn_interval = 10;
+                        } else {
+                            state.latest_sn_interval = state.latest_sn_interval * 2;
+                        }
+                        if state.latest_sn_interval > 600 {
+                            state.latest_sn_interval = 600;
+                        }
+                        (state.active_sn_list.len(), cur_sn_interval, state.latest_sn_interval)
+                    }
+                };
+                if latest_sn_interval != 0 {
+                    runtime::sleep(Duration::from_secs(cur_sn_interval)).await;
+                }
+                if active_sn_count > 0 {
+                    continue;
+                }
+            }
+            for listener in self.net_manager.udp_listeners().iter() {
+                let quic_ep = listener.quic_ep();
+                for sn in self.sn_list.iter() {
+                    for sn_ep in sn.connect_info().endpoints().iter() {
+                        let mut peer_conn = match self.create_connection(listener.local(), quic_ep.clone(), sn, sn_ep).await {
+                            Ok(peer_conn) => peer_conn,
+                            Err(e) => {
+                                log::error!("connect to sn {} failed: {:?}", sn.desc().device_id(), e);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = self.report(&mut peer_conn).await {
+                            log::error!("ping to {} failed: {:?}", sn.desc().device_id(), e);
                             continue;
                         }
-                    };
-                    let active_sn = ActiveSN {
-                        sn: sn.clone(),
-                        latest_time: bucky_time_now(),
-                        conn_id: peer_conn.conn_id(),
-                        recv_future: Arc::new(Mutex::new(None)),
-                        peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
-                    };
-                    let mut state = self.state.write().unwrap();
-                    state.active_sn_list.push(active_sn);
+
+                        let recv_handle = peer_conn.take_recv_handle().unwrap();
+                        let conn_id = peer_conn.conn_id();
+                        let active_sn = ActiveSN {
+                            sn: sn.clone(),
+                            latest_time: bucky_time_now(),
+                            conn_id: peer_conn.conn_id(),
+                            recv_future: Arc::new(Mutex::new(None)),
+                            peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
+                        };
+                        let mut state = self.state.write().unwrap();
+                        state.active_sn_list.push(active_sn);
+
+                        let this = self.clone();
+                        Executor::spawn_ok(async move {
+                            recv_handle.await;
+                            this.remote_sn_conn(conn_id);
+                        });
+                    }
                 }
             }
         }
+    }
+
+    fn remote_sn_conn(&self, conn_id: TempSeq) {
+        let mut state = self.state.write().unwrap();
+        state.active_sn_list.retain(|sn| sn.conn_id != conn_id);
     }
 
     async fn create_connection(self: &Arc<Self>, local_ep: Endpoint, quic_ep: quinn::Endpoint, sn: &Device, sn_ep: &Endpoint) -> BdtResult<PeerConnection> {
@@ -199,7 +239,7 @@ impl SNClientService {
         let mut client_config =
             quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(240).try_into().unwrap()));
         transport_config.keep_alive_interval(Some(Duration::from_secs(60)));
         client_config.transport_config(Arc::new(transport_config));
 
@@ -242,6 +282,24 @@ impl SNClientService {
         state.active_sn_list.clone()
     }
 
+    async fn report(&self, conn: &mut PeerConnection) -> BdtResult<()> {
+        let seq = self.gen_seq.generate();
+        let mut report = ReportSn {
+            protocol_version: 0,
+            stack_version: 0,
+            seq,
+            sn_peer_id: conn.remote_device_id().clone(),
+            from_peer_id: Some(self.local_device.device_id().clone()),
+            peer_info: Some(self.local_device.device().clone()),
+            send_time: bucky_time_now(),
+            contract_id: None,
+            receipt: None,
+        };
+        conn.send(Package::new(PackageCmdCode::ReportSn, report)).await?;
+
+        Ok(())
+    }
+
     pub async fn call(&self,
                       reverse_endpoints: Option<&[Endpoint]>,
                       remote: &DeviceId,
@@ -259,7 +317,7 @@ impl SNClientService {
                 reverse_endpoint_array: reverse_endpoints.map(|ep_list| Vec::from(ep_list)),
                 active_pn_list: None,
                 peer_info: Some(self.local_device.device().clone()),
-                send_time: 0,
+                send_time: bucky_time_now(),
                 payload: payload_pkg.clone(),
                 is_always_call: false,
             };

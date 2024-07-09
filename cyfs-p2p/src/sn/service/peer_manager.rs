@@ -9,6 +9,7 @@ use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
 use bucky_time::bucky_time_now;
 use crate::{runtime, types::*};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult};
+use crate::executor::Executor;
 use crate::sn::service::peer_connection::PeerConnection;
 use crate::sn::service::statistic::{PeerStatus, StatisticManager};
 use crate::sockets::QuicSocket;
@@ -188,9 +189,10 @@ impl PeerManager {
         self.conn_id_generator.generate()
     }
 
-    pub fn add_peer_connection(&self, peer_desc: Device, conn: PeerConnection) {
+    pub fn add_peer_connection(self: &Arc<Self>, peer_desc: Device, mut conn: PeerConnection) {
         let conn_id = conn.conn_id();
         let remote_id = conn.remote_device_id().clone();
+        let recv_handle = conn.take_recv_handle().unwrap();
         let conn = Arc::new(runtime::Mutex::new(conn));
         let mut conn_cache = self.conn_cache.lock().unwrap();
         conn_cache.insert(conn_id, (remote_id.clone(), conn.clone()));
@@ -202,6 +204,12 @@ impl PeerManager {
             let _ = peer_info.update_desc(&peer_desc);
             peer_info.add_conn(conn_id);
         }
+
+        let this = self.clone();
+        Executor::spawn_ok(async move {
+            recv_handle.await;
+            this.remove_peer_connection(conn_id);
+        });
     }
 
     pub fn remove_peer_connection(&self, conn_id: TempSeq) {
@@ -236,4 +244,6 @@ impl PeerManager {
             v.clone()
         })
     }
+
+
 }

@@ -118,7 +118,7 @@ impl Contract {
         stat.receipt.call_peer_count += call_peer_inc;
     }
 
-    fn prepare_receipt(&self, ping_pkg: &mut SnPing, now_abs: SystemTime, secret: &PrivateKey) {
+    fn prepare_receipt(&self, ping_pkg: &mut ReportSn, now_abs: SystemTime, secret: &PrivateKey) {
         let mut stat = self.stat.lock().unwrap();
         if stat.commit_receipt_start_time > UNIX_EPOCH && stat.receipt.grade.is_accept() {
             let commit_receipt_start_time = stat.commit_receipt_start_time;

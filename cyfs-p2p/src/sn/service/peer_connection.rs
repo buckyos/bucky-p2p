@@ -17,13 +17,16 @@ pub struct PeerConnection {
     conn_id: TempSeq,
     socket: QuicSocket,
     send: SendStream,
-    handle: SpawnHandle<BdtResult<()>>,
+    handle: Option<SpawnHandle<BdtResult<()>>>,
 }
 
 impl PeerConnection {
     pub async fn accept(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> BdtResult<Self> {
         let (send, recv) = socket.socket().accept_bi().await
             .map_err(into_bdt_err!(crate::error::BdtErrorCode::QuicError))?;
+
+        log::info!("recv PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+            conn_id, socket.remote_device_id().to_string(), socket.remote(), socket.local_device_id().to_string(), socket.local());
 
         let handle = Executor::spawn_with_handle(async move {
             if let Err(e) = Self::recv(conn_id, recv, listener).await {
@@ -36,11 +39,13 @@ impl PeerConnection {
             conn_id,
             socket,
             send,
-            handle,
+            handle: Some(handle),
         })
     }
 
     pub async fn connect(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> BdtResult<Self> {
+        log::info!("new PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+            conn_id, socket.remote_device_id().to_string(), socket.remote(), socket.local_device_id().to_string(), socket.local());
         let (send, recv) = socket.socket().open_bi().await
             .map_err(into_bdt_err!(crate::error::BdtErrorCode::QuicError))?;
         let handle = Executor::spawn_with_handle(async move {
@@ -53,7 +58,7 @@ impl PeerConnection {
             conn_id,
             socket,
             send,
-            handle,
+            handle: Some(handle),
         })
     }
 
@@ -73,8 +78,10 @@ impl PeerConnection {
     }
 
     async fn recv(conn_id: TempSeq, mut recv: RecvStream, listener: impl PeerConnectionEvent) -> BdtResult<()> {
+        log::info!("enter recv loop");
         loop {
             let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
+            log::debug!("conn {:?} recv {:?}", conn_id, cmd_code);
             if let Err(e) = listener.on_recv(conn_id, cmd_code, cmd_body).await {
                 log::error!("on_recv error: {:?}", e);
             }
@@ -101,8 +108,8 @@ impl PeerConnection {
         &self.socket.remote_device_id()
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.handle.is_finished()
+    pub fn take_recv_handle(&mut self) -> Option<SpawnHandle<BdtResult<()>>> {
+        self.handle.take()
     }
 
     pub async fn send<T: RawEncode + for <'a> RawDecode<'a>>(&mut self, pkg: Package<T>) -> BdtResult<()> {
@@ -114,7 +121,9 @@ impl PeerConnection {
     }
 
     async fn shutdown(&mut self) -> BdtResult<()> {
-        self.handle.abort();
+        if self.handle.is_some() {
+            self.handle.take().unwrap().abort();
+        }
         self.send.finish();
         self.send.stopped().await.map_err(into_bdt_err!(BdtErrorCode::IoError));
         self.socket.shutdown().await?;
@@ -124,6 +133,7 @@ impl PeerConnection {
 
 impl Drop for PeerConnection {
     fn drop(&mut self) {
+        log::info!("drop PeerConnection {:?}", self.conn_id);
         Executor::block_on(self.shutdown());
     }
 }

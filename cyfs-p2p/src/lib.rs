@@ -6,7 +6,7 @@ compile_error!("Only one of 'runtime-async-std' and 'runtime-tokio' should be en
 mod history;
 mod types;
 mod sockets;
-mod executor;
+pub mod executor;
 pub mod protocol;
 // pub mod pn;
 pub mod sn;

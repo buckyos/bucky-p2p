@@ -61,7 +61,7 @@ impl SnService {
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
         let device_cache = Arc::new(DeviceCache::new(&DeviceCacheConfig {
-            expire: Duration::from_secs(600),
+            expire: Duration::from_secs(240),
             capacity: 10240,
         }, None));
         let cert_resolver = ServerCertResolver::new();
@@ -186,6 +186,10 @@ impl SnService {
             PackageCmdCode::SnCalledResp => {
                 let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
                 self.handle_called_resp(called_resp).await;
+            }
+            PackageCmdCode::ReportSn => {
+                let _report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                // self.peer_mgr.report_sn(report_sn).await;
             }
             _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
         }

@@ -13,6 +13,7 @@ use crate::history::keystore::EncryptedKey;
 use crate::protocol::{AckTunnel, Package, MTU, PackageCmdCode, SynTunnel};
 use crate::protocol::v0::{SnCalled, AckStream, SynStream};
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor,};
+use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::sockets::tcp::TCPSocket;
 use super::{Tunnel, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
@@ -189,7 +190,7 @@ pub struct TunnelManager {
     tunnels: Arc<RwLock<HashMap<DeviceId, Arc<Tunnels>>>>,
     net_manager: NetManagerRef,
     receive_dispatcher: ReceiveDispatcherRef,
-    // sn_service: SNClientServiceRef,
+    sn_service: SNClientServiceRef,
     local_device: LocalDeviceRef,
     protocol_version: u8,
     stack_version: u32,
@@ -205,7 +206,7 @@ impl TunnelManager {
     pub fn new(
         net_manager: NetManagerRef,
         receive_dispatcher: ReceiveDispatcherRef,
-        // sn_service: SNClientServiceRef,
+        sn_service: SNClientServiceRef,
         local_device: LocalDeviceRef,
         protocol_version: u8,
         stack_version: u32,
@@ -224,7 +225,7 @@ impl TunnelManager {
             tunnels,
             net_manager,
             receive_dispatcher,
-            // sn_service,
+            sn_service,
             local_device,
             protocol_version,
             stack_version,

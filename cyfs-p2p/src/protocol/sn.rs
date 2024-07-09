@@ -402,7 +402,7 @@ impl From<(SnServiceReceipt, Signature)> for ReceiptWithSignature {
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
-pub struct SnPing {
+pub struct ReportSn {
     pub protocol_version: u8,
     pub stack_version: u32,
     //ln与sn的keepalive包

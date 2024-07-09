@@ -36,7 +36,7 @@ pub enum PackageCmdCode {
     SnCallResp = 0x21,
     SnCalled = 0x22,
     SnCalledResp = 0x23,
-    SnPing = 0x24,
+    ReportSn = 0x24,
     SnPingResp = 0x25,
 
     SessionData = 0x40,
@@ -75,7 +75,7 @@ impl TryFrom<u8> for PackageCmdCode {
             0x21u8 => Ok(Self::SnCallResp),
             0x22u8 => Ok(Self::SnCalled),
             0x23u8 => Ok(Self::SnCalledResp),
-            0x24u8 => Ok(Self::SnPing),
+            0x24u8 => Ok(Self::ReportSn),
             0x25u8 => Ok(Self::SnPingResp),
 
             0x50u8 => Ok(Self::SynProxy),
