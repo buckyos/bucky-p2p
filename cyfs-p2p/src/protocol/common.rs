@@ -28,16 +28,20 @@ pub const MTU_LARGE: usize = 1024*30;
 pub enum PackageCmdCode {
     SynStream = 1,
     AckStream = 2,
+    SynReverseStream = 3,
+    AckReverseStream = 4,
 
     SynDatagram = 0x11,
     AckDatagram = 0x12,
+    SynReverseDatagram = 0x13,
+    AckReverseDatagram = 0x14,
 
     SnCall = 0x20,
     SnCallResp = 0x21,
     SnCalled = 0x22,
     SnCalledResp = 0x23,
     ReportSn = 0x24,
-    SnPingResp = 0x25,
+    ReportSnResp = 0x25,
 
     SessionData = 0x40,
     TcpAckAckConnection = 0x43,
@@ -55,7 +59,7 @@ pub enum PackageCmdCode {
 
 impl PackageCmdCode {
     pub fn is_sn(&self) -> bool {
-        (*self >= Self::SnCall) && (*self <= Self::SnPingResp)
+        (*self >= Self::SnCall) && (*self <= Self::ReportSnResp)
     }
 
     pub fn is_proxy(&self) -> bool {
@@ -69,14 +73,18 @@ impl TryFrom<u8> for PackageCmdCode {
         match v {
             1u8 => Ok(Self::SynStream),
             2u8 => Ok(Self::AckStream),
+            3u8 => Ok(Self::SynReverseStream),
+            4u8 => Ok(Self::AckReverseStream),
             0x11u8 => Ok(Self::SynDatagram),
             0x12u8 => Ok(Self::AckDatagram),
+            0x13u8 => Ok(Self::SynReverseDatagram),
+            0x14u8 => Ok(Self::AckReverseDatagram),
             0x20u8 => Ok(Self::SnCall),
             0x21u8 => Ok(Self::SnCallResp),
             0x22u8 => Ok(Self::SnCalled),
             0x23u8 => Ok(Self::SnCalledResp),
             0x24u8 => Ok(Self::ReportSn),
-            0x25u8 => Ok(Self::SnPingResp),
+            0x25u8 => Ok(Self::ReportSnResp),
 
             0x50u8 => Ok(Self::SynProxy),
             0x51u8 => Ok(Self::AckProxy),

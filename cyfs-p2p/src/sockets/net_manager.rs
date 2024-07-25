@@ -9,7 +9,7 @@ use crate::history::keystore::Keystore;
 use crate::LocalDeviceRef;
 use crate::sockets::{NetListener, NetListenerRef, QuicListenerEventListener};
 use crate::sockets::quic::QuicListenerRef;
-use crate::sockets::tcp::TcpListenerEventListener;
+use crate::sockets::tcp::{TCPListener, TcpListenerEventListener, TCPListenerRef};
 
 pub struct NetManager {
     net_listener: NetListenerRef,
@@ -50,6 +50,10 @@ impl NetManager {
 
     pub fn udp_listeners(&self) -> &Vec<QuicListenerRef> {
         self.net_listener.udp()
+    }
+
+    pub fn tcp_listeners(&self) -> &Vec<TCPListenerRef> {
+        self.net_listener.tcp()
     }
 
     pub fn add_listen_device(&self, device: Device, key: PrivateKey) {

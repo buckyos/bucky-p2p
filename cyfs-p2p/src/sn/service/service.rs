@@ -60,6 +60,7 @@ impl SnService {
         local_device: LocalDeviceRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
+        Executor::init(None);
         let device_cache = Arc::new(DeviceCache::new(&DeviceCacheConfig {
             expire: Duration::from_secs(240),
             capacity: 10240,
@@ -95,7 +96,6 @@ impl SnService {
     }
 
     pub async fn start(self: &Arc<Self>) -> BdtResult<()> {
-        Executor::init(None);
         let this = self.clone();
         self.net_listener.set_udp_listener_event_listener(Arc::new(move |socket: QuicSocket| {
             let this = this.clone();
@@ -188,7 +188,8 @@ impl SnService {
                 self.handle_called_resp(called_resp).await;
             }
             PackageCmdCode::ReportSn => {
-                let _report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                let report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                self.handle_report_sn(&conn_id, report_sn).await;
                 // self.peer_mgr.report_sn(report_sn).await;
             }
             _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
@@ -415,6 +416,25 @@ impl SnService {
         //         cached_peer.receipt.rto = ((cached_peer.receipt.rto as u32 * 7 + rto) / 8) as u16;
         //     }
         // }
+    }
+
+    async fn handle_report_sn(&self, conn_id: &TempSeq, report_sn: ReportSn) {
+        let from_peer_id = report_sn.from_peer_id.clone();
+        let log_key = format!("[report_sn {}]", from_peer_id.map(|v| v.to_string()).unwrap_or("no device".to_string()));
+        info!("{}.", log_key);
+
+        let conn = self.peer_mgr.find_connection(*conn_id);
+        assert!(conn.is_some());
+        let mut peer_conn = conn.as_ref().unwrap().lock().await;
+        let remote_ep = peer_conn.remote().clone();
+        peer_conn.send(Package::new(PackageCmdCode::ReportSnResp, ReportSnResp {
+            seq: report_sn.seq,
+            sn_peer_id: self.local_device_id().clone(),
+            result: BuckyErrorCode::Ok.into_u8(),
+            peer_info: None,
+            end_point_array: vec![remote_ep],
+            receipt: None,
+        })).await;
     }
 }
 

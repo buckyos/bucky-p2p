@@ -414,3 +414,13 @@ pub struct ReportSn {
     pub contract_id: Option<ObjectId>,         //合约文件对象id
     pub receipt: Option<ReceiptWithSignature>, //客户端提供的服务清单
 }
+
+#[derive(Debug, Clone, RawEncode, RawDecode)]
+pub struct ReportSnResp {
+    pub seq: TempSeq,                      //包序列包
+    pub sn_peer_id: DeviceId,              //sn的设备id
+    pub result: u8,                        //是否接受device的接入
+    pub peer_info: Option<Device>,         //sn的设备信息
+    pub end_point_array: Vec<Endpoint>,    //外网地址列表
+    pub receipt: Option<SnServiceReceipt>, //返回sn的一些连接信息，如当前连接的peer数量
+}

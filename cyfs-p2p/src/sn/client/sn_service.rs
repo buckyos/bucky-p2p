@@ -16,7 +16,7 @@ use crate::{LocalDeviceRef, MixAesKey, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
-use crate::protocol::{Package, PackageCmdCode, SnCall, ReportSn};
+use crate::protocol::{Package, PackageCmdCode, SnCall, ReportSn, ReportSnResp};
 use crate::protocol::v0::{SnCalled, SnCalledResp, SnCallResp, SnPingResp};
 use crate::receive_processor::{ReceiveProcessor, ReceiveProcessorRef};
 use crate::sn::service::PeerConnection;
@@ -24,9 +24,9 @@ use crate::sn::types::PingSessionResp;
 use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::sockets::tcp::TCPSocket;
 
-#[async_trait::async_trait]
+#[callback_trait::callback_trait]
 pub trait SNEvent: 'static + Send + Sync {
-    async fn on_called(&self, called: &SnCalled) -> BdtResult<()>;
+    async fn on_called(&self, called: SnCalled) -> BdtResult<()>;
 }
 pub type SNEventRef = Arc<dyn SNEvent>;
 
@@ -37,15 +37,17 @@ pub struct ActiveSN {
     pub conn_id: TempSeq,
     pub recv_future: Arc<Mutex<Option<NotifyFuture<SnCallResp>>>>,
     pub peer_connection: Arc<runtime::Mutex<PeerConnection>>,
+    pub wan_ep_list: Vec<Endpoint>,
 }
 
 pub struct SNServiceState {
     pub pinging_tasks: Vec<AbortHandle>,
     pub active_sn_list: Vec<ActiveSN>,
     pub latest_sn_interval: u64,
+    pub cur_report_future: Option<NotifyFuture<ReportSnResp>>,
 }
 
-pub struct SNClientService {
+pub(crate) struct SNClientService {
     net_manager: NetManagerRef,
     sn_list: Vec<Device>,
     local_device: LocalDeviceRef,
@@ -54,7 +56,7 @@ pub struct SNClientService {
     call_timeout: Duration,
     conn_timeout: Duration,
     state: RwLock<SNServiceState>,
-    listener: SNEventRef,
+    listener: Mutex<Option<SNEventRef>>,
 }
 pub type SNClientServiceRef = Arc<SNClientService>;
 
@@ -63,7 +65,6 @@ impl SNClientService {
                sn_list: Vec<Device>,
                local_device: LocalDeviceRef,
                gen_seq: Arc<TempSeqGenerator>,
-               listener: SNEventRef,
                ping_timeout: Duration,
                call_timeout: Duration,
                conn_timeout: Duration,) -> Arc<Self> {
@@ -79,9 +80,15 @@ impl SNClientService {
                 pinging_tasks: vec![],
                 active_sn_list: vec![],
                 latest_sn_interval: 0,
+                cur_report_future: None,
             }),
-            listener,
+            listener: Mutex::new(None),
         })
+    }
+
+    pub fn set_listener(&self, listener: impl SNEvent) {
+        let mut _listener = self.listener.lock().unwrap();
+        *_listener = Some(Arc::new(listener));
     }
 
     async fn handle(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> BdtResult<()> {
@@ -101,35 +108,60 @@ impl SNClientService {
             },
             PackageCmdCode::SnCalled => {
                 let sn_called = SnCalled::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-                self.on_called(conn_id, &sn_called).await?;
-            }
+                self.on_called(conn_id, sn_called).await?;
+            },
+            PackageCmdCode::ReportSnResp => {
+                let resp = ReportSnResp::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                log::info!("report sn resp: {:?}", resp);
+                if let Some(cur_report_future) = {
+                    let mut state = self.state.write().unwrap();
+                    state.cur_report_future.take()
+                } {
+                    cur_report_future.set_complete(resp);
+                }
+            },
             _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
         }
         Ok(())
     }
 
-    async fn on_called(&self, conn_id: TempSeq, sn_called: &SnCalled) -> BdtResult<()> {
-        let resp = match self.listener.on_called(sn_called).await {
-            Ok(_) => {
-                SnCalledResp {
-                    seq: sn_called.call_seq.clone(),
-                    sn_peer_id: sn_called.sn_peer_id.clone(),
-                    result: 0,
+    async fn on_called(&self, conn_id: TempSeq, sn_called: SnCalled) -> BdtResult<()> {
+        let listener = {
+            let listener = self.listener.lock().unwrap();
+            listener.clone()
+        };
+        let seq = sn_called.call_seq.clone();
+        let sn_peer_id = sn_called.sn_peer_id.clone();
+        let to_peer_id = sn_called.to_peer_id.clone();
+        let resp = if listener.is_some() {
+            match listener.as_ref().unwrap().on_called(sn_called).await {
+                Ok(_) => {
+                    SnCalledResp {
+                        seq,
+                        sn_peer_id,
+                        result: 0,
+                    }
+                }
+                Err(e) => {
+                    log::info!("on called to {} failed: {:?}", to_peer_id, e);
+                    SnCalledResp {
+                        seq,
+                        sn_peer_id,
+                        result: e.code().into_u8(),
+                    }
                 }
             }
-            Err(e) => {
-                log::info!("on called to {} failed: {:?}", sn_called.to_peer_id, e);
-                SnCalledResp {
-                    seq: sn_called.call_seq.clone(),
-                    sn_peer_id: sn_called.sn_peer_id.clone(),
-                    result: e.code().into_u8(),
-                }
+        } else {
+            SnCalledResp {
+                seq,
+                sn_peer_id,
+                result: 0,
             }
         };
 
         let peer_conn = self.get_peer_connection(conn_id);
         if let Some(peer_conn) = peer_conn {
-            peer_conn.lock().await.send(Package::new(PackageCmdCode::SnCallResp, resp)).await?;
+            peer_conn.lock().await.send(Package::new(PackageCmdCode::SnCalledResp, resp)).await?;
         }
         Ok(())
     }
@@ -190,10 +222,15 @@ impl SNClientService {
                                 continue;
                             }
                         };
-                        if let Err(e) = self.report(&mut peer_conn).await {
-                            log::error!("ping to {} failed: {:?}", sn.desc().device_id(), e);
-                            continue;
-                        }
+                        let report_resp = match self.report(&mut peer_conn).await {
+                            Ok(resp) => {
+                                resp
+                            }
+                            Err(e) => {
+                                log::error!("ping to {} failed: {:?}", sn.desc().device_id(), e);
+                                continue;
+                            }
+                        };
 
                         let recv_handle = peer_conn.take_recv_handle().unwrap();
                         let conn_id = peer_conn.conn_id();
@@ -203,6 +240,7 @@ impl SNClientService {
                             conn_id: peer_conn.conn_id(),
                             recv_future: Arc::new(Mutex::new(None)),
                             peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
+                            wan_ep_list: report_resp.end_point_array,
                         };
                         let mut state = self.state.write().unwrap();
                         state.active_sn_list.push(active_sn);
@@ -277,12 +315,12 @@ impl SNClientService {
         Ok(())
     }
 
-    fn get_active_sn_list(&self) -> Vec<ActiveSN> {
+    pub fn get_active_sn_list(&self) -> Vec<ActiveSN> {
         let state = self.state.read().unwrap();
         state.active_sn_list.clone()
     }
 
-    async fn report(&self, conn: &mut PeerConnection) -> BdtResult<()> {
+    async fn report(&self, conn: &mut PeerConnection) -> BdtResult<ReportSnResp> {
         let seq = self.gen_seq.generate();
         let mut report = ReportSn {
             protocol_version: 0,
@@ -295,9 +333,18 @@ impl SNClientService {
             contract_id: None,
             receipt: None,
         };
+        let future = NotifyFuture::<ReportSnResp>::new();
+        {
+            let mut state = self.state.write().unwrap();
+            state.cur_report_future = Some(future.clone());
+        }
         conn.send(Package::new(PackageCmdCode::ReportSn, report)).await?;
-
-        Ok(())
+        let resp = runtime::timeout(self.call_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "report timeout"))?;
+        {
+            let mut state = self.state.write().unwrap();
+            state.cur_report_future = None;
+        }
+        Ok(resp)
     }
 
     pub async fn call(&self,

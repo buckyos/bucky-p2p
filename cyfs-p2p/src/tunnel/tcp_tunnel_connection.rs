@@ -20,10 +20,11 @@ use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::history::keystore::{EncryptedKey, Keystore};
 use crate::protocol::{AckTunnel, Package, MTU, MTU_LARGE, PackageCmdCode, SynTunnel, PackageHeader};
-use crate::protocol::v0::{AckStream, SynStream, SynDatagram, AckDatagram, SynClose, AckClose};
+use crate::protocol::v0::{AckStream, SynStream, SynDatagram, AckDatagram, SynClose, AckClose, SynReverseStream, AckReverseStream, AckReverseDatagram, SynReverseDatagram};
 use crate::receive_processor::{ReceiveProcessorRef};
 use crate::sockets::tcp::{TCPRead, TCPSocket, TCPWrite};
 use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPortsRef, TunnelStat, TunnelStatRef, TunnelStream, TunnelType};
+use crate::tunnel::TunnelInstance::ReverseDatagram;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum TunnelState {
@@ -224,6 +225,34 @@ impl TcpTunnelConnectionImpl {
         Ok(read)
     }
 
+    async fn open_reverse_stream_inner(sequence: TempSeq,
+                                       write: &mut TCPWrite,
+                                       recv_future: NotifyFuture<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>,
+                                       vport: u16,
+                                       session_id: IncreaseId) -> BdtResult<TCPRead> {
+        let syn = SynReverseStream {
+            sequence,
+            session_id,
+            vport,
+            payload: Vec::new(),
+        };
+        let pkg = Package::new(PackageCmdCode::SynReverseStream, syn);
+
+        write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        let (read, cmd_code, cmd_body) = recv_future.await?;
+
+        if cmd_code != PackageCmdCode::AckReverseStream {
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+        }
+
+        let ack = AckReverseStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        if ack.result != 0 {
+            return Err(bdt_err!(BdtErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+        }
+
+        Ok(read)
+    }
+
     async fn open_datagram_inner(sequence: TempSeq,
                                  write: &mut TCPWrite,
                                  recv_future: NotifyFuture<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>,) -> BdtResult<TCPRead> {
@@ -248,6 +277,29 @@ impl TcpTunnelConnectionImpl {
         Ok(read)
     }
 
+    async fn open_reverse_datagram_inner(sequence: TempSeq,
+                                 write: &mut TCPWrite,
+                                 recv_future: NotifyFuture<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>,) -> BdtResult<TCPRead> {
+        let syn = SynReverseDatagram {
+            sequence,
+            payload: Vec::new(),
+        };
+        let pkg = Package::new(PackageCmdCode::SynReverseDatagram, syn);
+
+        write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        let (read, cmd_code, cmd_body) = recv_future.await?;
+
+        if cmd_code != PackageCmdCode::AckReverseDatagram {
+            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+        }
+
+        let ack = AckReverseDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        if ack.result != 0 {
+            return Err(bdt_err!(BdtErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+        }
+
+        Ok(read)
+    }
 }
 
 pub struct TcpTunnelConnection {
@@ -277,10 +329,84 @@ impl TcpTunnelConnection {
                                                                     lister_ports)?))
         })
     }
+
+    async fn open_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+        let (conn_timeout, sequence, mut write, recv_future) = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.tunnel_state != TunnelState::Idle {
+                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.sequence, inner.tunnel_state));
+            }
+            inner.tunnel_state = TunnelState::Opening;
+
+            let future = NotifyFuture::<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>::new();
+            {
+                let mut recv_future = inner.recv_future.lock().unwrap();
+                *recv_future = Some(future.clone());
+            }
+
+            (inner.conn_timeout, inner.sequence, inner.write.take().unwrap(), future)
+        };
+        match runtime::timeout(conn_timeout, TcpTunnelConnectionImpl::open_reverse_stream_inner(sequence, &mut write, recv_future, vport, session_id.clone())).await {
+            Ok(Ok(read)) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.tunnel_state = TunnelState::Worked;
+                Ok(Box::new(TcpTunnelStream::new(self.inner.clone(), read, write, session_id, vport)))
+            }
+            Ok(Err(err)) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.tunnel_state = TunnelState::Error;
+                Err(err)
+            }
+            Err(err) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.tunnel_state = TunnelState::Error;
+                Err(bdt_err!(BdtErrorCode::Timeout, "{}", err))
+            }
+        }
+    }
+
+    async fn open_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
+        let (conn_timeout, sequence, mut write, recv_future) = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.tunnel_state != TunnelState::Idle {
+                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.sequence, inner.tunnel_state));
+            }
+            inner.tunnel_state = TunnelState::Opening;
+            let future = NotifyFuture::<BdtResult<(TCPRead, PackageCmdCode, Vec<u8>)>>::new();
+            {
+                let mut recv_future = inner.recv_future.lock().unwrap();
+                *recv_future = Some(future.clone());
+            }
+            (inner.conn_timeout, inner.sequence, inner.write.take().unwrap(), future)
+        };
+        match runtime::timeout(conn_timeout, TcpTunnelConnectionImpl::open_reverse_datagram_inner(sequence, &mut write, recv_future)).await {
+            Ok(Ok(read)) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.tunnel_state = TunnelState::Worked;
+                Ok(Box::new(TcpTunnelDatagramRecv::new(self.inner.clone(), read, write)))
+            }
+            Ok(Err(err)) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.tunnel_state = TunnelState::Error;
+                Err(err)
+            }
+            Err(err) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.tunnel_state = TunnelState::Error;
+                Err(bdt_err!(BdtErrorCode::Timeout, "{}", err))
+            }
+        }
+    }
+
 }
 
 #[async_trait::async_trait]
 impl TunnelConnection for TcpTunnelConnection {
+    fn get_sequence(&self) -> TempSeq {
+        let inner = self.inner.lock().unwrap();
+        inner.sequence
+    }
+
     fn socket_type(&self) -> SocketType {
         SocketType::TCP
     }
@@ -295,14 +421,34 @@ impl TunnelConnection for TcpTunnelConnection {
         inner.tunnel_stat.clone()
     }
 
-    async fn connect(&self) -> BdtResult<()> {
-        let (local_device, remote_ep, remote_id, conn_timeout) = {
+    async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+        let (has_socket, local_device, remote_ep, remote_id, conn_timeout) = {
             let mut inner = self.inner.lock().unwrap();
-            if inner.data_socket.is_some() {
-                return Ok(());
-            }
-            (inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout)
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout)
         };
+        if has_socket {
+            return Ok(self.open_stream(vport, session_id).await?);
+        }
+        let mut tcp_socket = TCPSocket::connect(local_device, remote_ep, remote_id, conn_timeout).await?;
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.enter_idle_mode()?;
+        }
+
+        Ok(self.open_stream(vport, session_id).await?)
+    }
+
+    async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+        let (has_socket, local_device, remote_ep, remote_id, conn_timeout) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout)
+        };
+
+        if has_socket {
+            return Ok(self.open_datagram().await?);
+        }
 
         let mut tcp_socket = TCPSocket::connect(local_device, remote_ep, remote_id, conn_timeout).await?;
 
@@ -312,7 +458,49 @@ impl TunnelConnection for TcpTunnelConnection {
             inner.enter_idle_mode()?;
         }
 
-        Ok(())
+        Ok(self.open_datagram().await?)
+    }
+
+    async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+        let (has_socket, local_device, remote_ep, remote_id, conn_timeout) = {
+            let mut inner = self.inner.lock().unwrap();
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout)
+        };
+
+        if has_socket {
+            return Ok(self.open_reverse_stream(vport, session_id).await?);
+        }
+
+        let mut tcp_socket = TCPSocket::connect(local_device, remote_ep, remote_id, conn_timeout).await?;
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.enter_idle_mode()?;
+        }
+
+        Ok(self.open_reverse_stream(vport, session_id).await?)
+    }
+
+    async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
+        let (has_socket, local_device, remote_ep, remote_id, conn_timeout) = {
+            let mut inner = self.inner.lock().unwrap();
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout)
+        };
+
+        if has_socket {
+            return Ok(self.open_reverse_datagram().await?);
+        }
+
+        let mut tcp_socket = TCPSocket::connect(local_device, remote_ep, remote_id, conn_timeout).await?;
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.enter_idle_mode()?;
+        }
+
+        Ok(self.open_reverse_datagram().await?)
     }
 
     async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
@@ -409,10 +597,7 @@ impl TunnelConnection for TcpTunnelConnection {
                         write
                     };
                     let ack = AckStream {
-                        sequence: syn_stream.sequence,
-                        to_session_id: session_id,
                         result: 0,
-                        payload: Vec::new(),
                     };
                     let pkg = Package::new(PackageCmdCode::AckStream, ack);
                     write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
@@ -421,6 +606,29 @@ impl TunnelConnection for TcpTunnelConnection {
                         inner.tunnel_state = TunnelState::Worked;
                     }
                     return Ok(TunnelInstance::Stream(Box::new(TcpTunnelStream::new(self.inner.clone(), read, write, session_id, vport))))
+                }
+                PackageCmdCode::SynReverseStream => {
+                    let reserve_stream = SynReverseStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                    let mut write = {
+                        let mut inner = self.inner.lock().unwrap();
+                        if inner.tunnel_state != TunnelState::Idle {
+                            continue;
+                        }
+                        inner.tunnel_state = TunnelState::Accepting;
+                        inner.sequence = reserve_stream.sequence;
+                        let write = inner.write.take().unwrap();
+                        write
+                    };
+                    let ack = AckReverseStream {
+                        result: 0,
+                    };
+                    let pkg = Package::new(PackageCmdCode::AckReverseStream, ack);
+                    write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+                    {
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.tunnel_state = TunnelState::Worked;
+                    }
+                    return Ok(TunnelInstance::ReverseStream(Box::new(TcpTunnelStream::new(self.inner.clone(), read, write, reserve_stream.session_id, 0))));
                 }
                 PackageCmdCode::SynDatagram => {
                     let syn_datagram = SynDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
@@ -435,9 +643,7 @@ impl TunnelConnection for TcpTunnelConnection {
                         write
                     };
                     let ack = AckDatagram {
-                        sequence: syn_datagram.sequence,
                         result: 0,
-                        payload: Vec::new(),
                     };
                     let pkg = Package::new(PackageCmdCode::AckDatagram, ack);
                     write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
@@ -446,6 +652,29 @@ impl TunnelConnection for TcpTunnelConnection {
                         inner.tunnel_state = TunnelState::Worked;
                     }
                     return Ok(TunnelInstance::Datagram(Box::new(TcpTunnelDatagramRecv::new(self.inner.clone(), read, write))))
+                }
+                PackageCmdCode::SynReverseDatagram => {
+                    let reverse_datagram = SynReverseDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                    let mut write = {
+                        let mut inner = self.inner.lock().unwrap();
+                        if inner.tunnel_state != TunnelState::Idle {
+                            continue;
+                        }
+                        inner.tunnel_state = TunnelState::Accepting;
+                        inner.sequence = reverse_datagram.sequence;
+                        let write = inner.write.take().unwrap();
+                        write
+                    };
+                    let ack = AckReverseDatagram {
+                        result: 0,
+                    };
+                    let pkg = Package::new(PackageCmdCode::AckReverseDatagram, ack);
+                    write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+                    {
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.tunnel_state = TunnelState::Worked;
+                    }
+                    return Ok(TunnelInstance::ReverseDatagram(Box::new(TcpTunnelDatagramSend::new(self.inner.clone(), read, write))));
                 }
                 _ => {
                     let inner = self.inner.lock().unwrap();

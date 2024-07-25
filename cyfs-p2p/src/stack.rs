@@ -87,23 +87,6 @@ impl Drop for P2pStack {
     }
 }
 
-pub struct SNEventListener {
-
-}
-
-impl SNEventListener {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-#[async_trait::async_trait]
-impl SNEvent for SNEventListener {
-    async fn on_called(&self, called: &SnCalled) -> BdtResult<()> {
-        todo!()
-    }
-}
-
 pub struct TunnelManagerEventListener {
 
 }
@@ -128,7 +111,6 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         sn_list,
         local_device.clone(),
         gen_seq.clone(),
-        Arc::new(SNEventListener::new()),
         Duration::from_secs(300),
         Duration::from_secs(300),
         Duration::from_secs(300),
@@ -143,6 +125,14 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         0,
         Duration::from_secs(300),
     );
+
+    let manager = tunnel_manager.clone();
+    sn_service.set_listener(move |called: SnCalled| {
+        let manager = manager.clone();
+        async move {
+            manager.on_sn_called(called).await
+        }
+    });
 
     // sn_service.register_pkg_processor(&mut processor);
     tunnel_manager.register_pkg_processor(&mut processor);

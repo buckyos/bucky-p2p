@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
-use bucky_raw_codec::RawDecodeWithContext;
+use bucky_raw_codec::{RawDecodeWithContext, RawFrom};
 use bucky_time::bucky_time_now;
+use notify_future::NotifyFuture;
 use crate::{IncreaseId, LocalDeviceRef, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
@@ -13,10 +15,10 @@ use crate::history::keystore::EncryptedKey;
 use crate::protocol::{AckTunnel, Package, MTU, PackageCmdCode, SynTunnel};
 use crate::protocol::v0::{SnCalled, AckStream, SynStream};
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor,};
-use crate::sn::client::SNClientServiceRef;
+use crate::sn::client::{SNClientServiceRef, SNEvent};
 use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::sockets::tcp::TCPSocket;
-use super::{Tunnel, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
+use super::{QuicTunnelConnection, ReverseFutureCache, ReverseResult, SocketType, StreamSnCall, TcpTunnelConnection, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
 
 pub struct TunnelGuard {
     tunnel: Option<Tunnel>,
@@ -67,7 +69,36 @@ impl Drop for TunnelGuard {
 
 struct TunnelsState {
     tunnels: HashMap<TempSeq, Arc<Tunnel>>,
+    pending_tunnels: HashMap<TempSeq, NotifyFuture<ReverseResult>>,
 }
+
+impl TunnelsState {
+    pub fn get_idle_tunnel(&mut self) -> Option<Arc<Tunnel>> {
+        for (_, tunnel) in self.tunnels.iter() {
+            if tunnel.is_idle() {
+                return Some(tunnel.clone())
+            }
+        }
+        None
+    }
+
+    pub fn tunnel_exist(&mut self, seq: TempSeq) -> bool {
+        self.tunnels.contains_key(&seq)
+    }
+
+    pub fn remove_tunnel(&mut self, seq: TempSeq) {
+        self.tunnels.remove(&seq);
+    }
+
+    pub fn add_pending_future(&mut self, seq: TempSeq, future: NotifyFuture<ReverseResult>) {
+        self.pending_tunnels.insert(seq, future);
+    }
+
+    pub fn try_pop_pending_future(&mut self, seq: TempSeq) -> Option<NotifyFuture<ReverseResult>> {
+        self.pending_tunnels.remove(&seq)
+    }
+}
+
 struct Tunnels {
     state: Mutex<TunnelsState>
 }
@@ -77,24 +108,25 @@ impl Tunnels {
         Arc::new(Self {
             state: Mutex::new(TunnelsState {
                 tunnels: Default::default(),
+                pending_tunnels: Default::default(),
             })
         })
     }
 
     pub fn get_idle_tunnel(&self) -> Option<Arc<Tunnel>> {
         let mut state = self.state.lock().unwrap();
-        for (_, tunnel) in state.tunnels.iter() {
-            if tunnel.is_idle() {
-                return Some(tunnel.clone());
-            }
-        }
-        None
+        state.get_idle_tunnel()
     }
 
-    pub fn add_tunnel(self: &Arc<Self>, tunnel: Tunnel, listener: Option<TunnelManagerEventRef>) {
-        let mut state = self.state.lock().unwrap();
+    pub fn add_tunnel(self: &Arc<Self>, tunnel: Tunnel, listener: Option<TunnelManagerEventRef>) -> bool {
         let tunnel = Arc::new(tunnel);
-        state.tunnels.insert(tunnel.get_sequence(), tunnel.clone());
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.tunnels.contains_key(&tunnel.get_sequence()) {
+                return false;
+            }
+            state.tunnels.insert(tunnel.get_sequence(), tunnel.clone());
+        }
         let this = self.clone();
         Executor::spawn(async move {
             loop {
@@ -110,6 +142,7 @@ impl Tunnels {
                                     stream.remote_endpoint().to_string(),
                                     stream.local_device_id().to_string(),
                                     stream.local_endpoint().to_string());
+
                                 if listener.is_some() {
                                     listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
                                 }
@@ -121,9 +154,16 @@ impl Tunnels {
                                     datagram.remote_endpoint().to_string(),
                                     datagram.local_device_id().to_string(),
                                     datagram.local_endpoint().to_string());
+
                                 if listener.is_some() {
                                     listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
                                 }
+                            }
+                            TunnelInstance::ReverseStream(stream) => {
+
+                            }
+                            TunnelInstance::ReverseDatagram(datagram) => {
+
                             }
                         }
                     }
@@ -136,16 +176,37 @@ impl Tunnels {
             let mut state = this.state.lock().unwrap();
             state.tunnels.remove(&tunnel.get_sequence());
         });
+        true
     }
 
     pub fn tunnel_exist(&self, seq: TempSeq) -> bool {
         let mut state = self.state.lock().unwrap();
-        state.tunnels.contains_key(&seq)
+        state.tunnel_exist(seq)
     }
 
     pub fn remove_tunnel(&self, seq: TempSeq) {
         let mut state = self.state.lock().unwrap();
-        state.tunnels.remove(&seq);
+        state.remove_tunnel(seq);
+    }
+
+    pub fn try_pop_pending_future(&self, seq: TempSeq) -> Option<NotifyFuture<ReverseResult>> {
+        let mut state = self.state.lock().unwrap();
+        state.try_pop_pending_future(seq)
+    }
+
+    pub fn add_pending_future(&self, seq: TempSeq, future: NotifyFuture<ReverseResult>) {
+        let mut state = self.state.lock().unwrap();
+        state.add_pending_future(seq, future);
+    }
+}
+
+impl ReverseFutureCache for Tunnels {
+    fn add_reverse_future(&self, sequence: TempSeq, future: NotifyFuture<ReverseResult>) {
+        self.add_pending_future(sequence, future);
+    }
+
+    fn remove_reverse_future(&self, sequence: TempSeq) {
+        self.try_pop_pending_future(sequence);
     }
 }
 
@@ -221,6 +282,7 @@ impl TunnelManager {
             ()
         }).unwrap();
 
+
         let manager = Arc::new(Self {
             tunnels,
             net_manager,
@@ -289,26 +351,91 @@ impl TunnelManager {
         let local_id = socket.local_device_id().clone();
         let local_ep = socket.local().clone();
         let remote = self.net_manager.get_device_cache().get(&remote_id).await.unwrap();
-        let mut tunnel = Tunnel::new(
-            self.net_manager.clone(),
-            self.gen_seq.generate(),
+        let net_manager = self.net_manager.clone();
+        let sn_service = self.sn_service.clone();
+        let protocol_version = self.protocol_version;
+        let stack_version = self.stack_version;
+        let local_device = self.local_device.clone();
+        let conn_timeout = self.conn_timeout;
+        let listen_ports = self.listen_ports.clone();
+
+        let mut tunnel_conn = Box::new(TcpTunnelConnection::new(
+            TempSeq::from(0),
+            self.local_device.clone(),
+            remote_id.clone(),
+            socket.remote().clone(),
+            self.conn_timeout,
             self.protocol_version,
             self.stack_version,
-            remote,
-            self.local_device.clone(),
-            self.conn_timeout.clone(),
-            self.listen_ports.clone());
-        tunnel.accept_tcp_tunnel(socket)?;
+            Some(socket),
+            self.listen_ports.clone())?);
 
-        log::info!("new tcp tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            tunnel.get_sequence(),
-            remote_id.to_string(),
-            remote_ep.to_string(),
-            local_id.to_string(),
-            local_ep.to_string());
-
+        let tunnels = self.get_tunnels(&remote_id);
         let listener = self.listener.lock().unwrap().clone();
-        self.get_tunnels(&remote_id).add_tunnel(tunnel, listener);
+        Executor::spawn(async move {
+            match tunnel_conn.accept_instance().await {
+                Ok(instance) => {
+                    log::info!("new tcp tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        tunnel_conn.get_sequence(),
+                        remote_id.to_string(),
+                        remote_ep.to_string(),
+                        local_id.to_string(),
+                        local_ep.to_string());
+                    match instance {
+                        TunnelInstance::Stream(stream) => {
+                            let mut tunnel = Tunnel::new(
+                                net_manager.clone(),
+                                sn_service.clone(),
+                                tunnel_conn.get_sequence(),
+                                protocol_version,
+                                stack_version,
+                                remote.clone(),
+                                local_device.clone(),
+                                conn_timeout,
+                                listen_ports.clone());
+                            tunnel.set_tunnel_conn(tunnel_conn);
+                            if tunnels.add_tunnel(tunnel, listener.clone()) {
+                                if listener.is_some() {
+                                    listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
+                                }
+                            }
+                        }
+                        TunnelInstance::Datagram(datagram) => {
+                            let mut tunnel = Tunnel::new(
+                                net_manager.clone(),
+                                sn_service.clone(),
+                                tunnel_conn.get_sequence(),
+                                protocol_version,
+                                stack_version,
+                                remote.clone(),
+                                local_device.clone(),
+                                conn_timeout,
+                                listen_ports.clone());
+                            tunnel.set_tunnel_conn(tunnel_conn);
+                            if tunnels.add_tunnel(tunnel, listener.clone()) {
+                                if listener.is_some() {
+                                    listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
+                                }
+                            }
+                        }
+                        TunnelInstance::ReverseStream(stream) => {
+                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_sequence()) {
+                                future.set_complete(ReverseResult::Stream(tunnel_conn, stream));
+                            }
+                        }
+                        TunnelInstance::ReverseDatagram(datagram) => {
+                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_sequence()) {
+                                future.set_complete(ReverseResult::Datagram(tunnel_conn, datagram));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("accept tunnel error: {:?}", e);
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -318,26 +445,106 @@ impl TunnelManager {
         let local_id = socket.local_device_id().clone();
         let local_ep = socket.local().clone();
         let remote = self.net_manager.get_device_cache().get(&remote_id).await.unwrap();
+        let net_manager = self.net_manager.clone();
+        let sn_service = self.sn_service.clone();
+        let protocol_version = self.protocol_version;
+        let stack_version = self.stack_version;
+        let local_device = self.local_device.clone();
+        let conn_timeout = self.conn_timeout;
+        let listen_ports = self.listen_ports.clone();
+
         let mut tunnel = Tunnel::new(
             self.net_manager.clone(),
+            self.sn_service.clone(),
             self.gen_seq.generate(),
             self.protocol_version,
             self.stack_version,
-            remote,
+            remote.clone(),
             self.local_device.clone(),
             self.conn_timeout.clone(),
             self.listen_ports.clone());
-        tunnel.accept_quic_tunnel(socket)?;
+        // tunnel.accept_quic_tunnel(socket)?;
 
-        log::info!("new quic tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            tunnel.get_sequence(),
-            remote_id.to_string(),
-            remote_ep.to_string(),
-            local_id.to_string(),
-            local_ep.to_string());
+        let tunnel_conn = Box::new(QuicTunnelConnection::new(
+            self.net_manager.clone(),
+            TempSeq::from(0),
+            self.local_device.clone(),
+            remote_id.clone(),
+            remote_ep,
+            self.conn_timeout,
+            self.protocol_version,
+            self.stack_version,
+            local_ep,
+            Some(socket),
+            self.listen_ports.clone()));
 
+        let tunnels = self.get_tunnels(&remote_id);
         let listener = self.listener.lock().unwrap().clone();
-        self.get_tunnels(&remote_id).add_tunnel(tunnel, listener);
+        Executor::spawn(async move {
+            match tunnel_conn.accept_instance().await {
+                Ok(instance) => {
+                    log::info!("new quic tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        tunnel_conn.get_sequence(),
+                        remote_id.to_string(),
+                        remote_ep.to_string(),
+                        local_id.to_string(),
+                        local_ep.to_string());
+
+                    match instance {
+                        TunnelInstance::Stream(stream) => {
+                            let mut tunnel = Tunnel::new(
+                                net_manager.clone(),
+                                sn_service.clone(),
+                                tunnel_conn.get_sequence(),
+                                protocol_version,
+                                stack_version,
+                                remote.clone(),
+                                local_device.clone(),
+                                conn_timeout,
+                                listen_ports.clone());
+                            tunnel.set_tunnel_conn(tunnel_conn);
+                            if tunnels.add_tunnel(tunnel, listener.clone()) {
+                                if listener.is_some() {
+                                    listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
+                                }
+                            }
+                        }
+                        TunnelInstance::Datagram(datagram) => {
+                            let mut tunnel = Tunnel::new(
+                                net_manager.clone(),
+                                sn_service.clone(),
+                                tunnel_conn.get_sequence(),
+                                protocol_version,
+                                stack_version,
+                                remote.clone(),
+                                local_device.clone(),
+                                conn_timeout,
+                                listen_ports.clone());
+                            tunnel.set_tunnel_conn(tunnel_conn);
+                            if tunnels.add_tunnel(tunnel, listener.clone()) {
+                                if listener.is_some() {
+                                    listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
+                                }
+                            }
+                        }
+                        TunnelInstance::ReverseStream(stream) => {
+                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_sequence()) {
+                                future.set_complete(ReverseResult::Stream(tunnel_conn, stream));
+                            }
+                        }
+                        TunnelInstance::ReverseDatagram(datagram) => {
+                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_sequence()) {
+                                future.set_complete(ReverseResult::Datagram(tunnel_conn, datagram));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("accept tunnel error: {:?}", e);
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -376,6 +583,7 @@ impl TunnelManager {
             let seq = self.gen_seq.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
+                self.sn_service.clone(),
                 seq,
                 self.protocol_version,
                 self.stack_version,
@@ -384,8 +592,7 @@ impl TunnelManager {
                 self.conn_timeout,
                 self.listen_ports.clone(),
             );
-            tunnel.connect().await?;
-            let datagram = tunnel.open_datagram().await?;
+            let datagram = tunnel.connect_datagram(tunnels.clone()).await?;
             let listener = self.listener.lock().unwrap().clone();
             tunnels.add_tunnel(tunnel, listener);
             Ok(datagram)
@@ -402,6 +609,7 @@ impl TunnelManager {
             let seq = self.gen_seq.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
+                self.sn_service.clone(),
                 seq,
                 self.protocol_version,
                 self.stack_version,
@@ -410,25 +618,185 @@ impl TunnelManager {
                 self.conn_timeout,
                 self.listen_ports.clone(),
             );
-            tunnel.connect().await?;
-            let stream = tunnel.open_stream(vport, session_id).await?;
+            let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
             let listener = self.listener.lock().unwrap().clone();
             tunnels.add_tunnel(tunnel, listener);
             Ok(stream)
         }
     }
 
+    fn get_wan_ip_list(&self) -> Vec<Endpoint> {
+        let mut wan_list = Vec::new();
+        self.sn_service.get_active_sn_list().iter().map(|v| v.wan_ep_list.as_slice()).flatten().for_each(|ep| {
+            wan_list.push(ep.clone());
+        });
+        wan_list
+    }
+
+    fn is_same_lan(&self, reverse_list: &Vec<Endpoint>) -> bool {
+        let local_wan_list = self.get_wan_ip_list();
+        for ep in reverse_list.iter() {
+            for wan_ip in local_wan_list.iter() {
+                if ep.is_same_ip_addr(wan_ip) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    pub async fn on_sn_called(&self, sn_called: SnCalled) -> BdtResult<()> {
+        log::info!("on_sn_called {:?}", sn_called);
+
+        let eps = if self.is_same_lan(&sn_called.reverse_endpoint_array) {
+            let mut eps = sn_called.peer_info.connect_info().endpoints().clone();
+            eps.extend_from_slice(sn_called.reverse_endpoint_array.as_slice());
+            eps
+        } else {
+            let mut eps = sn_called.reverse_endpoint_array;
+            eps.extend_from_slice(sn_called.peer_info.connect_info().endpoints());
+            eps
+        };
+
+        for ep in eps.iter() {
+            if ep.is_tcp() {
+                let mut tunnel = Tunnel::new(
+                    self.net_manager.clone(),
+                    self.sn_service.clone(),
+                    sn_called.call_seq,
+                    self.protocol_version,
+                    self.stack_version,
+                    sn_called.peer_info.clone(),
+                    self.local_device.clone(),
+                    self.conn_timeout,
+                    self.listen_ports.clone());
+
+                let mut tunnel_conn = TcpTunnelConnection::new(
+                    sn_called.call_seq,
+                    self.local_device.clone(),
+                    sn_called.to_peer_id.clone(),
+                    ep.clone(),
+                    self.conn_timeout,
+                    self.protocol_version,
+                    self.stack_version,
+                    None, self.listen_ports.clone())?;
+                if sn_called.payload.is_empty() {
+                    let datagram = match tunnel_conn.connect_reverse_datagram().await {
+                        Ok(datagram) => datagram,
+                        Err(e) => {
+                            log::error!("connect reverse stream error: {:?} msg: {}", e.code(), e.msg());
+                            continue;
+                        }
+                    };
+                    tunnel.set_tunnel_conn(Box::new(tunnel_conn));
+                    let listener = {
+                        self.listener.lock().unwrap().clone()
+                    };
+                    {
+                        let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                        tunnels.add_tunnel(tunnel, listener.clone());
+                    }
+                    let listener = self.listener.lock().unwrap().clone();
+                    if listener.is_some() {
+                        listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
+                    }
+                } else {
+                    let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                    let stream = match tunnel_conn.connect_reverse_stream(stream_call.vport, stream_call.session_id).await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            log::error!("connect reverse datagram error: {:?} msg: {}", e.code(), e.msg());
+                            continue;
+                        }
+                    };
+                    tunnel.set_tunnel_conn(Box::new(tunnel_conn));
+                    let listener = {
+                        self.listener.lock().unwrap().clone()
+                    };
+                    {
+                        let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                        tunnels.add_tunnel(tunnel, listener.clone());
+                    }
+                    if listener.is_some() {
+                        listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
+                    }
+                }
+            } else if ep.is_udp() {
+                for listener in self.net_manager.udp_listeners().iter() {
+                    let local_ep = listener.local();
+                    let mut tunnel = Tunnel::new(
+                        self.net_manager.clone(),
+                        self.sn_service.clone(),
+                        sn_called.call_seq,
+                        self.protocol_version,
+                        self.stack_version,
+                        sn_called.peer_info.clone(),
+                        self.local_device.clone(),
+                        self.conn_timeout,
+                        self.listen_ports.clone());
+
+                    let mut tunnel_conn = QuicTunnelConnection::new(self.net_manager.clone(),
+                                                                    sn_called.call_seq,
+                                                                    self.local_device.clone(),
+                                                                    sn_called.to_peer_id.clone(),
+                                                                    ep.clone(),
+                                                                    self.conn_timeout,
+                                                                    self.protocol_version,
+                                                                    self.stack_version,
+                                                                    local_ep.clone(),
+                                                                    None,
+                                                                    self.listen_ports.clone());
+                    if sn_called.payload.is_empty() {
+                        let datagram = match tunnel_conn.connect_reverse_datagram().await {
+                            Ok(datagram) => datagram,
+                            Err(e) => {
+                                log::error!("connect reverse datagram error: {:?} msg: {}", e.code(), e.msg());
+                                continue;
+                            }
+                        };
+                        tunnel.set_tunnel_conn(Box::new(tunnel_conn));
+                        let listener = {
+                            self.listener.lock().unwrap().clone()
+                        };
+                        {
+                            let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                            tunnels.add_tunnel(tunnel, listener.clone());
+                        }
+                        let listener = self.listener.lock().unwrap().clone();
+                        if listener.is_some() {
+                            listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
+                        }
+                    } else {
+                        let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                        let stream = match tunnel_conn.connect_reverse_stream(stream_call.vport, stream_call.session_id).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                log::error!("connect reverse stream error: {:?} msg: {}", e.code(), e.msg());
+                                continue;
+                            }
+                        };
+                        tunnel.set_tunnel_conn(Box::new(tunnel_conn));
+                        let listener = {
+                            self.listener.lock().unwrap().clone()
+                        };
+                        {
+                            let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                            tunnels.add_tunnel(tunnel, listener.clone());
+                        }
+                        if listener.is_some() {
+                            listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for TunnelManager {
     fn drop(&mut self) {
+        log::info!("tunnel manager drop.device {}", self.local_device.device_id().to_string());
         self.clear_handle.abort();
     }
 }
-
-// #[async_trait::async_trait]
-// impl SNEvent for TunnelManager {
-//     async fn on_called(&self, called: &SnCalled) -> BdtResult<()> {
-//         Ok(())
-//     }
-// }

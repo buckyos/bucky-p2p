@@ -105,20 +105,20 @@ pub const TCP_ACK_CONNECTION_RESULT_REFUSED: u8 = 1;
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct AckStream {
-    pub sequence: TempSeq,
-    pub to_session_id: IncreaseId,
     pub result: u8,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SynReverseStream {
+    pub sequence: TempSeq,
+    pub session_id: IncreaseId,
+    pub vport: u16,
     pub payload: Vec<u8>,
 }
 
-impl std::fmt::Display for AckStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "TcpAckConnection:{{sequence:{:?},to_session_id:{}}}",
-            self.sequence, self.to_session_id
-        )
-    }
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct AckReverseStream {
+    pub result: u8,
 }
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
@@ -129,9 +129,18 @@ pub struct SynDatagram {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct AckDatagram {
-    pub sequence: TempSeq,
     pub result: u8,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SynReverseDatagram {
+    pub sequence: TempSeq,
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct AckReverseDatagram {
+    pub result: u8,
 }
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]

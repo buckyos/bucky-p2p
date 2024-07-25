@@ -129,14 +129,20 @@ pub trait TunnelDatagramRecv: 'static + Send + runtime::AsyncRead {
 pub enum TunnelInstance {
     Stream(Box<dyn TunnelStream>),
     Datagram(Box<dyn TunnelDatagramRecv>),
+    ReverseStream(Box<dyn TunnelStream>),
+    ReverseDatagram(Box<dyn TunnelDatagramSend>),
 }
 
 #[async_trait::async_trait]
 pub(crate) trait TunnelConnection: AsAny + Send + Sync {
+    fn get_sequence(&self) -> TempSeq;
     fn socket_type(&self) -> SocketType;
     fn is_idle(&self) -> bool;
     fn tunnel_stat(&self) -> TunnelStatRef;
-    async fn connect(&self) -> BdtResult<()>;
+    async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>>;
+    async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>>;
+    async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>>;
+    async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>>;
     async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>>;
     async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>>;
     async fn accept_instance(&self) -> BdtResult<TunnelInstance>;
