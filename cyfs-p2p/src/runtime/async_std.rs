@@ -11,6 +11,9 @@ pub use futures_rustls::TlsStream;
 pub use futures::AsyncReadExt;
 pub use futures::AsyncWriteExt;
 
+#[cfg(unix)]
+pub use async_std::os::unix::io::RawFd;
+
 use std::fmt;
 use std::io;
 use std::pin::Pin;

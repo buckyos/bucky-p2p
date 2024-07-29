@@ -5,10 +5,9 @@ use bucky_objects::Device;
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
+use crate::IncreaseIdGenerator;
 use crate::stream::StreamGuard;
-use crate::stream::udp_stream::UdpStream;
-use super::tcp_stream::TcpStream;
-use crate::tunnel::{SocketType, TunnelGuard, TunnelManagerRef, TunnelType};
+use crate::tunnel::{SocketType, TunnelGuard, TunnelManagerRef, TunnelStream, TunnelType};
 
 struct StreamListenerState {
     abort_handle: Option<AbortHandle>,
@@ -96,37 +95,28 @@ impl Deref for StreamListenerGuard {
 
 pub struct StreamManager {
     tunnel_manager: TunnelManagerRef,
+    session_gen: IncreaseIdGenerator,
     listeners: Mutex<HashMap<u16, StreamListenerRef>>,
-    send_buffer: usize,
-    min_box: u16,
-    max_box: u16
 }
 
 pub type StreamManagerRef = Arc<StreamManager>;
 
 impl StreamManager {
-    pub fn new(tunnel_manager: TunnelManagerRef,
-               send_buffer: usize,
-               min_box: u16,
-               max_box: u16) -> Arc<Self> {
+    pub fn new(tunnel_manager: TunnelManagerRef,) -> Arc<Self> {
         let stream = Arc::new(Self {
             tunnel_manager: tunnel_manager.clone(),
+            session_gen: IncreaseIdGenerator::new(),
             listeners: Mutex::new(HashMap::new()),
-            send_buffer,
-            min_box,
-            max_box,
         });
 
         let weak = Arc::downgrade(&stream);
-        tunnel_manager.set_stream_listener(move |tunnel: TunnelGuard| {
+        tunnel_manager.set_stream_listener(move |tunnel: Box<dyn TunnelStream>| {
             let weak = weak.clone();
             async move {
-                if let TunnelType::STREAM(vport) = tunnel.tunnel_type() {
-                    if let Some(stream_manager) = weak.upgrade() {
-                        let mut listeners = stream_manager.listeners.lock().unwrap();
-                        if let Some(listener) = listeners.get(&vport) {
-                            listener.waiter.set_result_with_cache(StreamGuard::new(Arc::new(TcpStream::new(tunnel, stream_manager.send_buffer, stream_manager.min_box, stream_manager.max_box))));
-                        }
+                if let Some(stream_manager) = weak.upgrade() {
+                    let mut listeners = stream_manager.listeners.lock().unwrap();
+                    if let Some(listener) = listeners.get(&tunnel.port()) {
+                        listener.waiter.set_result_with_cache(StreamGuard::new(tunnel));
                     }
                 }
             }
@@ -135,16 +125,9 @@ impl StreamManager {
     }
 
     pub async fn connect(&self, remote: &Device, port: u16, ) -> BdtResult<StreamGuard> {
-        let tunnel = self.tunnel_manager.create_stream_tunnel(remote, port).await?;
-        let stream = match tunnel.socket_type() {
-            SocketType::TCP => {
-                StreamGuard::new(Arc::new(TcpStream::new(tunnel, self.send_buffer, self.min_box, self.max_box)))
-            },
-            SocketType::UDP => {
-                StreamGuard::new(Arc::new(UdpStream::new(tunnel)))
-            }
-        };
-        Ok(stream)
+        let session_id = self.session_gen.generate();
+        let tunnel = self.tunnel_manager.create_stream_tunnel(remote, session_id, port).await?;
+        Ok(StreamGuard::new(tunnel))
     }
 
     pub async fn listen(self: &StreamManagerRef, port: u16) -> BdtResult<StreamListenerGuard> {

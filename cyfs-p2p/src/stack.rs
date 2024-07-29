@@ -126,11 +126,14 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         Duration::from_secs(300),
     );
 
-    let manager = tunnel_manager.clone();
+    let manager = Arc::downgrade(&tunnel_manager);
     sn_service.set_listener(move |called: SnCalled| {
         let manager = manager.clone();
         async move {
-            manager.on_sn_called(called).await
+            if let Some(manager) = manager.upgrade() {
+                manager.on_sn_called(called).await?;
+            }
+            Ok(())
         }
     });
 

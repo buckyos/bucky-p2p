@@ -84,8 +84,7 @@ async fn main() {
         .start().unwrap();
 
     Executor::init(None);
-    let data_folder = std::env::current_dir().unwrap().join(APP_NAME);
-    let default_desc_path = data_folder.join(APP_NAME);
+    let default_desc_path = std::env::current_dir().unwrap().join("sn");
     let matches = clap::App::new(APP_NAME)
         .arg(clap::Arg::with_name("desc").short("d").long("desc").takes_value(true)
             .default_value(default_desc_path.to_str().unwrap())
@@ -93,7 +92,7 @@ async fn main() {
 
     match load_device_info(Path::new(matches.value_of("desc").unwrap())) {
         Ok((device, private_key)) => {
-            let unique_id = String::from_utf8_lossy(device.desc().unique_id().as_slice());
+            // let unique_id = String::from_utf8_lossy(device.desc().unique_id().as_slice());
             // cyfs_debug::CyfsLoggerBuilder::new_app(APP_NAME)
             //     .level("info")
             //     .console("warn")

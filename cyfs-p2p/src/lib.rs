@@ -18,6 +18,7 @@ mod tunnel;
 pub mod error;
 // pub mod stream;
 mod runtime;
+pub mod stream;
 
 #[macro_use]
 extern crate log;

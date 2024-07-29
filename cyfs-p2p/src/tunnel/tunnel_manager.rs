@@ -6,6 +6,7 @@ use std::time::Duration;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
 use bucky_raw_codec::{RawDecodeWithContext, RawFrom};
 use bucky_time::bucky_time_now;
+use callback_trait::callback_trait;
 use notify_future::NotifyFuture;
 use crate::{IncreaseId, LocalDeviceRef, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
@@ -118,7 +119,7 @@ impl Tunnels {
         state.get_idle_tunnel()
     }
 
-    pub fn add_tunnel(self: &Arc<Self>, tunnel: Tunnel, listener: Option<TunnelManagerEventRef>) -> bool {
+    pub fn add_tunnel(self: &Arc<Self>, tunnel: Tunnel, listener: TunnelManagerEventRef) -> bool {
         let tunnel = Arc::new(tunnel);
         {
             let mut state = self.state.lock().unwrap();
@@ -143,9 +144,7 @@ impl Tunnels {
                                     stream.local_device_id().to_string(),
                                     stream.local_endpoint().to_string());
 
-                                if listener.is_some() {
-                                    listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
-                                }
+                                    listener.on_new_tunnel_stream(stream).await;
                             }
                             TunnelInstance::Datagram(datagram) => {
                                 log::info!("accept datagram tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
@@ -155,9 +154,7 @@ impl Tunnels {
                                     datagram.local_device_id().to_string(),
                                     datagram.local_endpoint().to_string());
 
-                                if listener.is_some() {
-                                    listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
-                                }
+                                    listener.on_new_tunnel_datagram(datagram).await;
                             }
                             TunnelInstance::ReverseStream(stream) => {
 
@@ -210,13 +207,60 @@ impl ReverseFutureCache for Tunnels {
     }
 }
 
-#[async_trait::async_trait]
-pub trait TunnelManagerEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_stream(&self, tunnel: Box<dyn TunnelStream>) -> ();
-    async fn on_new_tunnel_datagram(&self, tunnel: Box<dyn TunnelDatagramRecv>) -> ();
+pub struct TunnelManagerEvent {
+    stream_event: Mutex<Option<TunnelManagerStreamEventRef>>,
+    datagram_event: Mutex<Option<TunnelManagerDatagramEventRef>>,
+}
+pub type TunnelManagerEventRef = Arc<TunnelManagerEvent>;
+
+impl TunnelManagerEvent {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            stream_event: Mutex::new(None),
+            datagram_event: Mutex::new(None),
+        })
+    }
+
+    fn set_stream_event_listener(&self, listener: impl TunnelManagerStreamEvent) {
+        let mut stream_event = self.stream_event.lock().unwrap();
+        *stream_event = Some(Arc::new(listener));
+    }
+
+    fn set_datagram_event_listener(&self, listener: impl TunnelManagerDatagramEvent) {
+        let mut datagram_event = self.datagram_event.lock().unwrap();
+        *datagram_event = Some(Arc::new(listener));
+    }
+
+    async fn on_new_tunnel_stream(&self, tunnel: Box<dyn TunnelStream>) {
+        let stream_event = {
+            self.stream_event.lock().unwrap().clone()
+        };
+        if stream_event.is_some() {
+            stream_event.as_ref().unwrap().on_new_tunnel_stream(tunnel).await;
+        }
+    }
+
+    async fn on_new_tunnel_datagram(&self, tunnel: Box<dyn TunnelDatagramRecv>) {
+        let datagram_event = {
+            self.datagram_event.lock().unwrap().clone()
+        };
+        if datagram_event.is_some() {
+            datagram_event.as_ref().unwrap().on_new_tunnel_datagram(tunnel).await;
+        }
+    }
 }
 
-pub type TunnelManagerEventRef = Arc<dyn TunnelManagerEvent>;
+#[callback_trait::callback_trait]
+pub trait TunnelManagerStreamEvent: 'static + Send + Sync {
+    async fn on_new_tunnel_stream(&self, tunnel: Box<dyn TunnelStream>) -> ();
+}
+pub type TunnelManagerStreamEventRef = Arc<dyn TunnelManagerStreamEvent>;
+
+#[callback_trait::callback_trait]
+pub trait TunnelManagerDatagramEvent: 'static + Send + Sync {
+    async fn on_new_tunnel_datagram(&self, tunnel: Box<dyn TunnelDatagramRecv>) -> ();
+}
+pub type TunnelManagerDatagramEventRef = Arc<dyn TunnelManagerDatagramEvent>;
 
 struct ListenPorts {
     listen_ports: Mutex<HashSet<u16>>,
@@ -255,7 +299,7 @@ pub struct TunnelManager {
     local_device: LocalDeviceRef,
     protocol_version: u8,
     stack_version: u32,
-    listener: Mutex<Option<TunnelManagerEventRef>>,
+    listener: TunnelManagerEventRef,
     conn_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
     listen_ports: Arc<ListenPorts>,
@@ -291,7 +335,7 @@ impl TunnelManager {
             local_device,
             protocol_version,
             stack_version,
-            listener: Mutex::new(None),
+            listener: TunnelManagerEvent::new(),
             conn_timeout,
             gen_seq: Arc::new(TempSeqGenerator::new()),
             listen_ports: ListenPorts::new(),
@@ -371,7 +415,7 @@ impl TunnelManager {
             self.listen_ports.clone())?);
 
         let tunnels = self.get_tunnels(&remote_id);
-        let listener = self.listener.lock().unwrap().clone();
+        let listener = self.listener.clone();
         Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
@@ -395,9 +439,7 @@ impl TunnelManager {
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
-                                if listener.is_some() {
-                                    listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
-                                }
+                                listener.on_new_tunnel_stream(stream).await;
                             }
                         }
                         TunnelInstance::Datagram(datagram) => {
@@ -413,9 +455,7 @@ impl TunnelManager {
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
-                                if listener.is_some() {
-                                    listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
-                                }
+                                listener.on_new_tunnel_datagram(datagram).await;
                             }
                         }
                         TunnelInstance::ReverseStream(stream) => {
@@ -479,7 +519,7 @@ impl TunnelManager {
             self.listen_ports.clone()));
 
         let tunnels = self.get_tunnels(&remote_id);
-        let listener = self.listener.lock().unwrap().clone();
+        let listener = self.listener.clone();
         Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
@@ -504,9 +544,7 @@ impl TunnelManager {
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
-                                if listener.is_some() {
-                                    listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
-                                }
+                                listener.on_new_tunnel_stream(stream).await;
                             }
                         }
                         TunnelInstance::Datagram(datagram) => {
@@ -522,9 +560,7 @@ impl TunnelManager {
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
-                                if listener.is_some() {
-                                    listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
-                                }
+                                listener.on_new_tunnel_datagram(datagram).await;
                             }
                         }
                         TunnelInstance::ReverseStream(stream) => {
@@ -548,9 +584,12 @@ impl TunnelManager {
         Ok(())
     }
 
-    pub(crate) fn set_listener(&self, listener: impl TunnelManagerEvent) {
-        let mut listeners = self.listener.lock().unwrap();
-        *listeners = Some(Arc::new(listener));
+    pub(crate) fn set_stream_listener(&self, listener: impl TunnelManagerStreamEvent) {
+        self.listener.set_stream_event_listener(listener);
+    }
+
+    pub(crate) fn set_datagram_listener(&self, listener: impl TunnelManagerDatagramEvent) {
+        self.listener.set_datagram_event_listener(listener);
     }
 
     pub(crate) fn add_listen_port(&self, port: u16) {
@@ -593,7 +632,7 @@ impl TunnelManager {
                 self.listen_ports.clone(),
             );
             let datagram = tunnel.connect_datagram(tunnels.clone()).await?;
-            let listener = self.listener.lock().unwrap().clone();
+            let listener = self.listener.clone();
             tunnels.add_tunnel(tunnel, listener);
             Ok(datagram)
         }
@@ -619,7 +658,7 @@ impl TunnelManager {
                 self.listen_ports.clone(),
             );
             let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
-            let listener = self.listener.lock().unwrap().clone();
+            let listener = self.listener.clone();
             tunnels.add_tunnel(tunnel, listener);
             Ok(stream)
         }
@@ -689,17 +728,13 @@ impl TunnelManager {
                         }
                     };
                     tunnel.set_tunnel_conn(Box::new(tunnel_conn));
-                    let listener = {
-                        self.listener.lock().unwrap().clone()
-                    };
+                    let listener = self.listener.clone();
                     {
                         let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
                         tunnels.add_tunnel(tunnel, listener.clone());
                     }
-                    let listener = self.listener.lock().unwrap().clone();
-                    if listener.is_some() {
-                        listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
-                    }
+                    let listener = self.listener.clone();
+                    listener.on_new_tunnel_datagram(datagram).await;
                 } else {
                     let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
                     let stream = match tunnel_conn.connect_reverse_stream(stream_call.vport, stream_call.session_id).await {
@@ -710,16 +745,12 @@ impl TunnelManager {
                         }
                     };
                     tunnel.set_tunnel_conn(Box::new(tunnel_conn));
-                    let listener = {
-                        self.listener.lock().unwrap().clone()
-                    };
+                    let listener = self.listener.clone();
                     {
                         let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
                         tunnels.add_tunnel(tunnel, listener.clone());
                     }
-                    if listener.is_some() {
-                        listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
-                    }
+                    listener.on_new_tunnel_stream(stream).await;
                 }
             } else if ep.is_udp() {
                 for listener in self.net_manager.udp_listeners().iter() {
@@ -755,17 +786,13 @@ impl TunnelManager {
                             }
                         };
                         tunnel.set_tunnel_conn(Box::new(tunnel_conn));
-                        let listener = {
-                            self.listener.lock().unwrap().clone()
-                        };
+                        let listener = self.listener.clone();
                         {
                             let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
                             tunnels.add_tunnel(tunnel, listener.clone());
                         }
-                        let listener = self.listener.lock().unwrap().clone();
-                        if listener.is_some() {
-                            listener.as_ref().unwrap().on_new_tunnel_datagram(datagram).await;
-                        }
+                        let listener = self.listener.clone();
+                        listener.on_new_tunnel_datagram(datagram).await;
                     } else {
                         let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
                         let stream = match tunnel_conn.connect_reverse_stream(stream_call.vport, stream_call.session_id).await {
@@ -776,16 +803,12 @@ impl TunnelManager {
                             }
                         };
                         tunnel.set_tunnel_conn(Box::new(tunnel_conn));
-                        let listener = {
-                            self.listener.lock().unwrap().clone()
-                        };
+                        let listener = self.listener.clone();
                         {
                             let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
                             tunnels.add_tunnel(tunnel, listener.clone());
                         }
-                        if listener.is_some() {
-                            listener.as_ref().unwrap().on_new_tunnel_stream(stream).await;
-                        }
+                        listener.on_new_tunnel_stream(stream).await;
                     }
                 }
             }

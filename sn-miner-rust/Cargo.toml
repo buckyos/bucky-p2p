@@ -1,10 +1,10 @@
 [package]
-name = "sn-miner-rust"
+name = "sn-miner"
 version = "0.5.0"
 authors = ["zhangzhen <zhangzhen@buckyos.com>"]
 edition = "2018"
 license = "BSD-2-Clause"
-description = "Rust sn-miner-rust package"
+description = "Rust sn-miner package"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

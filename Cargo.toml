@@ -6,4 +6,5 @@ members = [
     "./sn-miner-rust",
     "bucky-rustls",
     "cyfs-p2p-test",
+    "desc-tool",
 ]

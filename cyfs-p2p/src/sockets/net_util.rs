@@ -5,9 +5,9 @@ use std::mem;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 #[cfg(unix)]
-use async_std::net::UdpSocket;
+use crate::runtime::UdpSocket;
 #[cfg(unix)]
-use async_std::os::unix::io::RawFd;
+use crate::runtime::RawFd;
 #[cfg(unix)]
 extern crate libc;
 
@@ -56,7 +56,7 @@ pub fn set_socket_reuseaddr(fd: RawFd) -> Result<(), Box<dyn Error>> {
         let msg = format!(
             "set_socket_reuseaddr error! ret={}, err={}",
             ret,
-            async_std::io::Error::last_os_error()
+            std::io::Error::last_os_error()
         );
         error!("{}", msg);
 
@@ -84,7 +84,7 @@ pub fn set_socket_reuseport(fd: RawFd) -> Result<(), Box<dyn Error>> {
         let msg = format!(
             "set_socket_reuseport error! ret={}, err={}",
             ret,
-            async_std::io::Error::last_os_error()
+            std::io::Error::last_os_error()
         );
         error!("{}", msg);
 
@@ -112,7 +112,7 @@ pub fn set_socket_keepalive(fd: RawFd) -> Result<(), Box<dyn Error>> {
         let msg = format!(
             "setsockopt error! ret={}, err={}",
             ret,
-            async_std::io::Error::last_os_error()
+            std::io::Error::last_os_error()
         );
         error!("{}", msg);
 

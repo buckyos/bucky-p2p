@@ -160,12 +160,20 @@ impl TCPListener {
                                 .unwrap(),
                         ) < 0
                         {
-                            Err(BdtError::from((
-                                BuckyErrorCode::AlreadyExists,
-                                "bind port failed",
-                            )))
+                            Err(BdtError::new(
+                                BdtErrorCode::AlreadyExists,
+                                "bind port failed".to_string(),
+                            ))
                         } else {
-                            Ok(TcpListener::from_raw_fd(raw_sock))
+                            #[cfg(feature = "runtime-tokio")]
+                            {
+                                Ok(TcpListener::from_std(std::net::TcpListener::from_raw_fd(raw_sock)).unwrap())
+                            }
+
+                            #[cfg(feature = "runtime-async-std")]
+                            {
+                                Ok(TcpListener::from_raw_fd(raw_sock))
+                            }
                         }
                     }
                 }
@@ -268,10 +276,21 @@ impl TCPListener {
         }
         #[cfg(not(windows))]
         {
-            use std::os::unix::io::AsRawFd;
-            unsafe {
-                let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_socket();
-                libc::close(raw);
+            #[cfg(feature = "runtime-async-std")]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_socket();
+                    libc::close(raw);
+                }
+            }
+            #[cfg(feature = "runtime-tokio")]
+            {
+                use std::os::fd::AsRawFd;
+                unsafe {
+                    let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_fd();
+                    libc::close(raw.try_into().unwrap());
+                }
             }
         }
     }
