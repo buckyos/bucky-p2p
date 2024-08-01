@@ -1,0 +1,18 @@
+[package]
+name = "cyfs-p2p-test"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread"]}
+clap = "2"
+cyfs-p2p = { path = "../cyfs-p2p" }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.117"
+bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
+bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
+bucky-raw-codec = {git = "https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
+flexi_logger = "0.28.5"
+log = "0.4.22"

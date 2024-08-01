@@ -7,7 +7,7 @@ use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
 use crate::IncreaseIdGenerator;
 use crate::stream::StreamGuard;
-use crate::tunnel::{SocketType, TunnelGuard, TunnelManagerRef, TunnelStream, TunnelType};
+use crate::tunnel::{SocketType, TunnelManagerRef, TunnelStream, TunnelType};
 
 struct StreamListenerState {
     abort_handle: Option<AbortHandle>,

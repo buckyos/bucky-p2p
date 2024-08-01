@@ -1178,6 +1178,7 @@ dependencies = [
  "callback-trait",
  "futures",
  "futures-rustls",
+ "if-addrs",
  "libc",
  "log",
  "md5",
@@ -1210,6 +1211,7 @@ dependencies = [
  "clap",
  "cyfs-p2p",
  "flexi_logger",
+ "log",
  "serde",
  "serde_json",
  "tokio",
@@ -1918,6 +1920,16 @@ checksum = "634d9b1461af396cad843f47fdba5597a4f9e6ddd4bfb6ff5d85028c25cb12f6"
 dependencies = [
  "unicode-bidi",
  "unicode-normalization",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a2b3d54f41dab497e273737c41c6c2468c6d0b001b8cc0871d57334e78c4691"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

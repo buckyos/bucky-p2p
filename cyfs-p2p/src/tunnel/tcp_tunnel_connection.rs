@@ -27,7 +27,7 @@ use crate::tunnel::{SocketType, TunnelConnection, TunnelDatagramRecv, TunnelData
 use crate::tunnel::TunnelInstance::ReverseDatagram;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum TunnelState {
+pub enum TunnelState {
     Init,
     Idle,
     Opening,

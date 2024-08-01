@@ -42,6 +42,8 @@ pub enum PackageCmdCode {
     SnCalledResp = 0x23,
     ReportSn = 0x24,
     ReportSnResp = 0x25,
+    SnQuery = 0x26,
+    SnQueryResp = 0x27,
 
     SessionData = 0x40,
     TcpAckAckConnection = 0x43,
@@ -85,6 +87,8 @@ impl TryFrom<u8> for PackageCmdCode {
             0x23u8 => Ok(Self::SnCalledResp),
             0x24u8 => Ok(Self::ReportSn),
             0x25u8 => Ok(Self::ReportSnResp),
+            0x26u8 => Ok(Self::SnQuery),
+            0x27u8 => Ok(Self::SnQueryResp),
 
             0x50u8 => Ok(Self::SynProxy),
             0x51u8 => Ok(Self::AckProxy),

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 use bucky_objects::{DeviceId, Endpoint, Protocol};
 use bucky_raw_codec::RawConvertTo;
 use quinn::crypto::rustls::QuicClientConfig;
@@ -6,7 +7,7 @@ use quinn::VarInt;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::LocalDeviceRef;
+use crate::{LocalDeviceRef, runtime};
 
 #[derive(Clone)]
 pub struct QuicSocket {
@@ -34,7 +35,8 @@ impl QuicSocket {
         }
     }
 
-    pub async fn connect(local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint) -> BdtResult<Self> {
+    pub async fn connect(local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint,
+                         timeout: Duration,) -> BdtResult<Self> {
         let client_key = local_device_ref.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let client_cert = local_device_ref.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let mut config =
@@ -57,9 +59,10 @@ impl QuicSocket {
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
         endpoint.set_default_client_config(client_config);
 
-        let conn = endpoint.connect(remote.addr().clone(),
-                                    remote_device_id.object_id().to_base36().as_str()).unwrap().await
-            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+        let conn = runtime::timeout(timeout, endpoint.connect(remote.addr().clone(),
+                                    remote_device_id.object_id().to_base36().as_str()).unwrap()).await
+            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
+            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
                      local_device_ref.device_id().clone(),
                      remote_device_id,

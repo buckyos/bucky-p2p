@@ -14,6 +14,7 @@ pub struct SnCall {
     pub protocol_version: u8,
     pub stack_version: u32,
     pub seq: TempSeq,
+    pub tunnel_id: TempSeq,
     pub sn_peer_id: DeviceId,
     pub to_peer_id: DeviceId,
     pub from_peer_id: DeviceId,
@@ -30,8 +31,9 @@ impl std::fmt::Debug for SnCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "SnCall:{{seq:{:?}, sn_peer_id:{:?}, to_peer_id:{}, from_peer_id:{:?}, reverse_endpoint_array:{:?}, active_pn_list:{:?}, peer_info:{}, payload:{}}}",
+            "SnCall:{{seq:{:?}, tunnel_id:{:?}, sn_peer_id:{:?}, to_peer_id:{}, from_peer_id:{:?}, reverse_endpoint_array:{:?}, active_pn_list:{:?}, peer_info:{}, payload:{}}}",
             self.seq,
+            self.tunnel_id,
             self.sn_peer_id,
             self.to_peer_id,
             self.from_peer_id,
@@ -413,6 +415,8 @@ pub struct ReportSn {
     pub send_time: Timestamp,                  //发送时间
     pub contract_id: Option<ObjectId>,         //合约文件对象id
     pub receipt: Option<ReceiptWithSignature>, //客户端提供的服务清单
+    pub map_port: Option<u16>,
+    pub local_eps: Vec<Endpoint>,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
@@ -423,4 +427,20 @@ pub struct ReportSnResp {
     pub peer_info: Option<Device>,         //sn的设备信息
     pub end_point_array: Vec<Endpoint>,    //外网地址列表
     pub receipt: Option<SnServiceReceipt>, //返回sn的一些连接信息，如当前连接的peer数量
+}
+
+#[derive(Debug, Clone, RawEncode, RawDecode)]
+pub struct SnQuery {
+    pub protocol_version: u8,
+    pub stack_version: u32,
+    //ln与sn的keepalive包
+    pub seq: TempSeq,                          //序列号
+    pub query_id: DeviceId,
+}
+
+#[derive(Debug, Clone, RawEncode, RawDecode)]
+pub struct SnQueryResp {
+    pub seq: TempSeq,                      //包序列包
+    pub peer_info: Option<Device>,         //sn的设备信息
+    pub end_point_array: Vec<Endpoint>,    //外网地址列表
 }

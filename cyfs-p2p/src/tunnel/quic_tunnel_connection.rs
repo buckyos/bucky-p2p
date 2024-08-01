@@ -315,15 +315,15 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (has_socket, local_device, remote_id, remote_ep) = {
+        let (has_socket, local_device, remote_id, remote_ep, conn_timeout) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone())
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout)
         };
         if has_socket {
             return Ok(self.open_stream(vport, session_id).await?);
         }
 
-        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep).await?;
+        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?;
         {
             let mut inner = self.inner.lock().unwrap();
             inner.data_socket = Some(socket);
@@ -334,15 +334,15 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
-        let (has_socket, local_device, remote_id, remote_ep) = {
+        let (has_socket, local_device, remote_id, remote_ep, conn_timeout) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone())
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout)
         };
         if has_socket {
             return Ok(self.open_datagram().await?);
         }
 
-        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep).await?;
+        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?;
         {
             let mut inner = self.inner.lock().unwrap();
             inner.data_socket = Some(socket);
@@ -353,15 +353,15 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (has_socket, local_device, remote_id, remote_ep) = {
+        let (has_socket, local_device, remote_id, remote_ep, conn_timeout) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone())
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout)
         };
         if has_socket {
             return Ok(self.open_reverse_stream(vport, session_id).await?);
         }
 
-        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep).await?;
+        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?;
         {
             let mut inner = self.inner.lock().unwrap();
             inner.data_socket = Some(socket);
@@ -372,15 +372,15 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
-        let (has_socket, local_device, remote_id, remote_ep) = {
+        let (has_socket, local_device, remote_id, remote_ep, conn_timeout) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone())
+            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout)
         };
         if has_socket {
             return Ok(self.open_reverse_datagram().await?);
         }
 
-        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep).await?;
+        let mut socket = QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?;
         {
             let mut inner = self.inner.lock().unwrap();
             inner.data_socket = Some(socket);

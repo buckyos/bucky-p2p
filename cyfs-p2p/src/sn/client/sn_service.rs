@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::future::Future;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use bucky_error::BuckyErrorCode;
@@ -16,7 +18,7 @@ use crate::{LocalDeviceRef, MixAesKey, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::history::keystore::Keystore;
-use crate::protocol::{Package, PackageCmdCode, SnCall, ReportSn, ReportSnResp};
+use crate::protocol::{Package, PackageCmdCode, SnCall, ReportSn, ReportSnResp, SnQueryResp, SnQuery};
 use crate::protocol::v0::{SnCalled, SnCalledResp, SnCallResp, SnPingResp};
 use crate::receive_processor::{ReceiveProcessor, ReceiveProcessorRef};
 use crate::sn::service::PeerConnection;
@@ -30,12 +32,17 @@ pub trait SNEvent: 'static + Send + Sync {
 }
 pub type SNEventRef = Arc<dyn SNEvent>;
 
+pub enum SnResp {
+    SnCallResp(SnCallResp),
+    SnQueryResp(SnQueryResp),
+}
+
 #[derive(Clone)]
 pub struct ActiveSN {
     pub sn: Device,
     pub latest_time: u64,
     pub conn_id: TempSeq,
-    pub recv_future: Arc<Mutex<Option<NotifyFuture<SnCallResp>>>>,
+    pub recv_future: Arc<Mutex<HashMap<TempSeq, NotifyFuture<SnResp>>>>,
     pub peer_connection: Arc<runtime::Mutex<PeerConnection>>,
     pub wan_ep_list: Vec<Endpoint>,
 }
@@ -47,7 +54,7 @@ pub struct SNServiceState {
     pub cur_report_future: Option<NotifyFuture<ReportSnResp>>,
 }
 
-pub(crate) struct SNClientService {
+pub struct SNClientService {
     net_manager: NetManagerRef,
     sn_list: Vec<Device>,
     local_device: LocalDeviceRef,
@@ -61,7 +68,7 @@ pub(crate) struct SNClientService {
 pub type SNClientServiceRef = Arc<SNClientService>;
 
 impl SNClientService {
-    pub fn new(net_manager: NetManagerRef,
+    pub(crate) fn new(net_manager: NetManagerRef,
                sn_list: Vec<Device>,
                local_device: LocalDeviceRef,
                gen_seq: Arc<TempSeqGenerator>,
@@ -98,9 +105,22 @@ impl SNClientService {
                 let mut state = self.state.write().unwrap();
                 for active_sn in state.active_sn_list.iter_mut() {
                     if active_sn.conn_id == conn_id {
-                        let mut recv_future = active_sn.recv_future.lock().unwrap();
-                        if let Some(recv_future) = recv_future.take() {
-                            recv_future.set_complete(resp);
+                        let mut recv_futures = active_sn.recv_future.lock().unwrap();
+                        if let Some(recv_future) = recv_futures.remove(&resp.seq) {
+                            recv_future.set_complete(SnResp::SnCallResp(resp));
+                        }
+                        break;
+                    }
+                }
+            },
+            PackageCmdCode::SnQueryResp => {
+                let resp = SnQueryResp::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                let mut state = self.state.write().unwrap();
+                for active_sn in state.active_sn_list.iter_mut() {
+                    if active_sn.conn_id == conn_id {
+                        let mut recv_futures = active_sn.recv_future.lock().unwrap();
+                        if let Some(recv_future) = recv_futures.remove(&resp.seq) {
+                            recv_future.set_complete(SnResp::SnQueryResp(resp));
                         }
                         break;
                     }
@@ -130,7 +150,7 @@ impl SNClientService {
             let listener = self.listener.lock().unwrap();
             listener.clone()
         };
-        let seq = sn_called.call_seq.clone();
+        let seq = sn_called.tunnel_id.clone();
         let sn_peer_id = sn_called.sn_peer_id.clone();
         let to_peer_id = sn_called.to_peer_id.clone();
         let resp = if listener.is_some() {
@@ -194,7 +214,9 @@ impl SNClientService {
                     } else {
                         let cur_sn_interval = state.latest_sn_interval;
                         if state.latest_sn_interval == 0 {
-                            state.latest_sn_interval = 10;
+                            state.latest_sn_interval = 1;
+                        } else if state.latest_sn_interval == 10 {
+                            state.latest_sn_interval = 1;
                         } else {
                             state.latest_sn_interval = state.latest_sn_interval * 2;
                         }
@@ -208,6 +230,27 @@ impl SNClientService {
                     runtime::sleep(Duration::from_secs(cur_sn_interval)).await;
                 }
                 if active_sn_count > 0 {
+                    let mut ping_sn_list = Vec::new();
+                    {
+                        let mut state = self.state.write().unwrap();
+                        for active_sn in state.active_sn_list.iter_mut() {
+                            if bucky_time_now() - active_sn.latest_time > 600 * 1000 * 1000 {
+                                active_sn.latest_time = bucky_time_now();
+                                ping_sn_list.push(active_sn.clone());
+                            }
+                        }
+                    }
+
+                    for active_sn in ping_sn_list.iter() {
+                        let mut peer_conn = active_sn.peer_connection.lock().await;
+                        match self.report(&mut peer_conn).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                log::error!("ping to {} failed: {:?}", active_sn.sn.desc().device_id(), e);
+                                continue;
+                            }
+                        }
+                    }
                     continue;
                 }
             }
@@ -238,7 +281,7 @@ impl SNClientService {
                             sn: sn.clone(),
                             latest_time: bucky_time_now(),
                             conn_id: peer_conn.conn_id(),
-                            recv_future: Arc::new(Mutex::new(None)),
+                            recv_future: Arc::new(Mutex::new(HashMap::new())),
                             peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
                             wan_ep_list: report_resp.end_point_array,
                         };
@@ -262,6 +305,7 @@ impl SNClientService {
     }
 
     async fn create_connection(self: &Arc<Self>, local_ep: Endpoint, quic_ep: quinn::Endpoint, sn: &Device, sn_ep: &Endpoint) -> BdtResult<PeerConnection> {
+        log::info!("connect to sn: {} sn_ep: {}", sn.desc().device_id(), sn_ep);
         let client_key = self.local_device.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let client_cert = self.local_device.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let mut config =
@@ -277,8 +321,8 @@ impl SNClientService {
         let mut client_config =
             quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(240).try_into().unwrap()));
-        transport_config.keep_alive_interval(Some(Duration::from_secs(60)));
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
+        transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
         client_config.transport_config(Arc::new(transport_config));
 
         let conning = quic_ep.connect_with(client_config, sn_ep.addr().clone(), sn.desc().device_id().object_id().to_base36().as_str())
@@ -322,6 +366,56 @@ impl SNClientService {
 
     async fn report(&self, conn: &mut PeerConnection) -> BdtResult<ReportSnResp> {
         let seq = self.gen_seq.generate();
+        let local_ips = if_addrs::get_if_addrs().map(|addrs| {
+            addrs.iter().filter(|addr| !addr.name.contains("VMware")
+                && !addr.name.contains("VirtualBox")
+                && !addr.name.contains("ZeroTier")
+                && !addr.name.contains("Tun")
+                && !addr.name.contains("docker")
+                && !addr.name.contains("lo")
+                && !addr.name.contains("veth")
+                && !addr.name.contains("V-M")
+                && !addr.name.contains("br-")
+                && !addr.name.contains("vEthernet")
+                && addr.ip().to_string() != "127.0.0.1")
+                .map(|addr| addr.addr.ip().to_string()).collect::<Vec<String>>()
+        }).unwrap_or(Vec::new());
+
+        let mut local_eps = Vec::new();
+        for listener in self.net_manager.tcp_listeners().iter() {
+            if listener.local().addr().ip().is_unspecified() {
+                for ip in local_ips.iter() {
+                    match ip.parse::<IpAddr>() {
+                        Ok(ip) => {
+                            local_eps.push(Endpoint::from((Protocol::Tcp, ip, listener.local().addr().port())));
+                        }
+                        Err(_) => {
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                local_eps.push(listener.local());
+            }
+        }
+
+        for listener in self.net_manager.udp_listeners().iter() {
+            if listener.local().addr().ip().is_unspecified() {
+                for ip in local_ips.iter() {
+                    match ip.parse::<IpAddr>() {
+                        Ok(ip) => {
+                            local_eps.push(Endpoint::from((Protocol::Udp, ip, listener.local().addr().port())));
+                        }
+                        Err(_) => {
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                local_eps.push(listener.local());
+            }
+        }
+
         let mut report = ReportSn {
             protocol_version: 0,
             stack_version: 0,
@@ -332,6 +426,8 @@ impl SNClientService {
             send_time: bucky_time_now(),
             contract_id: None,
             receipt: None,
+            map_port: None,
+            local_eps,
         };
         let future = NotifyFuture::<ReportSnResp>::new();
         {
@@ -348,6 +444,7 @@ impl SNClientService {
     }
 
     pub async fn call(&self,
+                      tunnel_id: TempSeq,
                       reverse_endpoints: Option<&[Endpoint]>,
                       remote: &DeviceId,
                       payload_pkg: Vec<u8>) -> BdtResult<SnCallResp> {
@@ -358,6 +455,7 @@ impl SNClientService {
                 protocol_version: 0,
                 stack_version: 0,
                 seq,
+                tunnel_id,
                 sn_peer_id: active.sn.desc().device_id(),
                 to_peer_id: remote.clone(),
                 from_peer_id: self.local_device.device_id().clone(),
@@ -369,10 +467,10 @@ impl SNClientService {
                 is_always_call: false,
             };
             let mut peer_conn = active.peer_connection.lock().await;
-            let future = NotifyFuture::<SnCallResp>::new();
+            let future = NotifyFuture::<SnResp>::new();
             {
                 let mut recv_future = active.recv_future.lock().unwrap();
-                *recv_future = Some(future.clone());
+                recv_future.insert(seq, future.clone());
             }
             if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnCall, call)).await {
                 log::error!("send call to {} failed: {:?}", active.sn.desc().device_id(), e);
@@ -380,8 +478,18 @@ impl SNClientService {
             }
 
             let resp = match runtime::timeout(self.call_timeout, future).await {
-                Ok(resp) => resp,
+                Ok(resp) => {
+                    match resp {
+                        SnResp::SnCallResp(resp) => resp,
+                        SnResp::SnQueryResp(_) => {
+                            log::error!("unexpect resp");
+                            continue;
+                        }
+                    }
+                },
                 Err(_) => {
+                    let mut recv_future = active.recv_future.lock().unwrap();
+                    recv_future.remove(&seq);
                     log::error!("call to {} timeout", active.sn.desc().device_id());
                     continue;
                 }
@@ -392,4 +500,47 @@ impl SNClientService {
         Err(bdt_err!(BdtErrorCode::ConnectFailed, "call timeout"))
     }
 
+    pub async fn query(&self, device_id: &DeviceId) -> BdtResult<SnQueryResp> {
+        let active_list = self.get_active_sn_list();
+        for active in active_list.iter() {
+            let seq = self.gen_seq.generate();
+            let query = SnQuery {
+                protocol_version: 0,
+                stack_version: 0,
+                seq,
+                query_id: device_id.clone(),
+            };
+            let mut peer_conn = active.peer_connection.lock().await;
+            let future = NotifyFuture::<SnResp>::new();
+            {
+                let mut recv_future = active.recv_future.lock().unwrap();
+                recv_future.insert(seq, future.clone());
+            }
+            if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQuery, query)).await {
+                log::error!("send call to {} failed: {:?}", active.sn.desc().device_id(), e);
+                continue;
+            }
+
+            let resp = match runtime::timeout(self.call_timeout, future).await {
+                Ok(resp) => {
+                    match resp {
+                        SnResp::SnQueryResp(resp) => resp,
+                        SnResp::SnCallResp(_) => {
+                            log::error!("unexpect resp");
+                            continue;
+                        }
+                    }
+                },
+                Err(_) => {
+                    let mut recv_future = active.recv_future.lock().unwrap();
+                    recv_future.remove(&seq);
+                    log::error!("call to {} timeout", active.sn.desc().device_id());
+                    continue;
+                }
+            };
+
+            return Ok(resp);
+        }
+        Err(bdt_err!(BdtErrorCode::ConnectFailed, "call timeout"))
+    }
 }

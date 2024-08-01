@@ -42,7 +42,7 @@ impl ServerCertResolver {
     }
 
     pub fn get_device(&self, device_id: &DeviceId) -> Option<Device> {
-        let mut device_cache = self.device_cache.lock().unwrap();
+        let device_cache = self.device_cache.lock().unwrap();
         match device_cache.get(device_id) {
             Some(device_info) => Some(device_info.device.clone()),
             None => None
@@ -62,6 +62,7 @@ impl ResolvesServerCert for ServerCertResolver {
             Err(_) => return None
         };
 
+        println!("resolve device_id = {}", device_id);
         let device_cache = self.device_cache.lock().unwrap();
         let device_info = match device_cache.get(&device_id) {
             Some(device_info) => device_info,

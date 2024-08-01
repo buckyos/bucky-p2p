@@ -3,7 +3,7 @@ use std::path::Path;
 use std::thread;
 use bucky_crypto::PrivateKey;
 use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId};
-use bucky_raw_codec::{FileDecoder, FileEncoder, RawDecode, RawFrom};
+use bucky_raw_codec::{FileDecoder, FileEncoder};
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming};
 use log::Record;
 
@@ -13,7 +13,6 @@ use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
 #[warn(unused_imports)]
 pub(crate) use sfo_result::err as miner_err;
 pub(crate) use sfo_result::into_err as into_miner_err;
-use cyfs_p2p::error::{BdtError, BdtErrorCode};
 use cyfs_p2p::executor::Executor;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]

@@ -170,7 +170,7 @@ pub struct SnCalled {
     pub reverse_endpoint_array: Vec<Endpoint>,
     pub active_pn_list: Vec<DeviceId>,
     pub peer_info: Device,
-    pub call_seq: TempSeq,
+    pub tunnel_id: TempSeq,
     pub call_send_time: Timestamp,
     pub payload: Vec<u8>,
 }

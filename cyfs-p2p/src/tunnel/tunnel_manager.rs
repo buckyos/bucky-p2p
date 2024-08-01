@@ -21,53 +21,6 @@ use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::sockets::tcp::TCPSocket;
 use super::{QuicTunnelConnection, ReverseFutureCache, ReverseResult, SocketType, StreamSnCall, TcpTunnelConnection, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
 
-pub struct TunnelGuard {
-    tunnel: Option<Tunnel>,
-    tunnels: Arc<Tunnels>,
-}
-
-impl TunnelGuard {
-    pub fn new(tunnel: Tunnel, tunnels: Arc<Tunnels>) -> Self {
-        Self {
-            tunnel: Some(tunnel),
-            tunnels
-        }
-    }
-}
-
-impl Deref for TunnelGuard {
-    type Target = Tunnel;
-
-    fn deref(&self) -> &Self::Target {
-        self.tunnel.as_ref().unwrap()
-    }
-}
-
-impl DerefMut for TunnelGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.tunnel.as_mut().unwrap()
-    }
-}
-
-impl Drop for TunnelGuard {
-    fn drop(&mut self) {
-        // self.tunnels.add_idle_tunnel(self.tunnel.take().unwrap());
-        let mut tunnel = self.tunnel.take().unwrap();
-        self.tunnels.remove_tunnel(tunnel.get_sequence());
-        // let ret = Executor::block_on(
-        //     // tunnel.close()
-        // );
-        // match ret {
-        //     Ok(_) => {
-        //         self.tunnels.add_idle_tunnel(tunnel);
-        //     }
-        //     Err(err) => {
-        //         log::error!("close tunnel error: {:?}", err);
-        //     }
-        // }
-    }
-}
-
 struct TunnelsState {
     tunnels: HashMap<TempSeq, Arc<Tunnel>>,
     pending_tunnels: HashMap<TempSeq, NotifyFuture<ReverseResult>>,
@@ -105,7 +58,7 @@ struct Tunnels {
 }
 
 impl Tunnels {
-    pub fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(TunnelsState {
                 tunnels: Default::default(),
@@ -308,7 +261,7 @@ pub struct TunnelManager {
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
 impl TunnelManager {
-    pub fn new(
+    pub(crate) fn new(
         net_manager: NetManagerRef,
         receive_dispatcher: ReceiveDispatcherRef,
         sn_service: SNClientServiceRef,
@@ -702,7 +655,7 @@ impl TunnelManager {
                 let mut tunnel = Tunnel::new(
                     self.net_manager.clone(),
                     self.sn_service.clone(),
-                    sn_called.call_seq,
+                    sn_called.tunnel_id,
                     self.protocol_version,
                     self.stack_version,
                     sn_called.peer_info.clone(),
@@ -711,7 +664,7 @@ impl TunnelManager {
                     self.listen_ports.clone());
 
                 let mut tunnel_conn = TcpTunnelConnection::new(
-                    sn_called.call_seq,
+                    sn_called.tunnel_id,
                     self.local_device.clone(),
                     sn_called.to_peer_id.clone(),
                     ep.clone(),
@@ -758,7 +711,7 @@ impl TunnelManager {
                     let mut tunnel = Tunnel::new(
                         self.net_manager.clone(),
                         self.sn_service.clone(),
-                        sn_called.call_seq,
+                        sn_called.tunnel_id,
                         self.protocol_version,
                         self.stack_version,
                         sn_called.peer_info.clone(),
@@ -767,7 +720,7 @@ impl TunnelManager {
                         self.listen_ports.clone());
 
                     let mut tunnel_conn = QuicTunnelConnection::new(self.net_manager.clone(),
-                                                                    sn_called.call_seq,
+                                                                    sn_called.tunnel_id,
                                                                     self.local_device.clone(),
                                                                     sn_called.to_peer_id.clone(),
                                                                     ep.clone(),

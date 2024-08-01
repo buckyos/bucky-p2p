@@ -23,8 +23,7 @@ impl NetManager {
         device_cache: Arc<DeviceCache>,
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
-        tcp_accept_timout: Duration,
-        udp_recv_buffer: usize,) -> BdtResult<Self> {
+        tcp_accept_timout: Duration,) -> BdtResult<Self> {
         let cert_resolver = ServerCertResolver::new();
         Ok(Self {
             net_listener: NetListener::open(device_cache.clone(), cert_resolver.clone(), endpoints, port_mapping, tcp_accept_timout).await?,

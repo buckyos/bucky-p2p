@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::net::Shutdown;
 use std::sync::{Arc, Mutex, Weak};
@@ -8,6 +9,7 @@ use bucky_objects::{DeviceId, Endpoint};
 use bucky_raw_codec::RawEncode;
 use bucky_time::bucky_time_now;
 use callback_result::{CallbackWaiter, SingleCallbackWaiter};
+use futures::FutureExt;
 use notify_future::NotifyFuture;
 use crate::protocol::{AckTunnel, Package, PackageCmdCode, PackageHeader, SynTunnel};
 use crate::sockets::{NetManagerRef};
@@ -147,4 +149,24 @@ pub(crate) trait TunnelConnection: AsAny + Send + Sync {
     async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>>;
     async fn accept_instance(&self) -> BdtResult<TunnelInstance>;
     async fn shutdown(&self) -> BdtResult<()>;
+}
+
+pub async fn select_successful<T, E, F>(futures: Vec<F>) -> BdtResult<T>
+where
+    F: Future<Output=Result<T, E>> + Unpin,
+{
+    let mut futures = futures.into_iter().map(FutureExt::fuse).collect::<Vec<_>>();
+
+    while futures.len() > 0 {
+        let mut select_all = futures::future::select_all(futures);
+        match select_all.await {
+            (Ok(result), _index, remaining) => {
+                return Ok(result);
+            },
+            (Err(_), _index, remaining) => {
+                futures = remaining;
+            },
+        }
+    };
+    Err(bdt_err!(BdtErrorCode::ConnectFailed, "connect failed"))
 }

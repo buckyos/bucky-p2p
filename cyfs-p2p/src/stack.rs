@@ -12,7 +12,8 @@ use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveProcessor, ReceiveProcessorRef};
 use crate::sn::client::{SNClientService, SNClientServiceRef, SNEvent};
 use crate::sockets::{NetManager, NetManagerRef};
-use crate::tunnel::{TunnelGuard, TunnelManager, TunnelManagerEvent, TunnelManagerRef};
+use crate::stream::{StreamManager, StreamManagerRef};
+use crate::tunnel::{TunnelManager, TunnelManagerEvent, TunnelManagerRef};
 
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
 static RECEIVE_DISPATCHER: OnceCell<ReceiveDispatcherRef> = OnceCell::new();
@@ -20,8 +21,7 @@ static RECEIVE_DISPATCHER: OnceCell<ReceiveDispatcherRef> = OnceCell::new();
 pub async fn init_p2p(
     endpoints: &[Endpoint],
     port_mapping: Option<Vec<(Endpoint, u16)>>,
-    tcp_accept_timout: Duration,
-    udp_recv_buffer: usize,) -> BdtResult<()> {
+    tcp_accept_timout: Duration,) -> BdtResult<()> {
     Executor::init(None);
     let key_store = Arc::new(Keystore::new(crate::history::keystore::Config {
         key_expire: Duration::from_secs(120),
@@ -32,7 +32,7 @@ pub async fn init_p2p(
         expire: Duration::from_secs(600),
         capacity: 1024,
     }, None));
-    let net_manager = Arc::new(NetManager::open(device_cache, endpoints, port_mapping, tcp_accept_timout, udp_recv_buffer).await?);
+    let net_manager = Arc::new(NetManager::open(device_cache, endpoints, port_mapping, tcp_accept_timout).await?);
     let net_manager = NET_MANAGER.get_or_init(move || {
         net_manager.clone()
     });
@@ -49,6 +49,7 @@ pub struct P2pStack {
     sn_service: SNClientServiceRef,
     tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
+    stream_manager: StreamManagerRef,
 }
 pub type P2pStackRef = Arc<P2pStack>;
 
@@ -57,6 +58,7 @@ impl P2pStack {
         local_device: LocalDeviceRef,
         sn_service: SNClientServiceRef,
         tunnel_manager: TunnelManagerRef,
+        stream_manager: StreamManagerRef,
         net_manager: NetManagerRef,) -> Self {
         net_manager.add_listen_device(local_device.device().clone(), local_device.key().clone());
         Self {
@@ -64,6 +66,7 @@ impl P2pStack {
             sn_service,
             tunnel_manager,
             net_manager,
+            stream_manager,
         }
     }
 
@@ -78,6 +81,14 @@ impl P2pStack {
 
     pub fn local_device(&self) -> &LocalDeviceRef {
         &self.local_device
+    }
+
+    pub fn stream_manager(&self) -> &StreamManagerRef {
+        &self.stream_manager
+    }
+
+    pub fn sn_client(&self) -> &SNClientServiceRef {
+        &self.sn_service
     }
 }
 
@@ -143,9 +154,12 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
     RECEIVE_DISPATCHER.get().unwrap().add_processor(device_id, processor.clone());
     sn_service.start().await;
 
+    let stream_manager = StreamManager::new(tunnel_manager.clone());
+
     Ok(Arc::new(P2pStack::new(
         local_device.clone(),
         sn_service,
         tunnel_manager,
+        stream_manager,
         net_manager.clone(),)))
 }

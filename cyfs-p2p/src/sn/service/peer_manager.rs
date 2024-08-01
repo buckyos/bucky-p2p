@@ -41,8 +41,10 @@ pub struct FoundPeer {
 pub(crate) struct CachedPeerInfo {
     pub conn_list: Vec<TempSeq>,
     pub desc: Device,
+    pub map_port: Option<u16>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
+    pub local_eps: Arc<mini_moka::sync::Cache<String, Endpoint>>,
     pub is_wan: bool,
     // pub call_peers: HashMap<DeviceId, TempSeq>, // <peerid, last_call_seq>
     // pub receipt: SnServiceReceipt,
@@ -77,11 +79,13 @@ impl CachedPeerInfo {
             conn_list: vec![conn_id],
             is_wan: has_wan_endpoint(&desc),
             desc,
+            map_port: None,
             last_send_time: send_time,
             last_call_time: 0,
             // call_peers: Default::default(),
             // receipt: Default::default(),
             // last_receipt_request_time: ReceiptRequestTime::None,
+            local_eps: Arc::new(mini_moka::sync::CacheBuilder::new(100).time_to_idle(Duration::from_secs(1800)).build()),
         }
     }
 
@@ -120,6 +124,12 @@ impl CachedPeerInfo {
         self.desc = desc.clone();
         self.is_wan = has_wan_endpoint(desc);
         Ok(true)
+    }
+
+    fn update_local_eps(&mut self, local_ips: &Vec<Endpoint>) {
+        for ip in local_ips {
+            self.local_eps.insert(ip.to_string(), ip.clone());
+        }
     }
 }
 
@@ -223,6 +233,17 @@ impl PeerManager {
                     device_conn_map.remove(&remote_id);
                 }
             }
+        }
+    }
+
+    pub fn update_peer(&self, device_id: &DeviceId, device: &Option<Device>, map_port: Option<u16>, local_eps: &Vec<Endpoint>) {
+        let mut device_conn_map = self.device_conn_map.lock().unwrap();
+        if let Some(peer) = device_conn_map.get_mut(device_id) {
+            if let Some(device) = device {
+                peer.update_desc(device);
+            }
+            peer.map_port = map_port;
+            peer.update_local_eps(local_eps);
         }
     }
 

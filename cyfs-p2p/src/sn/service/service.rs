@@ -7,9 +7,10 @@ use std::{
     },
     time::Duration,
 };
+use std::net::ToSocketAddrs;
 use bucky_crypto::PrivateKey;
 use bucky_error::{BuckyError, BuckyErrorCode};
-use bucky_objects::{DeviceId, Endpoint, endpoints_to_string, NamedObject, Protocol};
+use bucky_objects::{DeviceId, Endpoint, EndpointArea, endpoints_to_string, NamedObject, Protocol};
 use bucky_raw_codec::{RawFrom, SizedOwnedData};
 use bucky_time::bucky_time_now;
 use bucky_rustls::ServerCertResolver;
@@ -192,6 +193,10 @@ impl SnService {
                 self.handle_report_sn(&conn_id, report_sn).await;
                 // self.peer_mgr.report_sn(report_sn).await;
             }
+            PackageCmdCode::SnQuery => {
+                let query = SnQuery::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                self.handle_query_sn(&conn_id, query).await;
+            }
             _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
         }
         Ok(())
@@ -318,7 +323,7 @@ impl SnService {
                         to_peer_cache.is_wan
                     );
 
-                    if self.call_stub.insert(from_peer_id, &call_req.seq) {
+                    if self.call_stub.insert(from_peer_id, &call_req.tunnel_id) {
                         if call_req.is_always_call || !to_peer_cache.is_wan {
                             let called_seq = self.seq_generator.generate();
                             let mut called_req = SnCalled {
@@ -326,7 +331,7 @@ impl SnService {
                                 to_peer_id: call_req.to_peer_id.clone(),
                                 sn_peer_id: self.local_device_id().clone(),
                                 peer_info: from_peer_desc,
-                                call_seq: call_req.seq,
+                                tunnel_id: call_req.tunnel_id,
                                 call_send_time: call_req.send_time,
                                 payload: vec![],
                                 reverse_endpoint_array: vec![],
@@ -419,22 +424,74 @@ impl SnService {
     }
 
     async fn handle_report_sn(&self, conn_id: &TempSeq, report_sn: ReportSn) {
-        let from_peer_id = report_sn.from_peer_id.clone();
-        let log_key = format!("[report_sn {}]", from_peer_id.map(|v| v.to_string()).unwrap_or("no device".to_string()));
-        info!("{}.", log_key);
-
         let conn = self.peer_mgr.find_connection(*conn_id);
         assert!(conn.is_some());
         let mut peer_conn = conn.as_ref().unwrap().lock().await;
-        let remote_ep = peer_conn.remote().clone();
-        peer_conn.send(Package::new(PackageCmdCode::ReportSnResp, ReportSnResp {
+        log::info!("report sn from {}.", peer_conn.remote_device_id().to_string());
+        if report_sn.peer_info.is_some() {
+
+        }
+        if report_sn.from_peer_id.is_some() {
+            self.peer_mgr.update_peer(report_sn.from_peer_id.as_ref().unwrap(), &report_sn.peer_info, report_sn.map_port, &report_sn.local_eps);
+        }
+        let mut remote_ep = peer_conn.remote().clone();
+        remote_ep.set_area(EndpointArea::Wan);
+        if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::ReportSnResp, ReportSnResp {
             seq: report_sn.seq,
             sn_peer_id: self.local_device_id().clone(),
             result: BuckyErrorCode::Ok.into_u8(),
             peer_info: None,
             end_point_array: vec![remote_ep],
             receipt: None,
-        })).await;
+        })).await {
+            log::error!("send report-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
+        }
+    }
+
+    async fn handle_query_sn(&self, conn_id: &TempSeq, query: SnQuery) {
+        let device_info = self.peer_mgr.find_peer(&query.query_id);
+        let resp = if device_info.is_some() {
+            let device_info = device_info.unwrap();
+            let mut end_point_array = Vec::new();
+            for conn_id in device_info.conn_list.iter().rev() {
+                let conn = self.peer_mgr.find_connection(*conn_id);
+                if conn.is_some() {
+                    let mut peer_conn = conn.as_ref().unwrap().lock().await;
+                    if device_info.map_port.is_some() {
+                        let remote_ep = peer_conn.remote().clone();
+                        let mut map_ep = Endpoint::from((Protocol::Tcp, remote_ep.addr().ip(), device_info.map_port.unwrap()));
+                        map_ep.set_area(EndpointArea::Wan);
+                        end_point_array.push(map_ep);
+                        let mut map_ep = Endpoint::from((Protocol::Udp, remote_ep.addr().ip(), device_info.map_port.unwrap()));
+                        map_ep.set_area(EndpointArea::Wan);
+                        end_point_array.push(map_ep);
+                    }
+                    let mut remote_ep = peer_conn.remote().clone();
+                    remote_ep.set_area(EndpointArea::Wan);
+                    end_point_array.push(remote_ep);
+                    end_point_array.extend_from_slice(device_info.local_eps.iter().map(|v| v.value().clone()).collect::<Vec<_>>().as_slice());
+                }
+            }
+            SnQueryResp {
+                seq: query.seq,
+                peer_info: Some(device_info.desc),
+                end_point_array,
+            }
+        } else {
+            SnQueryResp {
+                seq: query.seq,
+                peer_info: None,
+                end_point_array: vec![],
+            }
+        };
+
+        let conn = self.peer_mgr.find_connection(*conn_id);
+        assert!(conn.is_some());
+        let mut peer_conn = conn.as_ref().unwrap().lock().await;
+        log::info!("query sn from {}.", peer_conn.remote_device_id().to_string());
+        if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQueryResp, resp)).await {
+            log::error!("send query-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
+        }
     }
 }
 
