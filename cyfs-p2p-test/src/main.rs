@@ -78,7 +78,7 @@ impl SnServiceContractServer for SnServiceContractServerImpl {
 
 #[tokio::main]
 async fn main() {
-    flexi_logger::Logger::try_with_str("debug")
+    flexi_logger::Logger::try_with_str("info")
         .unwrap()
         .log_to_file(FileSpec::default().directory(std::env::current_dir().unwrap().join("logs")))
         .duplicate_to_stderr(Duplicate::All)
@@ -145,6 +145,7 @@ async fn client_instance(data_folder: &Path) {
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
 
+    // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
     let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap()).await.unwrap();
     log::info!("query resp {:?}", resp);
 

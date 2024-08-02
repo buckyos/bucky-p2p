@@ -134,7 +134,7 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         local_device.clone(),
         0,
         0,
-        Duration::from_secs(300),
+        Duration::from_secs(30),
     );
 
     let manager = Arc::downgrade(&tunnel_manager);

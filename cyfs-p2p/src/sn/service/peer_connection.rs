@@ -81,7 +81,7 @@ impl PeerConnection {
         log::info!("enter recv loop");
         loop {
             let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
-            log::debug!("conn {:?} recv {:?}", conn_id, cmd_code);
+            log::info!("conn {:?} recv {:?}", conn_id, cmd_code);
             if let Err(e) = listener.on_recv(conn_id, cmd_code, cmd_body).await {
                 log::error!("on_recv error: {:?}", e);
             }

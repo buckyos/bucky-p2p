@@ -37,6 +37,7 @@ impl QuicSocket {
 
     pub async fn connect(local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint,
                          timeout: Duration,) -> BdtResult<Self> {
+        log::info!("quic to {} connect begin", remote);
         let client_key = local_device_ref.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let client_cert = local_device_ref.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let mut config =
@@ -70,7 +71,9 @@ impl QuicSocket {
                      remote))
     }
 
-    pub async fn connect_with_ep(ep: quinn::Endpoint, local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint) -> BdtResult<Self> {
+    pub async fn connect_with_ep(ep: quinn::Endpoint, local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint,
+                                 timeout: Duration,) -> BdtResult<Self> {
+        log::info!("connect with ep remote = {}", remote);
         let client_key = local_device_ref.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let client_cert = local_device_ref.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let mut config =
@@ -89,10 +92,11 @@ impl QuicSocket {
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
         client_config.transport_config(Arc::new(transport_config));
 
-        let conn = ep.connect_with(client_config,
+        let conn = runtime::timeout(timeout, ep.connect_with(client_config,
                                    remote.addr().clone(),
-                                   remote_device_id.object_id().to_base36().as_str()).unwrap().await
-            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                                   remote_device_id.object_id().to_base36().as_str()).unwrap()).await
+            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
+            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
                      local_device_ref.device_id().clone(),
                      remote_device_id,

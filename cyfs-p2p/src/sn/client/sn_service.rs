@@ -153,29 +153,38 @@ impl SNClientService {
         let seq = sn_called.tunnel_id.clone();
         let sn_peer_id = sn_called.sn_peer_id.clone();
         let to_peer_id = sn_called.to_peer_id.clone();
-        let resp = if listener.is_some() {
-            match listener.as_ref().unwrap().on_called(sn_called).await {
-                Ok(_) => {
-                    SnCalledResp {
-                        seq,
-                        sn_peer_id,
-                        result: 0,
+
+        let resp = if &to_peer_id == self.local_device.device_id() {
+            if listener.is_some() {
+                match listener.as_ref().unwrap().on_called(sn_called).await {
+                    Ok(_) => {
+                        SnCalledResp {
+                            seq,
+                            sn_peer_id,
+                            result: 0,
+                        }
+                    }
+                    Err(e) => {
+                        log::info!("on called to {} failed: {:?}", to_peer_id, e);
+                        SnCalledResp {
+                            seq,
+                            sn_peer_id,
+                            result: e.code().into_u8(),
+                        }
                     }
                 }
-                Err(e) => {
-                    log::info!("on called to {} failed: {:?}", to_peer_id, e);
-                    SnCalledResp {
-                        seq,
-                        sn_peer_id,
-                        result: e.code().into_u8(),
-                    }
+            } else {
+                SnCalledResp {
+                    seq,
+                    sn_peer_id,
+                    result: 0,
                 }
             }
         } else {
             SnCalledResp {
                 seq,
                 sn_peer_id,
-                result: 0,
+                result: BuckyErrorCode::TargetNotFound.into_u8(),
             }
         };
 

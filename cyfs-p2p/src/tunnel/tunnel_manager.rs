@@ -650,6 +650,7 @@ impl TunnelManager {
             eps
         };
 
+        let from_device_id = sn_called.peer_info.desc().device_id();
         for ep in eps.iter() {
             if ep.is_tcp() {
                 let mut tunnel = Tunnel::new(
@@ -666,7 +667,7 @@ impl TunnelManager {
                 let mut tunnel_conn = TcpTunnelConnection::new(
                     sn_called.tunnel_id,
                     self.local_device.clone(),
-                    sn_called.to_peer_id.clone(),
+                    from_device_id.clone(),
                     ep.clone(),
                     self.conn_timeout,
                     self.protocol_version,
@@ -683,7 +684,7 @@ impl TunnelManager {
                     tunnel.set_tunnel_conn(Box::new(tunnel_conn));
                     let listener = self.listener.clone();
                     {
-                        let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                        let mut tunnels = self.get_tunnels(&from_device_id);
                         tunnels.add_tunnel(tunnel, listener.clone());
                     }
                     let listener = self.listener.clone();
@@ -700,7 +701,7 @@ impl TunnelManager {
                     tunnel.set_tunnel_conn(Box::new(tunnel_conn));
                     let listener = self.listener.clone();
                     {
-                        let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                        let mut tunnels = self.get_tunnels(&from_device_id);
                         tunnels.add_tunnel(tunnel, listener.clone());
                     }
                     listener.on_new_tunnel_stream(stream).await;
@@ -722,7 +723,7 @@ impl TunnelManager {
                     let mut tunnel_conn = QuicTunnelConnection::new(self.net_manager.clone(),
                                                                     sn_called.tunnel_id,
                                                                     self.local_device.clone(),
-                                                                    sn_called.to_peer_id.clone(),
+                                                                    from_device_id.clone(),
                                                                     ep.clone(),
                                                                     self.conn_timeout,
                                                                     self.protocol_version,
@@ -741,7 +742,7 @@ impl TunnelManager {
                         tunnel.set_tunnel_conn(Box::new(tunnel_conn));
                         let listener = self.listener.clone();
                         {
-                            let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                            let mut tunnels = self.get_tunnels(&from_device_id);
                             tunnels.add_tunnel(tunnel, listener.clone());
                         }
                         let listener = self.listener.clone();
@@ -758,7 +759,7 @@ impl TunnelManager {
                         tunnel.set_tunnel_conn(Box::new(tunnel_conn));
                         let listener = self.listener.clone();
                         {
-                            let mut tunnels = self.get_tunnels(&sn_called.to_peer_id);
+                            let mut tunnels = self.get_tunnels(&from_device_id);
                             tunnels.add_tunnel(tunnel, listener.clone());
                         }
                         listener.on_new_tunnel_stream(stream).await;

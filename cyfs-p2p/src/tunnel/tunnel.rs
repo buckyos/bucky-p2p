@@ -180,7 +180,7 @@ impl Tunnel {
         let mut futures: Vec<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>> = Vec::new();
         let ep_list = self.remote.connect_info().endpoints();
         for ep in ep_list.iter() {
-            if ep.is_tcp() && ep.addr().is_ipv4() {
+            if ep.is_tcp() && ep.is_static_wan() && ep.addr().is_ipv4() {
                 let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                     self.sequence,
                     self.local_device.clone(),
@@ -195,16 +195,7 @@ impl Tunnel {
                     Ok((tunnel_conn, stream))
                 });
                 futures.push(future);
-                // let stream = match tunnel_conn.connect_stream(vport, session_id).await {
-                //     Ok(stream) => stream,
-                //     Err(e) => {
-                //         log::error!("connect stream error: {:?} msg: {}", e.code(), e.msg());
-                //         continue;
-                //     }
-                // };
-                // self.tunnel_conn = Some(Box::new(tunnel_conn));
-                // return Ok(stream);
-            } else if ep.is_udp() && ep.addr().is_ipv4() {
+            } else if ep.is_udp() && ep.is_static_wan() && ep.addr().is_ipv4() {
                 for listener in self.net_manager.udp_listeners().iter() {
                     let local_ep = listener.local();
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
@@ -223,15 +214,6 @@ impl Tunnel {
                         Ok((tunnel_conn, stream))
                     });
                     futures.push(future);
-                    // let stream = match tunnel_conn.connect_stream(vport, session_id).await {
-                    //     Ok(stream) => stream,
-                    //     Err(e) => {
-                    //         log::error!("connect stream error: {:?} msg: {}", e.code(), e.msg());
-                    //         continue;
-                    //     }
-                    // };
-                    // self.tunnel_conn = Some(Box::new(tunnel_conn));
-                    // return Ok(stream);
                 }
             }
         }

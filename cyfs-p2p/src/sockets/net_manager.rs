@@ -47,6 +47,10 @@ impl NetManager {
     //     self.net_listener.udp_of(ep).map(|udp| udp.socket().as_ref().unwrap().clone())
     // }
 
+    pub fn udp_of(&self, ep: &Endpoint) -> Option<&QuicListenerRef> {
+        self.net_listener.udp_of(ep)
+    }
+
     pub fn udp_listeners(&self) -> &Vec<QuicListenerRef> {
         self.net_listener.udp()
     }

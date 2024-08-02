@@ -348,7 +348,7 @@ impl SnService {
 
                             let called_log =
                                 format!("{} called-req seq({})", log_key, called_seq.value());
-                            log::debug!(
+                            log::info!(
                                 "{} will send with payload(len={}) pn_list({:?}).",
                                 called_log,
                                 called_req.payload.len(),
@@ -359,7 +359,7 @@ impl SnService {
                                 if conn.is_some() {
                                     let mut peer_conn = conn.as_ref().unwrap().lock().await;
                                     if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnCalled, called_req.clone())).await {
-                                        log::debug!("send called-req failed, conn_id: {:?}, error: {:?}", conn_id, e);
+                                        log::info!("send called-req failed, conn_id: {:?}, error: {:?}", conn_id, e);
                                         continue;
                                     }
                                 }
@@ -400,7 +400,7 @@ impl SnService {
         if conn.is_some() {
             let mut conn = conn.as_ref().unwrap().lock().await;
             if let Err(e) = conn.send(Package::new(PackageCmdCode::SnCallResp, call_resp)).await {
-                log::debug!("send call-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
+                log::info!("send call-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
             }
         }
     }
