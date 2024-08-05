@@ -70,6 +70,7 @@ impl ReceiveDispatcher {
     }
 
     pub fn add_processor(&self, device_id: DeviceId, processor: ReceiveProcessorRef) {
+        log::info!("ReceiveDispatcher add_processor device_id = {}", device_id);
         self.processors.write().unwrap().insert(device_id, processor);
     }
 
@@ -78,6 +79,7 @@ impl ReceiveDispatcher {
     }
 
     pub fn remove_processor(&self, device_id: &DeviceId) {
+        log::info!("ReceiveDispatcher remove_processor device_id = {}", device_id);
         self.processors.write().unwrap().remove(device_id);
     }
 }

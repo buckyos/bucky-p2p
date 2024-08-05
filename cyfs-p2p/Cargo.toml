@@ -44,7 +44,7 @@ x509-cert = { version = "0.2.5", features = ["builder"] }
 libc = '0.2'
 c_linked_list = '1.1.1'
 rusqlite = { version = '0.30.0', features = ['bundled', 'blob'] }
-if-addrs = "0.13.1"
+if-addrs = { version = "0.13.1" }
 
 [target.'cfg(unix)'.dependencies]
 nix = '0.24'

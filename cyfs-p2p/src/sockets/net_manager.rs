@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use bucky_crypto::PrivateKey;
-use bucky_objects::{Device, DeviceId, Endpoint};
+use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
 use bucky_rustls::{ServerCertResolver, ServerCertResolverRef};
 use crate::error::BdtResult;
 use crate::finder::DeviceCache;
@@ -60,10 +60,12 @@ impl NetManager {
     }
 
     pub fn add_listen_device(&self, device: Device, key: PrivateKey) {
+        log::info!("add_listen_device {:?}", device.desc().device_id());
         self.cert_resolver.add_device(device, key);
     }
 
     pub fn remove_listen_device(&self, device_id: &DeviceId) {
+        log::info!("remove_listen_device {:?}", device_id);
         self.cert_resolver.remove_device(device_id);
     }
 

@@ -57,6 +57,10 @@ struct Tunnels {
     state: Mutex<TunnelsState>
 }
 
+impl Drop for Tunnels {
+    fn drop(&mut self) {
+    }
+}
 impl Tunnels {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -147,6 +151,17 @@ impl Tunnels {
     pub fn add_pending_future(&self, seq: TempSeq, future: NotifyFuture<ReverseResult>) {
         let mut state = self.state.lock().unwrap();
         state.add_pending_future(seq, future);
+    }
+
+    pub(crate) async fn close_all_tunnel(&self) {
+        let tunnels = {
+            let state = self.state.lock().unwrap();
+            state.tunnels.iter().map(|v| v.1.clone()).collect::<Vec<Arc<Tunnel>>>()
+        };
+
+        for tunnel in tunnels.into_iter() {
+            let _ = tunnel.shutdown().await;
+        }
     }
 }
 
@@ -321,6 +336,18 @@ impl TunnelManager {
                 let mut state = tunnels.state.lock().unwrap();
                 state.tunnels.remove(&seq);
             }
+        }
+    }
+
+    async fn close_all_tunnel(&self) {
+        let tunnels = self.tunnels.read().unwrap();
+        let mut tunnels_list = Vec::new();
+        for (_, tunnels) in tunnels.iter() {
+            tunnels_list.push(tunnels.clone());
+        }
+
+        for tunnels in tunnels_list.iter() {
+            tunnels.close_all_tunnel().await;
         }
     }
 
@@ -775,5 +802,6 @@ impl Drop for TunnelManager {
     fn drop(&mut self) {
         log::info!("tunnel manager drop.device {}", self.local_device.device_id().to_string());
         self.clear_handle.abort();
+        Executor::block_on(self.close_all_tunnel());
     }
 }

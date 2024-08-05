@@ -415,7 +415,8 @@ pub struct ReportSn {
     pub send_time: Timestamp,                  //发送时间
     pub contract_id: Option<ObjectId>,         //合约文件对象id
     pub receipt: Option<ReceiptWithSignature>, //客户端提供的服务清单
-    pub map_port: Option<u16>,
+    pub tcp_map_port: Option<u16>,
+    pub udp_map_port: Option<u16>,
     pub local_eps: Vec<Endpoint>,
 }
 

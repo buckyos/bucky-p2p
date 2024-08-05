@@ -16,3 +16,4 @@ bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
 bucky-raw-codec = {git = "https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
 flexi_logger = "0.28.5"
 log = "0.4.22"
+toml = "0.8.19"

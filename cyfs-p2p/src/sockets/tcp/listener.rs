@@ -116,6 +116,7 @@ impl TCPListener {
             UpdateOuterResult::Update
         }
     }
+
     pub fn mapping_port(&self) -> Option<u16> {
         self.state.read().unwrap().mapping_port
     }

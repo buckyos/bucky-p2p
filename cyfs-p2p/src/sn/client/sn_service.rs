@@ -16,7 +16,7 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::{LocalDeviceRef, MixAesKey, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::executor::Executor;
+use crate::executor::{Executor, SpawnHandle};
 use crate::history::keystore::Keystore;
 use crate::protocol::{Package, PackageCmdCode, SnCall, ReportSn, ReportSnResp, SnQueryResp, SnQuery};
 use crate::protocol::v0::{SnCalled, SnCalledResp, SnCallResp, SnPingResp};
@@ -48,7 +48,7 @@ pub struct ActiveSN {
 }
 
 pub struct SNServiceState {
-    pub pinging_tasks: Vec<AbortHandle>,
+    pub pinging_handle: Option<SpawnHandle<()>>,
     pub active_sn_list: Vec<ActiveSN>,
     pub latest_sn_interval: u64,
     pub cur_report_future: Option<NotifyFuture<ReportSnResp>>,
@@ -67,6 +67,13 @@ pub struct SNClientService {
 }
 pub type SNClientServiceRef = Arc<SNClientService>;
 
+impl Drop for SNClientService {
+    fn drop(&mut self) {
+        log::info!("SNClientService drop.device = {}", self.local_device.device_id());
+    }
+
+}
+
 impl SNClientService {
     pub(crate) fn new(net_manager: NetManagerRef,
                sn_list: Vec<Device>,
@@ -84,7 +91,7 @@ impl SNClientService {
             call_timeout,
             conn_timeout,
             state: RwLock::new(SNServiceState {
-                pinging_tasks: vec![],
+                pinging_handle: None,
                 active_sn_list: vec![],
                 latest_sn_interval: 0,
                 cur_report_future: None,
@@ -205,11 +212,29 @@ impl SNClientService {
         None
     }
 
-    pub async fn start(self: &Arc<Self>) {
+    pub async fn start(self: &Arc<Self>) -> BdtResult<()> {
         let this = self.clone();
         let handle = Executor::spawn_with_handle(async move {
             this.ping_proc().await;
-        }).unwrap();
+        }).map_err(into_bdt_err!(BdtErrorCode::Failed, "start sn ping proc failed"))?;
+        {
+            let mut state = self.state.write().unwrap();
+            state.pinging_handle = Some(handle);
+        }
+        Ok(())
+    }
+
+    pub async fn stop(&self) {
+        {
+            let state = self.state.read().unwrap();
+            if state.pinging_handle.is_some() {
+                state.pinging_handle.as_ref().unwrap().abort();
+            }
+            for active_sn in state.active_sn_list.iter() {
+                let mut peer_conn = active_sn.peer_connection.lock().await;
+                peer_conn.shutdown().await;
+            }
+        }
     }
 
     async fn ping_proc(self: &Arc<Self>) {
@@ -391,7 +416,9 @@ impl SNClientService {
         }).unwrap_or(Vec::new());
 
         let mut local_eps = Vec::new();
+        let mut tcp_map_port = None;
         for listener in self.net_manager.tcp_listeners().iter() {
+            tcp_map_port = listener.mapping_port();
             if listener.local().addr().ip().is_unspecified() {
                 for ip in local_ips.iter() {
                     match ip.parse::<IpAddr>() {
@@ -408,7 +435,9 @@ impl SNClientService {
             }
         }
 
+        let mut udp_map_port = None;
         for listener in self.net_manager.udp_listeners().iter() {
+            udp_map_port = listener.mapping_port();
             if listener.local().addr().ip().is_unspecified() {
                 for ip in local_ips.iter() {
                     match ip.parse::<IpAddr>() {
@@ -435,7 +464,8 @@ impl SNClientService {
             send_time: bucky_time_now(),
             contract_id: None,
             receipt: None,
-            map_port: None,
+            tcp_map_port,
+            udp_map_port,
             local_eps,
         };
         let future = NotifyFuture::<ReportSnResp>::new();

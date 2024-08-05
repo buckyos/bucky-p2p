@@ -5,7 +5,7 @@ use bucky_objects::Device;
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
-use crate::IncreaseIdGenerator;
+use crate::{IncreaseIdGenerator, LocalDevice, LocalDeviceRef};
 use crate::stream::StreamGuard;
 use crate::tunnel::{SocketType, TunnelManagerRef, TunnelStream, TunnelType};
 
@@ -94,6 +94,7 @@ impl Deref for StreamListenerGuard {
 }
 
 pub struct StreamManager {
+    local_device: LocalDeviceRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: IncreaseIdGenerator,
     listeners: Mutex<HashMap<u16, StreamListenerRef>>,
@@ -101,9 +102,16 @@ pub struct StreamManager {
 
 pub type StreamManagerRef = Arc<StreamManager>;
 
+impl Drop for StreamManager {
+    fn drop(&mut self) {
+        log::info!("StreamManager drop.device = {}", self.local_device.device_id());
+    }
+}
+
 impl StreamManager {
-    pub fn new(tunnel_manager: TunnelManagerRef,) -> Arc<Self> {
+    pub fn new(local_device: LocalDeviceRef, tunnel_manager: TunnelManagerRef,) -> Arc<Self> {
         let stream = Arc::new(Self {
+            local_device,
             tunnel_manager: tunnel_manager.clone(),
             session_gen: IncreaseIdGenerator::new(),
             listeners: Mutex::new(HashMap::new()),

@@ -432,7 +432,7 @@ impl SnService {
 
         }
         if report_sn.from_peer_id.is_some() {
-            self.peer_mgr.update_peer(report_sn.from_peer_id.as_ref().unwrap(), &report_sn.peer_info, report_sn.map_port, &report_sn.local_eps);
+            self.peer_mgr.update_peer(report_sn.from_peer_id.as_ref().unwrap(), &report_sn.peer_info, report_sn.tcp_map_port, report_sn.udp_map_port, &report_sn.local_eps);
         }
         let mut remote_ep = peer_conn.remote().clone();
         remote_ep.set_area(EndpointArea::Wan);
@@ -457,12 +457,13 @@ impl SnService {
                 let conn = self.peer_mgr.find_connection(*conn_id);
                 if conn.is_some() {
                     let mut peer_conn = conn.as_ref().unwrap().lock().await;
-                    if device_info.map_port.is_some() {
-                        let remote_ep = peer_conn.remote().clone();
-                        let mut map_ep = Endpoint::from((Protocol::Tcp, remote_ep.addr().ip(), device_info.map_port.unwrap()));
+                    let remote_ep = peer_conn.remote().clone();
+                    if device_info.tcp_map_port.is_some() {
+                        let mut map_ep = Endpoint::from((Protocol::Tcp, remote_ep.addr().ip(), device_info.tcp_map_port.unwrap()));
                         map_ep.set_area(EndpointArea::Wan);
-                        end_point_array.push(map_ep);
-                        let mut map_ep = Endpoint::from((Protocol::Udp, remote_ep.addr().ip(), device_info.map_port.unwrap()));
+                    }
+                    if device_info.udp_map_port.is_some() {
+                        let mut map_ep = Endpoint::from((Protocol::Udp, remote_ep.addr().ip(), device_info.udp_map_port.unwrap()));
                         map_ep.set_area(EndpointArea::Wan);
                         end_point_array.push(map_ep);
                     }

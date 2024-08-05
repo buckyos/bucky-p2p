@@ -83,6 +83,10 @@ impl QuicListener {
         self.state.read().unwrap().socket.clone().unwrap()
     }
 
+    pub fn mapping_port(&self) -> Option<u16> {
+        self.state.read().unwrap().mapping_port
+    }
+
     pub async fn reset(&self, new_ep: &Endpoint) -> Arc<Self> {
         todo!()
     }

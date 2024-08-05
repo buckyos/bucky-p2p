@@ -120,7 +120,7 @@ impl PeerConnection {
         Ok(())
     }
 
-    async fn shutdown(&mut self) -> BdtResult<()> {
+    pub(crate) async fn shutdown(&mut self) -> BdtResult<()> {
         if self.handle.is_some() {
             self.handle.take().unwrap().abort();
         }

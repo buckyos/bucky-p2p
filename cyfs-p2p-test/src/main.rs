@@ -18,6 +18,74 @@ use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnSer
 
 const APP_NAME: &str = "cyfs-p2p-test";
 
+#[derive(Deserialize)]
+pub struct TcpConfig {
+    ep_list: Vec<EP>,
+    port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+pub struct UdpConfig {
+    ep_list: Vec<EP>,
+    port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+pub struct P2pConfig {
+    ep_list: Vec<EP>,
+    port_map: Option<u16>,
+    tcp: Option<TcpConfig>,
+    udp: Option<UdpConfig>,
+}
+
+impl P2pConfig {
+    pub fn get_ep_list(&self) -> Vec<Endpoint> {
+        let mut eps = Vec::new();
+        for ep in self.ep_list.iter() {
+            eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+            eps.push(Endpoint::from((Protocol::Tcp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+        }
+        if let Some(tcp) = self.tcp.as_ref() {
+            for ep in tcp.ep_list.iter() {
+                eps.push(Endpoint::from((Protocol::Tcp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+            }
+        }
+        if let Some(udp) = self.udp.as_ref() {
+            for ep in udp.ep_list.iter() {
+                eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+            }
+        }
+        eps
+    }
+
+    pub fn get_port_mapping(&self) -> Vec<(Endpoint, u16)> {
+        let mut udp_map_port = self.port_map.clone();
+        if self.udp.is_some() && self.udp.as_ref().unwrap().port.is_some() {
+            udp_map_port = self.udp.as_ref().unwrap().port.clone();
+        }
+
+        let mut tcp_map_port = self.port_map.clone();
+        if self.tcp.is_some() && self.tcp.as_ref().unwrap().port.is_some() {
+            tcp_map_port = self.tcp.as_ref().unwrap().port.clone();
+        }
+
+        let ep_list = self.get_ep_list();
+        let mut map_port_list = Vec::new();
+        for ep in ep_list.iter() {
+            if ep.protocol() == Protocol::Tcp {
+                if let Some(port) = tcp_map_port {
+                    map_port_list.push((ep.clone(), port));
+                }
+            } else {
+                if let Some(port) = udp_map_port {
+                    map_port_list.push((ep.clone(), port));
+                }
+            }
+        }
+        map_port_list
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct EP {
     ip: String,
@@ -135,12 +203,21 @@ async fn main() {
 async fn client_instance(data_folder: &Path) {
     let sn_desc_path = data_folder.join("sn.desc");
     let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new()).unwrap().0;
-
-    let mut local_eps = Vec::new();
-    let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
-    ep.set_area(EndpointArea::Lan);
-    local_eps.push(ep);
-    init_p2p(local_eps.as_slice(), None, std::time::Duration::from_secs(300)).await.unwrap();
+    let config_path = data_folder.join("config.toml");
+    let (local_eps, map_port_lsit) = if config_path.exists() {
+        let config = std::fs::read_to_string(config_path.as_path()).unwrap();
+        let config: P2pConfig = toml::from_str(config.as_str()).unwrap();
+        let local_eps = config.get_ep_list();
+        let map_port_list = config.get_port_mapping();
+        (local_eps, Some(map_port_list))
+    } else {
+        let mut local_eps = Vec::new();
+        let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
+        ep.set_area(EndpointArea::Lan);
+        local_eps.push(ep);
+        (local_eps, None)
+    };
+    init_p2p(local_eps.as_slice(), map_port_lsit, std::time::Duration::from_secs(300)).await.unwrap();
 
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
@@ -163,11 +240,21 @@ async fn server_instance(data_folder: &Path) {
     let sn_desc_path = data_folder.join("sn.desc");
     let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new()).unwrap().0;
 
-    let mut local_eps = Vec::new();
-    let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
-    ep.set_area(EndpointArea::Lan);
-    local_eps.push(ep);
-    init_p2p(local_eps.as_slice(), None, std::time::Duration::from_secs(300)).await.unwrap();
+    let config_path = data_folder.join("config.toml");
+    let (local_eps, map_port_lsit) = if config_path.exists() {
+        let config = std::fs::read_to_string(config_path.as_path()).unwrap();
+        let config: P2pConfig = toml::from_str(config.as_str()).unwrap();
+        let local_eps = config.get_ep_list();
+        let map_port_list = config.get_port_mapping();
+        (local_eps, Some(map_port_list))
+    } else {
+        let mut local_eps = Vec::new();
+        let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
+        ep.set_area(EndpointArea::Lan);
+        local_eps.push(ep);
+        (local_eps, None)
+    };
+    init_p2p(local_eps.as_slice(), map_port_lsit, std::time::Duration::from_secs(300)).await.unwrap();
 
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();

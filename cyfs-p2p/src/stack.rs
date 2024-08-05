@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use bucky_crypto::PrivateKey;
-use bucky_objects::{Device, Endpoint, NamedObject};
+use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
 use once_cell::sync::OnceCell;
 use crate::executor::Executor;
 use crate::history::keystore::{Keystore};
@@ -50,8 +50,19 @@ pub struct P2pStack {
     tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
     stream_manager: StreamManagerRef,
+    processor_holder: ReceiveProcessorHolder,
 }
 pub type P2pStackRef = Arc<P2pStack>;
+
+struct ReceiveProcessorHolder {
+    device_id: DeviceId,
+}
+
+impl Drop for ReceiveProcessorHolder {
+    fn drop(&mut self) {
+        RECEIVE_DISPATCHER.get().unwrap().remove_processor(&self.device_id);
+    }
+}
 
 impl P2pStack {
     pub(crate) fn new(
@@ -61,12 +72,16 @@ impl P2pStack {
         stream_manager: StreamManagerRef,
         net_manager: NetManagerRef,) -> Self {
         net_manager.add_listen_device(local_device.device().clone(), local_device.key().clone());
+        let device_id = local_device.device_id().clone();
         Self {
             local_device,
             sn_service,
             tunnel_manager,
             net_manager,
             stream_manager,
+            processor_holder: ReceiveProcessorHolder {
+                device_id,
+            },
         }
     }
 
@@ -94,7 +109,9 @@ impl P2pStack {
 
 impl Drop for P2pStack {
     fn drop(&mut self) {
+        log::info!("P2pStack drop.device = {}", self.local_device.device_id());
         self.net_manager.remove_listen_device(&self.local_device.device().desc().device_id());
+        Executor::block_on(self.sn_service.stop());
     }
 }
 
@@ -154,7 +171,7 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
     RECEIVE_DISPATCHER.get().unwrap().add_processor(device_id, processor.clone());
     sn_service.start().await;
 
-    let stream_manager = StreamManager::new(tunnel_manager.clone());
+    let stream_manager = StreamManager::new(local_device.clone(), tunnel_manager.clone());
 
     Ok(Arc::new(P2pStack::new(
         local_device.clone(),

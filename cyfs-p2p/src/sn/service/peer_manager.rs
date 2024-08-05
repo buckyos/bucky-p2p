@@ -41,7 +41,8 @@ pub struct FoundPeer {
 pub(crate) struct CachedPeerInfo {
     pub conn_list: Vec<TempSeq>,
     pub desc: Device,
-    pub map_port: Option<u16>,
+    pub tcp_map_port: Option<u16>,
+    pub udp_map_port: Option<u16>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
     pub local_eps: Arc<mini_moka::sync::Cache<String, Endpoint>>,
@@ -79,7 +80,8 @@ impl CachedPeerInfo {
             conn_list: vec![conn_id],
             is_wan: has_wan_endpoint(&desc),
             desc,
-            map_port: None,
+            tcp_map_port: None,
+            udp_map_port: None,
             last_send_time: send_time,
             last_call_time: 0,
             // call_peers: Default::default(),
@@ -236,13 +238,14 @@ impl PeerManager {
         }
     }
 
-    pub fn update_peer(&self, device_id: &DeviceId, device: &Option<Device>, map_port: Option<u16>, local_eps: &Vec<Endpoint>) {
+    pub fn update_peer(&self, device_id: &DeviceId, device: &Option<Device>, tcp_map_port: Option<u16>, udp_map_port: Option<u16>, local_eps: &Vec<Endpoint>) {
         let mut device_conn_map = self.device_conn_map.lock().unwrap();
         if let Some(peer) = device_conn_map.get_mut(device_id) {
             if let Some(device) = device {
                 peer.update_desc(device);
             }
-            peer.map_port = map_port;
+            peer.tcp_map_port = tcp_map_port;
+            peer.udp_map_port = udp_map_port;
             peer.update_local_eps(local_eps);
         }
     }
