@@ -1,4 +1,4 @@
-use bucky_crypto::Signature;
+use bucky_crypto::{Signature};
 use bucky_objects::{Device, NamedObject, SingleKeyObjectDesc};
 use bucky_raw_codec::RawFrom;
 use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName, Error, SignatureScheme};
@@ -24,8 +24,9 @@ impl ClientCertVerifier for BuckyClientCertVerifier {
         self.subjects.as_slice()
     }
 
-    fn verify_client_cert(&self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
-        Ok(ClientCertVerified::assertion())
+    fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
+        let _ = Device::clone_from_slice(end_entity.as_ref()).map_err(|_e| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        return Ok(ClientCertVerified::assertion());
     }
 
     fn verify_tls12_signature(&self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {

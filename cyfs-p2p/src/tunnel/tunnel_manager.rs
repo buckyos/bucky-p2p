@@ -10,6 +10,7 @@ use bucky_raw_codec::{RawDecodeWithContext, RawFrom};
 use bucky_time::bucky_time_now;
 use callback_trait::callback_trait;
 use notify_future::NotifyFuture;
+use rustls::internal::msgs::handshake::SessionId;
 use crate::{IncreaseId, LocalDeviceRef, runtime, TempSeq, TempSeqGenerator};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
@@ -261,6 +262,59 @@ impl TunnelListenPorts for ListenPorts {
     }
 }
 
+#[async_trait::async_trait]
+pub trait DeviceFinder: 'static + Send + Sync {
+    async fn get_device(&self, device_id: &DeviceId) -> BdtResult<Device>;
+}
+pub type DeviceFinderRef = Arc<dyn DeviceFinder>;
+
+pub struct DefaultDeviceFinder {
+    device_cache: mini_moka::sync::Cache<DeviceId, Device>,
+    sn_service: SNClientServiceRef,
+}
+
+impl DefaultDeviceFinder {
+    pub fn new(sn_service: SNClientServiceRef) -> Arc<Self> {
+        Arc::new(Self {
+            device_cache: mini_moka::sync::Cache::builder().time_to_live(Duration::from_secs(600)).build(),
+            sn_service,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl DeviceFinder for DefaultDeviceFinder {
+    async fn get_device(&self, device_id: &DeviceId) -> BdtResult<Device> {
+        if let Some(device) = self.device_cache.get(device_id) {
+            return Ok(device);
+        }
+
+        let resp = self.sn_service.query(device_id).await?;
+        log::info!("query device {} resp {:?}", device_id, resp);
+        if resp.peer_info.is_none() {
+            return Err(bdt_err!(BdtErrorCode::NotFound, "device not found"));
+        }
+        let mut device = resp.peer_info.unwrap();
+        if !resp.end_point_array.is_empty() {
+            let eps = device.mut_connect_info().mut_endpoints();
+            for wan_ep in resp.end_point_array.iter() {
+                let mut has = false;
+                for ep in eps.iter() {
+                    if ep.protocol() == wan_ep.protocol() && ep.addr() == wan_ep.addr() {
+                        has = true;
+                        break;
+                    }
+                }
+                if !has {
+                    eps.push(wan_ep.clone());
+                }
+            }
+        }
+        self.device_cache.insert(device_id.clone(), device.clone());
+        Ok(device)
+    }
+}
+
 pub struct TunnelManager {
     tunnels: Arc<RwLock<HashMap<DeviceId, Arc<Tunnels>>>>,
     net_manager: NetManagerRef,
@@ -271,9 +325,11 @@ pub struct TunnelManager {
     stack_version: u32,
     listener: TunnelManagerEventRef,
     conn_timeout: Duration,
+    idle_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
     listen_ports: Arc<ListenPorts>,
     clear_handle: SpawnHandle<()>,
+    device_finder: DeviceFinderRef,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
@@ -283,9 +339,11 @@ impl TunnelManager {
         receive_dispatcher: ReceiveDispatcherRef,
         sn_service: SNClientServiceRef,
         local_device: LocalDeviceRef,
+        device_finder: DeviceFinderRef,
         protocol_version: u8,
         stack_version: u32,
-        conn_timeout: Duration,) -> Arc<Self> {
+        conn_timeout: Duration,
+        idle_timeout: Duration,) -> Arc<Self> {
         let tunnels = Arc::new(RwLock::new(HashMap::<DeviceId, Arc<Tunnels>>::new()));
         let tmp = tunnels.clone();
         let handle = Executor::spawn_with_handle(async move {
@@ -307,9 +365,11 @@ impl TunnelManager {
             stack_version,
             listener: TunnelManagerEvent::new(),
             conn_timeout,
+            idle_timeout,
             gen_seq: Arc::new(TempSeqGenerator::new()),
             listen_ports: ListenPorts::new(),
             clear_handle: handle,
+            device_finder,
         });
 
         manager
@@ -376,13 +436,14 @@ impl TunnelManager {
         let remote_ep = socket.remote().clone();
         let local_id = socket.local_device_id().clone();
         let local_ep = socket.local().clone();
-        let remote = self.net_manager.get_device_cache().get(&remote_id).await.unwrap();
         let net_manager = self.net_manager.clone();
         let sn_service = self.sn_service.clone();
         let protocol_version = self.protocol_version;
         let stack_version = self.stack_version;
         let local_device = self.local_device.clone();
         let conn_timeout = self.conn_timeout;
+        let idle_timeout = self.idle_timeout;
+
         let listen_ports = self.listen_ports.clone();
 
         let mut tunnel_conn = Box::new(TcpTunnelConnection::new(
@@ -415,9 +476,11 @@ impl TunnelManager {
                                 tunnel_conn.get_sequence(),
                                 protocol_version,
                                 stack_version,
-                                remote.clone(),
+                                remote_id.clone(),
+                                vec![],
                                 local_device.clone(),
                                 conn_timeout,
+                                idle_timeout,
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
@@ -431,9 +494,11 @@ impl TunnelManager {
                                 tunnel_conn.get_sequence(),
                                 protocol_version,
                                 stack_version,
-                                remote.clone(),
+                                remote_id.clone(),
+                                vec![],
                                 local_device.clone(),
                                 conn_timeout,
+                                idle_timeout,
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
@@ -466,13 +531,13 @@ impl TunnelManager {
         let remote_ep = socket.remote().clone();
         let local_id = socket.local_device_id().clone();
         let local_ep = socket.local().clone();
-        let remote = self.net_manager.get_device_cache().get(&remote_id).await.unwrap();
         let net_manager = self.net_manager.clone();
         let sn_service = self.sn_service.clone();
         let protocol_version = self.protocol_version;
         let stack_version = self.stack_version;
         let local_device = self.local_device.clone();
         let conn_timeout = self.conn_timeout;
+        let idle_timeout = self.idle_timeout;
         let listen_ports = self.listen_ports.clone();
 
         let mut tunnel = Tunnel::new(
@@ -481,9 +546,11 @@ impl TunnelManager {
             self.gen_seq.generate(),
             self.protocol_version,
             self.stack_version,
-            remote.clone(),
+            remote_id.clone(),
+            vec![],
             self.local_device.clone(),
             self.conn_timeout.clone(),
+            self.idle_timeout,
             self.listen_ports.clone());
         // tunnel.accept_quic_tunnel(socket)?;
 
@@ -494,6 +561,7 @@ impl TunnelManager {
             remote_id.clone(),
             remote_ep,
             self.conn_timeout,
+            self.idle_timeout,
             self.protocol_version,
             self.stack_version,
             local_ep,
@@ -520,9 +588,11 @@ impl TunnelManager {
                                 tunnel_conn.get_sequence(),
                                 protocol_version,
                                 stack_version,
-                                remote.clone(),
+                                remote_id.clone(),
+                                vec![],
                                 local_device.clone(),
                                 conn_timeout,
+                                idle_timeout,
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
@@ -536,9 +606,11 @@ impl TunnelManager {
                                 tunnel_conn.get_sequence(),
                                 protocol_version,
                                 stack_version,
-                                remote.clone(),
+                                remote_id.clone(),
+                                vec![],
                                 local_device.clone(),
                                 conn_timeout,
+                                idle_timeout,
                                 listen_ports.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
@@ -608,9 +680,38 @@ impl TunnelManager {
                 seq,
                 self.protocol_version,
                 self.stack_version,
-                remote.clone(),
+                remote.desc().device_id(),
+                remote.connect_info().endpoints().clone(),
                 self.local_device.clone(),
                 self.conn_timeout,
+                self.idle_timeout,
+                self.listen_ports.clone(),
+            );
+            let datagram = tunnel.connect_datagram(tunnels.clone()).await?;
+            let listener = self.listener.clone();
+            tunnels.add_tunnel(tunnel, listener);
+            Ok(datagram)
+        }
+    }
+
+    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &DeviceId) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+        let tunnels = self.get_tunnels(remote_id);
+        if let Some(tunnel) = tunnels.get_idle_tunnel() {
+            return tunnel.open_datagram().await;
+        } else {
+            let remote = self.device_finder.get_device(remote_id).await?;
+            let seq = self.gen_seq.generate();
+            let mut tunnel = Tunnel::new(
+                self.net_manager.clone(),
+                self.sn_service.clone(),
+                seq,
+                self.protocol_version,
+                self.stack_version,
+                remote_id.clone(),
+                remote.connect_info().endpoints().clone(),
+                self.local_device.clone(),
+                self.conn_timeout,
+                self.idle_timeout,
                 self.listen_ports.clone(),
             );
             let datagram = tunnel.connect_datagram(tunnels.clone()).await?;
@@ -634,9 +735,11 @@ impl TunnelManager {
                 seq,
                 self.protocol_version,
                 self.stack_version,
-                remote.clone(),
+                remote.desc().device_id(),
+                remote.connect_info().endpoints().clone(),
                 self.local_device.clone(),
                 self.conn_timeout,
+                self.idle_timeout,
                 self.listen_ports.clone(),
             );
             let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
@@ -646,30 +749,37 @@ impl TunnelManager {
         }
     }
 
-    fn get_wan_ip_list(&self) -> Vec<Endpoint> {
-        let mut wan_list = Vec::new();
-        self.sn_service.get_active_sn_list().iter().map(|v| v.wan_ep_list.as_slice()).flatten().for_each(|ep| {
-            wan_list.push(ep.clone());
-        });
-        wan_list
-    }
-
-    fn is_same_lan(&self, reverse_list: &Vec<Endpoint>) -> bool {
-        let local_wan_list = self.get_wan_ip_list();
-        for ep in reverse_list.iter() {
-            for wan_ip in local_wan_list.iter() {
-                if ep.is_same_ip_addr(wan_ip) {
-                    return true;
-                }
-            }
+    pub async fn create_stream_tunnel_from_id(&self, remote_id: &DeviceId, session_id: IncreaseId, vport: u16) -> BdtResult<Box<dyn TunnelStream>> {
+        let tunnels = self.get_tunnels(remote_id);
+        if let Some(tunnel) = tunnels.get_idle_tunnel() {
+            return tunnel.open_stream(vport, session_id).await;
+        } else {
+            let remote = self.device_finder.get_device(remote_id).await?;
+            let seq = self.gen_seq.generate();
+            let mut tunnel = Tunnel::new(
+                self.net_manager.clone(),
+                self.sn_service.clone(),
+                seq,
+                self.protocol_version,
+                self.stack_version,
+                remote_id.clone(),
+                remote.connect_info().endpoints().clone(),
+                self.local_device.clone(),
+                self.conn_timeout,
+                self.idle_timeout,
+                self.listen_ports.clone(),
+            );
+            let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
+            let listener = self.listener.clone();
+            tunnels.add_tunnel(tunnel, listener);
+            Ok(stream)
         }
-        return false;
     }
 
     pub async fn on_sn_called(&self, sn_called: SnCalled) -> BdtResult<()> {
         log::info!("on_sn_called {:?}", sn_called);
 
-        let eps = if self.is_same_lan(&sn_called.reverse_endpoint_array) {
+        let eps = if self.sn_service.is_same_lan(&sn_called.reverse_endpoint_array) {
             let mut eps = sn_called.peer_info.connect_info().endpoints().clone();
             eps.extend_from_slice(sn_called.reverse_endpoint_array.as_slice());
             eps
@@ -687,15 +797,16 @@ impl TunnelManager {
                 sn_called.tunnel_id,
                 self.protocol_version,
                 self.stack_version,
-                sn_called.peer_info.clone(),
+                sn_called.peer_info.desc().device_id(),
+                eps.clone(),
                 self.local_device.clone(),
                 self.conn_timeout,
+                self.idle_timeout,
                 self.listen_ports.clone());
 
             let mut futures = Vec::<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramRecv>)>> + Send>>>::new();
             for ep in eps.iter() {
                 if ep.is_tcp() {
-
                     let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                         sn_called.tunnel_id,
                         self.local_device.clone(),
@@ -712,17 +823,19 @@ impl TunnelManager {
                 } else if ep.is_udp() {
                     for listener in self.net_manager.udp_listeners().iter() {
                         let local_ep = listener.local();
-                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
-                                                                        sn_called.tunnel_id,
-                                                                        self.local_device.clone(),
-                                                                        from_device_id.clone(),
-                                                                        ep.clone(),
-                                                                        self.conn_timeout,
-                                                                        self.protocol_version,
-                                                                        self.stack_version,
-                                                                        local_ep.clone(),
-                                                                        None,
-                                                                        self.listen_ports.clone()));
+                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
+                            self.net_manager.clone(),
+                            sn_called.tunnel_id,
+                            self.local_device.clone(),
+                            from_device_id.clone(),
+                            ep.clone(),
+                            self.conn_timeout,
+                            self.idle_timeout,
+                            self.protocol_version,
+                            self.stack_version,
+                            local_ep.clone(),
+                            None,
+                            self.listen_ports.clone()));
 
                         futures.push(Box::pin(async move {
                             let datagram = tunnel_conn.connect_reverse_datagram().await?;
@@ -756,9 +869,11 @@ impl TunnelManager {
                 sn_called.tunnel_id,
                 self.protocol_version,
                 self.stack_version,
-                sn_called.peer_info.clone(),
+                sn_called.peer_info.desc().device_id(),
+                eps.clone(),
                 self.local_device.clone(),
                 self.conn_timeout,
+                self.idle_timeout,
                 self.listen_ports.clone());
 
             let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
@@ -783,17 +898,19 @@ impl TunnelManager {
                 } else if ep.is_udp() {
                     for listener in self.net_manager.udp_listeners().iter() {
                         let local_ep = listener.local();
-                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
-                                                                                 sn_called.tunnel_id,
-                                                                                 self.local_device.clone(),
-                                                                                 from_device_id.clone(),
-                                                                                 ep.clone(),
-                                                                                 self.conn_timeout,
-                                                                                 self.protocol_version,
-                                                                                 self.stack_version,
-                                                                                 local_ep.clone(),
-                                                                                 None,
-                                                                                 self.listen_ports.clone()));
+                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
+                            self.net_manager.clone(),
+                            sn_called.tunnel_id,
+                            self.local_device.clone(),
+                            from_device_id.clone(),
+                            ep.clone(),
+                            self.conn_timeout,
+                            self.idle_timeout,
+                            self.protocol_version,
+                            self.stack_version,
+                            local_ep.clone(),
+                            None,
+                            self.listen_ports.clone()));
 
                         let vport = stream_call.vport;
                         let session_id = stream_call.session_id;

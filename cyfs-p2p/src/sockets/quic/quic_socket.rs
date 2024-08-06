@@ -36,7 +36,7 @@ impl QuicSocket {
     }
 
     pub async fn connect(local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint,
-                         timeout: Duration,) -> BdtResult<Self> {
+                         timeout: Duration, idle_timeout: Duration) -> BdtResult<Self> {
         log::info!("quic to {} connect begin", remote);
         let client_key = local_device_ref.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let client_cert = local_device_ref.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
@@ -53,7 +53,10 @@ impl QuicSocket {
         let mut client_config =
             quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
+        transport_config.max_idle_timeout(Some(idle_timeout.try_into().unwrap()));
+        if idle_timeout > Duration::from_secs(30) {
+            transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
+        }
         // transport_config.max_concurrent_bidi_streams(1_u8.into());
         // transport_config.max_concurrent_uni_streams(1_u8.into());
         client_config.transport_config(Arc::new(transport_config));
@@ -72,7 +75,7 @@ impl QuicSocket {
     }
 
     pub async fn connect_with_ep(ep: quinn::Endpoint, local_device_ref: LocalDeviceRef, remote_device_id: DeviceId, remote: Endpoint,
-                                 timeout: Duration,) -> BdtResult<Self> {
+                                 timeout: Duration, idle_timeout: Duration) -> BdtResult<Self> {
         log::info!("connect with ep remote = {}", remote);
         let client_key = local_device_ref.key().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
         let client_cert = local_device_ref.device().to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
@@ -89,7 +92,10 @@ impl QuicSocket {
         let mut client_config =
             quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
+        transport_config.max_idle_timeout(Some(idle_timeout.try_into().unwrap()));
+        if idle_timeout > Duration::from_secs(30) {
+            transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
+        }
         client_config.transport_config(Arc::new(transport_config));
 
         let conn = runtime::timeout(timeout, ep.connect_with(client_config,

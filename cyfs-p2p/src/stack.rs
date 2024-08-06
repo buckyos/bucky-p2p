@@ -13,7 +13,7 @@ use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveP
 use crate::sn::client::{SNClientService, SNClientServiceRef, SNEvent};
 use crate::sockets::{NetManager, NetManagerRef};
 use crate::stream::{StreamManager, StreamManagerRef};
-use crate::tunnel::{TunnelManager, TunnelManagerEvent, TunnelManagerRef};
+use crate::tunnel::{DefaultDeviceFinder, DeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerEvent, TunnelManagerRef};
 
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
 static RECEIVE_DISPATCHER: OnceCell<ReceiveDispatcherRef> = OnceCell::new();
@@ -23,11 +23,6 @@ pub async fn init_p2p(
     port_mapping: Option<Vec<(Endpoint, u16)>>,
     tcp_accept_timout: Duration,) -> BdtResult<()> {
     Executor::init(None);
-    let key_store = Arc::new(Keystore::new(crate::history::keystore::Config {
-        key_expire: Duration::from_secs(120),
-            active_time: Duration::from_secs(600),
-            capacity: 256,
-        }));
     let device_cache =  Arc::new(DeviceCache::new(&DeviceCacheConfig {
         expire: Duration::from_secs(600),
         capacity: 1024,
@@ -36,7 +31,7 @@ pub async fn init_p2p(
     let net_manager = NET_MANAGER.get_or_init(move || {
         net_manager.clone()
     });
-    let dispatcher = RECEIVE_DISPATCHER.get_or_init(||ReceiveDispatcher::new(key_store.clone()));
+    let dispatcher = RECEIVE_DISPATCHER.get_or_init(||ReceiveDispatcher::new());
     net_manager.set_quic_listener_event_listener(dispatcher.clone());
     net_manager.set_tcp_listener_event_listener(dispatcher.clone());
     net_manager.listen();
@@ -126,7 +121,75 @@ impl TunnelManagerEventListener {
 
 }
 
-pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> BdtResult<P2pStackRef> {
+pub struct P2pStackBuilder {
+    local_device: Device,
+    local_key: PrivateKey,
+    sn_list: Vec<Device>,
+    conn_timeout: Duration,
+    idle_timeout: Duration,
+    sn_ping_interval: Duration,
+    sn_call_timeout: Duration,
+    device_finder: Option<DeviceFinderRef>,
+}
+
+impl P2pStackBuilder {
+    pub fn new(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> Self {
+        Self {
+            local_device,
+            local_key,
+            sn_list,
+            conn_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(600),
+            sn_ping_interval: Duration::from_secs(300),
+            sn_call_timeout: Duration::from_secs(30),
+            device_finder: None,
+        }
+    }
+
+    pub fn set_conn_timeout(mut self, conn_timeout: Duration) -> Self {
+        self.conn_timeout = conn_timeout;
+        self
+    }
+
+    pub fn set_conn_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
+
+    pub fn set_sn_ping_interval(mut self, sn_ping_interval: Duration) -> Self {
+        self.sn_ping_interval = sn_ping_interval;
+        self
+    }
+
+    pub fn set_sn_call_timeout(mut self, sn_call_timeout: Duration) -> Self {
+        self.sn_call_timeout = sn_call_timeout;
+        self
+    }
+
+    pub fn set_device_finder(mut self, device_finder: impl DeviceFinder) -> Self {
+        self.device_finder = Some(Arc::new(device_finder));
+        self
+    }
+
+    pub async fn build(self) -> BdtResult<P2pStackRef> {
+        create_p2p_stack(self.local_device,
+                         self.local_key,
+                         self.sn_list,
+                         self.device_finder,
+                         self.conn_timeout,
+                         self.idle_timeout,
+                         self.sn_ping_interval,
+                         self.sn_call_timeout).await
+    }
+}
+async fn create_p2p_stack(local_device: Device,
+                          local_key: PrivateKey,
+                          sn_list: Vec<Device>,
+                          device_finder: Option<DeviceFinderRef>,
+                          conn_timeout: Duration,
+                          idle_timeout: Duration,
+                          sn_ping_interval: Duration,
+                          sn_call_timeout: Duration,) -> BdtResult<P2pStackRef> {
     let gen_seq = Arc::new(TempSeqGenerator::new());
     let mut processor = ReceiveProcessor::new();
     let net_manager = NET_MANAGER.get().unwrap().clone();
@@ -139,19 +202,26 @@ pub async fn create_p2p_stack(local_device: Device, local_key: PrivateKey, sn_li
         sn_list,
         local_device.clone(),
         gen_seq.clone(),
-        Duration::from_secs(300),
-        Duration::from_secs(300),
-        Duration::from_secs(300),
+        sn_ping_interval,
+        sn_call_timeout,
+        conn_timeout,
     );
 
+    let device_finder = if device_finder.is_some() {
+        device_finder.unwrap()
+    } else {
+        DefaultDeviceFinder::new(sn_service.clone())
+    };
     let tunnel_manager = TunnelManager::new(
         net_manager.clone(),
         RECEIVE_DISPATCHER.get().unwrap().clone(),
         sn_service.clone(),
         local_device.clone(),
+        device_finder,
         0,
         0,
-        Duration::from_secs(30),
+        conn_timeout,
+        idle_timeout,
     );
 
     let manager = Arc::downgrade(&tunnel_manager);

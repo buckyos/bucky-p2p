@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use bucky_objects::Device;
+use bucky_objects::{Device, DeviceId};
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
@@ -135,6 +135,12 @@ impl StreamManager {
     pub async fn connect(&self, remote: &Device, port: u16, ) -> BdtResult<StreamGuard> {
         let session_id = self.session_gen.generate();
         let tunnel = self.tunnel_manager.create_stream_tunnel(remote, session_id, port).await?;
+        Ok(StreamGuard::new(tunnel))
+    }
+
+    pub async fn connect_from_id(&self, remote_id: &DeviceId, port: u16) -> BdtResult<StreamGuard> {
+        let session_id = self.session_gen.generate();
+        let tunnel = self.tunnel_manager.create_stream_tunnel_from_id(remote_id, session_id, port).await?;
         Ok(StreamGuard::new(tunnel))
     }
 

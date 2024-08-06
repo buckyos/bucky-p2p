@@ -57,15 +57,13 @@ impl ReceiveProcessor {
 
 pub struct ReceiveDispatcher {
     processors: RwLock<HashMap<DeviceId, ReceiveProcessorRef>>,
-    key_store: Arc<Keystore>,
 }
 pub type ReceiveDispatcherRef = Arc<ReceiveDispatcher>;
 
 impl ReceiveDispatcher {
-    pub fn new(key_store: Arc<Keystore>) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             processors: RwLock::new(HashMap::new()),
-            key_store,
         })
     }
 

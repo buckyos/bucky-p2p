@@ -61,8 +61,10 @@ pub struct Tunnel {
     protocol_version: u8,
     stack_version: u32,
     local_device: LocalDeviceRef,
-    remote: Device,
+    remote_id: DeviceId,
+    remote_eps: Vec<Endpoint>,
     conn_timeout: Duration,
+    idle_timeout: Duration,
     listen_ports: TunnelListenPortsRef,
 }
 
@@ -73,9 +75,11 @@ impl Tunnel {
         sequence: TempSeq,
         protocol_version: u8,
         stack_version: u32,
-        remote: Device,
+        remote_id: DeviceId,
+        remote_eps: Vec<Endpoint>,
         local_device: LocalDeviceRef,
         conn_timeout: Duration,
+        idle_timeout: Duration,
         listen_ports: TunnelListenPortsRef,) -> Self {
         Self {
             net_manager,
@@ -86,8 +90,10 @@ impl Tunnel {
             protocol_version,
             stack_version,
             local_device,
-            remote,
+            remote_id,
+            remote_eps,
             conn_timeout,
+            idle_timeout,
             listen_ports,
         }
     }
@@ -144,13 +150,14 @@ impl Tunnel {
         }
 
         let mut futures: Vec<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>> = Vec::new();
-        let ep_list = self.remote.connect_info().endpoints();
+        let ep_list = &self.remote_eps;
+        let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
-            if ep.is_tcp() && ep.is_static_wan() && ep.addr().is_ipv4() {
+            if ep.is_tcp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
                 let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                     self.sequence,
                     self.local_device.clone(),
-                    self.remote.desc().device_id(),
+                    self.remote_id.clone(),
                     ep.clone(),
                     self.conn_timeout,
                     self.protocol_version,
@@ -161,20 +168,22 @@ impl Tunnel {
                     Ok((tunnel_conn, stream))
                 });
                 futures.push(future);
-            } else if ep.is_udp() && ep.is_static_wan() && ep.addr().is_ipv4() {
+            } else if ep.is_udp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
                 for listener in self.net_manager.udp_listeners().iter() {
                     let local_ep = listener.local();
-                    let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
-                                                                    self.sequence,
-                                                                    self.local_device.clone(),
-                                                                    self.remote.desc().device_id(),
-                                                                    ep.clone(),
-                                                                    self.conn_timeout,
-                                                                    self.protocol_version,
-                                                                    self.stack_version,
-                                                                    local_ep.clone(),
-                                                                    None,
-                                                                    self.listen_ports.clone()));
+                    let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
+                        self.net_manager.clone(),
+                        self.sequence,
+                        self.local_device.clone(),
+                        self.remote_id.clone(),
+                        ep.clone(),
+                        self.conn_timeout,
+                        self.idle_timeout,
+                        self.protocol_version,
+                        self.stack_version,
+                        local_ep.clone(),
+                        None,
+                        self.listen_ports.clone()));
                     let future = Box::pin(async move {
                         let stream = tunnel_conn.connect_stream(vport, session_id).await?;
                         Ok((tunnel_conn, stream))
@@ -205,7 +214,7 @@ impl Tunnel {
         };
         self.sn_service.call(self.get_sequence(),
                              Some(reverse_eps.as_slice()),
-                             &self.remote.desc().device_id(),
+                             &self.remote_id,
                              call_data.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?).await?;
         let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
         if let ReverseResult::Stream(tunnel_conn, stream) = result {
@@ -223,48 +232,47 @@ impl Tunnel {
         }
 
         let mut futures: Vec<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramSend>)>> + Send>>> = Vec::new();
-        let ep_list = self.remote.connect_info().endpoints();
+        let ep_list = &self.remote_eps;
+        let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
-            if ep.is_tcp() {
-                if ep.is_static_wan() {
-                    let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
+            if ep.is_tcp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
+                let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
+                    self.sequence,
+                    self.local_device.clone(),
+                    self.remote_id.clone(),
+                    ep.clone(),
+                    self.conn_timeout,
+                    self.protocol_version,
+                    self.stack_version,
+                    None, self.listen_ports.clone())?);
+
+                let future = Box::pin(async move {
+                    let stream = tunnel_conn.connect_datagram().await?;
+                    Ok((tunnel_conn, stream))
+                });
+                futures.push(future);
+            } else if ep.is_udp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
+                for listener in self.net_manager.udp_listeners().iter() {
+                    let local_ep = listener.local();
+                    let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
+                        self.net_manager.clone(),
                         self.sequence,
                         self.local_device.clone(),
-                        self.remote.desc().device_id(),
+                        self.remote_id.clone(),
                         ep.clone(),
                         self.conn_timeout,
+                        self.idle_timeout,
                         self.protocol_version,
                         self.stack_version,
-                        None, self.listen_ports.clone())?);
+                        local_ep.clone(),
+                        None,
+                        self.listen_ports.clone()));
 
                     let future = Box::pin(async move {
                         let stream = tunnel_conn.connect_datagram().await?;
                         Ok((tunnel_conn, stream))
                     });
                     futures.push(future);
-                }
-            } else if ep.is_udp() {
-                if ep.is_static_wan() {
-                    for listener in self.net_manager.udp_listeners().iter() {
-                        let local_ep = listener.local();
-                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
-                                                                        self.sequence,
-                                                                        self.local_device.clone(),
-                                                                        self.remote.desc().device_id(),
-                                                                        ep.clone(),
-                                                                        self.conn_timeout,
-                                                                        self.protocol_version,
-                                                                        self.stack_version,
-                                                                        local_ep.clone(),
-                                                                        None,
-                                                                        self.listen_ports.clone()));
-
-                        let future = Box::pin(async move {
-                            let stream = tunnel_conn.connect_datagram().await?;
-                            Ok((tunnel_conn, stream))
-                        });
-                        futures.push(future);
-                    }
                 }
             }
         }
@@ -287,7 +295,7 @@ impl Tunnel {
         future_cache.add_reverse_future(self.sequence, future.clone());
         self.sn_service.call(self.get_sequence(),
                              Some(reverse_eps.as_slice()),
-                             &self.remote.desc().device_id(),
+                             &self.remote_id,
                              Vec::new()).await?;
         let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
         if let ReverseResult::Datagram(tunnel_conn, stream) = result {

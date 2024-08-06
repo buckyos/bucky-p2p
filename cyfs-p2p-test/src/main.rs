@@ -6,10 +6,10 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use bucky_crypto::PrivateKey;
-use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, EndpointArea, NamedObject, Protocol, UniqueId};
+use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, EndpointArea, Protocol, UniqueId};
 use bucky_raw_codec::FileDecoder;
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming, Record};
-use cyfs_p2p::{create_p2p_stack, IncreaseIdGenerator, init_p2p, LocalDevice, P2pStackRef};
+use cyfs_p2p::{IncreaseIdGenerator, init_p2p, LocalDevice, P2pStackBuilder, P2pStackRef};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use cyfs_p2p::error::{BdtError, BdtErrorCode, BdtResult};
@@ -233,29 +233,25 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
     stack.wait_online(None).await.unwrap();
 
     // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
-    let resp = if target.is_some() {
-        stack.sn_client().query(target.as_ref().unwrap()).await.unwrap()
+    let remote_id = if target.is_some() {
+        target.unwrap()
     } else {
-        stack.sn_client().query(&DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap()).await.unwrap()
+        DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap()
     };
-    log::info!("query resp {:?}", resp);
 
-    if let Some(mut remote) = resp.peer_info {
-        remote.mut_connect_info().mut_endpoints().extend_from_slice(resp.end_point_array.as_slice());
-        {
-            let mut stream = stack.stream_manager().connect(&remote, 80).await.unwrap();
-            stream.write_all("test".as_bytes()).await.unwrap();
-            let mut buf = [0u8; 1024];
-            let len = stream.read(buf.as_mut_slice()).await.unwrap();
-            log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
-        }
-        {
-            let mut stream = stack.stream_manager().connect(&remote, 80).await.unwrap();
-            stream.write_all("test".as_bytes()).await.unwrap();
-            let mut buf = [0u8; 1024];
-            let len = stream.read(buf.as_mut_slice()).await.unwrap();
-            log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
-        }
+    {
+        let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+        stream.write_all("test".as_bytes()).await.unwrap();
+        let mut buf = [0u8; 1024];
+        let len = stream.read(buf.as_mut_slice()).await.unwrap();
+        log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+    }
+    {
+        let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+        stream.write_all("test".as_bytes()).await.unwrap();
+        let mut buf = [0u8; 1024];
+        let len = stream.read(buf.as_mut_slice()).await.unwrap();
+        log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
     }
 }
 
@@ -370,6 +366,6 @@ async fn create_stack(config_path: &Path, eps: Vec<Endpoint>, sn_list: Vec<Devic
         (private_key, device)
     };
 
-    create_p2p_stack(device, private_key, sn_list).await
+    P2pStackBuilder::new(device, private_key, sn_list).build().await
 }
 

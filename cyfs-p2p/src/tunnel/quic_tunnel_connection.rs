@@ -40,6 +40,7 @@ pub struct QuicTunnelConnectionImpl {
     remote_id: DeviceId,
     remote_ep: Endpoint,
     conn_timeout: Duration,
+    idle_timeout: Duration,
     data_socket: Option<QuicSocket>,
     protocol_version: u8,
     stack_version: u32,
@@ -57,6 +58,7 @@ impl QuicTunnelConnectionImpl {
                remote_id: DeviceId,
                remote_ep: Endpoint,
                conn_timeout: Duration,
+               idle_timeout: Duration,
                protocol_version: u8,
                stack_version: u32,
                local_ep: Endpoint,
@@ -74,6 +76,7 @@ impl QuicTunnelConnectionImpl {
             remote_id,
             remote_ep,
             conn_timeout,
+            idle_timeout,
             data_socket: data_sender,
             protocol_version,
             stack_version,
@@ -218,6 +221,7 @@ impl QuicTunnelConnection {
                remote_id: DeviceId,
                remote_ep: Endpoint,
                conn_timeout: Duration,
+               idle_timeout: Duration,
                protocol_version: u8,
                stack_version: u32,
                local_ep: Endpoint,
@@ -230,6 +234,7 @@ impl QuicTunnelConnection {
             remote_id,
             remote_ep,
             conn_timeout,
+            idle_timeout,
             protocol_version,
             stack_version,
             local_ep,
@@ -315,18 +320,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, local_ep) = {
+        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.local_ep.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone())
         };
         if has_socket {
             return Ok(self.open_stream(vport, session_id).await?);
         }
 
         let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -338,18 +343,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, local_ep) = {
+        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.local_ep.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone())
         };
         if has_socket {
             return Ok(self.open_datagram().await?);
         }
 
         let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -361,18 +366,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, local_ep) = {
+        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.local_ep.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone())
         };
         if has_socket {
             return Ok(self.open_reverse_stream(vport, session_id).await?);
         }
 
         let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -384,18 +389,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, local_ep) = {
+        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.local_ep.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone())
         };
         if has_socket {
             return Ok(self.open_reverse_datagram().await?);
         }
 
         let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout).await?
+            QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();

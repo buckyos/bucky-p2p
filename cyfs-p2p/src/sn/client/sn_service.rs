@@ -105,6 +105,26 @@ impl SNClientService {
         *_listener = Some(Arc::new(listener));
     }
 
+    pub fn get_wan_ip_list(&self) -> Vec<Endpoint> {
+        let mut wan_list = Vec::new();
+        self.get_active_sn_list().iter().map(|v| v.wan_ep_list.as_slice()).flatten().for_each(|ep| {
+            wan_list.push(ep.clone());
+        });
+        wan_list
+    }
+
+    pub fn is_same_lan(&self, reverse_list: &Vec<Endpoint>) -> bool {
+        let local_wan_list = self.get_wan_ip_list();
+        for ep in reverse_list.iter() {
+            for wan_ip in local_wan_list.iter() {
+                if ep.is_same_ip_addr(wan_ip) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     async fn handle(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> BdtResult<()> {
         match cmd_code {
             PackageCmdCode::SnCallResp => {
