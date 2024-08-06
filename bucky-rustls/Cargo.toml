@@ -14,3 +14,4 @@ bucky-crypto = { git = "https://github.com/buckyos/bucky-crypto.git" }
 bucky-error = {git = "https://github.com/buckyos/bucky-error.git", features = ["rsa"]}
 bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
 bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
+log = "0.4.22"

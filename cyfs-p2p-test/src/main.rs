@@ -163,6 +163,9 @@ async fn main() {
             clap::Arg::with_name("config").short("c").long("config").takes_value(true)
                 .default_value(data_folder.to_str().unwrap())
                 .help("config path")
+        ).arg(
+            clap::Arg::with_name("target").short("t").long("target").takes_value(true)
+                .help("target device id")
         ))
         .subcommand(clap::SubCommand::with_name("server").arg(
             clap::Arg::with_name("config").short("c").long("config").takes_value(true)
@@ -176,8 +179,15 @@ async fn main() {
         }
         ("client", Some(matches)) => {
             let data_folder = matches.value_of("config").unwrap();
+            let target = matches.value_of("target").map_or(None, |v| {
+                if let Ok(device_id) = DeviceId::from_str(v) {
+                    Some(device_id)
+                } else {
+                    None
+                }
+            });
             let data_folder = std::path::Path::new(data_folder);
-            client_instance(data_folder).await;
+            client_instance(data_folder, target).await;
         }
         ("server", Some(matches)) => {
             let data_folder = matches.value_of("config").unwrap();
@@ -200,7 +210,7 @@ async fn main() {
     std::future::pending::<u8>().await;
 }
 
-async fn client_instance(data_folder: &Path) {
+async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
     let sn_desc_path = data_folder.join("sn.desc");
     let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new()).unwrap().0;
     let config_path = data_folder.join("config.toml");
@@ -223,16 +233,29 @@ async fn client_instance(data_folder: &Path) {
     stack.wait_online(None).await.unwrap();
 
     // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
-    let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap()).await.unwrap();
+    let resp = if target.is_some() {
+        stack.sn_client().query(target.as_ref().unwrap()).await.unwrap()
+    } else {
+        stack.sn_client().query(&DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap()).await.unwrap()
+    };
     log::info!("query resp {:?}", resp);
 
     if let Some(mut remote) = resp.peer_info {
         remote.mut_connect_info().mut_endpoints().extend_from_slice(resp.end_point_array.as_slice());
-        let mut stream = stack.stream_manager().connect(&remote, 80).await.unwrap();
-        stream.write_all("test".as_bytes()).await.unwrap();
-        let mut buf = [0u8; 1024];
-        let len = stream.read(buf.as_mut_slice()).await.unwrap();
-        log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+        {
+            let mut stream = stack.stream_manager().connect(&remote, 80).await.unwrap();
+            stream.write_all("test".as_bytes()).await.unwrap();
+            let mut buf = [0u8; 1024];
+            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+        }
+        {
+            let mut stream = stack.stream_manager().connect(&remote, 80).await.unwrap();
+            stream.write_all("test".as_bytes()).await.unwrap();
+            let mut buf = [0u8; 1024];
+            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+        }
     }
 }
 
@@ -264,8 +287,8 @@ async fn server_instance(data_folder: &Path) {
         let mut stream = listener.accept().await.unwrap();
         tokio::task::spawn(async move {
             let mut buf = [0u8; 1024];
-            stream.read(buf.as_mut_slice()).await.unwrap();
-            println!("read {}", String::from_utf8_lossy(&buf));
+            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            println!("read {}", String::from_utf8_lossy(&buf[..len]));
             stream.write("hello".as_bytes()).await.unwrap();
         });
     }

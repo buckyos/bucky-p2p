@@ -96,40 +96,6 @@ impl Tunnel {
         self.tunnel_conn = Some(tunnel_conn);
     }
 
-    pub(crate) fn accept_tcp_tunnel(&mut self, socket: TCPSocket) -> BdtResult<()> {
-        let mut tunnel_conn = TcpTunnelConnection::new(
-            self.sequence,
-            self.local_device.clone(),
-            self.remote.desc().device_id(),
-            socket.remote().clone(),
-            self.conn_timeout,
-            self.protocol_version,
-            self.stack_version,
-            Some(socket),
-            self.listen_ports.clone())?;
-        // tunnel_conn.accept_tunnel(listen_ports).await?;
-        self.tunnel_conn = Some(Box::new(tunnel_conn));
-        Ok(())
-    }
-
-    pub(crate) fn accept_quic_tunnel(&mut self, data_sender: QuicSocket) -> BdtResult<()> {
-        let tunnel_conn = QuicTunnelConnection::new(
-            self.net_manager.clone(),
-            self.sequence,
-            self.local_device.clone(),
-            self.remote.desc().device_id(),
-            data_sender.remote().clone(),
-            self.conn_timeout,
-            self.protocol_version,
-            self.stack_version,
-            data_sender.local().clone(),
-            Some(data_sender),
-            self.listen_ports.clone());
-
-        self.tunnel_conn = Some(Box::new(tunnel_conn));
-        Ok(())
-    }
-
     pub(crate) async fn accept_instance(&self) -> BdtResult<TunnelInstance> {
         self.tunnel_conn.as_ref().unwrap().accept_instance().await
     }
@@ -241,7 +207,7 @@ impl Tunnel {
                              Some(reverse_eps.as_slice()),
                              &self.remote.desc().device_id(),
                              call_data.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?).await?;
-        let result = runtime::timeout(Duration::from_secs(60), future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
+        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
         if let ReverseResult::Stream(tunnel_conn, stream) = result {
             self.tunnel_conn = Some(tunnel_conn);
             Ok(stream)
@@ -256,11 +222,12 @@ impl Tunnel {
             return Ok(datagram);
         }
 
+        let mut futures: Vec<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramSend>)>> + Send>>> = Vec::new();
         let ep_list = self.remote.connect_info().endpoints();
         for ep in ep_list.iter() {
             if ep.is_tcp() {
                 if ep.is_static_wan() {
-                    let mut tunnel_conn = TcpTunnelConnection::new(
+                    let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                         self.sequence,
                         self.local_device.clone(),
                         self.remote.desc().device_id(),
@@ -268,22 +235,19 @@ impl Tunnel {
                         self.conn_timeout,
                         self.protocol_version,
                         self.stack_version,
-                        None, self.listen_ports.clone())?;
-                    let datagram = match tunnel_conn.connect_datagram().await {
-                        Ok(datagram) => datagram,
-                        Err(e) => {
-                            log::error!("connect datagram error: {:?} msg: {}", e.code(), e.msg());
-                            continue;
-                        }
-                    };
-                    self.tunnel_conn = Some(Box::new(tunnel_conn));
-                    return Ok(datagram);
+                        None, self.listen_ports.clone())?);
+
+                    let future = Box::pin(async move {
+                        let stream = tunnel_conn.connect_datagram().await?;
+                        Ok((tunnel_conn, stream))
+                    });
+                    futures.push(future);
                 }
             } else if ep.is_udp() {
                 if ep.is_static_wan() {
                     for listener in self.net_manager.udp_listeners().iter() {
                         let local_ep = listener.local();
-                        let mut tunnel_conn = QuicTunnelConnection::new(self.net_manager.clone(),
+                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
                                                                         self.sequence,
                                                                         self.local_device.clone(),
                                                                         self.remote.desc().device_id(),
@@ -293,17 +257,26 @@ impl Tunnel {
                                                                         self.stack_version,
                                                                         local_ep.clone(),
                                                                         None,
-                                                                        self.listen_ports.clone());
-                        let datagram = match tunnel_conn.connect_datagram().await {
-                            Ok(datagram) => datagram,
-                            Err(e) => {
-                                log::error!("connect datagram error: {:?} msg: {}", e.code(), e.msg());
-                                continue;
-                            }
-                        };
-                        self.tunnel_conn = Some(Box::new(tunnel_conn));
-                        return Ok(datagram);
+                                                                        self.listen_ports.clone()));
+
+                        let future = Box::pin(async move {
+                            let stream = tunnel_conn.connect_datagram().await?;
+                            Ok((tunnel_conn, stream))
+                        });
+                        futures.push(future);
                     }
+                }
+            }
+        }
+
+        if futures.len() > 0 {
+            match select_successful(futures).await {
+                Ok((conn, datagram_send)) => {
+                    self.tunnel_conn = Some(conn);
+                    return Ok(datagram_send);
+                }
+                Err(e) => {
+                    log::error!("connect stream error: {:?} msg: {}", e.code(), e.msg());
                 }
             }
         }
@@ -316,7 +289,7 @@ impl Tunnel {
                              Some(reverse_eps.as_slice()),
                              &self.remote.desc().device_id(),
                              Vec::new()).await?;
-        let result = runtime::timeout(Duration::from_secs(60), future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
+        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
         if let ReverseResult::Datagram(tunnel_conn, stream) = result {
             self.tunnel_conn = Some(tunnel_conn);
             Ok(stream)

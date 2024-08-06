@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use bucky_objects::{Device, DeviceId, Endpoint, NamedObject};
@@ -19,7 +21,7 @@ use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor,};
 use crate::sn::client::{SNClientServiceRef, SNEvent};
 use crate::sockets::{NetManagerRef, QuicSocket};
 use crate::sockets::tcp::TCPSocket;
-use super::{QuicTunnelConnection, ReverseFutureCache, ReverseResult, SocketType, StreamSnCall, TcpTunnelConnection, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
+use super::{QuicTunnelConnection, ReverseFutureCache, ReverseResult, select_successful, SocketType, StreamSnCall, TcpTunnelConnection, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelListenPortsRef, TunnelStream, TunnelType};
 
 struct TunnelsState {
     tunnels: HashMap<TempSeq, Arc<Tunnel>>,
@@ -399,8 +401,8 @@ impl TunnelManager {
         Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
-                    log::info!("new tcp tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                        tunnel_conn.get_sequence(),
+                    log::info!("new tcp tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        instance,
                         remote_id.to_string(),
                         remote_ep.to_string(),
                         local_id.to_string(),
@@ -503,8 +505,8 @@ impl TunnelManager {
         Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
-                    log::info!("new quic tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                        tunnel_conn.get_sequence(),
+                    log::info!("new quic tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        instance,
                         remote_id.to_string(),
                         remote_ep.to_string(),
                         local_id.to_string(),
@@ -678,118 +680,145 @@ impl TunnelManager {
         };
 
         let from_device_id = sn_called.peer_info.desc().device_id();
-        for ep in eps.iter() {
-            if ep.is_tcp() {
-                let mut tunnel = Tunnel::new(
-                    self.net_manager.clone(),
-                    self.sn_service.clone(),
-                    sn_called.tunnel_id,
-                    self.protocol_version,
-                    self.stack_version,
-                    sn_called.peer_info.clone(),
-                    self.local_device.clone(),
-                    self.conn_timeout,
-                    self.listen_ports.clone());
+        if sn_called.payload.is_empty() {
+            let mut tunnel = Tunnel::new(
+                self.net_manager.clone(),
+                self.sn_service.clone(),
+                sn_called.tunnel_id,
+                self.protocol_version,
+                self.stack_version,
+                sn_called.peer_info.clone(),
+                self.local_device.clone(),
+                self.conn_timeout,
+                self.listen_ports.clone());
 
-                let mut tunnel_conn = TcpTunnelConnection::new(
-                    sn_called.tunnel_id,
-                    self.local_device.clone(),
-                    from_device_id.clone(),
-                    ep.clone(),
-                    self.conn_timeout,
-                    self.protocol_version,
-                    self.stack_version,
-                    None, self.listen_ports.clone())?;
-                if sn_called.payload.is_empty() {
-                    let datagram = match tunnel_conn.connect_reverse_datagram().await {
-                        Ok(datagram) => datagram,
-                        Err(e) => {
-                            log::error!("connect reverse stream error: {:?} msg: {}", e.code(), e.msg());
-                            continue;
-                        }
-                    };
-                    tunnel.set_tunnel_conn(Box::new(tunnel_conn));
-                    let listener = self.listener.clone();
-                    {
-                        let mut tunnels = self.get_tunnels(&from_device_id);
-                        tunnels.add_tunnel(tunnel, listener.clone());
-                    }
-                    let listener = self.listener.clone();
-                    listener.on_new_tunnel_datagram(datagram).await;
-                } else {
-                    let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-                    let stream = match tunnel_conn.connect_reverse_stream(stream_call.vport, stream_call.session_id).await {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            log::error!("connect reverse datagram error: {:?} msg: {}", e.code(), e.msg());
-                            continue;
-                        }
-                    };
-                    tunnel.set_tunnel_conn(Box::new(tunnel_conn));
-                    let listener = self.listener.clone();
-                    {
-                        let mut tunnels = self.get_tunnels(&from_device_id);
-                        tunnels.add_tunnel(tunnel, listener.clone());
-                    }
-                    listener.on_new_tunnel_stream(stream).await;
-                }
-            } else if ep.is_udp() {
-                for listener in self.net_manager.udp_listeners().iter() {
-                    let local_ep = listener.local();
-                    let mut tunnel = Tunnel::new(
-                        self.net_manager.clone(),
-                        self.sn_service.clone(),
+            let mut futures = Vec::<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramRecv>)>> + Send>>>::new();
+            for ep in eps.iter() {
+                if ep.is_tcp() {
+
+                    let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                         sn_called.tunnel_id,
+                        self.local_device.clone(),
+                        from_device_id.clone(),
+                        ep.clone(),
+                        self.conn_timeout,
                         self.protocol_version,
                         self.stack_version,
-                        sn_called.peer_info.clone(),
-                        self.local_device.clone(),
-                        self.conn_timeout,
-                        self.listen_ports.clone());
+                        None, self.listen_ports.clone())?);
+                    futures.push(Box::pin(async move {
+                        let datagram = tunnel_conn.connect_reverse_datagram().await?;
+                        Ok((tunnel_conn, datagram))
+                    }));
+                } else if ep.is_udp() {
+                    for listener in self.net_manager.udp_listeners().iter() {
+                        let local_ep = listener.local();
+                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
+                                                                        sn_called.tunnel_id,
+                                                                        self.local_device.clone(),
+                                                                        from_device_id.clone(),
+                                                                        ep.clone(),
+                                                                        self.conn_timeout,
+                                                                        self.protocol_version,
+                                                                        self.stack_version,
+                                                                        local_ep.clone(),
+                                                                        None,
+                                                                        self.listen_ports.clone()));
 
-                    let mut tunnel_conn = QuicTunnelConnection::new(self.net_manager.clone(),
-                                                                    sn_called.tunnel_id,
-                                                                    self.local_device.clone(),
-                                                                    from_device_id.clone(),
-                                                                    ep.clone(),
-                                                                    self.conn_timeout,
-                                                                    self.protocol_version,
-                                                                    self.stack_version,
-                                                                    local_ep.clone(),
-                                                                    None,
-                                                                    self.listen_ports.clone());
-                    if sn_called.payload.is_empty() {
-                        let datagram = match tunnel_conn.connect_reverse_datagram().await {
-                            Ok(datagram) => datagram,
-                            Err(e) => {
-                                log::error!("connect reverse datagram error: {:?} msg: {}", e.code(), e.msg());
-                                continue;
-                            }
-                        };
-                        tunnel.set_tunnel_conn(Box::new(tunnel_conn));
+                        futures.push(Box::pin(async move {
+                            let datagram = tunnel_conn.connect_reverse_datagram().await?;
+                            Ok((tunnel_conn, datagram))
+                        }));
+                    }
+                }
+            }
+
+            if futures.len() > 0 {
+                match select_successful(futures).await {
+                    Ok((conn, datagram_send)) => {
+                        tunnel.set_tunnel_conn(conn);
                         let listener = self.listener.clone();
                         {
                             let mut tunnels = self.get_tunnels(&from_device_id);
                             tunnels.add_tunnel(tunnel, listener.clone());
                         }
                         let listener = self.listener.clone();
-                        listener.on_new_tunnel_datagram(datagram).await;
-                    } else {
-                        let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-                        let stream = match tunnel_conn.connect_reverse_stream(stream_call.vport, stream_call.session_id).await {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                log::error!("connect reverse stream error: {:?} msg: {}", e.code(), e.msg());
-                                continue;
-                            }
-                        };
-                        tunnel.set_tunnel_conn(Box::new(tunnel_conn));
+                        listener.on_new_tunnel_datagram(datagram_send).await;
+                    }
+                    Err(e) => {
+                        log::error!("connect stream error: {:?} msg: {}", e.code(), e.msg());
+                    }
+                }
+            }
+        } else {
+            let mut tunnel = Tunnel::new(
+                self.net_manager.clone(),
+                self.sn_service.clone(),
+                sn_called.tunnel_id,
+                self.protocol_version,
+                self.stack_version,
+                sn_called.peer_info.clone(),
+                self.local_device.clone(),
+                self.conn_timeout,
+                self.listen_ports.clone());
+
+            let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+            let mut futures = Vec::<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>>::new();
+            for ep in eps.iter() {
+                if ep.is_tcp() {
+                    let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
+                        sn_called.tunnel_id,
+                        self.local_device.clone(),
+                        from_device_id.clone(),
+                        ep.clone(),
+                        self.conn_timeout,
+                        self.protocol_version,
+                        self.stack_version,
+                        None, self.listen_ports.clone())?);
+                    let vport = stream_call.vport;
+                    let session_id = stream_call.session_id;
+                    futures.push(Box::pin(async move {
+                        let stream = tunnel_conn.connect_reverse_stream(vport, session_id).await?;
+                        Ok((tunnel_conn, stream))
+                    }));
+                } else if ep.is_udp() {
+                    for listener in self.net_manager.udp_listeners().iter() {
+                        let local_ep = listener.local();
+                        let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(self.net_manager.clone(),
+                                                                                 sn_called.tunnel_id,
+                                                                                 self.local_device.clone(),
+                                                                                 from_device_id.clone(),
+                                                                                 ep.clone(),
+                                                                                 self.conn_timeout,
+                                                                                 self.protocol_version,
+                                                                                 self.stack_version,
+                                                                                 local_ep.clone(),
+                                                                                 None,
+                                                                                 self.listen_ports.clone()));
+
+                        let vport = stream_call.vport;
+                        let session_id = stream_call.session_id;
+                        futures.push(Box::pin(async move {
+                            let stream = tunnel_conn.connect_reverse_stream(vport, session_id).await?;
+                            Ok((tunnel_conn, stream))
+                        }));
+                    }
+                }
+            }
+
+            if futures.len() > 0 {
+                match select_successful(futures).await {
+                    Ok((conn, stream)) => {
+                        tunnel.set_tunnel_conn(conn);
                         let listener = self.listener.clone();
                         {
                             let mut tunnels = self.get_tunnels(&from_device_id);
                             tunnels.add_tunnel(tunnel, listener.clone());
                         }
+                        let listener = self.listener.clone();
                         listener.on_new_tunnel_stream(stream).await;
+                    }
+                    Err(e) => {
+                        log::error!("connect stream error: {:?} msg: {}", e.code(), e.msg());
                     }
                 }
             }

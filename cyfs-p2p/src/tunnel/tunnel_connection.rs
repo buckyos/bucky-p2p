@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::net::Shutdown;
@@ -135,6 +136,16 @@ pub enum TunnelInstance {
     ReverseDatagram(Box<dyn TunnelDatagramSend>),
 }
 
+impl Display for TunnelInstance {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TunnelInstance::Stream(stream) => write!(f, "Stream(seq {:?} session {} port {})", stream.sequence(), stream.session_id(), stream.port()),
+            TunnelInstance::Datagram(datagram) => write!(f, "Datagram({:?})", datagram.sequence()),
+            TunnelInstance::ReverseStream(stream) => write!(f, "ReverseStream(seq {:?} session {} port {})", stream.sequence(), stream.session_id(), stream.port()),
+            TunnelInstance::ReverseDatagram(datagram) => write!(f, "ReverseDatagram({:?})", datagram.sequence()),
+        }
+    }
+}
 #[async_trait::async_trait]
 pub(crate) trait TunnelConnection: AsAny + Send + Sync {
     fn get_sequence(&self) -> TempSeq;

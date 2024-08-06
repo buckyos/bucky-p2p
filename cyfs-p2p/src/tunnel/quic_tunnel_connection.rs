@@ -494,6 +494,10 @@ impl TunnelConnection for QuicTunnelConnection {
                                 tunnel_stat))));
                         } else if cmd_code == PackageCmdCode::SynReverseStream {
                             let syn = SynReverseStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                            {
+                                let mut inner = self.inner.lock().unwrap();
+                                inner.sequence = syn.sequence;
+                            }
                             return Ok(TunnelInstance::ReverseStream(Box::new(QuicTunnelStream::new(syn.vport,
                                 syn.session_id,
                                 syn.sequence,
@@ -506,6 +510,10 @@ impl TunnelConnection for QuicTunnelConnection {
                                 tunnel_stat))));
                         } else if cmd_code == PackageCmdCode::SynReverseDatagram {
                             let syn = SynReverseDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                            {
+                                let mut inner = self.inner.lock().unwrap();
+                                inner.sequence = syn.sequence;
+                            }
                             return Ok(TunnelInstance::ReverseDatagram(Box::new(QuicTunnelDatagramSend::new(send,
                                 syn.sequence,
                                 remote_id,
