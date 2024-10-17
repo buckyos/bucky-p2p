@@ -821,7 +821,7 @@ impl TunnelManager {
                         Ok((tunnel_conn, datagram))
                     }));
                 } else if ep.is_udp() {
-                    for listener in self.net_manager.udp_listeners().iter() {
+                    for listener in self.net_manager.quic_listeners().iter() {
                         let local_ep = listener.local();
                         let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                             self.net_manager.clone(),
@@ -896,7 +896,7 @@ impl TunnelManager {
                         Ok((tunnel_conn, stream))
                     }));
                 } else if ep.is_udp() {
-                    for listener in self.net_manager.udp_listeners().iter() {
+                    for listener in self.net_manager.quic_listeners().iter() {
                         let local_ep = listener.local();
                         let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                             self.net_manager.clone(),

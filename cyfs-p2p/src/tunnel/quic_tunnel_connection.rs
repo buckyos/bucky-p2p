@@ -328,7 +328,7 @@ impl TunnelConnection for QuicTunnelConnection {
             return Ok(self.open_stream(vport, session_id).await?);
         }
 
-        let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
+        let mut socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
             QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
             QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
@@ -351,7 +351,7 @@ impl TunnelConnection for QuicTunnelConnection {
             return Ok(self.open_datagram().await?);
         }
 
-        let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
+        let mut socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
             QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
             QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
@@ -374,7 +374,7 @@ impl TunnelConnection for QuicTunnelConnection {
             return Ok(self.open_reverse_stream(vport, session_id).await?);
         }
 
-        let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
+        let mut socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
             QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
             QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
@@ -397,7 +397,7 @@ impl TunnelConnection for QuicTunnelConnection {
             return Ok(self.open_reverse_datagram().await?);
         }
 
-        let mut socket = if let Some(listener) = net_manager.udp_of(&local_ep) {
+        let mut socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
             QuicSocket::connect_with_ep(listener.quic_ep(), local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
             QuicSocket::connect(local_device, remote_id, remote_ep, conn_timeout, idle_timeout).await?

@@ -308,7 +308,7 @@ impl SNClientService {
                     continue;
                 }
             }
-            for listener in self.net_manager.udp_listeners().iter() {
+            for listener in self.net_manager.quic_listeners().iter() {
                 let quic_ep = listener.quic_ep();
                 for sn in self.sn_list.iter() {
                     for sn_ep in sn.connect_info().endpoints().iter() {
@@ -456,7 +456,7 @@ impl SNClientService {
         }
 
         let mut udp_map_port = None;
-        for listener in self.net_manager.udp_listeners().iter() {
+        for listener in self.net_manager.quic_listeners().iter() {
             udp_map_port = listener.mapping_port();
             if listener.local().addr().ip().is_unspecified() {
                 for ip in local_ips.iter() {

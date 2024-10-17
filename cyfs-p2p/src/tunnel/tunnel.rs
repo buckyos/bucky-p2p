@@ -169,7 +169,7 @@ impl Tunnel {
                 });
                 futures.push(future);
             } else if ep.is_udp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
-                for listener in self.net_manager.udp_listeners().iter() {
+                for listener in self.net_manager.quic_listeners().iter() {
                     let local_ep = listener.local();
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                         self.net_manager.clone(),
@@ -252,7 +252,7 @@ impl Tunnel {
                 });
                 futures.push(future);
             } else if ep.is_udp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
-                for listener in self.net_manager.udp_listeners().iter() {
+                for listener in self.net_manager.quic_listeners().iter() {
                     let local_ep = listener.local();
                     let mut tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                         self.net_manager.clone(),
