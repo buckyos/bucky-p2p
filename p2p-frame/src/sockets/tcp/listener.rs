@@ -10,7 +10,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
-use crate::p2p_identity::{DeviceId, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
 use super::super::UpdateOuterResult;
@@ -210,7 +210,7 @@ impl TCPListener {
             return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
         }
 
-        let local_device_id = DeviceId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "decode cert failed."))?;
+        let local_device_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "decode cert failed."))?;
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
         self.device_cache.add(&remote_id, &remote_device);

@@ -5,17 +5,12 @@ use bucky_raw_codec::{RawDecode, RawEncode};
 use crate::endpoint::Endpoint;
 use crate::error::{BdtError, BdtResult};
 
-#[derive(RawDecode, RawEncode, Clone, Debug)]
-pub enum P2pIdentityType {
-    CYFS,
-}
-
 pub type EncodedP2pIdentityCert = Vec<u8>;
 
 #[derive(RawDecode, RawEncode, Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Debug)]
-pub struct DeviceId(Vec<u8>);
+pub struct P2pId(Vec<u8>);
 
-impl FromStr for DeviceId {
+impl FromStr for P2pId {
     type Err = BdtError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -23,7 +18,7 @@ impl FromStr for DeviceId {
     }
 }
 
-impl Display for DeviceId {
+impl Display for P2pId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", String::from_utf8_lossy(self.0.as_slice()).to_string())
     }
@@ -35,7 +30,7 @@ pub type EncodedP2pIdentity = Vec<u8>;
 
 pub trait P2pIdentity: 'static + Send + Sync {
     fn get_identity_cert(&self) -> BdtResult<P2pIdentityCertRef>;
-    fn get_id(&self) -> DeviceId;
+    fn get_id(&self) -> P2pId;
     fn get_name(&self) -> String;
     fn sign(&self, message: &[u8]) -> BdtResult<P2pSignature>;
     fn get_encoded_identity(&self) -> BdtResult<EncodedP2pIdentity>;
@@ -52,7 +47,7 @@ pub trait P2pIdentityFactory: 'static + Send + Sync {
 pub type P2pIdentityFactoryRef = Arc<dyn P2pIdentityFactory>;
 
 pub trait P2pIdentityCert: 'static + Send + Sync {
-    fn get_id(&self) -> DeviceId;
+    fn get_id(&self) -> P2pId;
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool;
     fn verify_cert(&self, name: &str) -> bool;
     fn get_encoded_cert(&self) -> BdtResult<EncodedP2pIdentityCert>;

@@ -7,7 +7,7 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
 use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea, Protocol};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
@@ -53,7 +53,7 @@ pub struct Tunnel {
     protocol_version: u8,
     stack_version: u32,
     local_device: LocalDeviceRef,
-    remote_id: DeviceId,
+    remote_id: P2pId,
     remote_eps: Vec<Endpoint>,
     conn_timeout: Duration,
     idle_timeout: Duration,
@@ -68,7 +68,7 @@ impl Tunnel {
         sequence: TempSeq,
         protocol_version: u8,
         stack_version: u32,
-        remote_id: DeviceId,
+        remote_id: P2pId,
         remote_eps: Vec<Endpoint>,
         local_device: LocalDeviceRef,
         conn_timeout: Duration,

@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 use aes::cipher::crypto_common::rand_core;
+use once_cell::sync::OnceCell;
 use rustls::crypto::{CryptoProvider, GetRandomFailed, WebPkiSupportedAlgorithms};
 use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
 use rustls::Error;
@@ -22,7 +23,7 @@ pub use client_cert_verifier::*;
 use crate::p2p_identity::P2pIdentityFactoryRef;
 use crate::tls::sign::TlsKey;
 
-static key_provider: OnceLock<KeyProvider> = OnceLock::new();
+static key_provider: OnceCell<KeyProvider> = OnceCell::new();
 pub fn init_tls(factory: P2pIdentityFactoryRef) {
     key_provider.get_or_init(|| {
         KeyProvider {

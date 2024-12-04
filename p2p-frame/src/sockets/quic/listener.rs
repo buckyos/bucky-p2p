@@ -9,7 +9,7 @@ use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
-use crate::p2p_identity::{DeviceId, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
 use crate::sockets::{QuicSocket, UpdateOuterResult};
 use crate::tls::ServerCertResolverRef;
 
@@ -148,7 +148,7 @@ impl QuicListener {
             return Err(bdt_err!(BdtErrorCode::TlsError, "no server name"));
         }
 
-        let local_id = DeviceId::from_str(serve_name.unwrap())?;
+        let local_id = P2pId::from_str(serve_name.unwrap())?;
         let peer_identity = connection.peer_identity();
         let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
         if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {

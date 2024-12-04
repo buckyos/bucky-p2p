@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertRef};
 use crate::stream::StreamGuard;
 use crate::tunnel::{TunnelManagerRef, TunnelStream};
 use crate::types::IncreaseIdGenerator;
@@ -138,7 +138,7 @@ impl StreamManager {
         Ok(StreamGuard::new(tunnel))
     }
 
-    pub async fn connect_from_id(&self, remote_id: &DeviceId, port: u16) -> BdtResult<StreamGuard> {
+    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> BdtResult<StreamGuard> {
         let session_id = self.session_gen.generate();
         let tunnel = self.tunnel_manager.create_stream_tunnel_from_id(remote_id, session_id, port).await?;
         Ok(StreamGuard::new(tunnel))

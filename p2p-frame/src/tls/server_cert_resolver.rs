@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 use rustls::pki_types::CertificateDer;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use crate::p2p_identity::{DeviceId, P2pIdentity};
+use crate::p2p_identity::{P2pId, P2pIdentity};
 use crate::tls::sign::TlsKey;
 
 pub struct TlsServerCertResolver {
-    device_cache: Mutex<HashMap<DeviceId, Arc<dyn P2pIdentity>>>
+    device_cache: Mutex<HashMap<P2pId, Arc<dyn P2pIdentity>>>
 }
 
 impl Debug for TlsServerCertResolver {
@@ -32,12 +32,12 @@ impl TlsServerCertResolver {
         device_cache.insert(id.get_id(), id);
     }
 
-    pub fn remove_device(&self, device_id: &DeviceId) {
+    pub fn remove_device(&self, device_id: &P2pId) {
         let mut device_cache = self.device_cache.lock().unwrap();
         device_cache.remove(device_id);
     }
 
-    pub fn get_device(&self, device_id: &DeviceId) -> Option<Arc<dyn P2pIdentity>> {
+    pub fn get_device(&self, device_id: &P2pId) -> Option<Arc<dyn P2pIdentity>> {
         let device_cache = self.device_cache.lock().unwrap();
         match device_cache.get(device_id) {
             Some(device_info) => Some(device_info.clone()),
@@ -53,7 +53,7 @@ impl ResolvesServerCert for TlsServerCertResolver {
         }
 
         let server_name = client_hello.server_name().unwrap();
-        let device_id = match DeviceId::from_str(server_name) {
+        let device_id = match P2pId::from_str(server_name) {
             Ok(device_id) => device_id,
             Err(_) => return None
         };

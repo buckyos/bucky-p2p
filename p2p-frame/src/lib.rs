@@ -14,6 +14,7 @@ pub mod tls;
 pub mod sn;
 pub mod finder;
 pub mod receive_processor;
+pub mod stack;
 
 #[macro_use]
 extern crate log;

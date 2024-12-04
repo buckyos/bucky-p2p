@@ -8,7 +8,7 @@ use bucky_time::bucky_time_now;
 use notify_future::NotifyFuture;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor};
 use crate::runtime;
@@ -258,12 +258,12 @@ impl TunnelListenPorts for ListenPorts {
 
 #[async_trait::async_trait]
 pub trait DeviceFinder: 'static + Send + Sync {
-    async fn get_device(&self, device_id: &DeviceId) -> BdtResult<P2pIdentityCertRef>;
+    async fn get_device(&self, device_id: &P2pId) -> BdtResult<P2pIdentityCertRef>;
 }
 pub type DeviceFinderRef = Arc<dyn DeviceFinder>;
 
 pub struct DefaultDeviceFinder {
-    device_cache: mini_moka::sync::Cache<DeviceId, P2pIdentityCertRef>,
+    device_cache: mini_moka::sync::Cache<P2pId, P2pIdentityCertRef>,
     sn_service: SNClientServiceRef,
     cert_factory: P2pIdentityCertFactoryRef,
 }
@@ -280,7 +280,7 @@ impl DefaultDeviceFinder {
 
 #[async_trait::async_trait]
 impl DeviceFinder for DefaultDeviceFinder {
-    async fn get_device(&self, device_id: &DeviceId) -> BdtResult<P2pIdentityCertRef> {
+    async fn get_device(&self, device_id: &P2pId) -> BdtResult<P2pIdentityCertRef> {
         if let Some(device) = self.device_cache.get(device_id) {
             return Ok(device);
         }
@@ -315,7 +315,7 @@ impl DeviceFinder for DefaultDeviceFinder {
 }
 
 pub struct TunnelManager {
-    tunnels: Arc<RwLock<HashMap<DeviceId, Arc<Tunnels>>>>,
+    tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels>>>>,
     net_manager: NetManagerRef,
     receive_dispatcher: ReceiveDispatcherRef,
     sn_service: SNClientServiceRef,
@@ -345,7 +345,7 @@ impl TunnelManager {
         stack_version: u32,
         conn_timeout: Duration,
         idle_timeout: Duration,) -> Arc<Self> {
-        let tunnels = Arc::new(RwLock::new(HashMap::<DeviceId, Arc<Tunnels>>::new()));
+        let tunnels = Arc::new(RwLock::new(HashMap::<P2pId, Arc<Tunnels>>::new()));
         let tmp = tunnels.clone();
         let handle = Executor::spawn_with_handle(async move {
             loop {
@@ -376,7 +376,7 @@ impl TunnelManager {
         manager
     }
 
-    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<DeviceId, Arc<Tunnels>>>>) {
+    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels>>>>) {
         let tunnels_map = tunnels.read().unwrap();
         for (_, tunnels) in tunnels_map.iter() {
             let mut remove_list = Vec::new();
@@ -649,7 +649,7 @@ impl TunnelManager {
         self.listen_ports.remove_listen_port(port)
     }
 
-    fn get_tunnels(&self, remote_id: &DeviceId) -> Arc<Tunnels> {
+    fn get_tunnels(&self, remote_id: &P2pId) -> Arc<Tunnels> {
         let mut tunnels = self.tunnels.write().unwrap();
         let device_tunnels = tunnels.get(remote_id);
         if device_tunnels.is_none() {
@@ -690,7 +690,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &DeviceId) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId) -> BdtResult<Box<dyn TunnelDatagramSend>> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_datagram().await;
@@ -747,7 +747,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_stream_tunnel_from_id(&self, remote_id: &DeviceId, session_id: IncreaseId, vport: u16) -> BdtResult<Box<dyn TunnelStream>> {
+    pub async fn create_stream_tunnel_from_id(&self, remote_id: &P2pId, session_id: IncreaseId, vport: u16) -> BdtResult<Box<dyn TunnelStream>> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_stream(vport, session_id).await;

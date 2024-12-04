@@ -4,7 +4,7 @@ use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncod
 use bucky_time::{bucky_time_to_system_time, system_time_to_bucky_time, MIN_BUCKY_TIME};
 use crate::endpoint::Endpoint;
 use crate::error::{BdtError, BdtErrorCode};
-use crate::p2p_identity::{DeviceId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
+use crate::p2p_identity::{P2pId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
 use crate::types::{TempSeq, Timestamp};
 
 #[derive(Clone, RawEncode, RawDecode)]
@@ -13,11 +13,11 @@ pub struct SnCall {
     pub stack_version: u32,
     pub seq: TempSeq,
     pub tunnel_id: TempSeq,
-    pub sn_peer_id: DeviceId,
-    pub to_peer_id: DeviceId,
-    pub from_peer_id: DeviceId,
+    pub sn_peer_id: P2pId,
+    pub to_peer_id: P2pId,
+    pub from_peer_id: P2pId,
     pub reverse_endpoint_array: Option<Vec<Endpoint>>,
-    pub active_pn_list: Option<Vec<DeviceId>>,
+    pub active_pn_list: Option<Vec<P2pId>>,
     pub peer_info: Option<EncodedP2pIdentityCert>,
     pub send_time: Timestamp,
     pub payload: Vec<u8>,
@@ -201,7 +201,7 @@ impl<'de> RawDecode<'de> for SnServiceReceiptVersion {
 }
 
 struct SnServiceReceiptSignature {
-    sn_peerid: DeviceId,
+    sn_peerid: P2pId,
     receipt: SnServiceReceipt,
 }
 
@@ -239,7 +239,7 @@ pub struct SnServiceReceipt {
 impl SnServiceReceipt {
     pub fn sign(
         &self,
-        sn_peerid: &DeviceId,
+        sn_peerid: &P2pId,
         _private_key: &Arc<dyn P2pIdentity>,
     ) -> Result<P2pSignature, BdtError> {
         let _sig_fields = SnServiceReceiptSignature {
@@ -253,7 +253,7 @@ impl SnServiceReceipt {
 
     pub fn verify(
         &self,
-        sn_peerid: &DeviceId,
+        sn_peerid: &P2pId,
         _sign: &P2pSignature,
         _const_info: &EncodedP2pIdentityCert,
     ) -> bool {
@@ -410,11 +410,11 @@ pub struct ReportSn {
     pub stack_version: u32,
     //ln与sn的keepalive包
     pub seq: TempSeq,                          //序列号
-    pub sn_peer_id: DeviceId,                  //sn的设备id
-    pub from_peer_id: Option<DeviceId>,        //发送者设备id
+    pub sn_peer_id: P2pId,                  //sn的设备id
+    pub from_peer_id: Option<P2pId>,        //发送者设备id
     pub peer_info: Option<EncodedP2pIdentityCert>,             //发送者设备信息
     pub send_time: Timestamp,                  //发送时间
-    pub contract_id: Option<DeviceId>,         //合约文件对象id
+    pub contract_id: Option<P2pId>,         //合约文件对象id
     pub receipt: Option<ReceiptWithSignature>, //客户端提供的服务清单
     pub tcp_map_port: Option<u16>,
     pub udp_map_port: Option<u16>,
@@ -424,7 +424,7 @@ pub struct ReportSn {
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct ReportSnResp {
     pub seq: TempSeq,                      //包序列包
-    pub sn_peer_id: DeviceId,              //sn的设备id
+    pub sn_peer_id: P2pId,              //sn的设备id
     pub result: u8,                        //是否接受device的接入
     pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
     pub end_point_array: Vec<Endpoint>,    //外网地址列表
@@ -437,7 +437,7 @@ pub struct SnQuery {
     pub stack_version: u32,
     //ln与sn的keepalive包
     pub seq: TempSeq,                          //序列号
-    pub query_id: DeviceId,
+    pub query_id: P2pId,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]

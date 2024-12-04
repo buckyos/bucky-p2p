@@ -7,12 +7,12 @@ mod manager;
 
 pub use manager::StatisticManager;
 use crate::error::BdtErrorCode;
-use crate::p2p_identity::DeviceId;
+use crate::p2p_identity::P2pId;
 use crate::types::{TempSeq, Timestamp};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum StatisticKey {
-    RemoteId(DeviceId),
+    RemoteId(P2pId),
     RemoteEndpoint(SocketAddr),
 }
 
@@ -88,7 +88,7 @@ impl std::fmt::Display for StatusKind {
 pub struct PeerStatus(Arc<RwLock<PeerStatusImpl>>);
 
 impl PeerStatus {
-    pub fn with_peer(id: DeviceId, now: Timestamp) -> Self {
+    pub fn with_peer(id: P2pId, now: Timestamp) -> Self {
         Self(Arc::new(RwLock::new(PeerStatusImpl {
             id: StatisticKey::RemoteId(id),
             status: PeerStatusKind::Connecting(now),
@@ -141,14 +141,14 @@ impl PeerStatus {
         }
     }
 
-    pub fn add_record(&self, peer_id: DeviceId, seq: TempSeq) {
+    pub fn add_record(&self, peer_id: P2pId, seq: TempSeq) {
         self.0.write().unwrap()
             .records
             .entry((StatisticKey::RemoteId(peer_id), seq))
             .or_insert(StatusKind::CallResult(BdtErrorCode::Ok));
     }
 
-    pub fn record(&self, peer_id: DeviceId, seq: TempSeq, errno: BdtErrorCode) {
+    pub fn record(&self, peer_id: P2pId, seq: TempSeq, errno: BdtErrorCode) {
 
         let w = &mut *self.0.write().unwrap();
         match w.records

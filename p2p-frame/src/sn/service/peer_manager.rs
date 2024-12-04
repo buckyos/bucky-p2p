@@ -9,7 +9,7 @@ use bucky_time::bucky_time_now;
 use crate::endpoint::Endpoint;
 use crate::error::{BdtResult};
 use crate::executor::Executor;
-use crate::p2p_identity::{DeviceId, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 use crate::runtime;
 use crate::sn::service::PeerConnection;
 use crate::sn::service::statistic::{PeerStatus, StatisticManager};
@@ -118,12 +118,12 @@ impl CachedPeerInfo {
 }
 
 struct Peers {
-    active_peers: HashMap<DeviceId, CachedPeerInfo>,
-    knock_peers: HashMap<DeviceId, CachedPeerInfo>,
+    active_peers: HashMap<P2pId, CachedPeerInfo>,
+    knock_peers: HashMap<P2pId, CachedPeerInfo>,
 }
 
 impl Peers {
-    fn find_peer(&mut self, peerid: &DeviceId, reason: FindPeerReason) -> Option<&mut CachedPeerInfo> {
+    fn find_peer(&mut self, peerid: &P2pId, reason: FindPeerReason) -> Option<&mut CachedPeerInfo> {
         let found_cache = match self.active_peers.get_mut(peerid) {
             Some(p) => {
                 Some(p)
@@ -156,8 +156,8 @@ impl Peers {
 pub struct PeerManager {
     config: Config,
     statistic_manager: &'static StatisticManager,
-    conn_cache: Mutex<HashMap<TempSeq, (DeviceId, Arc<runtime::Mutex<PeerConnection>>)>>,
-    device_conn_map: Mutex<HashMap<DeviceId, CachedPeerInfo>>,
+    conn_cache: Mutex<HashMap<TempSeq, (P2pId, Arc<runtime::Mutex<PeerConnection>>)>>,
+    device_conn_map: Mutex<HashMap<P2pId, CachedPeerInfo>>,
     conn_id_generator: TempSeqGenerator,
 }
 pub type PeerManagerRef = Arc<PeerManager>;
@@ -220,7 +220,7 @@ impl PeerManager {
         }
     }
 
-    pub fn update_peer(&self, device_id: &DeviceId, device: &Option<P2pIdentityCertRef>, tcp_map_port: Option<u16>, udp_map_port: Option<u16>, local_eps: &Vec<Endpoint>) {
+    pub fn update_peer(&self, device_id: &P2pId, device: &Option<P2pIdentityCertRef>, tcp_map_port: Option<u16>, udp_map_port: Option<u16>, local_eps: &Vec<Endpoint>) {
         let mut device_conn_map = self.device_conn_map.lock().unwrap();
         if let Some(peer) = device_conn_map.get_mut(device_id) {
             if let Some(device) = device {
@@ -237,7 +237,7 @@ impl PeerManager {
         conn_cache.get(&conn_id).map(|c| c.1.clone())
     }
 
-    pub fn find_connections(&self, device_id: &DeviceId) -> Vec<Arc<runtime::Mutex<PeerConnection>>> {
+    pub fn find_connections(&self, device_id: &P2pId) -> Vec<Arc<runtime::Mutex<PeerConnection>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
         let device_conn_map = self.device_conn_map.lock().unwrap();
         device_conn_map.get(device_id).map(|conns| {
@@ -245,7 +245,7 @@ impl PeerManager {
         }).unwrap_or_default()
     }
 
-    pub fn find_peer(&self, id: &DeviceId) -> Option<CachedPeerInfo> {
+    pub fn find_peer(&self, id: &P2pId) -> Option<CachedPeerInfo> {
         self.device_conn_map.lock().unwrap().get(id).map(|v| {
             v.clone()
         })

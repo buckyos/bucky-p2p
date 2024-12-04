@@ -11,7 +11,7 @@ use tokio::io::ReadBuf;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::endpoint::Endpoint;
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{Package, PackageCmdCode, PackageHeader, MTU_LARGE};
 use crate::protocol::v0::{AckClose, AckDatagram, AckReverseDatagram, AckReverseStream, AckStream, SynClose, SynDatagram, SynReverseDatagram, SynReverseStream, SynStream};
 use crate::runtime;
@@ -131,7 +131,7 @@ fn create_accept_handle(read: TCPRead,
 pub struct TcpTunnelConnectionImpl {
     sequence: TempSeq,
     local_device: LocalDeviceRef,
-    remote_id: DeviceId,
+    remote_id: P2pId,
     remote_ep: Endpoint,
     conn_timeout: Duration,
     data_socket: Option<Arc<TCPSocket>>,
@@ -151,7 +151,7 @@ impl TcpTunnelConnectionImpl {
     pub fn new(
         sequence: TempSeq,
         local_device: LocalDeviceRef,
-        remote_id: DeviceId,
+        remote_id: P2pId,
         remote_ep: Endpoint,
         conn_timeout: Duration,
         protocol_version: u8,
@@ -307,7 +307,7 @@ impl TcpTunnelConnection {
     pub fn new(
         sequence: TempSeq,
         local_device: LocalDeviceRef,
-        remote_id: DeviceId,
+        remote_id: P2pId,
         remote_ep: Endpoint,
         conn_timeout: Duration,
         protocol_version: u8,
@@ -992,12 +992,12 @@ impl TunnelStream for TcpTunnelStream {
         tunnel.sequence
     }
 
-    fn remote_device_id(&self) -> DeviceId {
+    fn remote_device_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> DeviceId {
+    fn local_device_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.local_device.get_id()
     }
@@ -1210,12 +1210,12 @@ impl TunnelDatagramSend for TcpTunnelDatagramSend {
         tunnel.sequence
     }
 
-    fn remote_device_id(&self) -> DeviceId {
+    fn remote_device_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> DeviceId {
+    fn local_device_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.local_device.get_id()
     }
@@ -1439,12 +1439,12 @@ impl TunnelDatagramRecv for TcpTunnelDatagramRecv {
         tunnel.sequence
     }
 
-    fn remote_device_id(&self) -> DeviceId {
+    fn remote_device_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> DeviceId {
+    fn local_device_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.local_device.get_id()
     }

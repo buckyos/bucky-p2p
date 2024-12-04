@@ -12,7 +12,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{bdt_err, into_bdt_err, BdtErrorCode, BdtResult};
 use crate::runtime;
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCalled, SnCalledResp};
 use crate::sn::service::PeerConnection;
@@ -514,7 +514,7 @@ impl SNClientService {
     pub async fn call(&self,
                       tunnel_id: TempSeq,
                       reverse_endpoints: Option<&[Endpoint]>,
-                      remote: &DeviceId,
+                      remote: &P2pId,
                       payload_pkg: Vec<u8>) -> BdtResult<SnCallResp> {
         let active_list = self.get_active_sn_list();
         for active in active_list.iter() {
@@ -569,7 +569,7 @@ impl SNClientService {
         Err(bdt_err!(BdtErrorCode::ConnectFailed, "call timeout"))
     }
 
-    pub async fn query(&self, device_id: &DeviceId) -> BdtResult<SnQueryResp> {
+    pub async fn query(&self, device_id: &P2pId) -> BdtResult<SnQueryResp> {
         let active_list = self.get_active_sn_list();
         for active in active_list.iter() {
             let sn = self.cert_factory.create(&active.sn)?;

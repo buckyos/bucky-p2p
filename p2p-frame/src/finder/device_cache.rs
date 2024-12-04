@@ -5,7 +5,7 @@ use std::{
 };
 use mini_moka::sync::{Cache, CacheBuilder};
 use crate::executor::Executor;
-use crate::p2p_identity::{DeviceId, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 use super::outer_device_cache::*;
 
 #[derive(Clone)]
@@ -15,8 +15,8 @@ pub struct DeviceCacheConfig {
 }
 
 struct MemCaches {
-    lru_caches: Cache<DeviceId, P2pIdentityCertRef>,
-    static_caches: BTreeMap<DeviceId, P2pIdentityCertRef>
+    lru_caches: Cache<P2pId, P2pIdentityCertRef>,
+    static_caches: BTreeMap<P2pId, P2pIdentityCertRef>
 }
 
 impl MemCaches {
@@ -27,12 +27,12 @@ impl MemCaches {
         }
     }
 
-    fn remove(&mut self, remote: &DeviceId) {
+    fn remove(&mut self, remote: &P2pId) {
         self.static_caches.remove(remote);
         self.lru_caches.invalidate(remote);
     }
 
-    fn get(&mut self, remote: &DeviceId) -> Option<P2pIdentityCertRef> {
+    fn get(&mut self, remote: &P2pId) -> Option<P2pIdentityCertRef> {
         self.lru_caches.get(remote).or_else(|| self.static_caches.get(remote).map(|v| v.clone()))
     }
 }
@@ -54,7 +54,7 @@ impl DeviceCache {
         }
     }
 
-    pub fn add_static(&self, id: &DeviceId, device: &P2pIdentityCertRef) {
+    pub fn add_static(&self, id: &P2pId, device: &P2pIdentityCertRef) {
         let real_device_id = device.get_id();
         if *id != real_device_id {
             error!("add device but unmatch device_id! param_id={}, calc_id={}", id, real_device_id);
@@ -78,7 +78,7 @@ impl DeviceCache {
         }
     }
 
-    pub fn add(&self, id: &DeviceId, device: &P2pIdentityCertRef) {
+    pub fn add(&self, id: &P2pId, device: &P2pIdentityCertRef) {
         let real_device_id = device.get_id();
         if *id != real_device_id {
             error!("add device but unmatch device_id! param_id={}, calc_id={}", id, real_device_id);
@@ -102,7 +102,7 @@ impl DeviceCache {
         }
     }
 
-    pub async fn get(&self, id: &DeviceId) -> Option<P2pIdentityCertRef> {
+    pub async fn get(&self, id: &P2pId) -> Option<P2pIdentityCertRef> {
         let mem_cache = self.get_inner(id);
         if mem_cache.is_some() {
             mem_cache
@@ -113,11 +113,11 @@ impl DeviceCache {
         }
     }
 
-    pub fn get_inner(&self, id: &DeviceId) -> Option<P2pIdentityCertRef> {
+    pub fn get_inner(&self, id: &P2pId) -> Option<P2pIdentityCertRef> {
         self.cache.lock().unwrap().get(id)
     }
 
-    pub fn remove_inner(&self, id: &DeviceId) {
+    pub fn remove_inner(&self, id: &P2pId) {
         self.cache.lock().unwrap().remove(id);
     }
 }

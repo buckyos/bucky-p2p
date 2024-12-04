@@ -5,7 +5,7 @@ use bucky_time::bucky_time_now;
 
 use once_cell::sync::OnceCell;
 use crate::executor::Executor;
-use crate::p2p_identity::DeviceId;
+use crate::p2p_identity::P2pId;
 use crate::types::Timestamp;
 use super::super::storage::SqliteStorage;
 
@@ -58,7 +58,7 @@ impl StatisticManager {
         INSTANCE.get_or_init(|| Self::new())
     }
 
-    pub fn get_peer_status(&self, id: DeviceId, now: Timestamp) -> PeerStatus {
+    pub fn get_peer_status(&self, id: P2pId, now: Timestamp) -> PeerStatus {
         self.0.write().unwrap()
             .statistics
             .entry(id.to_string())

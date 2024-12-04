@@ -6,14 +6,14 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 
 #[derive(Clone)]
 pub struct QuicSocket {
     socket: quinn::Connection,
-    remote_device_id: DeviceId,
-    local_device_id: DeviceId,
+    remote_device_id: P2pId,
+    local_device_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
 }
@@ -21,8 +21,8 @@ pub struct QuicSocket {
 impl QuicSocket {
     pub fn new(
         socket: quinn::Connection,
-        local_device_id: DeviceId,
-        remote_device_id: DeviceId,
+        local_device_id: P2pId,
+        remote_device_id: P2pId,
         local: Endpoint,
         remote: Endpoint,
     ) -> Self {
@@ -37,7 +37,7 @@ impl QuicSocket {
 
     pub async fn connect(local_device_ref: LocalDeviceRef,
                          cert_factory: P2pIdentityCertFactoryRef,
-                         remote_device_id: DeviceId,
+                         remote_device_id: P2pId,
                          remote: Endpoint,
                          timeout: Duration,
                          idle_timeout: Duration) -> BdtResult<Self> {
@@ -81,7 +81,7 @@ impl QuicSocket {
     pub async fn connect_with_ep(ep: quinn::Endpoint,
                                  local_device_ref: LocalDeviceRef,
                                  cert_factory: P2pIdentityCertFactoryRef,
-                                 remote_device_id: DeviceId,
+                                 remote_device_id: P2pId,
                                  remote: Endpoint,
                                  timeout: Duration,
                                  idle_timeout: Duration) -> BdtResult<Self> {
@@ -131,11 +131,11 @@ impl QuicSocket {
         &self.remote
     }
 
-    pub fn local_device_id(&self) -> &DeviceId {
+    pub fn local_device_id(&self) -> &P2pId {
         &self.local_device_id
     }
 
-    pub fn remote_device_id(&self) -> &DeviceId {
+    pub fn remote_device_id(&self) -> &P2pId {
         &self.remote_device_id
     }
 

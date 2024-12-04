@@ -5,7 +5,7 @@ use crate::runtime::{TcpStream, TlsConnector};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::runtime;
 
@@ -19,8 +19,8 @@ pub struct TCPSend {
 }
 pub struct TCPSocket {
     socket: Mutex<Option<runtime::TlsStream<TcpStream>>>,
-    remote_device_id: DeviceId,
-    local_device_id: DeviceId,
+    remote_device_id: P2pId,
+    local_device_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
     write_lock: Mutex<u8>,
@@ -38,8 +38,8 @@ impl std::fmt::Display for TCPSocket {
 
 impl TCPSocket {
     pub fn new(socket: runtime::TlsStream<TcpStream>,
-               local_device_id: DeviceId,
-               remote_device_id: DeviceId,
+               local_device_id: P2pId,
+               remote_device_id: P2pId,
                local: Endpoint,
                remote: Endpoint) -> Self {
         Self {
@@ -57,7 +57,7 @@ impl TCPSocket {
         cert_factory: P2pIdentityCertFactoryRef,
         local_device_ref: LocalDeviceRef,
         remote_ep: Endpoint,
-        remote_device_id: DeviceId,
+        remote_device_id: P2pId,
         timeout: Duration,) -> BdtResult<TCPSocket> {
         let client_config =
             rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
@@ -83,11 +83,11 @@ impl TCPSocket {
         Ok(socket)
     }
 
-    pub fn remote_device_id(&self) -> &DeviceId {
+    pub fn remote_device_id(&self) -> &P2pId {
         &self.remote_device_id
     }
 
-    pub fn local_device_id(&self) -> &DeviceId {
+    pub fn local_device_id(&self) -> &P2pId {
         &self.local_device_id
     }
 

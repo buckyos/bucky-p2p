@@ -4,7 +4,7 @@ use tokio::io::AsyncWriteExt;
 use crate::endpoint::Endpoint;
 use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::DeviceId;
+use crate::p2p_identity::P2pId;
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
 use crate::sockets::QuicSocket;
 use crate::types::TempSeq;
@@ -101,11 +101,11 @@ impl PeerConnection {
         &self.socket.remote()
     }
 
-    pub fn local_device_id(&self) -> &DeviceId {
+    pub fn local_device_id(&self) -> &P2pId {
         &self.socket.local_device_id()
     }
 
-    pub fn remote_device_id(&self) -> &DeviceId {
+    pub fn remote_device_id(&self) -> &P2pId {
         &self.socket.remote_device_id()
     }
 

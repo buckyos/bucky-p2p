@@ -635,12 +635,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-modes"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e2211b0817f061502a8dd9f11a37e879e79763e3c698d2418cf824d8cb2f21e"
-
-[[package]]
 name = "block-padding"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -677,7 +671,7 @@ dependencies = [
  "async-std",
  "async-trait",
  "base58",
- "block-modes 0.8.1",
+ "block-modes",
  "bucky-error",
  "bucky-raw-codec",
  "bucky-time",
@@ -802,12 +796,6 @@ name = "byte-tools"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3b5ca7a04898ad4bcd41c90c5285445ff5b791899bb1b0abdd2a2aa791211d7"
-
-[[package]]
-name = "byte_string"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11aade7a05aa8c3a351cedc44c3fc45806430543382fcc4743a9b757a2a0b4ed"
 
 [[package]]
 name = "bytecount"
@@ -1168,46 +1156,22 @@ dependencies = [
 name = "cyfs-p2p"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
- "as-any",
- "async-channel 2.3.1",
  "async-std",
- "async-trait",
- "block-modes 0.9.1",
  "bucky-crypto",
  "bucky-error",
  "bucky-objects",
  "bucky-raw-codec",
- "bucky-rustls",
  "bucky-time",
- "c_linked_list",
- "callback-result",
- "callback-trait",
  "futures",
  "futures-rustls",
- "if-addrs",
- "libc",
  "log",
- "md5",
- "mini-moka",
  "nix",
- "notify-future",
- "num-derive",
- "num-traits",
- "once_cell",
  "p2p-frame",
  "quinn",
  "rand 0.7.3",
- "rusqlite",
- "rustls",
- "sfo-result",
  "sha2 0.8.2",
- "socket2 0.5.7",
  "tokio",
  "tokio-rustls",
- "tokio_kcp",
- "winapi",
- "x509-cert",
 ]
 
 [[package]]
@@ -1247,21 +1211,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f55bf8e7b65898637379c1b74eb1551107c8294ed26d855ceb9fd1a09cfc9bc0"
 dependencies = [
  "const-oid",
- "der_derive",
- "flagset",
  "pem-rfc7468",
  "zeroize",
-]
-
-[[package]]
-name = "der_derive"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.72",
 ]
 
 [[package]]
@@ -1492,12 +1443,6 @@ dependencies = [
  "rustc-hex",
  "static_assertions",
 ]
-
-[[package]]
-name = "flagset"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ea1ec5f8307826a5b71094dd91fc04d4ae75d5709b20ad351c7fb4815c86ec"
 
 [[package]]
 name = "flexi_logger"
@@ -2090,17 +2035,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcp"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e387a924f42063d380be14857714a2f0c177e44dbeab8895244e5370d8a8e68"
-dependencies = [
- "bytes",
- "log",
- "thiserror",
-]
-
-[[package]]
 name = "kv-log-macro"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2226,12 +2160,6 @@ name = "lru_time_cache"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9106e1d747ffd48e6be5bb2d97fa706ed25b144fbee4d5c02eae110cd8d6badd"
-
-[[package]]
-name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"
@@ -2448,10 +2376,8 @@ dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
  "as-any",
- "async-channel 2.3.1",
  "async-std",
  "async-trait",
- "block-modes 0.9.1",
  "bucky-raw-codec",
  "bucky-time",
  "c_linked_list",
@@ -2463,7 +2389,6 @@ dependencies = [
  "if-addrs",
  "libc",
  "log",
- "md5",
  "mini-moka",
  "nix",
  "notify-future",
@@ -2477,13 +2402,10 @@ dependencies = [
  "rustls",
  "sfo-result",
  "sha2 0.10.8",
- "socket2 0.5.7",
  "tokio",
  "tokio-rustls",
- "tokio_kcp",
  "winapi",
  "x25519-dalek",
- "x509-cert",
 ]
 
 [[package]]
@@ -3416,17 +3338,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if 1.0.0",
- "cpufeatures",
- "digest 0.10.7",
-]
-
-[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3571,9 +3482,6 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
-dependencies = [
- "lock_api",
-]
 
 [[package]]
 name = "spki"
@@ -3639,7 +3547,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "sha1 0.6.1",
+ "sha1",
  "syn 1.0.109",
 ]
 
@@ -3925,27 +3833,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tls_codec"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e78c9c330f8c85b2bae7c8368f2739157db9991235123aa1b15ef9502bfb6a"
-dependencies = [
- "tls_codec_derive",
- "zeroize",
-]
-
-[[package]]
-name = "tls_codec_derive"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d9ef545650e79f30233c0003bcc2504d7efac6dad25fca40744de773fe2049c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.72",
-]
-
-[[package]]
 name = "tokio"
 version = "1.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3982,22 +3869,6 @@ checksum = "0c7bc40d0e5a97695bb96e27995cd3a08538541b0a846f65bba7a359f36700d4"
 dependencies = [
  "rustls",
  "rustls-pki-types",
- "tokio",
-]
-
-[[package]]
-name = "tokio_kcp"
-version = "0.9.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e29e2ec62565bc70b02413615745fede2eb72e0e29843f60e7206c1f633659cb"
-dependencies = [
- "byte_string",
- "bytes",
- "futures-util",
- "kcp",
- "log",
- "rand 0.8.5",
- "spin",
  "tokio",
 ]
 
@@ -4585,20 +4456,6 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
-]
-
-[[package]]
-name = "x509-cert"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
-dependencies = [
- "const-oid",
- "der",
- "sha1 0.10.6",
- "signature",
- "spki",
- "tls_codec",
 ]
 
 [[package]]

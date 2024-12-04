@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use crate::error::BdtResult;
-use crate::p2p_identity::DeviceId;
+use crate::p2p_identity::P2pId;
 use crate::sockets::{QuicListenerEventListener, QuicSocket};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
 
@@ -47,7 +47,7 @@ impl ReceiveProcessor {
 }
 
 pub struct ReceiveDispatcher {
-    processors: RwLock<HashMap<DeviceId, ReceiveProcessorRef>>,
+    processors: RwLock<HashMap<P2pId, ReceiveProcessorRef>>,
 }
 pub type ReceiveDispatcherRef = Arc<ReceiveDispatcher>;
 
@@ -58,16 +58,16 @@ impl ReceiveDispatcher {
         })
     }
 
-    pub fn add_processor(&self, device_id: DeviceId, processor: ReceiveProcessorRef) {
+    pub fn add_processor(&self, device_id: P2pId, processor: ReceiveProcessorRef) {
         log::info!("ReceiveDispatcher add_processor device_id = {}", device_id);
         self.processors.write().unwrap().insert(device_id, processor);
     }
 
-    pub fn get_processor(&self, device_id: &DeviceId) -> Option<ReceiveProcessorRef> {
+    pub fn get_processor(&self, device_id: &P2pId) -> Option<ReceiveProcessorRef> {
         self.processors.read().unwrap().get(device_id).map(|p| p.clone())
     }
 
-    pub fn remove_processor(&self, device_id: &DeviceId) {
+    pub fn remove_processor(&self, device_id: &P2pId) {
         log::info!("ReceiveDispatcher remove_processor device_id = {}", device_id);
         self.processors.write().unwrap().remove(device_id);
     }

@@ -3,7 +3,7 @@ use std::{
     sync::{atomic::{self, AtomicU32}, Arc, Mutex},
     time::{SystemTime}
 };
-use crate::p2p_identity::{DeviceId, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef};
 use crate::protocol::{v0::*, *};
 use crate::types::TempSeq;
 
@@ -22,7 +22,7 @@ pub trait ServiceAppraiser: Send + Sync {
 }
 
 struct Contract {
-    sn_peerid: DeviceId,
+    sn_peerid: P2pId,
     sn: EncodedP2pIdentityCert,
     stat: Mutex<ContractStat>,
     wait_seq: AtomicU32,
@@ -32,7 +32,7 @@ struct Contract {
 
 #[derive(Clone)]
 struct CallPeerStat {
-    peerid: DeviceId,
+    peerid: P2pId,
     last_seq: TempSeq,
     is_connect_success: bool,
 }
@@ -41,8 +41,8 @@ struct ContractStat {
     commit_receipt_start_time: SystemTime,
     last_receipt: SnServiceReceipt,
     receipt: SnServiceReceipt,
-    last_call_peers: HashMap<DeviceId, CallPeerStat>,
-    call_peers: HashMap<DeviceId, CallPeerStat>,
+    last_call_peers: HashMap<P2pId, CallPeerStat>,
+    call_peers: HashMap<P2pId, CallPeerStat>,
 }
 
 impl Contract {

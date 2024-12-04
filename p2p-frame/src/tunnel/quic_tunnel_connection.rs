@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::endpoint::Endpoint;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
 use crate::protocol::v0::{SynDatagram, SynReverseDatagram, SynReverseStream, SynStream};
 use crate::runtime;
@@ -31,7 +31,7 @@ pub struct QuicTunnelConnectionImpl {
     net_manager: NetManagerRef,
     sequence: TempSeq,
     local_device: LocalDeviceRef,
-    remote_id: DeviceId,
+    remote_id: P2pId,
     remote_ep: Endpoint,
     conn_timeout: Duration,
     idle_timeout: Duration,
@@ -50,7 +50,7 @@ impl QuicTunnelConnectionImpl {
     pub fn new(net_manager: NetManagerRef,
                sequence: TempSeq,
                local_device: LocalDeviceRef,
-               remote_id: DeviceId,
+               remote_id: P2pId,
                remote_ep: Endpoint,
                conn_timeout: Duration,
                idle_timeout: Duration,
@@ -104,8 +104,8 @@ impl QuicTunnelConnectionImpl {
                                sequence: TempSeq,
                                vport: u16,
                                session_id: IncreaseId,
-                               remote_id: DeviceId,
-                               local_id: DeviceId,
+                               remote_id: P2pId,
+                               local_id: P2pId,
                                remote_ep: Endpoint,
                                local_ep: Endpoint,
                                tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelStream>> {
@@ -134,14 +134,14 @@ impl QuicTunnelConnectionImpl {
     }
 
     async fn open_reverse_stream_inner(socket: &quinn::Connection,
-                               sequence: TempSeq,
-                               vport: u16,
-                               session_id: IncreaseId,
-                               remote_id: DeviceId,
-                               local_id: DeviceId,
-                               remote_ep: Endpoint,
-                               local_ep: Endpoint,
-                               tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelStream>> {
+                                       sequence: TempSeq,
+                                       vport: u16,
+                                       session_id: IncreaseId,
+                                       remote_id: P2pId,
+                                       local_id: P2pId,
+                                       remote_ep: Endpoint,
+                                       local_ep: Endpoint,
+                                       tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelStream>> {
         let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
         let syn = SynReverseStream {
             sequence,
@@ -168,8 +168,8 @@ impl QuicTunnelConnectionImpl {
 
     async fn open_datagram_inner(socket: &quinn::Connection,
                                  sequence: TempSeq,
-                                 remote_id: DeviceId,
-                                 local_id: DeviceId,
+                                 remote_id: P2pId,
+                                 local_id: P2pId,
                                  remote_ep: Endpoint,
                                  local_ep: Endpoint,
                                  tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelDatagramSend>> {
@@ -187,12 +187,12 @@ impl QuicTunnelConnectionImpl {
     }
 
     async fn open_reverse_datagram_inner(socket: &quinn::Connection,
-                                 sequence: TempSeq,
-                                 remote_id: DeviceId,
-                                 local_id: DeviceId,
-                                 remote_ep: Endpoint,
-                                 local_ep: Endpoint,
-                                 tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
+                                         sequence: TempSeq,
+                                         remote_id: P2pId,
+                                         local_id: P2pId,
+                                         remote_ep: Endpoint,
+                                         local_ep: Endpoint,
+                                         tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
         let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
 
         let syn = SynReverseDatagram {
@@ -215,7 +215,7 @@ impl QuicTunnelConnection {
     pub fn new(net_manager: NetManagerRef,
                sequence: TempSeq,
                local_device: LocalDeviceRef,
-               remote_id: DeviceId,
+               remote_id: P2pId,
                remote_ep: Endpoint,
                conn_timeout: Duration,
                idle_timeout: Duration,
@@ -583,8 +583,8 @@ pub struct QuicTunnelStream {
     port: u16,
     session_id: IncreaseId,
     sequence: TempSeq,
-    remote_id: DeviceId,
-    local_id: DeviceId,
+    remote_id: P2pId,
+    local_id: P2pId,
     remote_ep: Endpoint,
     local_ep: Endpoint,
     send: SendStream,
@@ -596,8 +596,8 @@ impl QuicTunnelStream {
     fn new(port: u16,
            session_id: IncreaseId,
            sequence: TempSeq,
-           remote_id: DeviceId,
-           local_id: DeviceId,
+           remote_id: P2pId,
+           local_id: P2pId,
            remote_ep: Endpoint,
            local_ep: Endpoint,
            send: SendStream,
@@ -696,11 +696,11 @@ impl TunnelStream for QuicTunnelStream {
         self.sequence
     }
 
-    fn remote_device_id(&self) -> DeviceId {
+    fn remote_device_id(&self) -> P2pId {
         self.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> DeviceId {
+    fn local_device_id(&self) -> P2pId {
         self.local_id.clone()
     }
 
@@ -731,8 +731,8 @@ impl Drop for QuicTunnelStream {
 
 pub struct QuicTunnelDatagramSend {
     sequence: TempSeq,
-    remote_id: DeviceId,
-    local_id: DeviceId,
+    remote_id: P2pId,
+    local_id: P2pId,
     remote_ep: Endpoint,
     local_ep: Endpoint,
     send: SendStream,
@@ -742,8 +742,8 @@ pub struct QuicTunnelDatagramSend {
 impl QuicTunnelDatagramSend {
     fn new(send: SendStream,
            sequence: TempSeq,
-           remote_id: DeviceId,
-           local_id: DeviceId,
+           remote_id: P2pId,
+           local_id: P2pId,
            remote_ep: Endpoint,
            local_ep: Endpoint,
            tunnel_stat: TunnelStatRef,) -> Self {
@@ -811,11 +811,11 @@ impl TunnelDatagramSend for QuicTunnelDatagramSend {
         self.sequence
     }
 
-    fn remote_device_id(&self) -> DeviceId {
+    fn remote_device_id(&self) -> P2pId {
         self.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> DeviceId {
+    fn local_device_id(&self) -> P2pId {
         self.local_id.clone()
     }
 
@@ -846,8 +846,8 @@ impl Drop for QuicTunnelDatagramSend {
 
 pub struct QuicTunnelDatagramRecv {
     sequence: TempSeq,
-    remote_id: DeviceId,
-    local_id: DeviceId,
+    remote_id: P2pId,
+    local_id: P2pId,
     remote_ep: Endpoint,
     local_ep: Endpoint,
     recv: RecvStream,
@@ -857,8 +857,8 @@ pub struct QuicTunnelDatagramRecv {
 impl QuicTunnelDatagramRecv {
     fn new(
         sequence: TempSeq,
-        remote_id: DeviceId,
-        local_id: DeviceId,
+        remote_id: P2pId,
+        local_id: P2pId,
         remote_ep: Endpoint,
         local_ep: Endpoint,
         recv: RecvStream,
@@ -900,11 +900,11 @@ impl TunnelDatagramRecv for QuicTunnelDatagramRecv {
         self.sequence
     }
 
-    fn remote_device_id(&self) -> DeviceId {
+    fn remote_device_id(&self) -> P2pId {
         self.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> DeviceId {
+    fn local_device_id(&self) -> P2pId {
         self.local_id.clone()
     }
 

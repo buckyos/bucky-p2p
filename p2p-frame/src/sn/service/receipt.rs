@@ -1,5 +1,5 @@
 use std::time::SystemTime;
-use crate::p2p_identity::{DeviceId, EncodedP2pIdentityCert};
+use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert};
 use crate::protocol::{ReceiptWithSignature, SnServiceReceipt};
 
 pub type IsRequestReceipt = bool;
@@ -25,5 +25,5 @@ pub trait SnServiceContractServer {
     ) -> IsAcceptClient; // 是否同意为客户端提供服务
 
     // 检查指定peer是否获得授权
-    fn verify_auth(&self, client_peer_id: &DeviceId) -> IsAcceptClient;
+    fn verify_auth(&self, client_peer_id: &P2pId) -> IsAcceptClient;
 }

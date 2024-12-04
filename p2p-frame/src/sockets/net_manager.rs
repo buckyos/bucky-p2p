@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::endpoint::Endpoint;
 use crate::error::BdtResult;
 use crate::finder::DeviceCache;
-use crate::p2p_identity::{DeviceId, P2pIdentityRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::sockets::{NetListener, NetListenerRef, QuicListenerEventListener, QuicListenerRef};
 use crate::sockets::tcp::{TCPListenerRef, TcpListenerEventListener};
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
@@ -62,12 +62,12 @@ impl NetManager {
         self.cert_resolver.add_device(device);
     }
 
-    pub fn remove_listen_device(&self, device_id: &DeviceId) {
+    pub fn remove_listen_device(&self, device_id: &P2pId) {
         log::info!("remove_listen_device {:?}", device_id);
         self.cert_resolver.remove_device(device_id);
     }
 
-    pub fn get_listen_device(&self, device_id: &DeviceId) -> Option<P2pIdentityRef> {
+    pub fn get_listen_device(&self, device_id: &P2pId) -> Option<P2pIdentityRef> {
         self.cert_resolver.get_device(device_id)
     }
 

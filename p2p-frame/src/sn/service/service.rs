@@ -12,7 +12,7 @@ use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
 use crate::error::{into_bdt_err, BdtErrorCode, BdtResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
-use crate::p2p_identity::{DeviceId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
@@ -142,7 +142,7 @@ impl SnService {
         self.stopped.load(atomic::Ordering::Relaxed)
     }
 
-    pub fn local_device_id(&self) -> DeviceId {
+    pub fn local_device_id(&self) -> P2pId {
         self.local_device.get_id()
     }
 
