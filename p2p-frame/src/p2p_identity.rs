@@ -1,0 +1,67 @@
+use std::fmt::Display;
+use std::str::FromStr;
+use std::sync::Arc;
+use bucky_raw_codec::{RawDecode, RawEncode};
+use crate::endpoint::Endpoint;
+use crate::error::{BdtError, BdtResult};
+
+#[derive(RawDecode, RawEncode, Clone, Debug)]
+pub enum P2pIdentityType {
+    CYFS,
+}
+
+pub type EncodedP2pIdentityCert = Vec<u8>;
+
+#[derive(RawDecode, RawEncode, Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Debug)]
+pub struct DeviceId(Vec<u8>);
+
+impl FromStr for DeviceId {
+    type Err = BdtError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Vec::from(s.as_bytes())))
+    }
+}
+
+impl Display for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", String::from_utf8_lossy(self.0.as_slice()).to_string())
+    }
+}
+
+pub type P2pSignature = Vec<u8>;
+
+pub type EncodedP2pIdentity = Vec<u8>;
+
+pub trait P2pIdentity: 'static + Send + Sync {
+    fn get_identity_cert(&self) -> BdtResult<P2pIdentityCertRef>;
+    fn get_id(&self) -> DeviceId;
+    fn get_name(&self) -> String;
+    fn sign(&self, message: &[u8]) -> BdtResult<P2pSignature>;
+    fn get_encoded_identity(&self) -> BdtResult<EncodedP2pIdentity>;
+    fn endpoints(&self) -> Vec<Endpoint>;
+    fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityRef;
+}
+
+pub type P2pIdentityRef = Arc<dyn P2pIdentity>;
+pub type LocalDeviceRef = Arc<dyn P2pIdentity>;
+
+pub trait P2pIdentityFactory: 'static + Send + Sync {
+    fn create(&self, id: &EncodedP2pIdentity) -> BdtResult<P2pIdentityRef>;
+}
+pub type P2pIdentityFactoryRef = Arc<dyn P2pIdentityFactory>;
+
+pub trait P2pIdentityCert: 'static + Send + Sync {
+    fn get_id(&self) -> DeviceId;
+    fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool;
+    fn verify_cert(&self, name: &str) -> bool;
+    fn get_encoded_cert(&self) -> BdtResult<EncodedP2pIdentityCert>;
+    fn endpoints(&self) -> Vec<Endpoint>;
+    fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityCertRef;
+}
+pub type P2pIdentityCertRef = Arc<dyn P2pIdentityCert>;
+
+pub trait P2pIdentityCertFactory: 'static + Send + Sync {
+    fn create(&self, cert: &EncodedP2pIdentityCert) -> BdtResult<P2pIdentityCertRef>;
+}
+pub type P2pIdentityCertFactoryRef = Arc<dyn P2pIdentityCertFactory>;

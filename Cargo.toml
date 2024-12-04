@@ -7,4 +7,5 @@ members = [
     "bucky-rustls",
     "cyfs-p2p-test",
     "desc-tool",
+    "p2p-frame",
 ]

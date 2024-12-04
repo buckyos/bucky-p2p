@@ -7,13 +7,14 @@ use bucky_raw_codec::{FileDecoder, FileEncoder};
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming};
 use log::Record;
 
-use cyfs_p2p::{LocalDevice, sn::service::*};
-use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
+use cyfs_p2p::LocalDevice;
+use p2p_frame::::{ReceiptWithSignature, SnServiceReceipt};
 
 #[warn(unused_imports)]
 pub(crate) use sfo_result::err as miner_err;
 pub(crate) use sfo_result::into_err as into_miner_err;
-use cyfs_p2p::executor::Executor;
+use p2p_frame::::Executor;
+use p2p_frame::::service::*;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MinerErrorCode {

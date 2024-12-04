@@ -12,9 +12,9 @@ use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming,
 use cyfs_p2p::{IncreaseIdGenerator, init_p2p, LocalDevice, P2pStackBuilder, P2pStackRef};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use cyfs_p2p::error::{BdtError, BdtErrorCode, BdtResult};
-use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
-use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
+use p2p_frame::error::{BdtError, BdtErrorCode, BdtResult};
+use p2p_frame::::{ReceiptWithSignature, SnServiceReceipt};
+use p2p_frame::::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
 
 const APP_NAME: &str = "cyfs-p2p-test";
 

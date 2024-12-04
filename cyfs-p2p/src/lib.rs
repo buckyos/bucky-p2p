@@ -5,20 +5,9 @@ compile_error!("Only one of 'runtime-async-std' and 'runtime-tokio' should be en
 
 mod history;
 mod types;
-mod sockets;
-pub mod executor;
-pub mod protocol;
-// pub mod pn;
-pub mod sn;
 // mod dht;
 mod finder;
-mod receive_processor;
 mod stack;
-mod tunnel;
-pub mod error;
-// pub mod stream;
-mod runtime;
-pub mod stream;
 
 #[macro_use]
 extern crate log;

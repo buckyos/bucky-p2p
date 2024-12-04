@@ -1,48 +1,16 @@
-use futures::future::{AbortHandle, AbortRegistration, Abortable};
 use rand::Rng;
 use std::fmt;
 use std::{
     hash::{Hash, Hasher},
-    collections::LinkedList,
     sync::{
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
-use std::sync::Arc;
-use bucky_crypto::{AesKey, KeyMixHash, PrivateKey};
-use bucky_error::BuckyError;
-use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, Protocol};
-use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
-use bucky_time::bucky_time_now;
-use sha2::Digest;
-use p2p_frame::p2p_identity::{P2pIdentity, EncodedP2pIdentityCert, P2pIdentityType};
+use bucky_raw_codec::{RawDecode, RawEncode};
+use crate::endpoint::{Endpoint, Protocol};
 
-#[derive(Clone)]
-pub struct MixAesKey {
-    pub enc_key: AesKey,
-    pub mix_key: AesKey
-}
-
-impl std::fmt::Display for MixAesKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "enc {}, mix {}", self.enc_key.to_hex().unwrap(), self.mix_key.to_hex().unwrap())
-    }
-}
-
-
-impl MixAesKey {
-    pub fn mix_hash(&self, local_id: &DeviceId, remote_id: &DeviceId) -> KeyMixHash {
-        let mut sha = sha2::Sha256::new();
-        sha.input(local_id.object_id().as_slice());
-        sha.input(remote_id.object_id().as_slice());
-        let hash = sha.result();
-        let salt = u64::from_be_bytes([hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]]);
-        self.mix_key.mix_hash(Some(salt))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, RawEncode, RawDecode)]
 pub struct Sequence(u32);
 
 impl Sequence {
@@ -69,34 +37,7 @@ impl Hash for Sequence {
     }
 }
 
-impl RawFixedBytes for Sequence {
-    fn raw_bytes() -> Option<usize> {
-        u32::raw_bytes()
-    }
-}
-
-impl RawEncode for Sequence {
-    fn raw_measure(&self, _purpose: &Option<RawEncodePurpose>) -> Result<usize, BuckyError> {
-        Ok(<u32 as RawFixedBytes>::raw_bytes().unwrap())
-    }
-
-    fn raw_encode<'a>(
-        &self,
-        buf: &'a mut [u8],
-        purpose: &Option<RawEncodePurpose>,
-    ) -> Result<&'a mut [u8], BuckyError> {
-        self.0.raw_encode(buf, purpose)
-    }
-}
-
-impl<'de> RawDecode<'de> for Sequence {
-    fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), BuckyError> {
-        u32::raw_decode(buf).map(|(n, buf)| (Self(n), buf))
-    }
-}
-
-
-#[derive(Clone, Copy, Ord, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
 pub struct TempSeq(u32);
 
 impl TempSeq {
@@ -151,32 +92,6 @@ impl Hash for TempSeq {
     }
 }
 
-impl RawFixedBytes for TempSeq {
-    fn raw_bytes() -> Option<usize> {
-        u32::raw_bytes()
-    }
-}
-
-impl RawEncode for TempSeq {
-    fn raw_measure(&self, _purpose: &Option<RawEncodePurpose>) -> Result<usize, BuckyError> {
-        Ok(<u32 as RawFixedBytes>::raw_bytes().unwrap())
-    }
-
-    fn raw_encode<'a>(
-        &self,
-        buf: &'a mut [u8],
-        purpose: &Option<RawEncodePurpose>,
-    ) -> Result<&'a mut [u8], BuckyError> {
-        self.0.raw_encode(buf, purpose)
-    }
-}
-
-impl<'de> RawDecode<'de> for TempSeq {
-    fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), BuckyError> {
-        u32::raw_decode(buf).map(|(n, buf)| (Self(n), buf))
-    }
-}
-
 pub struct TempSeqGenerator {
     cur: AtomicU32,
 }
@@ -193,7 +108,7 @@ impl From<TempSeq> for TempSeqGenerator {
 
 impl TempSeqGenerator {
     pub fn new() -> Self {
-        let now = TempSeq::now(bucky_time_now());
+        let now = TempSeq::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
         Self {
             cur: AtomicU32::new(now),
         }
@@ -211,7 +126,7 @@ impl TempSeqGenerator {
 
 pub type Timestamp = u64;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(RawEncode, RawDecode, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct IncreaseId(u32);
 
 impl std::fmt::Display for IncreaseId {
@@ -233,26 +148,6 @@ impl IncreaseId {
 
     pub fn is_valid(&self) -> bool {
         *self != Self::invalid()
-    }
-}
-
-impl RawEncode for IncreaseId {
-    fn raw_measure(&self, _purpose: &Option<RawEncodePurpose>) -> Result<usize, BuckyError> {
-        Ok(<u32 as RawFixedBytes>::raw_bytes().unwrap())
-    }
-
-    fn raw_encode<'a>(
-        &self,
-        buf: &'a mut [u8],
-        purpose: &Option<RawEncodePurpose>,
-    ) -> Result<&'a mut [u8], BuckyError> {
-        self.0.raw_encode(buf, purpose)
-    }
-}
-
-impl<'de> RawDecode<'de> for IncreaseId {
-    fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), BuckyError> {
-        u32::raw_decode(buf).map(|(n, buf)| (Self(n), buf))
     }
 }
 
@@ -321,44 +216,5 @@ impl EndpointPair {
 
     pub fn is_reverse_tcp(&self) -> bool {
         self.0.is_tcp() && self.0.addr().port() != 0
-    }
-}
-
-pub struct LocalDevice {
-    device: Device,
-    private_key: PrivateKey,
-    device_id: DeviceId,
-}
-pub type LocalDeviceRef = Arc<LocalDevice>;
-
-impl LocalDevice {
-    pub fn new(device: Device, private_key: PrivateKey) -> Arc<Self> {
-        let device_id = device.desc().device_id();
-        Arc::new(Self { device, device_id, private_key })
-    }
-
-    // pub fn device(&self) -> &Device {
-    //     &self.device
-    // }
-    //
-    // pub fn device_id(&self) -> &DeviceId {
-    //     &self.device_id
-    // }
-    //
-    // pub fn key(&self) -> &PrivateKey {
-    //     &self.private_key
-    // }
-}
-
-impl P2pIdentity for LocalDevice {
-    fn get_identity_cert(&self) -> EncodedP2pIdentityCert {
-        EncodedP2pIdentityCert {
-            ty: P2pIdentityType::CYFS,
-            cert: self.device.to_vec().unwrap(),
-        }
-    }
-
-    fn get_name(&self) -> String {
-        self.device_id.to_string()
     }
 }

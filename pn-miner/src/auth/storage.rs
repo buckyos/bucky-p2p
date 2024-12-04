@@ -7,7 +7,7 @@ use std::{
 use async_std::sync::Arc;
 use bucky_objects::DeviceId;
 use rusqlite;
-use cyfs_p2p::error::BdtResult;
+use p2p_frame::error::BdtResult;
 use cyfs_p2p::pn::service::{ProxyDeviceStub, ProxyServiceEvents};
 
 pub struct Config {
