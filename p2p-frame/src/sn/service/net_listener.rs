@@ -37,16 +37,16 @@ impl NetListener {
             if let PackageCmdCode::Exchange = first_pkg.cmd_code() {
                 let exchg = first_pkg.as_any().downcast_ref::<Exchange>();
                 if let Some(exchg) = exchg {
-                    if !exchg.verify(service.local_device_id()).await {
+                    if !exchg.verify(service.local_identity_id()).await {
                         let error_message = format!("exchange sign-verify failed, from: {:?}.", resp_sender.remote());
                         warn!("{}", error_message);
-                        StatisticManager::get_instance().get_peer_status(service.local_device_id().clone(), bucky_time_now()).recod_error(error_message);
+                        StatisticManager::get_instance().get_peer_status(service.local_identity_id().clone(), bucky_time_now()).recod_error(error_message);
                         return;
                     }
                 } else {
                     let error_message = format!("fetch exchange failed, from: {:?}.", resp_sender.remote());
                     warn!("{}", error_message);
-                    StatisticManager::get_instance().get_peer_status(service.local_device_id().clone(), bucky_time_now()).recod_error(error_message);
+                    StatisticManager::get_instance().get_peer_status(service.local_identity_id().clone(), bucky_time_now()).recod_error(error_message);
                     return;
                 }
                 cmd_pkg = pkg_box.packages().get(1);
@@ -68,14 +68,14 @@ impl NetListener {
                                     if !is_ok {
                                         let error_message = format!("sn-ping verify but unmatch, from {:?}", resp_sender.remote());
                                         warn!("{}", error_message);
-                                        StatisticManager::get_instance().get_peer_status(service.local_device_id().clone(), bucky_time_now()).recod_error(error_message);
+                                        StatisticManager::get_instance().get_peer_status(service.local_identity_id().clone(), bucky_time_now()).recod_error(error_message);
                                         return;
                                     }
                                 },
                                 Err(e) => {
                                     let error_message = format!("sn-ping verify failed, from {:?}, {}", resp_sender.remote(), e);
                                     warn!("{}", error_message);
-                                    StatisticManager::get_instance().get_peer_status(service.local_device_id().clone(), bucky_time_now()).recod_error(error_message);
+                                    StatisticManager::get_instance().get_peer_status(service.local_identity_id().clone(), bucky_time_now()).recod_error(error_message);
                                     return;
                                 }
                             }
@@ -274,7 +274,7 @@ impl NetListener {
     }
     */
 
-    async fn bind(endpoints: &[Endpoint], local_device_id: &DeviceId, key_store: &Keystore) -> (Vec<BdtResult<UdpListener>>, Vec<BdtResult<TcpAcceptor>>) {
+    async fn bind(endpoints: &[Endpoint], local_identity_id: &DeviceId, key_store: &Keystore) -> (Vec<BdtResult<UdpListener>>, Vec<BdtResult<TcpAcceptor>>) {
         let mut udp_futures = vec![];
         let mut tcp_futures = vec![];
 
@@ -288,7 +288,7 @@ impl NetListener {
                     udp_futures.push(UdpListener::bind(endpoint.addr().clone(), key_store.clone()));
                 },
                 Protocol::Tcp => {
-                    tcp_futures.push(TcpAcceptor::bind(local_device_id.clone(), endpoint.addr().clone(), key_store.clone()));
+                    tcp_futures.push(TcpAcceptor::bind(local_identity_id.clone(), endpoint.addr().clone(), key_store.clone()));
                 }
                 Protocol::Unk => {
                     log::info!("sn-miner unknown listener.")
@@ -310,8 +310,8 @@ impl NetListener {
         endpoints_v4: &[Endpoint],
         service: SnService) -> BdtResult<(NetListener, usize, usize)> {
 
-        let (mut udp_results, mut tcp_results) = Self::bind(endpoints_v6, service.local_device_id(), service.key_store()).await;
-        let (mut udp_results_v4, mut tcp_results_v4) = Self::bind(endpoints_v4, service.local_device_id(), service.key_store()).await;
+        let (mut udp_results, mut tcp_results) = Self::bind(endpoints_v6, service.local_identity_id(), service.key_store()).await;
+        let (mut udp_results_v4, mut tcp_results_v4) = Self::bind(endpoints_v4, service.local_identity_id(), service.key_store()).await;
 
         udp_results.append(&mut udp_results_v4);
         tcp_results.append(&mut tcp_results_v4);
@@ -479,14 +479,14 @@ impl UdpListener {
 #[derive(Clone)]
 // 暂时只支持QA
 struct TcpAcceptor {
-    local_device_id: DeviceId,
+    local_identity_id: DeviceId,
     addr: SocketAddr,
     socket: Arc<TcpListener>,
     key_store: Keystore,
 }
 
 impl TcpAcceptor {
-    async fn bind(local_device_id: DeviceId, addr: SocketAddr, key_store: Keystore) -> BdtResult<TcpAcceptor> {
+    async fn bind(local_identity_id: DeviceId, addr: SocketAddr, key_store: Keystore) -> BdtResult<TcpAcceptor> {
         match TcpListener::bind(addr.clone()).await {
             Err(e) => {
                 warn!("tcp-listener({}) bind failed, err: {}", addr, e);
@@ -495,7 +495,7 @@ impl TcpAcceptor {
             Ok(socket) => {
                 info!("tcp-listener({}) bind ok.", addr);
                 Ok(TcpAcceptor {
-                    local_device_id,
+                    local_identity_id,
                     addr,
                     socket: Arc::new(socket),
                     key_store,
@@ -509,7 +509,7 @@ impl TcpAcceptor {
             match self.socket.accept().await {
                 Ok((socket, from_addr)) => {
                     debug!("tcp-listener({}) accept a stream, will read the first package, from {:?}", self.addr, from_addr);
-                    match AcceptInterface::accept(socket.clone(), &self.local_device_id,&self.key_store, Duration::from_secs(2)).await {
+                    match AcceptInterface::accept(socket.clone(), &self.local_identity_id,&self.key_store, Duration::from_secs(2)).await {
                         Ok((interface, first_box)) => {
                             break Ok((first_box, MessageSender::Tcp(TcpSender {
                                 handle: interface.into()
@@ -543,16 +543,16 @@ impl TcpAcceptor {
 
 pub struct UdpSender {
     handle: Arc<UdpInterface>,
-    remote_device_id: DeviceId,
+    remote_identity_id: DeviceId,
     key: MixAesKey,
     to_addr: SocketAddr,
 }
 
 impl UdpSender {
-    fn new(handle: Arc<UdpInterface>, remote_device_id: DeviceId, key: MixAesKey, to_addr: SocketAddr) -> UdpSender {
+    fn new(handle: Arc<UdpInterface>, remote_identity_id: DeviceId, key: MixAesKey, to_addr: SocketAddr) -> UdpSender {
         UdpSender {
             handle,
-            remote_device_id,
+            remote_identity_id,
             key,
             to_addr,
         }
@@ -561,7 +561,7 @@ impl UdpSender {
 
 impl UdpSender {
     pub fn box_pkg(&self, pkg: DynamicPackage) -> PackageBox {
-        let mut package_box = PackageBox::encrypt_box(self.remote_device_id.clone(), self.key.clone());
+        let mut package_box = PackageBox::encrypt_box(self.remote_identity_id.clone(), self.key.clone());
         package_box.append(vec![pkg]);
         package_box
     }

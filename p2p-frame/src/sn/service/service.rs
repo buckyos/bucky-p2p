@@ -12,7 +12,7 @@ use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
 use crate::error::{into_bdt_err, BdtErrorCode, BdtResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
@@ -30,7 +30,7 @@ use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConn
 pub struct SnService {
     seq_generator: TempSeqGenerator,
     device_cache: Arc<DeviceCache>,
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     stopped: AtomicBool,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
 
@@ -45,7 +45,7 @@ pub type SnServiceRef = Arc<SnService>;
 
 impl SnService {
     pub async fn new(
-        local_device: LocalDeviceRef,
+        local_identity: P2pIdentityRef,
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
@@ -55,18 +55,18 @@ impl SnService {
             capacity: 10240,
         }, None));
         let cert_resolver = TlsServerCertResolver::new();
-        cert_resolver.add_device(local_device.clone());
+        cert_resolver.add_device(local_identity.clone());
         let net_listener = NetListener::open(
             device_cache.clone(),
             cert_resolver,
             cert_factory.clone(),
-            local_device.endpoints().as_slice(),
+            local_identity.endpoints().as_slice(),
             None,
             Duration::from_secs(30),
         ).await.unwrap();
         let service = SnService {
             seq_generator: TempSeqGenerator::new(),
-            local_device: local_device.clone(),
+            local_identity: local_identity.clone(),
             stopped: AtomicBool::new(false),
             peer_mgr: PeerManager::new(),
             call_stub: CallStub::new(),
@@ -99,7 +99,7 @@ impl SnService {
                     }
                 }).await {
                     Ok(conn) => {
-                        let peer_desc = this.device_cache.get(conn.remote_device_id()).await;
+                        let peer_desc = this.device_cache.get(conn.remote_identity_id()).await;
                         if peer_desc.is_some() {
                             this.peer_mgr.add_peer_connection(peer_desc.unwrap(), conn);
                         }
@@ -142,8 +142,8 @@ impl SnService {
         self.stopped.load(atomic::Ordering::Relaxed)
     }
 
-    pub fn local_device_id(&self) -> P2pId {
-        self.local_device.get_id()
+    pub fn local_identity_id(&self) -> P2pId {
+        self.local_identity.get_id()
     }
 
     fn peer_manager(&self) -> &PeerManagerRef {
@@ -316,7 +316,7 @@ impl SnService {
                             let mut called_req = SnCalled {
                                 seq: called_seq,
                                 to_peer_id: call_req.to_peer_id.clone(),
-                                sn_peer_id: self.local_device_id().clone(),
+                                sn_peer_id: self.local_identity_id().clone(),
                                 peer_info: from_peer_desc.get_encoded_cert().unwrap(),
                                 tunnel_id: call_req.tunnel_id,
                                 call_send_time: call_req.send_time,
@@ -359,7 +359,7 @@ impl SnService {
 
                     SnCallResp {
                         seq: call_req.seq,
-                        sn_peer_id: self.local_device_id().clone(),
+                        sn_peer_id: self.local_identity_id().clone(),
                         result: BdtErrorCode::Ok.into_u8(),
                         to_peer_info: Some(to_peer_cache.desc.get_encoded_cert().unwrap()),
                     }
@@ -368,7 +368,7 @@ impl SnService {
 
                     SnCallResp {
                         seq: call_req.seq,
-                        sn_peer_id: self.local_device_id().clone(),
+                        sn_peer_id: self.local_identity_id().clone(),
                         result: BdtErrorCode::NotFound.into_u8(),
                         to_peer_info: None,
                     }
@@ -377,7 +377,7 @@ impl SnService {
                 warn!("{} to-peer not found.", log_key);
                 SnCallResp {
                     seq: call_req.seq,
-                    sn_peer_id: self.local_device_id().clone(),
+                    sn_peer_id: self.local_identity_id().clone(),
                     result: BdtErrorCode::NotFound.into_u8(),
                     to_peer_info: None,
                 }
@@ -414,7 +414,7 @@ impl SnService {
         let conn = self.peer_mgr.find_connection(*conn_id);
         assert!(conn.is_some());
         let mut peer_conn = conn.as_ref().unwrap().lock().await;
-        log::info!("report sn from {}.", peer_conn.remote_device_id().to_string());
+        log::info!("report sn from {}.", peer_conn.remote_identity_id().to_string());
         if report_sn.peer_info.is_some() {
 
         }
@@ -429,7 +429,7 @@ impl SnService {
         remote_ep.set_area(EndpointArea::Wan);
         if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::ReportSnResp, ReportSnResp {
             seq: report_sn.seq,
-            sn_peer_id: self.local_device_id().clone(),
+            sn_peer_id: self.local_identity_id().clone(),
             result: BdtErrorCode::Ok.into_u8(),
             peer_info: None,
             end_point_array: vec![remote_ep],
@@ -480,7 +480,7 @@ impl SnService {
         let conn = self.peer_mgr.find_connection(*conn_id);
         assert!(conn.is_some());
         let mut peer_conn = conn.as_ref().unwrap().lock().await;
-        log::info!("query sn from {}.", peer_conn.remote_device_id().to_string());
+        log::info!("query sn from {}.", peer_conn.remote_identity_id().to_string());
         if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQueryResp, resp)).await {
             log::error!("send query-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
         }

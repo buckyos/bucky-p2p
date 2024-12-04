@@ -12,7 +12,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{bdt_err, into_bdt_err, BdtErrorCode, BdtResult};
 use crate::runtime;
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCalled, SnCalledResp};
 use crate::sn::service::PeerConnection;
@@ -50,7 +50,7 @@ pub struct SNServiceState {
 pub struct SNClientService {
     net_manager: NetManagerRef,
     sn_list: Vec<P2pIdentityCertRef>,
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     gen_seq: Arc<TempSeqGenerator>,
     ping_timeout: Duration,
     call_timeout: Duration,
@@ -64,7 +64,7 @@ pub type SNClientServiceRef = Arc<SNClientService>;
 
 impl Drop for SNClientService {
     fn drop(&mut self) {
-        log::info!("SNClientService drop.device = {}", self.local_device.get_id());
+        log::info!("SNClientService drop.device = {}", self.local_identity.get_id());
     }
 
 }
@@ -72,7 +72,7 @@ impl Drop for SNClientService {
 impl SNClientService {
     pub fn new(net_manager: NetManagerRef,
                sn_list: Vec<P2pIdentityCertRef>,
-               local_device: LocalDeviceRef,
+               local_identity: P2pIdentityRef,
                gen_seq: Arc<TempSeqGenerator>,
                cert_factory: P2pIdentityCertFactoryRef,
                ping_timeout: Duration,
@@ -81,7 +81,7 @@ impl SNClientService {
         Arc::new(Self {
             net_manager,
             sn_list,
-            local_device,
+            local_identity,
             gen_seq,
             ping_timeout,
             call_timeout,
@@ -178,7 +178,7 @@ impl SNClientService {
         let sn_peer_id = sn_called.sn_peer_id.clone();
         let to_peer_id = sn_called.to_peer_id.clone();
 
-        let resp = if to_peer_id == self.local_device.get_id() {
+        let resp = if to_peer_id == self.local_identity.get_id() {
             if listener.is_some() {
                 match listener.as_ref().unwrap().on_called(sn_called).await {
                     Ok(_) => {
@@ -369,8 +369,8 @@ impl SNClientService {
 
     async fn create_connection(self: &Arc<Self>, local_ep: Endpoint, quic_ep: quinn::Endpoint, sn: &P2pIdentityCertRef, sn_ep: &Endpoint) -> BdtResult<PeerConnection> {
         log::info!("connect to sn: {} sn_ep: {}", sn.get_id(), sn_ep);
-        let client_key = self.local_device.get_encoded_identity()?;
-        let client_cert = self.local_device.get_identity_cert()?.get_encoded_cert()?;
+        let client_key = self.local_identity.get_encoded_identity()?;
+        let client_cert = self.local_identity.get_identity_cert()?.get_encoded_cert()?;
         let mut config =
             rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
                 .with_protocol_versions(&[&TLS13])
@@ -392,7 +392,7 @@ impl SNClientService {
             .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "connect to sn failed"))?;
 
         let conn = conning.await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "connect to sn failed"))?;
-        let quic_socket = QuicSocket::new(conn, self.local_device.get_id(), sn.get_id(), local_ep, sn_ep.clone());
+        let quic_socket = QuicSocket::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
         let conn_id = self.gen_seq.generate();
         let this = self.clone();
         let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
@@ -487,9 +487,9 @@ impl SNClientService {
             protocol_version: 0,
             stack_version: 0,
             seq,
-            sn_peer_id: conn.remote_device_id().clone(),
-            from_peer_id: Some(self.local_device.get_id()),
-            peer_info: Some(self.local_device.get_identity_cert()?.get_encoded_cert()?),
+            sn_peer_id: conn.remote_identity_id().clone(),
+            from_peer_id: Some(self.local_identity.get_id()),
+            peer_info: Some(self.local_identity.get_identity_cert()?.get_encoded_cert()?),
             send_time: bucky_time_now(),
             contract_id: None,
             receipt: None,
@@ -527,10 +527,10 @@ impl SNClientService {
                 tunnel_id,
                 sn_peer_id: sn.get_id(),
                 to_peer_id: remote.clone(),
-                from_peer_id: self.local_device.get_id().clone(),
+                from_peer_id: self.local_identity.get_id().clone(),
                 reverse_endpoint_array: reverse_endpoints.map(|ep_list| Vec::from(ep_list)),
                 active_pn_list: None,
-                peer_info: Some(self.local_device.get_identity_cert()?.get_encoded_cert()?),
+                peer_info: Some(self.local_identity.get_identity_cert()?.get_encoded_cert()?),
                 send_time: bucky_time_now(),
                 payload: payload_pkg.clone(),
                 is_always_call: false,

@@ -45,7 +45,7 @@ struct ManagerImpl {
     call: CallManager,
     key_store: Arc<Keystore>,
     ping_config: PingConfig,
-    local_device: Device,
+    local_identity: Device,
     called_event_listener: Arc<dyn PingClientCalledEvent>,
     processor: RecieveProcessorRef,
 }
@@ -61,7 +61,7 @@ impl ClientManager {
         key_store: Arc<Keystore>,
         call_config: CallConfig,
         net_listener: NetListener,
-        local_device: Device,
+        local_identity: Device,
         atomic_interval: Duration,
         ping_config: PingConfig,
         called_event_listener: Arc<dyn PingClientCalledEvent>,) -> Self {
@@ -69,14 +69,14 @@ impl ClientManager {
         let cache = Arc::new(SnCache::new());
         let ping = PingClients::new(key_store.clone(),
                                     cache.clone(),
-                                    &local_device.desc().device_id(),
+                                    &local_identity.desc().device_id(),
                                     gen_seq.clone(),
                                     net_listener,
                                     vec![],
-                                    local_device.clone(),
+                                    local_identity.clone(),
                                     ping_config.clone(),
                                     called_event_listener.clone());
-        let call = CallManager::create(proxy_manager, cache.clone(), device_cache, local_device.clone(), net_manager, key_store.clone(), call_config);
+        let call = CallManager::create(proxy_manager, cache.clone(), device_cache, local_identity.clone(), net_manager, key_store.clone(), call_config);
         let manager = Self(Arc::new(ManagerImpl {
             cache,
             ping: RwLock::new(ping),
@@ -84,7 +84,7 @@ impl ClientManager {
             gen_seq,
             key_store,
             ping_config,
-            local_device,
+            local_identity,
             called_event_listener,
         }));
 
@@ -119,7 +119,7 @@ impl ClientManager {
                     let to_start = PingClients::new(
                         self.0.key_store.clone(),
                         self.0.cache.clone(),
-                        &self.0.local_device.desc().device_id(),
+                        &self.0.local_identity.desc().device_id(),
                         self.0.gen_seq.clone(),
                         to_close.net_listener().reset(None),
                         to_close.sn_list().clone(),
@@ -152,7 +152,7 @@ impl ClientManager {
             let to_start = PingClients::new(
                 self.0.key_store.clone(),
                 self.0.cache.clone(),
-                &self.0.local_device.desc().device_id(),
+                &self.0.local_identity.desc().device_id(),
                 self.0.gen_seq.clone(),
                 to_close.net_listener().reset(None),
                 sn_list,
@@ -167,14 +167,14 @@ impl ClientManager {
         to_start
     }
 
-    pub fn reset_endpoints(&self, net_listener: NetListenerRef, local_device: Device) -> PingClients {
+    pub fn reset_endpoints(&self, net_listener: NetListenerRef, local_identity: Device) -> PingClients {
         let (to_start, to_close) = {
             let mut ping = self.0.ping.write().unwrap();
             let to_close = ping.clone();
             let to_start = to_close.reset(self.0.key_store.clone(),
                                           self.0.cache.clone(),
                                           net_listener,
-                                          local_device,
+                                          local_identity,
                                           self.0.ping_config.clone(),
                                           self.0.called_event_listener.clone());
             *ping = to_start.clone();

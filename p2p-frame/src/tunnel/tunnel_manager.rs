@@ -8,7 +8,7 @@ use bucky_time::bucky_time_now;
 use notify_future::NotifyFuture;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcherRef, ReceiveProcessor};
 use crate::runtime;
@@ -93,9 +93,9 @@ impl Tunnels {
                                     stream.sequence(),
                                     stream.session_id(),
                                     stream.port(),
-                                    stream.remote_device_id().to_string(),
+                                    stream.remote_identity_id().to_string(),
                                     stream.remote_endpoint().to_string(),
-                                    stream.local_device_id().to_string(),
+                                    stream.local_identity_id().to_string(),
                                     stream.local_endpoint().to_string());
 
                                     listener.on_new_tunnel_stream(stream).await;
@@ -103,9 +103,9 @@ impl Tunnels {
                             TunnelInstance::Datagram(datagram) => {
                                 log::info!("accept datagram tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
                                     datagram.sequence(),
-                                    datagram.remote_device_id().to_string(),
+                                    datagram.remote_identity_id().to_string(),
                                     datagram.remote_endpoint().to_string(),
-                                    datagram.local_device_id().to_string(),
+                                    datagram.local_identity_id().to_string(),
                                     datagram.local_endpoint().to_string());
 
                                     listener.on_new_tunnel_datagram(datagram).await;
@@ -319,7 +319,7 @@ pub struct TunnelManager {
     net_manager: NetManagerRef,
     receive_dispatcher: ReceiveDispatcherRef,
     sn_service: SNClientServiceRef,
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     protocol_version: u8,
     stack_version: u32,
     listener: TunnelManagerEventRef,
@@ -338,7 +338,7 @@ impl TunnelManager {
         net_manager: NetManagerRef,
         receive_dispatcher: ReceiveDispatcherRef,
         sn_service: SNClientServiceRef,
-        local_device: LocalDeviceRef,
+        local_identity: P2pIdentityRef,
         device_finder: DeviceFinderRef,
         cert_factory: P2pIdentityCertFactoryRef,
         protocol_version: u8,
@@ -360,7 +360,7 @@ impl TunnelManager {
             net_manager,
             receive_dispatcher,
             sn_service,
-            local_device,
+            local_identity,
             protocol_version,
             stack_version,
             listener: TunnelManagerEvent::new(),
@@ -433,15 +433,15 @@ impl TunnelManager {
     }
 
     async fn on_new_tcp_tunnel(&self, socket: TCPSocket) -> BdtResult<()> {
-        let remote_id = socket.remote_device_id().clone();
+        let remote_id = socket.remote_identity_id().clone();
         let remote_ep = socket.remote().clone();
-        let local_id = socket.local_device_id().clone();
+        let local_id = socket.local_identity_id().clone();
         let local_ep = socket.local().clone();
         let net_manager = self.net_manager.clone();
         let sn_service = self.sn_service.clone();
         let protocol_version = self.protocol_version;
         let stack_version = self.stack_version;
-        let local_device = self.local_device.clone();
+        let local_identity = self.local_identity.clone();
         let conn_timeout = self.conn_timeout;
         let idle_timeout = self.idle_timeout;
 
@@ -449,7 +449,7 @@ impl TunnelManager {
 
         let tunnel_conn = Box::new(TcpTunnelConnection::new(
             TempSeq::from(0),
-            self.local_device.clone(),
+            self.local_identity.clone(),
             remote_id.clone(),
             socket.remote().clone(),
             self.conn_timeout,
@@ -481,7 +481,7 @@ impl TunnelManager {
                                 stack_version,
                                 remote_id.clone(),
                                 vec![],
-                                local_device.clone(),
+                                local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
                                 listen_ports.clone(),
@@ -500,7 +500,7 @@ impl TunnelManager {
                                 stack_version,
                                 remote_id.clone(),
                                 vec![],
-                                local_device.clone(),
+                                local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
                                 listen_ports.clone(),
@@ -532,15 +532,15 @@ impl TunnelManager {
     }
 
     async fn on_new_quic_tunnel(&self, socket: QuicSocket) -> BdtResult<()> {
-        let remote_id = socket.remote_device_id().clone();
+        let remote_id = socket.remote_identity_id().clone();
         let remote_ep = socket.remote().clone();
-        let local_id = socket.local_device_id().clone();
+        let local_id = socket.local_identity_id().clone();
         let local_ep = socket.local().clone();
         let net_manager = self.net_manager.clone();
         let sn_service = self.sn_service.clone();
         let protocol_version = self.protocol_version;
         let stack_version = self.stack_version;
-        let local_device = self.local_device.clone();
+        let local_identity = self.local_identity.clone();
         let conn_timeout = self.conn_timeout;
         let idle_timeout = self.idle_timeout;
         let listen_ports = self.listen_ports.clone();
@@ -548,7 +548,7 @@ impl TunnelManager {
         let tunnel_conn = Box::new(QuicTunnelConnection::new(
             self.net_manager.clone(),
             TempSeq::from(0),
-            self.local_device.clone(),
+            self.local_identity.clone(),
             remote_id.clone(),
             remote_ep,
             self.conn_timeout,
@@ -583,7 +583,7 @@ impl TunnelManager {
                                 stack_version,
                                 remote_id.clone(),
                                 vec![],
-                                local_device.clone(),
+                                local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
                                 listen_ports.clone(),
@@ -602,7 +602,7 @@ impl TunnelManager {
                                 stack_version,
                                 remote_id.clone(),
                                 vec![],
-                                local_device.clone(),
+                                local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
                                 listen_ports.clone(),
@@ -677,7 +677,7 @@ impl TunnelManager {
                 self.stack_version,
                 remote.get_id(),
                 remote.endpoints(),
-                self.local_device.clone(),
+                self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.listen_ports.clone(),
@@ -705,7 +705,7 @@ impl TunnelManager {
                 self.stack_version,
                 remote_id.clone(),
                 remote.endpoints(),
-                self.local_device.clone(),
+                self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.listen_ports.clone(),
@@ -734,7 +734,7 @@ impl TunnelManager {
                 self.stack_version,
                 remote.get_id(),
                 remote.endpoints(),
-                self.local_device.clone(),
+                self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.listen_ports.clone(),
@@ -762,7 +762,7 @@ impl TunnelManager {
                 self.stack_version,
                 remote_id.clone(),
                 remote.endpoints(),
-                self.local_device.clone(),
+                self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.listen_ports.clone(),
@@ -799,7 +799,7 @@ impl TunnelManager {
                 self.stack_version,
                 from_device_id.clone(),
                 eps.clone(),
-                self.local_device.clone(),
+                self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.listen_ports.clone(),
@@ -810,7 +810,7 @@ impl TunnelManager {
                 if ep.is_tcp() {
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                         sn_called.tunnel_id,
-                        self.local_device.clone(),
+                        self.local_identity.clone(),
                         from_device_id.clone(),
                         ep.clone(),
                         self.conn_timeout,
@@ -829,7 +829,7 @@ impl TunnelManager {
                         let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                             self.net_manager.clone(),
                             sn_called.tunnel_id,
-                            self.local_device.clone(),
+                            self.local_identity.clone(),
                             from_device_id.clone(),
                             ep.clone(),
                             self.conn_timeout,
@@ -875,7 +875,7 @@ impl TunnelManager {
                 self.stack_version,
                 self.cert_factory.create(&sn_called.peer_info)?.get_id(),
                 eps.clone(),
-                self.local_device.clone(),
+                self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.listen_ports.clone(),
@@ -887,7 +887,7 @@ impl TunnelManager {
                 if ep.is_tcp() {
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                         sn_called.tunnel_id,
-                        self.local_device.clone(),
+                        self.local_identity.clone(),
                         from_device_id.clone(),
                         ep.clone(),
                         self.conn_timeout,
@@ -907,7 +907,7 @@ impl TunnelManager {
                         let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                             self.net_manager.clone(),
                             sn_called.tunnel_id,
-                            self.local_device.clone(),
+                            self.local_identity.clone(),
                             from_device_id.clone(),
                             ep.clone(),
                             self.conn_timeout,
@@ -953,7 +953,7 @@ impl TunnelManager {
 
 impl Drop for TunnelManager {
     fn drop(&mut self) {
-        log::info!("tunnel manager drop.device {}", self.local_device.get_id().to_string());
+        log::info!("tunnel manager drop.device {}", self.local_identity.get_id().to_string());
         self.clear_handle.abort();
         Executor::block_on(self.close_all_tunnel());
     }

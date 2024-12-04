@@ -31,7 +31,7 @@ struct SessionImpl {
     config: Config,
     with_device: bool,
     local: Interface,
-    local_device: Device,
+    local_identity: Device,
     gen_seq: Arc<TempSeqGenerator>,
     sn_id: DeviceId,
     sn_desc: DeviceDesc,
@@ -68,7 +68,7 @@ enum SessionState {
 pub struct UdpSesssionParams {
     pub config: Config,
     pub local: Interface,
-    pub local_device: Device,
+    pub local_identity: Device,
     pub with_device: bool,
     pub sn_desc: DeviceDesc,
     pub sn_endpoints: Vec<Endpoint>,
@@ -84,7 +84,7 @@ impl UdpPingSession {
             gen_seq,
             config: params.config,
             local: params.local,
-            local_device: params.local_device,
+            local_identity: params.local_identity,
             with_device: params.with_device,
             sn_id: params.sn_desc.device_id(),
             sn_desc: params.sn_desc,
@@ -99,9 +99,9 @@ impl UdpPingSession {
             protocol_version: 0,
             stack_version: 0,
             seq,
-            from_peer_id: Some(self.0.local_device.desc().device_id()),
+            from_peer_id: Some(self.0.local_identity.desc().device_id()),
             sn_peer_id: self.sn().clone(),
-            peer_info: if self.0.with_device { Some(self.0.local_device.clone()) } else { None },
+            peer_info: if self.0.with_device { Some(self.0.local_identity.clone()) } else { None },
             send_time: bucky_time_now(),
             contract_id: None,
             receipt: None
@@ -115,7 +115,7 @@ impl UdpPingSession {
             key_stub.key.clone());
 
         if let keystore::EncryptedKey::Unconfirmed(key_encrypted) = key_stub.encrypted {
-            let mut exchg = Exchange::from((&ping_pkg, self.0.local_device.clone(), key_encrypted, key_stub.key.mix_key));
+            let mut exchg = Exchange::from((&ping_pkg, self.0.local_identity.clone(), key_encrypted, key_stub.key.mix_key));
             let _ = exchg.sign(self.0.key_store.signer()).await;
             pkg_box.push(exchg);
         }
@@ -172,13 +172,13 @@ impl PingSession for UdpPingSession {
         Box::new(self.clone())
     }
 
-    fn reset(&self, local_device: Option<Device>, sn_endpoint: Option<Endpoint>) -> Box<dyn PingSession> {
+    fn reset(&self, local_identity: Option<Device>, sn_endpoint: Option<Endpoint>) -> Box<dyn PingSession> {
         Self(Arc::new(SessionImpl {
             key_store: self.0.key_store.clone(),
             config: self.0.config.clone(),
-            with_device: local_device.is_some(),
+            with_device: local_identity.is_some(),
             local: self.0.local.clone(),
-            local_device: local_device.unwrap_or(self.0.local_device.clone()),
+            local_identity: local_identity.unwrap_or(self.0.local_identity.clone()),
             gen_seq: self.0.gen_seq.clone(),
             sn_id: self.0.sn_id.clone(),
             sn_desc: self.0.sn_desc.clone(),

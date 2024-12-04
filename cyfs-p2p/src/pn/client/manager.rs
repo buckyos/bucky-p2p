@@ -110,7 +110,7 @@ impl ProxyManager {
 
     // fn on_ack_proxy_pkg(&self,
     //                     resp_sender: &mut Box<dyn RespSender>,
-    //                     remote_device_id: &DeviceId,
+    //                     remote_identity_id: &DeviceId,
     //                     key: &MixAesKey,
     //                     first_package: &DynamicPackage) -> BdtResult<()> {
     //     if first_package.cmd_code() == PackageCmdCode::AckProxy {

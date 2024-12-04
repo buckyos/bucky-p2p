@@ -37,7 +37,7 @@ struct ManagerImpl {
     proxy_manager: Arc<ProxyManager>,
     sn_cache: Arc<SnCache>,
     device_cache: Arc<DeviceCache>,
-    local_device: Device,
+    local_identity: Device,
     net_manager: Arc<NetManager>,
     key_store: Arc<Keystore>,
     call_config: CallConfig,
@@ -48,7 +48,7 @@ pub struct CallManager(Arc<ManagerImpl>);
 
 impl std::fmt::Display for CallManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CallManager{{local:{}}}", self.0.local_device.desc().device_id())
+        write!(f, "CallManager{{local:{}}}", self.0.local_identity.desc().device_id())
     }
 }
 
@@ -57,7 +57,7 @@ impl CallManager {
         proxy_manager: Arc<ProxyManager>,
         sn_cache: Arc<SnCache>,
         device_cache: Arc<DeviceCache>,
-        local_device: Device,
+        local_identity: Device,
         net_manager: Arc<NetManager>,
         key_store: Arc<Keystore>,
         call_config: CallConfig,) -> Self {
@@ -67,7 +67,7 @@ impl CallManager {
             proxy_manager,
             sn_cache,
             device_cache,
-            local_device,
+            local_identity,
             net_manager,
             key_store,
             call_config,
@@ -93,7 +93,7 @@ impl CallManager {
                 stack_version: 0,
                 seq: seq,
                 to_peer_id: remote.clone(),
-                from_peer_id: self.0.local_device.desc().device_id(),
+                from_peer_id: self.0.local_identity.desc().device_id(),
                 sn_peer_id: sn_id.clone(),
                 reverse_endpoint_array: reverse_endpoints.map(|ep_list| Vec::from(ep_list)),
                 active_pn_list: if active_pn_list.len() > 0 {
@@ -101,7 +101,7 @@ impl CallManager {
                 } else {
                     None
                 },
-                peer_info: Some(self.0.local_device.clone()),
+                peer_info: Some(self.0.local_identity.clone()),
                 payload: SizedOwnedData::from(vec![]),
                 send_time: 0,
                 is_always_call: false
@@ -110,7 +110,7 @@ impl CallManager {
             let session = CallSession::new(self.0.key_store.clone(),
                                            self.0.device_cache.clone(),
                                            self.0.sn_cache.clone(),
-                                           self.0.local_device.desc().device_id(),
+                                           self.0.local_identity.desc().device_id(),
                                            call,
                                            self.0.call_config.clone()).await;
             let net_listener = self.0.net_manager.listener();
@@ -399,7 +399,7 @@ struct SessionImpl {
     sn: DeviceId,
     config: CallConfig,
     state: RwLock<SessionStateImpl>,
-    local_device_id: DeviceId,
+    local_identity_id: DeviceId,
     sn_cache: Arc<SnCache>,
     key_store: Arc<Keystore>,
     device_cache: Arc<DeviceCache>,
@@ -421,13 +421,13 @@ impl WeakSession {
 
 impl std::fmt::Display for CallSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CallSession{{local:{}, sn:{}}}", self.0.local_device_id, self.sn())
+        write!(f, "CallSession{{local:{}, sn:{}}}", self.0.local_identity_id, self.sn())
     }
 }
 
 impl std::fmt::Debug for CallSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CallSession{{local:{}, sn:{}}}", self.0.local_device_id, self.sn())
+        write!(f, "CallSession{{local:{}, sn:{}}}", self.0.local_identity_id, self.sn())
     }
 }
 
@@ -437,7 +437,7 @@ impl CallSession {
         WeakSession(Arc::downgrade(&self.0))
     }
 
-    async fn new(key_store: Arc<Keystore>, device_cache: Arc<DeviceCache>, sn_cache: Arc<SnCache>, local_device_id: DeviceId, call: SnCall, config: CallConfig) -> Self {
+    async fn new(key_store: Arc<Keystore>, device_cache: Arc<DeviceCache>, sn_cache: Arc<SnCache>, local_identity_id: DeviceId, call: SnCall, config: CallConfig) -> Self {
         let sn = call.sn_peer_id.clone();
         let key_stub = key_store.create_key(device_cache.get_inner(&sn).unwrap().desc(), true);
         let mut packages = PackageBox::encrypt_box(sn.clone(), key_stub.key.clone());
@@ -458,7 +458,7 @@ impl CallSession {
                 start_at: 0,
                 state: SessionState::Init,
             }),
-            local_device_id,
+            local_identity_id,
             sn_cache,
             key_store,
             device_cache,

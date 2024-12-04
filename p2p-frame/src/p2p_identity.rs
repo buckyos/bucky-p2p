@@ -38,8 +38,8 @@ pub trait P2pIdentity: 'static + Send + Sync {
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityRef;
 }
 
+// pub type P2pIdentityRef = Arc<dyn P2pIdentity>;
 pub type P2pIdentityRef = Arc<dyn P2pIdentity>;
-pub type LocalDeviceRef = Arc<dyn P2pIdentity>;
 
 pub trait P2pIdentityFactory: 'static + Send + Sync {
     fn create(&self, id: &EncodedP2pIdentity) -> BdtResult<P2pIdentityRef>;

@@ -210,11 +210,11 @@ impl TCPListener {
             return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
         }
 
-        let local_device_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "decode cert failed."))?;
+        let local_identity_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "decode cert failed."))?;
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
         self.device_cache.add(&remote_id, &remote_device);
-        Ok(TCPSocket::new(runtime::TlsStream::from(tls_stream), local_device_id, remote_id, local, remote))
+        Ok(TCPSocket::new(runtime::TlsStream::from(tls_stream), local_identity_id, remote_id, local, remote))
     }
 
     pub fn start(self: &Arc<Self>) {

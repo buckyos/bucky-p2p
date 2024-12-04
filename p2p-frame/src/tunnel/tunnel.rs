@@ -7,7 +7,7 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
 use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea, Protocol};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
@@ -52,7 +52,7 @@ pub struct Tunnel {
     state: Mutex<TunnelState>,
     protocol_version: u8,
     stack_version: u32,
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     remote_id: P2pId,
     remote_eps: Vec<Endpoint>,
     conn_timeout: Duration,
@@ -70,7 +70,7 @@ impl Tunnel {
         stack_version: u32,
         remote_id: P2pId,
         remote_eps: Vec<Endpoint>,
-        local_device: LocalDeviceRef,
+        local_identity: P2pIdentityRef,
         conn_timeout: Duration,
         idle_timeout: Duration,
         listen_ports: TunnelListenPortsRef,
@@ -83,7 +83,7 @@ impl Tunnel {
             state: Mutex::new(TunnelState { status: TunnelStatus::Connecting }),
             protocol_version,
             stack_version,
-            local_device,
+            local_identity,
             remote_id,
             remote_eps,
             conn_timeout,
@@ -151,7 +151,7 @@ impl Tunnel {
             if ep.is_tcp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
                 let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                     self.sequence,
-                    self.local_device.clone(),
+                    self.local_identity.clone(),
                     self.remote_id.clone(),
                     ep.clone(),
                     self.conn_timeout,
@@ -170,7 +170,7 @@ impl Tunnel {
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                         self.net_manager.clone(),
                         self.sequence,
-                        self.local_device.clone(),
+                        self.local_identity.clone(),
                         self.remote_id.clone(),
                         ep.clone(),
                         self.conn_timeout,
@@ -235,7 +235,7 @@ impl Tunnel {
             if ep.is_tcp() && (is_lan || ep.is_static_wan()) && ep.addr().is_ipv4() {
                 let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
                     self.sequence,
-                    self.local_device.clone(),
+                    self.local_identity.clone(),
                     self.remote_id.clone(),
                     ep.clone(),
                     self.conn_timeout,
@@ -256,7 +256,7 @@ impl Tunnel {
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(QuicTunnelConnection::new(
                         self.net_manager.clone(),
                         self.sequence,
-                        self.local_device.clone(),
+                        self.local_identity.clone(),
                         self.remote_id.clone(),
                         ep.clone(),
                         self.conn_timeout,
@@ -316,9 +316,9 @@ impl Tunnel {
             stream.sequence(),
             stream.session_id(),
             vport,
-            stream.remote_device_id().to_string(),
+            stream.remote_identity_id().to_string(),
             stream.remote_endpoint().to_string(),
-            stream.local_device_id().to_string(),
+            stream.local_identity_id().to_string(),
             stream.local_endpoint().to_string());
 
         Ok(stream)
@@ -333,9 +333,9 @@ impl Tunnel {
 
         log::info!("Open stream tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
             datagram.sequence(),
-            datagram.remote_device_id().to_string(),
+            datagram.remote_identity_id().to_string(),
             datagram.remote_endpoint().to_string(),
-            datagram.local_device_id().to_string(),
+            datagram.local_identity_id().to_string(),
             datagram.local_endpoint().to_string());
 
         Ok(datagram)

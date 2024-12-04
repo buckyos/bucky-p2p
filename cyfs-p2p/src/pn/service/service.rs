@@ -77,12 +77,12 @@ impl std::fmt::Display for Service {
 
 impl Service {
     pub async fn start(
-        local_device: Device,
+        local_identity: Device,
         local_secret: PrivateKey,
         proxy_ports: Vec<(SocketAddr, Option<SocketAddr>)>,
         config: Option<Config>,
         events: Option<Box<dyn ProxyServiceEvents>>) -> BdtResult<Service> {
-        info!("will start pn service device:{}", local_device.desc().device_id());
+        info!("will start pn service device:{}", local_identity.desc().device_id());
 
         let config = config.unwrap_or_default();
 
@@ -93,10 +93,10 @@ impl Service {
             events: events.unwrap_or(Box::new(DefaultEvents {}))
         }));
 
-        service.keystore().add_local_key(local_device.desc().device_id().clone(),
+        service.keystore().add_local_key(local_identity.desc().device_id().clone(),
                                          local_secret,
-                                         local_device.desc().clone());
-        let command_port = local_device.connect_info().endpoints()[0];
+                                         local_identity.desc().clone());
+        let command_port = local_identity.connect_info().endpoints()[0];
 
         let service_impl = unsafe { &mut *(Arc::as_ptr(&service.0) as *mut ServiceImpl) };
         service_impl.command_tunnel = Some(CommandTunnel::open(service.to_weak(), command_port)?);

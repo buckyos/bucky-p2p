@@ -67,7 +67,7 @@ impl std::str::FromStr for SnStatus {
 pub trait PingSession: Send + Sync + std::fmt::Display {
     fn sn(&self) -> &DeviceId;
     fn local(&self) -> Endpoint;
-    fn reset(&self,  local_device: Option<Device>, sn_endpoint: Option<Endpoint>) -> Box<dyn PingSession>;
+    fn reset(&self,  local_identity: Option<Device>, sn_endpoint: Option<Endpoint>) -> Box<dyn PingSession>;
     fn clone_as_ping_session(&self) -> Box<dyn PingSession>;
     async fn wait(&self) -> BdtResult<PingSessionResp>;
     fn stop(&self);
@@ -137,7 +137,7 @@ struct PingClient {
     sn: Device,
     gen_seq: Arc<TempSeqGenerator>,
     net_listener: NetListenerRef,
-    local_device: RwLock<Device>,
+    local_identity: RwLock<Device>,
     state: RwLock<ClientState>,
 
 }
@@ -145,7 +145,7 @@ pub type PingClientRef = Arc<PingClient>;
 
 impl std::fmt::Display for PingClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let device_id = self.local_device.read().unwrap().desc().device_id();
+        let device_id = self.local_identity.read().unwrap().desc().device_id();
         write!(f, "PingClient {{local:{}, sn:{}}}", device_id, self.sn())
     }
 }
@@ -159,7 +159,7 @@ impl PingClient {
         net_listener: NetListenerRef,
         sn_index: usize,
         sn: Device,
-        local_device: Device,
+        local_identity: Device,
     ) -> Arc<Self> {
         let sn_id = sn.desc().device_id();
         key_store.reset_peer(&sn_id);
@@ -173,7 +173,7 @@ impl PingClient {
             sn,
             sn_id,
             sn_index,
-            local_device: RwLock::new(local_device),
+            local_identity: RwLock::new(local_identity),
             state: RwLock::new(ClientState {
                 ipv4: Ipv4ClientState::Init(StateWaiter::new()),
                 ipv6: Ipv6ClientState::None
@@ -184,7 +184,7 @@ impl PingClient {
     pub(crate) fn reset(
         &self,
         net_listener: NetListenerRef,
-        local_device: Device,
+        local_identity: Device,
     ) -> Arc<Self> {
         Arc::new(PingClient {
             key_store,
@@ -195,7 +195,7 @@ impl PingClient {
             sn,
             sn_id,
             sn_index,
-            local_device: RwLock::new(local_device),
+            local_identity: RwLock::new(local_identity),
             state: RwLock::new(ClientState {
                 ipv4: Ipv4ClientState::Init(StateWaiter::new()),
                 ipv6: Ipv6ClientState::None
@@ -207,8 +207,8 @@ impl PingClient {
         Arc::ptr_eq(&self, &other)
     }
 
-    pub fn local_device(&self) -> Device {
-        self.local_device.read().unwrap().clone()
+    pub fn local_identity(&self) -> Device {
+        self.local_identity.read().unwrap().clone()
     }
 
     pub fn stop(&self) {
@@ -280,7 +280,7 @@ impl PingClient {
         let update = self.net_listener().update_outer(&local, &outer);
         if update > UpdateOuterResult::None {
             info!("{} update local {} => {}", self, local, outer);
-            let mut local_dev = self.local_device();
+            let mut local_dev = self.local_identity();
             let device_sn_list = local_dev.mut_connect_info().mut_sn_list();
             device_sn_list.clear();
             device_sn_list.push(self.sn().clone());
@@ -303,7 +303,7 @@ impl PingClient {
 
 
             let updated = {
-                let mut store = self.local_device.write().unwrap();
+                let mut store = self.local_identity.write().unwrap();
                 if store.body().as_ref().unwrap().update_time() < local_dev.body().as_ref().unwrap().update_time() {
                     *store = local_dev;
                     true
@@ -336,7 +336,7 @@ impl PingClient {
             } => {
                 match active {
                     ActiveState::Wait(_, session) => {
-                        let session = session.reset(Some(self.local_device()), None);
+                        let session = session.reset(Some(self.local_identity()), None);
                         *active = ActiveState::FirstTry(session.clone_as_ping_session());
                         {
 
@@ -622,7 +622,7 @@ impl PingClient {
                         let params = UdpSesssionParams {
                             config: self.config.udp.clone(),
                             local: local.clone(),
-                            local_device: self.local_device(),
+                            local_identity: self.local_identity(),
                             with_device: true,
                             sn_desc: self.sn.desc().clone(),
                             sn_endpoints,
@@ -641,7 +641,7 @@ impl PingClient {
                         let params = UdpSesssionParams {
                             config: self.config.udp.clone(),
                             local: local.clone(),
-                            local_device: self.local_device(),
+                            local_identity: self.local_identity(),
                             with_device: false,
                             sn_desc: self.sn.desc().clone(),
                             sn_endpoints,

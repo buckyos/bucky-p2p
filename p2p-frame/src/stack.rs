@@ -5,7 +5,7 @@ use crate::endpoint::Endpoint;
 use crate::error::BdtResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef, P2pIdentityRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef};
 use crate::protocol::v0::SnCalled;
 use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveProcessor, ReceiveProcessorRef};
 use crate::sn::client::{SNClientService, SNClientServiceRef, SNEvent};
@@ -48,7 +48,7 @@ pub async fn init_p2p(
 }
 
 pub struct P2pStack {
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     sn_service: SNClientServiceRef,
     tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
@@ -69,15 +69,15 @@ impl Drop for ReceiveProcessorHolder {
 
 impl P2pStack {
     pub fn new(
-        local_device: LocalDeviceRef,
+        local_identity: P2pIdentityRef,
         sn_service: SNClientServiceRef,
         tunnel_manager: TunnelManagerRef,
         stream_manager: StreamManagerRef,
         net_manager: NetManagerRef,) -> Self {
-        net_manager.add_listen_device(local_device.clone());
-        let device_id = local_device.get_id();
+        net_manager.add_listen_device(local_identity.clone());
+        let device_id = local_identity.get_id();
         Self {
-            local_device,
+            local_identity,
             sn_service,
             tunnel_manager,
             net_manager,
@@ -97,8 +97,8 @@ impl P2pStack {
         &self.tunnel_manager
     }
 
-    pub fn local_device(&self) -> &LocalDeviceRef {
-        &self.local_device
+    pub fn local_identity(&self) -> &P2pIdentityRef {
+        &self.local_identity
     }
 
     pub fn stream_manager(&self) -> &StreamManagerRef {
@@ -112,8 +112,8 @@ impl P2pStack {
 
 impl Drop for P2pStack {
     fn drop(&mut self) {
-        log::info!("P2pStack drop.device = {}", self.local_device.get_id());
-        self.net_manager.remove_listen_device(&self.local_device.get_id());
+        log::info!("P2pStack drop.device = {}", self.local_identity.get_id());
+        self.net_manager.remove_listen_device(&self.local_identity.get_id());
         Executor::block_on(self.sn_service.stop());
     }
 }
@@ -129,7 +129,7 @@ impl TunnelManagerEventListener {
 
 }
 
-pub async fn create_p2p_stack(local_device: P2pIdentityRef,
+pub async fn create_p2p_stack(local_identity: P2pIdentityRef,
                           sn_list: Vec<P2pIdentityCertRef>,
                           device_finder: Option<DeviceFinderRef>,
                           conn_timeout: Duration,
@@ -139,13 +139,13 @@ pub async fn create_p2p_stack(local_device: P2pIdentityRef,
     let gen_seq = Arc::new(TempSeqGenerator::new());
     let mut processor = ReceiveProcessor::new();
     let net_manager = NET_MANAGER.get().unwrap().clone();
-    let device_id = local_device.get_id();
+    let device_id = local_identity.get_id();
 
     let cert_factory = CERT_FACTORY.get().unwrap().clone();
     let sn_service = SNClientService::new(
         net_manager.clone(),
         sn_list,
-        local_device.clone(),
+        local_identity.clone(),
         gen_seq.clone(),
         cert_factory.clone(),
         sn_ping_interval,
@@ -162,7 +162,7 @@ pub async fn create_p2p_stack(local_device: P2pIdentityRef,
         net_manager.clone(),
         RECEIVE_DISPATCHER.get().unwrap().clone(),
         sn_service.clone(),
-        local_device.clone(),
+        local_identity.clone(),
         device_finder,
         cert_factory.clone(),
         0,
@@ -188,10 +188,10 @@ pub async fn create_p2p_stack(local_device: P2pIdentityRef,
     RECEIVE_DISPATCHER.get().unwrap().add_processor(device_id, processor.clone());
     sn_service.start().await;
 
-    let stream_manager = StreamManager::new(local_device.clone(), tunnel_manager.clone());
+    let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());
 
     Ok(Arc::new(P2pStack::new(
-        local_device.clone(),
+        local_identity.clone(),
         sn_service,
         tunnel_manager,
         stream_manager,

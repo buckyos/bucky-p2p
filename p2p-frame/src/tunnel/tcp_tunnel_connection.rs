@@ -11,7 +11,7 @@ use tokio::io::ReadBuf;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::endpoint::Endpoint;
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{Package, PackageCmdCode, PackageHeader, MTU_LARGE};
 use crate::protocol::v0::{AckClose, AckDatagram, AckReverseDatagram, AckReverseStream, AckStream, SynClose, SynDatagram, SynReverseDatagram, SynReverseStream, SynStream};
 use crate::runtime;
@@ -130,7 +130,7 @@ fn create_accept_handle(read: TCPRead,
 
 pub struct TcpTunnelConnectionImpl {
     sequence: TempSeq,
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     remote_id: P2pId,
     remote_ep: Endpoint,
     conn_timeout: Duration,
@@ -150,7 +150,7 @@ pub struct TcpTunnelConnectionImpl {
 impl TcpTunnelConnectionImpl {
     pub fn new(
         sequence: TempSeq,
-        local_device: LocalDeviceRef,
+        local_identity: P2pIdentityRef,
         remote_id: P2pId,
         remote_ep: Endpoint,
         conn_timeout: Duration,
@@ -161,7 +161,7 @@ impl TcpTunnelConnectionImpl {
         cert_factory: P2pIdentityCertFactoryRef,) -> BdtResult<Self> {
         let mut obj = Self {
             sequence,
-            local_device,
+            local_identity,
             remote_id,
             remote_ep,
             conn_timeout,
@@ -306,7 +306,7 @@ pub struct TcpTunnelConnection {
 impl TcpTunnelConnection {
     pub fn new(
         sequence: TempSeq,
-        local_device: LocalDeviceRef,
+        local_identity: P2pIdentityRef,
         remote_id: P2pId,
         remote_ep: Endpoint,
         conn_timeout: Duration,
@@ -317,7 +317,7 @@ impl TcpTunnelConnection {
         cert_factory: P2pIdentityCertFactoryRef, ) -> BdtResult<Self> {
         Ok(Self {
             inner: Arc::new(Mutex::new(TcpTunnelConnectionImpl::new(sequence,
-                                                                    local_device,
+                                                                    local_identity,
                                                                     remote_id,
                                                                     remote_ep,
                                                                     conn_timeout,
@@ -421,14 +421,14 @@ impl TunnelConnection for TcpTunnelConnection {
     }
 
     async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (has_socket, local_device, remote_ep, remote_id, conn_timeout, verifier) = {
+        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
+            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
         if has_socket {
             return Ok(self.open_stream(vport, session_id).await?);
         }
-        let tcp_socket = TCPSocket::connect(verifier, local_device, remote_ep, remote_id, conn_timeout).await?;
+        let tcp_socket = TCPSocket::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
 
         {
             let mut inner = self.inner.lock().unwrap();
@@ -440,16 +440,16 @@ impl TunnelConnection for TcpTunnelConnection {
     }
 
     async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
-        let (has_socket, local_device, remote_ep, remote_id, conn_timeout, verifier) = {
+        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
+            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
 
         if has_socket {
             return Ok(self.open_datagram().await?);
         }
 
-        let tcp_socket = TCPSocket::connect(verifier, local_device, remote_ep, remote_id, conn_timeout).await?;
+        let tcp_socket = TCPSocket::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
 
         {
             let mut inner = self.inner.lock().unwrap();
@@ -461,16 +461,16 @@ impl TunnelConnection for TcpTunnelConnection {
     }
 
     async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (has_socket, local_device, remote_ep, remote_id, conn_timeout, verifier) = {
+        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
+            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
 
         if has_socket {
             return Ok(self.open_reverse_stream(vport, session_id).await?);
         }
 
-        let tcp_socket = TCPSocket::connect(verifier, local_device, remote_ep, remote_id, conn_timeout).await?;
+        let tcp_socket = TCPSocket::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
 
         {
             let mut inner = self.inner.lock().unwrap();
@@ -482,16 +482,16 @@ impl TunnelConnection for TcpTunnelConnection {
     }
 
     async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
-        let (has_socket, local_device, remote_ep, remote_id, conn_timeout, verifier) = {
+        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
+            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
 
         if has_socket {
             return Ok(self.open_reverse_datagram().await?);
         }
 
-        let tcp_socket = TCPSocket::connect(verifier, local_device, remote_ep, remote_id, conn_timeout).await?;
+        let tcp_socket = TCPSocket::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
 
         {
             let mut inner = self.inner.lock().unwrap();
@@ -992,14 +992,14 @@ impl TunnelStream for TcpTunnelStream {
         tunnel.sequence
     }
 
-    fn remote_device_id(&self) -> P2pId {
+    fn remote_identity_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> P2pId {
+    fn local_identity_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
-        tunnel.local_device.get_id()
+        tunnel.local_identity.get_id()
     }
 
     fn remote_endpoint(&self) -> Endpoint {
@@ -1035,7 +1035,7 @@ impl Drop for TcpTunnelStream {
         {
             let tunnel = self.tunnel.lock().unwrap();
             log::info!("drop tcp tunnel stream {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_device.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
         {
             let tunnel = self.tunnel.lock().unwrap();
@@ -1210,14 +1210,14 @@ impl TunnelDatagramSend for TcpTunnelDatagramSend {
         tunnel.sequence
     }
 
-    fn remote_device_id(&self) -> P2pId {
+    fn remote_identity_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> P2pId {
+    fn local_identity_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
-        tunnel.local_device.get_id()
+        tunnel.local_identity.get_id()
     }
 
     fn remote_endpoint(&self) -> Endpoint {
@@ -1253,7 +1253,7 @@ impl Drop for TcpTunnelDatagramSend {
         {
             let tunnel = self.tunnel.lock().unwrap();
             log::info!("drop tcp tunnel datagram {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_device.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
         {
             let tunnel = self.tunnel.lock().unwrap();
@@ -1439,14 +1439,14 @@ impl TunnelDatagramRecv for TcpTunnelDatagramRecv {
         tunnel.sequence
     }
 
-    fn remote_device_id(&self) -> P2pId {
+    fn remote_identity_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
         tunnel.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> P2pId {
+    fn local_identity_id(&self) -> P2pId {
         let tunnel = self.tunnel.lock().unwrap();
-        tunnel.local_device.get_id()
+        tunnel.local_identity.get_id()
     }
 
     fn remote_endpoint(&self) -> Endpoint {
@@ -1482,7 +1482,7 @@ impl Drop for TcpTunnelDatagramRecv {
         {
             let tunnel = self.tunnel.lock().unwrap();
             log::info!("drop tcp tunnel datagram {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_device.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
         {
             let tunnel = self.tunnel.lock().unwrap();

@@ -185,7 +185,7 @@ impl PeerManager {
 
     pub fn add_peer_connection(self: &Arc<Self>, peer_desc: P2pIdentityCertRef, mut conn: PeerConnection) {
         let conn_id = conn.conn_id();
-        let remote_id = conn.remote_device_id().clone();
+        let remote_id = conn.remote_identity_id().clone();
         let recv_handle = conn.take_recv_handle().unwrap();
         let conn = Arc::new(runtime::Mutex::new(conn));
         let mut conn_cache = self.conn_cache.lock().unwrap();

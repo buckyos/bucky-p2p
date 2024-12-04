@@ -68,15 +68,15 @@ async fn main() {
     task::block_on(async {
         let data_folder = std::env::current_dir().unwrap().join(APP_NAME);
 
-        if let Ok((local_device, private_key)) = load_device_info(data_folder.as_path()) {
+        if let Ok((local_identity, private_key)) = load_device_info(data_folder.as_path()) {
             log::info!(
                 "pn-miner load device success, path is: {}.",
                 data_folder.to_str().unwrap()
             );
 
-            let mut local_device = local_device;
+            let mut local_identity = local_identity;
             // bind 0 地址
-            let cmd_ep = &mut local_device.mut_connect_info().mut_endpoints()[0];
+            let cmd_ep = &mut local_identity.mut_connect_info().mut_endpoints()[0];
             let outer_addr = *cmd_ep.addr();
             cmd_ep.mut_addr().set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
@@ -103,7 +103,7 @@ async fn main() {
             };
 
             if let Ok(service) = pn::service::Service::start(
-                local_device.clone(),
+                local_identity.clone(),
                 private_key,
                 vec![(proxy_local, Some(proxy_outer))],
                 None,
@@ -114,7 +114,7 @@ async fn main() {
             .await
             {
                 log::info!("pn-miner auth server listen on {}", auth_port);
-                if auth::interface::listen(auth_port, local_device.desc().device_id(), auth_store)
+                if auth::interface::listen(auth_port, local_identity.desc().device_id(), auth_store)
                     .await
                     .is_ok()
                 {

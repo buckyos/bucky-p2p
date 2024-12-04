@@ -46,7 +46,7 @@ struct ClientsImpl {
     sn_cache: Arc<SnCache>,
     net_listener: NetListenerRef,
     sn_list: Vec<Device>,
-    local_device: Device,
+    local_identity: Device,
     gen_seq: Arc<TempSeqGenerator>,
     state: RwLock<StateImpl>,
     ping_config: PingConfig,
@@ -58,7 +58,7 @@ pub struct PingClients(Arc<ClientsImpl>);
 
 impl std::fmt::Display for PingClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PingClients{{local:{}}}", self.0.local_device.desc().device_id())
+        write!(f, "PingClients{{local:{}}}", self.0.local_identity.desc().device_id())
     }
 }
 
@@ -68,7 +68,7 @@ impl PingClients {
         key_store: Arc<Keystore>,
         sn_cache: Arc<SnCache>,
         net_listener: NetListenerRef,
-        local_device: Device,
+        local_identity: Device,
         ping_config: PingConfig,
         called_event_listener: Arc<dyn PingClientCalledEvent>,
     ) -> Self {
@@ -102,7 +102,7 @@ impl PingClients {
             key_store,
             gen_seq: self.0.gen_seq.clone(),
             net_listener,
-            local_device,
+            local_identity,
             sn_list: self.0.sn_list.clone(),
             state: RwLock::new(StateImpl {
                 remain,
@@ -117,22 +117,22 @@ impl PingClients {
     pub(crate) fn new(
         key_store: Arc<Keystore>,
         sn_cache: Arc<SnCache>,
-        local_device_id: &DeviceId,
+        local_identity_id: &DeviceId,
         gen_seq: Arc<TempSeqGenerator>,
         net_listener: NetListenerRef,
         sn_list: Vec<Device>,
-        local_device: Device,
+        local_identity: Device,
         ping_config: PingConfig,
         called_event_listener: Arc<dyn PingClientCalledEvent>,
     ) -> Self {
         let mut remain: Vec<(usize, DeviceId)> = sn_list.iter().map(|d| d.desc().device_id()).enumerate().collect();
-        remain.sort_by(|(_, l), (_, r)| r.object_id().distance(local_device_id.object_id()).cmp(&l.object_id().distance(local_device_id.object_id())));
+        remain.sort_by(|(_, l), (_, r)| r.object_id().distance(local_identity_id.object_id()).cmp(&l.object_id().distance(local_identity_id.object_id())));
 
         Self(Arc::new(ClientsImpl {
             key_store,
             gen_seq,
             net_listener,
-            local_device,
+            local_identity,
             sn_list,
             state: RwLock::new(StateImpl {
                 remain,
@@ -146,9 +146,9 @@ impl PingClients {
 
     pub fn default_local(&self) -> Device {
         if let Some(client) = self.default_client() {
-            client.local_device()
+            client.local_identity()
         } else {
-            self.0.local_device.clone()
+            self.0.local_identity.clone()
         }
 
     }
@@ -225,7 +225,7 @@ impl PingClients {
                                         self.0.net_listener.reset(None),
                                         index,
                                         self.0.sn_list[index].clone(),
-                                        self.0.local_device.clone());
+                                        self.0.local_identity.clone());
                                     next.to_start = Some(client.clone());
                                     *connecting = client;
                                 } else {
@@ -256,7 +256,7 @@ impl PingClients {
                                         self.0.net_listener.reset(None),
                                         index,
                                         self.0.sn_list[index].clone(),
-                                        self.0.local_device.clone());
+                                        self.0.local_identity.clone());
                                     next.to_start = Some(client.clone());
                                     *active = client;
                                 } else {
@@ -319,7 +319,7 @@ impl PingClients {
                             self.0.net_listener.reset(None),
                             index,
                             self.0.sn_list[index].clone(),
-                            self.0.local_device.clone());
+                            self.0.local_identity.clone());
                         let next = NextStep::Start(waiter.new_waiter(), client.clone());
                         state.state = ClientsState::Connecting { waiter, client };
                         next
@@ -509,7 +509,7 @@ impl PingClients {
     pub fn on_called(&self, called: &SnCalled, in_box: &PackageBox, from: &Endpoint, from_interface: Interface) {
         info!("{} called, called: {:?}", self, called);
 
-        if !called.to_peer_id.eq(&self.0.local_device.desc().device_id()) {
+        if !called.to_peer_id.eq(&self.0.local_identity.desc().device_id()) {
             warn!("{} called, recv called to other: {}.", self, called.to_peer_id);
             return;
         }

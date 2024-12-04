@@ -93,8 +93,8 @@ pub trait TunnelStream: 'static + Send + runtime::AsyncWrite + runtime::AsyncRea
     fn port(&self) -> u16;
     fn session_id(&self) -> IncreaseId;
     fn sequence(&self) -> TempSeq;
-    fn remote_device_id(&self) -> P2pId;
-    fn local_device_id(&self) -> P2pId;
+    fn remote_identity_id(&self) -> P2pId;
+    fn local_identity_id(&self) -> P2pId;
     fn remote_endpoint(&self) -> Endpoint;
     fn local_endpoint(&self) -> Endpoint;
     async fn close(&mut self) -> BdtResult<()>;
@@ -103,8 +103,8 @@ pub trait TunnelStream: 'static + Send + runtime::AsyncWrite + runtime::AsyncRea
 #[async_trait::async_trait]
 pub trait TunnelDatagramSend: 'static + Send + runtime::AsyncWrite {
     fn sequence(&self) -> TempSeq;
-    fn remote_device_id(&self) -> P2pId;
-    fn local_device_id(&self) -> P2pId;
+    fn remote_identity_id(&self) -> P2pId;
+    fn local_identity_id(&self) -> P2pId;
     fn remote_endpoint(&self) -> Endpoint;
     fn local_endpoint(&self) -> Endpoint;
     async fn close(&mut self) -> BdtResult<()>;
@@ -113,8 +113,8 @@ pub trait TunnelDatagramSend: 'static + Send + runtime::AsyncWrite {
 #[async_trait::async_trait]
 pub trait TunnelDatagramRecv: 'static + Send + runtime::AsyncRead {
     fn sequence(&self) -> TempSeq;
-    fn remote_device_id(&self) -> P2pId;
-    fn local_device_id(&self) -> P2pId;
+    fn remote_identity_id(&self) -> P2pId;
+    fn local_identity_id(&self) -> P2pId;
     fn remote_endpoint(&self) -> Endpoint;
     fn local_endpoint(&self) -> Endpoint;
     async fn close(&mut self) -> BdtResult<()>;

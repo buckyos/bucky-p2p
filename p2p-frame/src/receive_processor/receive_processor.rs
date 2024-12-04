@@ -77,7 +77,7 @@ impl ReceiveDispatcher {
 impl TcpListenerEventListener for ReceiveDispatcher {
     async fn on_new_connection(&self,
                                socket: TCPSocket,) -> BdtResult<()> {
-        let processor = self.get_processor(socket.local_device_id());
+        let processor = self.get_processor(socket.local_identity_id());
         if processor.is_none() {
             return Ok(());
         }
@@ -94,7 +94,7 @@ impl TcpListenerEventListener for ReceiveDispatcher {
 impl QuicListenerEventListener for ReceiveDispatcher {
     async fn on_new_connection(&self,
                                socket: QuicSocket, ) -> BdtResult<()> {
-        let processor = self.get_processor(socket.local_device_id());
+        let processor = self.get_processor(socket.local_identity_id());
         if processor.is_none() {
             return Ok(());
         }

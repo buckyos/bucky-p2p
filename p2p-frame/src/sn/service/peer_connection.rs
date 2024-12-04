@@ -27,7 +27,7 @@ impl PeerConnection {
             .map_err(into_bdt_err!(crate::error::BdtErrorCode::QuicError))?;
 
         log::info!("recv PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            conn_id, socket.remote_device_id().to_string(), socket.remote(), socket.local_device_id().to_string(), socket.local());
+            conn_id, socket.remote_identity_id().to_string(), socket.remote(), socket.local_identity_id().to_string(), socket.local());
 
         let handle = Executor::spawn_with_handle(async move {
             if let Err(e) = Self::recv(conn_id, recv, listener).await {
@@ -46,7 +46,7 @@ impl PeerConnection {
 
     pub async fn connect(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> BdtResult<Self> {
         log::info!("new PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            conn_id, socket.remote_device_id().to_string(), socket.remote(), socket.local_device_id().to_string(), socket.local());
+            conn_id, socket.remote_identity_id().to_string(), socket.remote(), socket.local_identity_id().to_string(), socket.local());
         let (send, recv) = socket.socket().open_bi().await
             .map_err(into_bdt_err!(crate::error::BdtErrorCode::QuicError))?;
         let handle = Executor::spawn_with_handle(async move {
@@ -101,12 +101,12 @@ impl PeerConnection {
         &self.socket.remote()
     }
 
-    pub fn local_device_id(&self) -> &P2pId {
-        &self.socket.local_device_id()
+    pub fn local_identity_id(&self) -> &P2pId {
+        &self.socket.local_identity_id()
     }
 
-    pub fn remote_device_id(&self) -> &P2pId {
-        &self.socket.remote_device_id()
+    pub fn remote_identity_id(&self) -> &P2pId {
+        &self.socket.remote_identity_id()
     }
 
     pub fn take_recv_handle(&mut self) -> Option<SpawnHandle<BdtResult<()>>> {

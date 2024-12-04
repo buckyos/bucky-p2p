@@ -347,7 +347,7 @@ async fn all_in_one() {
 
     let generator = IncreaseIdGenerator::new();
     tokio::task::spawn(async move {
-        let mut tunnel = stack1.tunnel_manager().create_stream_tunnel(stack2.local_device().device(), generator.generate(), 0).await.unwrap();
+        let mut tunnel = stack1.tunnel_manager().create_stream_tunnel(stack2.local_identity().device(), generator.generate(), 0).await.unwrap();
         let mut buf = [0u8; 32];
         tunnel.read(buf.as_mut_slice()).await.unwrap();
         tokio::time::sleep(Duration::from_secs(30)).await;

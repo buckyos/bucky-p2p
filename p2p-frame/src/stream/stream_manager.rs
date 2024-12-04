@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{bdt_err, BdtErrorCode, BdtResult};
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertRef};
 use crate::stream::StreamGuard;
 use crate::tunnel::{TunnelManagerRef, TunnelStream};
 use crate::types::IncreaseIdGenerator;
@@ -94,7 +94,7 @@ impl Deref for StreamListenerGuard {
 }
 
 pub struct StreamManager {
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: IncreaseIdGenerator,
     listeners: Mutex<HashMap<u16, StreamListenerRef>>,
@@ -104,14 +104,14 @@ pub type StreamManagerRef = Arc<StreamManager>;
 
 impl Drop for StreamManager {
     fn drop(&mut self) {
-        log::info!("StreamManager drop.device = {}", self.local_device.get_id());
+        log::info!("StreamManager drop.device = {}", self.local_identity.get_id());
     }
 }
 
 impl StreamManager {
-    pub fn new(local_device: LocalDeviceRef, tunnel_manager: TunnelManagerRef,) -> Arc<Self> {
+    pub fn new(local_identity: P2pIdentityRef, tunnel_manager: TunnelManagerRef,) -> Arc<Self> {
         let stream = Arc::new(Self {
-            local_device,
+            local_identity,
             tunnel_manager: tunnel_manager.clone(),
             session_gen: IncreaseIdGenerator::new(),
             listeners: Mutex::new(HashMap::new()),

@@ -52,12 +52,12 @@ impl RespSender {
         self.data_sender.local()
     }
 
-    pub fn remote_device_id(&self) -> &DeviceId {
-        self.data_sender.remote_device_id()
+    pub fn remote_identity_id(&self) -> &DeviceId {
+        self.data_sender.remote_identity_id()
     }
 
-    pub fn local_device_id(&self) -> &DeviceId {
-        self.data_sender.local_device_id()
+    pub fn local_identity_id(&self) -> &DeviceId {
+        self.data_sender.local_identity_id()
     }
 
     pub fn key(&self) -> &MixAesKey {

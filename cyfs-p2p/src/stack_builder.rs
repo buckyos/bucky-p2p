@@ -108,7 +108,7 @@ impl P2pIdentity for CyfsIdentity {
     }
 }
 pub struct P2pStackBuilder {
-    local_device: Device,
+    local_identity: Device,
     local_key: PrivateKey,
     sn_list: Vec<Device>,
     conn_timeout: Duration,
@@ -119,9 +119,9 @@ pub struct P2pStackBuilder {
 }
 
 impl P2pStackBuilder {
-    pub fn new(local_device: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> Self {
+    pub fn new(local_identity: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> Self {
         Self {
-            local_device,
+            local_identity,
             local_key,
             sn_list,
             conn_timeout: Duration::from_secs(30),
@@ -158,7 +158,7 @@ impl P2pStackBuilder {
     }
 
     pub async fn build(self) -> BdtResult<P2pStackRef> {
-        create_p2p_stack(Arc::new(CyfsIdentity::new(self.local_device, self.local_key)),
+        create_p2p_stack(Arc::new(CyfsIdentity::new(self.local_identity, self.local_key)),
                          self.sn_list.iter().map(|d| Arc::new(CyfsIdentityCert::new(d.clone()))).collect(),
                          self.device_finder,
                          self.conn_timeout,

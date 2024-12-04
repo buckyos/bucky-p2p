@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::endpoint::Endpoint;
 use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
 use crate::executor::Executor;
-use crate::p2p_identity::{P2pId, LocalDeviceRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
 use crate::protocol::v0::{SynDatagram, SynReverseDatagram, SynReverseStream, SynStream};
 use crate::runtime;
@@ -30,7 +30,7 @@ enum TunnelState {
 pub struct QuicTunnelConnectionImpl {
     net_manager: NetManagerRef,
     sequence: TempSeq,
-    local_device: LocalDeviceRef,
+    local_identity: P2pIdentityRef,
     remote_id: P2pId,
     remote_ep: Endpoint,
     conn_timeout: Duration,
@@ -49,7 +49,7 @@ pub struct QuicTunnelConnectionImpl {
 impl QuicTunnelConnectionImpl {
     pub fn new(net_manager: NetManagerRef,
                sequence: TempSeq,
-               local_device: LocalDeviceRef,
+               local_identity: P2pIdentityRef,
                remote_id: P2pId,
                remote_ep: Endpoint,
                conn_timeout: Duration,
@@ -68,7 +68,7 @@ impl QuicTunnelConnectionImpl {
         Self {
             net_manager,
             sequence,
-            local_device,
+            local_identity,
             remote_id,
             remote_ep,
             conn_timeout,
@@ -214,7 +214,7 @@ pub struct QuicTunnelConnection {
 impl QuicTunnelConnection {
     pub fn new(net_manager: NetManagerRef,
                sequence: TempSeq,
-               local_device: LocalDeviceRef,
+               local_identity: P2pIdentityRef,
                remote_id: P2pId,
                remote_ep: Endpoint,
                conn_timeout: Duration,
@@ -228,7 +228,7 @@ impl QuicTunnelConnection {
         let inner = QuicTunnelConnectionImpl::new(
             net_manager,
             sequence,
-            local_device,
+            local_identity,
             remote_id,
             remote_ep,
             conn_timeout,
@@ -253,7 +253,7 @@ impl QuicTunnelConnection {
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
              inner.remote_id.clone(),
-             inner.local_device.get_id(),
+             inner.local_identity.get_id(),
              inner.remote_ep.clone(),
              inner.local_ep.clone(),
              inner.tunnel_stat.clone())
@@ -279,7 +279,7 @@ impl QuicTunnelConnection {
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
              inner.remote_id.clone(),
-             inner.local_device.get_id(),
+             inner.local_identity.get_id(),
              inner.remote_ep.clone(),
              inner.local_ep.clone(),
              inner.tunnel_stat.clone())
@@ -319,18 +319,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
+        let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
         };
         if has_socket {
             return Ok(self.open_stream(vport, session_id).await?);
         }
 
         let socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_identity, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect(local_identity, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -342,18 +342,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
+        let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
         };
         if has_socket {
             return Ok(self.open_datagram().await?);
         }
 
         let socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_identity, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect(local_identity, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -365,18 +365,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
+        let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
         };
         if has_socket {
             return Ok(self.open_reverse_stream(vport, session_id).await?);
         }
 
         let socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_identity, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect(local_identity, verifier, remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -388,18 +388,18 @@ impl TunnelConnection for QuicTunnelConnection {
     }
 
     async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
-        let (net_manager, has_socket, local_device, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
+        let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
-            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_device.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
+            (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
         };
         if has_socket {
             return Ok(self.open_reverse_datagram().await?);
         }
 
         let socket = if let Some(listener) = net_manager.quic_of(&local_ep) {
-            QuicSocket::connect_with_ep(listener.quic_ep(), local_device, verifier.clone(), remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect_with_ep(listener.quic_ep(), local_identity, verifier.clone(), remote_id, remote_ep, conn_timeout, idle_timeout).await?
         } else {
-            QuicSocket::connect(local_device, verifier.clone(), remote_id, remote_ep, conn_timeout, idle_timeout).await?
+            QuicSocket::connect(local_identity, verifier.clone(), remote_id, remote_ep, conn_timeout, idle_timeout).await?
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -419,7 +419,7 @@ impl TunnelConnection for QuicTunnelConnection {
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
              inner.remote_id.clone(),
-             inner.local_device.get_id(),
+             inner.local_identity.get_id(),
              inner.remote_ep.clone(),
              inner.local_ep.clone(),
              inner.tunnel_stat.clone())
@@ -445,7 +445,7 @@ impl TunnelConnection for QuicTunnelConnection {
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
              inner.remote_id.clone(),
-             inner.local_device.get_id(),
+             inner.local_identity.get_id(),
              inner.remote_ep.clone(),
              inner.local_ep.clone(),
              inner.tunnel_stat.clone())
@@ -469,7 +469,7 @@ impl TunnelConnection for QuicTunnelConnection {
                 inner.sequence,
                 inner.remote_id.clone(),
                 inner.remote_ep.clone(),
-                inner.local_device.get_id(),
+                inner.local_identity.get_id(),
                 inner.local_ep.clone(),
              inner.tunnel_stat.clone())
         };
@@ -696,11 +696,11 @@ impl TunnelStream for QuicTunnelStream {
         self.sequence
     }
 
-    fn remote_device_id(&self) -> P2pId {
+    fn remote_identity_id(&self) -> P2pId {
         self.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> P2pId {
+    fn local_identity_id(&self) -> P2pId {
         self.local_id.clone()
     }
 
@@ -811,11 +811,11 @@ impl TunnelDatagramSend for QuicTunnelDatagramSend {
         self.sequence
     }
 
-    fn remote_device_id(&self) -> P2pId {
+    fn remote_identity_id(&self) -> P2pId {
         self.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> P2pId {
+    fn local_identity_id(&self) -> P2pId {
         self.local_id.clone()
     }
 
@@ -900,11 +900,11 @@ impl TunnelDatagramRecv for QuicTunnelDatagramRecv {
         self.sequence
     }
 
-    fn remote_device_id(&self) -> P2pId {
+    fn remote_identity_id(&self) -> P2pId {
         self.remote_id.clone()
     }
 
-    fn local_device_id(&self) -> P2pId {
+    fn local_identity_id(&self) -> P2pId {
         self.local_id.clone()
     }
 
