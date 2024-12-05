@@ -52,6 +52,7 @@ pub trait P2pIdentityCert: 'static + Send + Sync {
     fn verify_cert(&self, name: &str) -> bool;
     fn get_encoded_cert(&self) -> BdtResult<EncodedP2pIdentityCert>;
     fn endpoints(&self) -> Vec<Endpoint>;
+    fn sn_list(&self) -> Vec<P2pIdentityCertRef>;
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityCertRef;
 }
 pub type P2pIdentityCertRef = Arc<dyn P2pIdentityCert>;

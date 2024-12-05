@@ -16,7 +16,7 @@ use bucky_objects::{Device, DeviceId, Endpoint, NamedObject, Protocol};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
 use bucky_time::bucky_time_now;
 use sha2::Digest;
-use p2p_frame::p2p_identity::{P2pIdentity, EncodedP2pIdentityCert, P2pIdentityType};
+use p2p_frame::p2p_identity::{P2pIdentity, EncodedP2pIdentityCert};
 
 #[derive(Clone)]
 pub struct MixAesKey {

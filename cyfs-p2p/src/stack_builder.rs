@@ -6,8 +6,8 @@ use bucky_objects::{Device, NamedObject, SingleKeyObjectDesc};
 use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
 use p2p_frame::endpoint::Endpoint;
 use p2p_frame::error::{into_bdt_err, BdtErrorCode, BdtResult};
-use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature};
-use p2p_frame::stack::{create_p2p_stack, P2pStackRef};
+use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory};
+use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pStackRef};
 use p2p_frame::tunnel::{DeviceFinder, DeviceFinderRef};
 
 pub struct CyfsIdentityCert {
@@ -45,6 +45,10 @@ impl P2pIdentityCert for CyfsIdentityCert {
 
     fn endpoints(&self) -> Vec<Endpoint> {
         self.device.connect_info().endpoints().iter().map(|ep| Endpoint::from_str(ep.to_string().as_str()).unwrap()).collect()
+    }
+
+    fn sn_list(&self) -> Vec<P2pIdentityCertRef> {
+        Vec::new()
     }
 
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityCertRef {
@@ -107,6 +111,34 @@ impl P2pIdentity for CyfsIdentity {
         Arc::new(CyfsIdentity::new(device, self.key.clone()))
     }
 }
+
+pub struct CyfsIdentityFactory;
+
+impl P2pIdentityFactory for CyfsIdentityFactory {
+    fn create(&self, id: &EncodedP2pIdentity) -> BdtResult<P2pIdentityRef> {
+        Ok(Arc::new(CyfsIdentity::clone_from_slice(id.as_slice())
+            .map_err(into_bdt_err!(BdtErrorCode::Failed, "decode identity from vec failed"))?))
+    }
+}
+
+pub struct CyfsIdentityCertFactory;
+
+impl P2pIdentityCertFactory for CyfsIdentityCertFactory {
+    fn create(&self, cert: &EncodedP2pIdentityCert) -> BdtResult<P2pIdentityCertRef> {
+        Device::clone_from_slice(cert.as_slice())
+            .map_err(into_bdt_err!(BdtErrorCode::Failed, "decode device from vec failed"))
+            .map(|device| Arc::new(CyfsIdentityCert::new(device)))
+    }
+}
+
+pub async fn init_cyfs_p2p(eps: &[Endpoint],
+                           port_mapping: Option<Vec<(Endpoint, u16)>>,
+                           tcp_accept_timout: Duration,) -> BdtResult<()> {
+    let identity_factory = Arc::new(CyfsIdentityFactory);
+    let cert_factory = Arc::new(CyfsIdentityCertFactory);
+    init_p2p(identity_factory, cert_factory, eps, port_mapping, tcp_accept_timout).await
+}
+
 pub struct P2pStackBuilder {
     local_identity: Device,
     local_key: PrivateKey,

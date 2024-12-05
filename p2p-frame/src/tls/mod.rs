@@ -24,14 +24,14 @@ use crate::p2p_identity::P2pIdentityFactoryRef;
 use crate::tls::sign::TlsKey;
 
 static key_provider: OnceCell<KeyProvider> = OnceCell::new();
-pub fn init_tls(factory: P2pIdentityFactoryRef) {
+pub(crate) fn init_tls(factory: P2pIdentityFactoryRef) {
     key_provider.get_or_init(|| {
         KeyProvider {
             factory
         }
     });
 }
-pub fn provider() -> CryptoProvider {
+pub(crate) fn provider() -> CryptoProvider {
     CryptoProvider {
         cipher_suites: ALL_CIPHER_SUITES.to_vec(),
         kx_groups: kx::ALL_KX_GROUPS.to_vec(),
