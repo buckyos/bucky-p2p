@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use once_cell::sync::OnceCell;
 use crate::endpoint::Endpoint;
-use crate::error::BdtResult;
+use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef};
@@ -25,7 +25,7 @@ pub async fn init_p2p(
     cert_factory: P2pIdentityCertFactoryRef,
     endpoints: &[Endpoint],
     port_mapping: Option<Vec<(Endpoint, u16)>>,
-    tcp_accept_timout: Duration,) -> BdtResult<()> {
+    tcp_accept_timout: Duration,) -> P2pResult<()> {
     Executor::init(None);
     init_tls(identity_factory.clone());
     let device_cache =  Arc::new(DeviceCache::new(&DeviceCacheConfig {
@@ -88,7 +88,7 @@ impl P2pStack {
         }
     }
 
-    pub async fn wait_online(&self, timeout: Option<Duration>) -> BdtResult<()> {
+    pub async fn wait_online(&self, timeout: Option<Duration>) -> P2pResult<()> {
         self.sn_service.wait_online(timeout).await?;
         Ok(())
     }
@@ -135,7 +135,7 @@ pub async fn create_p2p_stack(local_identity: P2pIdentityRef,
                           conn_timeout: Duration,
                           idle_timeout: Duration,
                           sn_ping_interval: Duration,
-                          sn_call_timeout: Duration,) -> BdtResult<P2pStackRef> {
+                          sn_call_timeout: Duration,) -> P2pResult<P2pStackRef> {
     let gen_seq = Arc::new(TempSeqGenerator::new());
     let mut processor = ReceiveProcessor::new();
     let net_manager = NET_MANAGER.get().unwrap().clone();

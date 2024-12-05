@@ -6,7 +6,7 @@ pub use sfo_result::into_err as into_bdt_err;
 
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default, FromPrimitive, ToPrimitive, RawEncode, RawDecode)]
-pub enum BdtErrorCode {
+pub enum P2pErrorCode {
     Ok = 0,
 
     #[default]
@@ -96,7 +96,7 @@ pub enum BdtErrorCode {
     TunnelNotConnected,
 }
 
-impl BdtErrorCode {
+impl P2pErrorCode {
     pub fn as_u8(&self) -> u8 {
         let v: u16 = self.as_u16();
         v as u8
@@ -116,6 +116,6 @@ impl BdtErrorCode {
     }
 }
 
-pub type BdtResult<T> = Result<T, BdtErrorCode>;
-pub type BdtError = sfo_result::Error<BdtErrorCode>;
+pub type P2pResult<T> = Result<T, P2pErrorCode>;
+pub type P2pError = sfo_result::Error<P2pErrorCode>;
 

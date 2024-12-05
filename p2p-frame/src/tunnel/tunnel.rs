@@ -6,7 +6,7 @@ use std::time::Duration;
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
 use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea, Protocol};
-use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, P2pErrorCode, P2pResult, into_bdt_err};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
@@ -97,7 +97,7 @@ impl Tunnel {
         self.tunnel_conn = Some(tunnel_conn);
     }
 
-    pub async fn accept_instance(&self) -> BdtResult<TunnelInstance> {
+    pub async fn accept_instance(&self) -> P2pResult<TunnelInstance> {
         self.tunnel_conn.as_ref().unwrap().accept_instance().await
     }
 
@@ -138,13 +138,13 @@ impl Tunnel {
         reverse_eps
     }
 
-    pub async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId, future_cache: Arc<dyn ReverseFutureCache>) -> BdtResult<Box<dyn TunnelStream>> {
+    pub async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<Box<dyn TunnelStream>> {
         if self.tunnel_conn.is_some() {
-            let stream = self.tunnel_conn.as_ref().unwrap().connect_stream(vport, session_id).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+            let stream = self.tunnel_conn.as_ref().unwrap().connect_stream(vport, session_id).await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(stream);
         }
 
-        let mut futures: Vec<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>> = Vec::new();
+        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>> = Vec::new();
         let ep_list = &self.remote_eps;
         let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
@@ -212,23 +212,23 @@ impl Tunnel {
         self.sn_service.call(self.get_sequence(),
                              Some(reverse_eps.as_slice()),
                              &self.remote_id,
-                             call_data.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?).await?;
-        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
+                             call_data.to_vec().map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?).await?;
+        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(P2pErrorCode::Timeout))?;
         if let ReverseResult::Stream(tunnel_conn, stream) = result {
             self.tunnel_conn = Some(tunnel_conn);
             Ok(stream)
         } else {
-            Err(bdt_err!(BdtErrorCode::ConnectFailed, "No available endpoint"))
+            Err(bdt_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
         }
     }
 
-    pub async fn connect_datagram(&mut self, future_cache: Arc<dyn ReverseFutureCache>) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    pub async fn connect_datagram(&mut self, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<Box<dyn TunnelDatagramSend>> {
         if self.tunnel_conn.is_some() {
-            let datagram = self.tunnel_conn.as_ref().unwrap().connect_datagram().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+            let datagram = self.tunnel_conn.as_ref().unwrap().connect_datagram().await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(datagram);
         }
 
-        let mut futures: Vec<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramSend>)>> + Send>>> = Vec::new();
+        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramSend>)>> + Send>>> = Vec::new();
         let ep_list = &self.remote_eps;
         let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
@@ -297,18 +297,18 @@ impl Tunnel {
                              Some(reverse_eps.as_slice()),
                              &self.remote_id,
                              Vec::new()).await?;
-        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(BdtErrorCode::Timeout))?;
+        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_bdt_err!(P2pErrorCode::Timeout))?;
         if let ReverseResult::Datagram(tunnel_conn, stream) = result {
             self.tunnel_conn = Some(tunnel_conn);
             Ok(stream)
         } else {
-            Err(bdt_err!(BdtErrorCode::ConnectFailed, "No available endpoint"))
+            Err(bdt_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
         }
     }
 
-    pub async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+    pub async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>> {
         if self.tunnel_conn.is_none() {
-            return Err(bdt_err!(BdtErrorCode::TunnelNotConnected, "Tunnel not connected"));
+            return Err(bdt_err!(P2pErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
         let stream = self.tunnel_conn.as_ref().unwrap().open_stream(vport, session_id).await?;
@@ -324,9 +324,9 @@ impl Tunnel {
         Ok(stream)
     }
 
-    pub async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    pub async fn open_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramSend>> {
         if self.tunnel_conn.is_none() {
-            return Err(bdt_err!(BdtErrorCode::TunnelNotConnected, "Tunnel not connected"));
+            return Err(bdt_err!(P2pErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
         let datagram = self.tunnel_conn.as_ref().unwrap().open_datagram().await?;
@@ -341,7 +341,7 @@ impl Tunnel {
         Ok(datagram)
     }
 
-    pub async fn shutdown(&self) -> BdtResult<()> {
+    pub async fn shutdown(&self) -> P2pResult<()> {
         log::info!("shutdown tunnel {:?}", self.sequence);
         if self.tunnel_conn.is_some() {
             self.tunnel_conn.as_ref().unwrap().shutdown().await

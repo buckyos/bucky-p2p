@@ -2,7 +2,7 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom
 use quinn::{RecvStream, SendStream};
 use tokio::io::AsyncWriteExt;
 use crate::endpoint::Endpoint;
-use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{P2pErrorCode, P2pResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::P2pId;
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
@@ -11,20 +11,20 @@ use crate::types::TempSeq;
 
 #[callback_trait::callback_trait]
 pub trait PeerConnectionEvent: 'static + Send + Sync {
-    async fn on_recv(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> BdtResult<()>;
+    async fn on_recv(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()>;
 }
 
 pub struct PeerConnection {
     conn_id: TempSeq,
     socket: QuicSocket,
     send: SendStream,
-    handle: Option<SpawnHandle<BdtResult<()>>>,
+    handle: Option<SpawnHandle<P2pResult<()>>>,
 }
 
 impl PeerConnection {
-    pub async fn accept(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> BdtResult<Self> {
+    pub async fn accept(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
         let (send, recv) = socket.socket().accept_bi().await
-            .map_err(into_bdt_err!(crate::error::BdtErrorCode::QuicError))?;
+            .map_err(into_bdt_err!(crate::error::P2pErrorCode::QuicError))?;
 
         log::info!("recv PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
             conn_id, socket.remote_identity_id().to_string(), socket.remote(), socket.local_identity_id().to_string(), socket.local());
@@ -44,11 +44,11 @@ impl PeerConnection {
         })
     }
 
-    pub async fn connect(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> BdtResult<Self> {
+    pub async fn connect(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
         log::info!("new PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
             conn_id, socket.remote_identity_id().to_string(), socket.remote(), socket.local_identity_id().to_string(), socket.local());
         let (send, recv) = socket.socket().open_bi().await
-            .map_err(into_bdt_err!(crate::error::BdtErrorCode::QuicError))?;
+            .map_err(into_bdt_err!(crate::error::P2pErrorCode::QuicError))?;
         let handle = Executor::spawn_with_handle(async move {
             if let Err(e) = Self::recv(conn_id, recv, listener).await {
                 log::error!("recv error: {:?}", e);
@@ -63,10 +63,10 @@ impl PeerConnection {
         })
     }
 
-    async fn read_pkg(recv: &mut RecvStream) -> BdtResult<(PackageCmdCode, Vec<u8>)> {
+    async fn read_pkg(recv: &mut RecvStream) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
         let mut buf_header = [0u8; 16];
-        recv.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        recv.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
         let cmd_code = match header.cmd_code() {
             Ok(cmd_code) => cmd_code,
             Err(err) => {
@@ -74,11 +74,11 @@ impl PeerConnection {
             }
         };
         let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-        recv.read_exact(cmd_body.as_mut_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        recv.read_exact(cmd_body.as_mut_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
         Ok((cmd_code, cmd_body))
     }
 
-    async fn recv(conn_id: TempSeq, mut recv: RecvStream, listener: impl PeerConnectionEvent) -> BdtResult<()> {
+    async fn recv(conn_id: TempSeq, mut recv: RecvStream, listener: impl PeerConnectionEvent) -> P2pResult<()> {
         log::info!("enter recv loop");
         loop {
             let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
@@ -109,24 +109,24 @@ impl PeerConnection {
         &self.socket.remote_identity_id()
     }
 
-    pub fn take_recv_handle(&mut self) -> Option<SpawnHandle<BdtResult<()>>> {
+    pub fn take_recv_handle(&mut self) -> Option<SpawnHandle<P2pResult<()>>> {
         self.handle.take()
     }
 
-    pub async fn send<T: RawEncode + for <'a> RawDecode<'a>>(&mut self, pkg: Package<T>) -> BdtResult<()> {
-        self.send.write_all(pkg.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?.as_slice()).await
-            .map_err(into_bdt_err!(crate::error::BdtErrorCode::IoError))?;
+    pub async fn send<T: RawEncode + for <'a> RawDecode<'a>>(&mut self, pkg: Package<T>) -> P2pResult<()> {
+        self.send.write_all(pkg.to_vec().map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?.as_slice()).await
+            .map_err(into_bdt_err!(crate::error::P2pErrorCode::IoError))?;
         self.send.flush().await
-            .map_err(into_bdt_err!(crate::error::BdtErrorCode::IoError))?;
+            .map_err(into_bdt_err!(crate::error::P2pErrorCode::IoError))?;
         Ok(())
     }
 
-    pub async fn shutdown(&mut self) -> BdtResult<()> {
+    pub async fn shutdown(&mut self) -> P2pResult<()> {
         if self.handle.is_some() {
             self.handle.take().unwrap().abort();
         }
         self.send.finish();
-        self.send.stopped().await.map_err(into_bdt_err!(BdtErrorCode::IoError));
+        self.send.stopped().await.map_err(into_bdt_err!(P2pErrorCode::IoError));
         self.socket.shutdown().await?;
         Ok(())
     }

@@ -9,7 +9,7 @@ use std::{
 use bucky_raw_codec::{RawFrom};
 use bucky_time::bucky_time_now;
 use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
-use crate::error::{into_bdt_err, BdtErrorCode, BdtResult};
+use crate::error::{into_bdt_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
@@ -85,7 +85,7 @@ impl SnService {
         service_ref
     }
 
-    pub async fn start(self: &Arc<Self>) -> BdtResult<()> {
+    pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
         let this = self.clone();
         self.net_listener.set_udp_listener_event_listener(Arc::new(move |socket: QuicSocket| {
             let this = this.clone();
@@ -163,10 +163,10 @@ impl SnService {
         // }
     }
 
-    pub async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TempSeq) -> BdtResult<()> {
+    pub async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TempSeq) -> P2pResult<()> {
         match cmd_code {
             PackageCmdCode::SnCall => {
-                let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_call(
                     call_req,
                     conn_id,
@@ -174,16 +174,16 @@ impl SnService {
                 ).await;
             }
             PackageCmdCode::SnCalledResp => {
-                let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_called_resp(called_resp).await;
             }
             PackageCmdCode::ReportSn => {
-                let report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                let report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_report_sn(&conn_id, report_sn).await;
                 // self.peer_mgr.report_sn(report_sn).await;
             }
             PackageCmdCode::SnQuery => {
-                let query = SnQuery::clone_from_slice(cmd_body).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                let query = SnQuery::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_query_sn(&conn_id, query).await;
             }
             _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
@@ -360,7 +360,7 @@ impl SnService {
                     SnCallResp {
                         seq: call_req.seq,
                         sn_peer_id: self.local_identity_id().clone(),
-                        result: BdtErrorCode::Ok.into_u8(),
+                        result: P2pErrorCode::Ok.into_u8(),
                         to_peer_info: Some(to_peer_cache.desc.get_encoded_cert().unwrap()),
                     }
                 } else {
@@ -369,7 +369,7 @@ impl SnService {
                     SnCallResp {
                         seq: call_req.seq,
                         sn_peer_id: self.local_identity_id().clone(),
-                        result: BdtErrorCode::NotFound.into_u8(),
+                        result: P2pErrorCode::NotFound.into_u8(),
                         to_peer_info: None,
                     }
                 }
@@ -378,7 +378,7 @@ impl SnService {
                 SnCallResp {
                     seq: call_req.seq,
                     sn_peer_id: self.local_identity_id().clone(),
-                    result: BdtErrorCode::NotFound.into_u8(),
+                    result: P2pErrorCode::NotFound.into_u8(),
                     to_peer_info: None,
                 }
             };
@@ -430,7 +430,7 @@ impl SnService {
         if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::ReportSnResp, ReportSnResp {
             seq: report_sn.seq,
             sn_peer_id: self.local_identity_id().clone(),
-            result: BdtErrorCode::Ok.into_u8(),
+            result: P2pErrorCode::Ok.into_u8(),
             peer_info: None,
             end_point_array: vec![remote_ep],
             receipt: None,

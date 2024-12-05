@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use crate::endpoint::Endpoint;
-use crate::error::BdtResult;
+use crate::error::P2pResult;
 use crate::finder::DeviceCache;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::sockets::{NetListener, NetListenerRef, QuicListenerEventListener, QuicListenerRef};
@@ -21,7 +21,7 @@ impl NetManager {
         cert_factory: P2pIdentityCertFactoryRef,
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
-        tcp_accept_timout: Duration,) -> BdtResult<Self> {
+        tcp_accept_timout: Duration,) -> P2pResult<Self> {
         let cert_resolver = TlsServerCertResolver::new();
         Ok(Self {
             net_listener: NetListener::open(device_cache.clone(), cert_resolver.clone(), cert_factory, endpoints, port_mapping, tcp_accept_timout).await?,

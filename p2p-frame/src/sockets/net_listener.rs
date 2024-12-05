@@ -2,7 +2,7 @@ use std::collections::{BTreeSet};
 use std::sync::{Arc};
 use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult};
+use crate::error::{bdt_err, P2pError, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_identity::{P2pIdentityCertFactoryRef};
@@ -24,10 +24,10 @@ impl NetListener {
         endpoints: &[Endpoint],
         port_mapping: Option<Vec<(Endpoint, u16)>>,
         tcp_accept_timout: Duration,
-    ) -> BdtResult<Arc<Self>> {
+    ) -> P2pResult<Arc<Self>> {
         let ep_len = endpoints.len();
         if ep_len == 0 {
-            let err = bdt_err!(BdtErrorCode::InvalidParam, "no endpoint");
+            let err = bdt_err!(P2pErrorCode::InvalidParam, "no endpoint");
             warn!("NetListener bind failed for {}", err);
             return Err(err);
         }
@@ -47,13 +47,13 @@ impl NetListener {
             let ep_pair = if ep.is_mapped_wan() {
                 let local_index = ep_index + 1;
                 let ep_pair = if local_index == ep_len {
-                    Err(BdtError::new(BdtErrorCode::InvalidParam, format!("mapped wan endpoint {} has no local endpoint", ep)))
+                    Err(P2pError::new(P2pErrorCode::InvalidParam, format!("mapped wan endpoint {} has no local endpoint", ep)))
                 } else {
                     let local_ep = &endpoints[local_index];
                     if !(local_ep.is_same_ip_version(ep)
                         && local_ep.protocol() == ep.protocol()
                         && !local_ep.is_static_wan()) {
-                        Err(BdtError::new(BdtErrorCode::InvalidParam, format!("mapped wan endpoint {} has invalid local endpoint {}", ep, local_ep)))
+                        Err(P2pError::new(P2pErrorCode::InvalidParam, format!("mapped wan endpoint {} has invalid local endpoint {}", ep, local_ep)))
                     } else {
                         Ok((*local_ep, Some(*ep)))
                     }

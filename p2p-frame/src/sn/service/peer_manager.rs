@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Mutex;
 use bucky_time::bucky_time_now;
 use crate::endpoint::Endpoint;
-use crate::error::{BdtResult};
+use crate::error::{P2pResult};
 use crate::executor::Executor;
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 use crate::runtime;
@@ -104,7 +104,7 @@ impl CachedPeerInfo {
         self.conn_list.len()
     }
 
-    fn update_desc(&mut self, desc: &P2pIdentityCertRef) -> BdtResult<bool> {
+    fn update_desc(&mut self, desc: &P2pIdentityCertRef) -> P2pResult<bool> {
         self.desc = desc.clone();
         self.is_wan = has_wan_endpoint(desc);
         Ok(true)

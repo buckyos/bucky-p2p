@@ -5,7 +5,7 @@ use quinn::Incoming;
 use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
 use rustls::pki_types::{CertificateDer};
 use rustls::version::TLS13;
-use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, P2pErrorCode, P2pResult, into_bdt_err};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
@@ -18,7 +18,7 @@ pub trait QuicListenerEventListener: Send + Sync + 'static {
     async fn on_new_connection(
         &self,
         socket: QuicSocket,
-    ) -> BdtResult<()>;
+    ) -> P2pResult<()>;
 }
 
 struct QuicListenerState {
@@ -107,21 +107,21 @@ impl QuicListener {
     }
 
 
-    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> BdtResult<()> {
+    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> P2pResult<()> {
         let mut server_config =
             rustls::ServerConfig::builder_with_provider(crate::tls::provider().into())
                 .with_protocol_versions(&[&TLS13])
-                .map_err(into_bdt_err!(BdtErrorCode::TlsError, "Create server config error"))?
+                .map_err(into_bdt_err!(P2pErrorCode::TlsError, "Create server config error"))?
                 .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(self.cert_factory.clone())))
                 .with_cert_resolver(self.cert_resolver.clone());
         server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
         let mut server_config =
-            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_config).map_err(into_bdt_err!(BdtErrorCode::TlsError, "create quic server config failed"))?));
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_config).map_err(into_bdt_err!(P2pErrorCode::TlsError, "create quic server config failed"))?));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
 
-        let endpoint = quinn::Endpoint::server(server_config, local.addr().clone()).map_err(into_bdt_err!(BdtErrorCode::QuicError, "Create quic server error"))?;
+        let endpoint = quinn::Endpoint::server(server_config, local.addr().clone()).map_err(into_bdt_err!(P2pErrorCode::QuicError, "Create quic server error"))?;
 
         let mut state = self.state.write().unwrap();
         state.local = Some(local.clone());
@@ -132,27 +132,27 @@ impl QuicListener {
         Ok(())
     }
 
-    async fn accept(&self, conn: Incoming) -> BdtResult<QuicSocket> {
-        let connection = conn.await.map_err(into_bdt_err!(BdtErrorCode::QuicError, "QuicListener accept error"))?;
+    async fn accept(&self, conn: Incoming) -> P2pResult<QuicSocket> {
+        let connection = conn.await.map_err(into_bdt_err!(P2pErrorCode::QuicError, "QuicListener accept error"))?;
         let handshake_data = connection.handshake_data();
         if handshake_data.is_none() {
-            return Err(bdt_err!(BdtErrorCode::TlsError, "no handshake data"));
+            return Err(bdt_err!(P2pErrorCode::TlsError, "no handshake data"));
         }
         let handshake_data = handshake_data.as_ref().unwrap().as_ref().downcast_ref::<HandshakeData>();
         if handshake_data.is_none() {
-            return Err(bdt_err!(BdtErrorCode::TlsError, "no handshake data"));
+            return Err(bdt_err!(P2pErrorCode::TlsError, "no handshake data"));
         }
 
         let serve_name = handshake_data.unwrap().server_name.as_ref();
         if serve_name.is_none() {
-            return Err(bdt_err!(BdtErrorCode::TlsError, "no server name"));
+            return Err(bdt_err!(P2pErrorCode::TlsError, "no server name"));
         }
 
         let local_id = P2pId::from_str(serve_name.unwrap())?;
         let peer_identity = connection.peer_identity();
         let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
         if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {
-            return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
+            return Err(bdt_err!(P2pErrorCode::CertError, "no cert"));
         }
         let remote_device = self.cert_factory.create(&remote_cert.unwrap()[0].as_ref().to_vec())?;
         self.device_cache.add(&remote_device.get_id(), &remote_device);

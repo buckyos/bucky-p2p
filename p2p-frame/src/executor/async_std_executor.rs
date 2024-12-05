@@ -3,7 +3,7 @@ use futures::executor::ThreadPool;
 use futures::future::RemoteHandle;
 use futures::task::{Spawn, SpawnExt};
 use once_cell::sync::OnceCell;
-use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{P2pErrorCode, P2pResult, into_bdt_err};
 
 pub struct Executor;
 
@@ -21,14 +21,14 @@ impl Executor {
         });
     }
 
-    pub fn spawn_with_handle<Fut>(future: Fut) -> BdtResult<SpawnHandle<Fut::Output>>
+    pub fn spawn_with_handle<Fut>(future: Fut) -> P2pResult<SpawnHandle<Fut::Output>>
         where
             Fut: Future + Send + 'static,
             Fut::Output: Send, {
-        EXECUTOR.get().unwrap().spawn_with_handle(future).map_err(into_bdt_err!(BdtErrorCode::ExecuteError))
+        EXECUTOR.get().unwrap().spawn_with_handle(future).map_err(into_bdt_err!(P2pErrorCode::ExecuteError))
     }
 
-    pub fn spawn<Fut>(future: Fut) -> BdtResult<()>
+    pub fn spawn<Fut>(future: Fut) -> P2pResult<()>
         where
             Fut: Future<Output = ()> + Send + 'static,{
         EXECUTOR.get().unwrap().spawn(future);

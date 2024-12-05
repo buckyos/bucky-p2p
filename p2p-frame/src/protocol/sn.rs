@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
 use bucky_time::{bucky_time_to_system_time, system_time_to_bucky_time, MIN_BUCKY_TIME};
 use crate::endpoint::Endpoint;
-use crate::error::{BdtError, BdtErrorCode};
+use crate::error::{P2pError, P2pErrorCode};
 use crate::p2p_identity::{P2pId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
 use crate::types::{TempSeq, Timestamp};
 
@@ -64,7 +64,7 @@ impl SnServiceGrade {
 }
 
 impl TryFrom<u8> for SnServiceGrade {
-    type Error = BdtError;
+    type Error = P2pError;
     fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
             0 => Ok(Self::None),
@@ -73,8 +73,8 @@ impl TryFrom<u8> for SnServiceGrade {
             3 => Ok(Self::Normal),
             4 => Ok(Self::Fine),
             5 => Ok(Self::Wonderfull),
-            _ => Err(BdtError::new(
-                BdtErrorCode::InvalidParam,
+            _ => Err(P2pError::new(
+                P2pErrorCode::InvalidParam,
                 "invalid SnServiceGrade value".to_string(),
             )),
         }
@@ -137,13 +137,13 @@ pub enum SnServiceReceiptVersion {
 }
 
 impl TryFrom<u8> for SnServiceReceiptVersion {
-    type Error = BdtError;
+    type Error = P2pError;
     fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
             0 => Ok(Self::Invalid),
             1 => Ok(Self::Current),
-            _ => Err(BdtError::new(
-                BdtErrorCode::UnSupport,
+            _ => Err(P2pError::new(
+                P2pErrorCode::UnSupport,
                 format!("unsupport version({})", v),
             )),
         }
@@ -241,7 +241,7 @@ impl SnServiceReceipt {
         &self,
         sn_peerid: &P2pId,
         _private_key: &Arc<dyn P2pIdentity>,
-    ) -> Result<P2pSignature, BdtError> {
+    ) -> Result<P2pSignature, P2pError> {
         let _sig_fields = SnServiceReceiptSignature {
             sn_peerid: sn_peerid.clone(),
             receipt: self.clone(),

@@ -6,7 +6,7 @@ use super::storage::{AsyncStorage, SqliteStorage};
 mod manager;
 
 pub use manager::StatisticManager;
-use crate::error::BdtErrorCode;
+use crate::error::P2pErrorCode;
 use crate::p2p_identity::P2pId;
 use crate::types::{TempSeq, Timestamp};
 
@@ -64,7 +64,7 @@ struct PeerStatusImpl {
 #[derive(Debug)]
 enum StatusKind {
     OnlineResult(PeerStatusKind),
-    CallResult(BdtErrorCode),
+    CallResult(P2pErrorCode),
     ErrorResult(String),
 }
 
@@ -145,10 +145,10 @@ impl PeerStatus {
         self.0.write().unwrap()
             .records
             .entry((StatisticKey::RemoteId(peer_id), seq))
-            .or_insert(StatusKind::CallResult(BdtErrorCode::Ok));
+            .or_insert(StatusKind::CallResult(P2pErrorCode::Ok));
     }
 
-    pub fn record(&self, peer_id: P2pId, seq: TempSeq, errno: BdtErrorCode) {
+    pub fn record(&self, peer_id: P2pId, seq: TempSeq, errno: P2pErrorCode) {
 
         let w = &mut *self.0.write().unwrap();
         match w.records

@@ -9,7 +9,7 @@ use quinn::{RecvStream, SendStream};
 use quinn::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::endpoint::Endpoint;
-use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, P2pErrorCode, P2pResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
@@ -85,10 +85,10 @@ impl QuicTunnelConnectionImpl {
         }
     }
 
-    async fn read_pkg(recv: &mut RecvStream) -> BdtResult<(PackageCmdCode, Vec<u8>)> {
+    async fn read_pkg(recv: &mut RecvStream) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
         let mut buf_header = [0u8; 16];
-        recv.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+        recv.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
         let cmd_code = match header.cmd_code() {
             Ok(cmd_code) => cmd_code,
             Err(err) => {
@@ -96,7 +96,7 @@ impl QuicTunnelConnectionImpl {
             }
         };
         let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-        recv.read_exact(cmd_body.as_mut_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        recv.read_exact(cmd_body.as_mut_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
         Ok((cmd_code, cmd_body))
     }
 
@@ -108,8 +108,8 @@ impl QuicTunnelConnectionImpl {
                                local_id: P2pId,
                                remote_ep: Endpoint,
                                local_ep: Endpoint,
-                               tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelStream>> {
-        let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                               tunnel_stat: TunnelStatRef) -> P2pResult<Box<dyn TunnelStream>> {
+        let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
         let syn = SynStream {
             sequence,
             to_vport: vport,
@@ -117,8 +117,8 @@ impl QuicTunnelConnectionImpl {
             payload: Vec::new(),
         };
         let pkg = Package::new(PackageCmdCode::SynStream, syn);
-        send.write_all(pkg.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        send.flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        send.write_all(pkg.to_vec().map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        send.flush().await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
 
         // let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
         // if cmd_code != PackageCmdCode::AckStream {
@@ -141,8 +141,8 @@ impl QuicTunnelConnectionImpl {
                                        local_id: P2pId,
                                        remote_ep: Endpoint,
                                        local_ep: Endpoint,
-                                       tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelStream>> {
-        let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                                       tunnel_stat: TunnelStatRef) -> P2pResult<Box<dyn TunnelStream>> {
+        let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
         let syn = SynReverseStream {
             sequence,
             session_id,
@@ -150,8 +150,8 @@ impl QuicTunnelConnectionImpl {
             payload: Vec::new(),
         };
         let pkg = Package::new(PackageCmdCode::SynReverseStream, syn);
-        send.write_all(pkg.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        send.flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        send.write_all(pkg.to_vec().map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        send.flush().await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
 
         // let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
         // if cmd_code != PackageCmdCode::AckStream {
@@ -172,16 +172,16 @@ impl QuicTunnelConnectionImpl {
                                  local_id: P2pId,
                                  remote_ep: Endpoint,
                                  local_ep: Endpoint,
-                                 tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelDatagramSend>> {
-        let mut send = socket.open_uni().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                                 tunnel_stat: TunnelStatRef) -> P2pResult<Box<dyn TunnelDatagramSend>> {
+        let mut send = socket.open_uni().await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
 
         let syn = SynDatagram {
             sequence,
             payload: Vec::new(),
         };
         let pkg = Package::new(PackageCmdCode::SynDatagram, syn);
-        send.write_all(pkg.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        send.flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        send.write_all(pkg.to_vec().map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        send.flush().await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
 
         Ok(Box::new(QuicTunnelDatagramSend::new(send, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat)))
     }
@@ -192,16 +192,16 @@ impl QuicTunnelConnectionImpl {
                                          local_id: P2pId,
                                          remote_ep: Endpoint,
                                          local_ep: Endpoint,
-                                         tunnel_stat: TunnelStatRef) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
-        let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+                                         tunnel_stat: TunnelStatRef) -> P2pResult<Box<dyn TunnelDatagramRecv>> {
+        let (mut send, recv) = socket.open_bi().await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
 
         let syn = SynReverseDatagram {
             sequence,
             payload: Vec::new(),
         };
         let pkg = Package::new(PackageCmdCode::SynReverseDatagram, syn);
-        send.write_all(pkg.to_vec().map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        send.flush().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+        send.write_all(pkg.to_vec().map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        send.flush().await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
 
         Ok(Box::new(QuicTunnelDatagramRecv::new(sequence, remote_id, local_id, remote_ep, local_ep, recv, tunnel_stat)))
     }
@@ -244,11 +244,11 @@ impl QuicTunnelConnection {
         }
     }
 
-    async fn open_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+    async fn open_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>> {
         let (conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat) = {
             let inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error {:?}", inner.tunnel_state));
+                return Err(bdt_err!(P2pErrorCode::ErrorState, "tunnel state error {:?}", inner.tunnel_state));
             }
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
@@ -270,11 +270,11 @@ impl QuicTunnelConnection {
         }
     }
 
-    async fn open_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
+    async fn open_reverse_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramRecv>> {
         let (conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat) = {
             let inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error"));
+                return Err(bdt_err!(P2pErrorCode::ErrorState, "tunnel state error"));
             }
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
@@ -318,7 +318,7 @@ impl TunnelConnection for QuicTunnelConnection {
         inner.tunnel_stat.clone()
     }
 
-    async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+    async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>> {
         let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
             (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
@@ -341,7 +341,7 @@ impl TunnelConnection for QuicTunnelConnection {
         Ok(self.open_stream(vport, session_id).await?)
     }
 
-    async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    async fn connect_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramSend>> {
         let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
             (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
@@ -364,7 +364,7 @@ impl TunnelConnection for QuicTunnelConnection {
         Ok(self.open_datagram().await?)
     }
 
-    async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+    async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>> {
         let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
             (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
@@ -387,7 +387,7 @@ impl TunnelConnection for QuicTunnelConnection {
         Ok(self.open_reverse_stream(vport, session_id).await?)
     }
 
-    async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>> {
+    async fn connect_reverse_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramRecv>> {
         let (net_manager, has_socket, local_identity, remote_id, remote_ep, conn_timeout, idle_timeout, local_ep, verifier) = {
             let inner = self.inner.lock().unwrap();
             (inner.net_manager.clone(), inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_id.clone(), inner.remote_ep.clone(), inner.conn_timeout, inner.idle_timeout, inner.local_ep.clone(), inner.cert_factory.clone())
@@ -410,11 +410,11 @@ impl TunnelConnection for QuicTunnelConnection {
         Ok(self.open_reverse_datagram().await?)
     }
 
-    async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>> {
+    async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>> {
         let (conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat) = {
             let inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error {:?}", inner.tunnel_state));
+                return Err(bdt_err!(P2pErrorCode::ErrorState, "tunnel state error {:?}", inner.tunnel_state));
             }
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
@@ -436,11 +436,11 @@ impl TunnelConnection for QuicTunnelConnection {
         }
     }
 
-    async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    async fn open_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramSend>> {
         let (conn, sequence, remote_id, local_id, remote_ep, local_ep, tunnel_stat) = {
             let inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(bdt_err!(BdtErrorCode::ErrorState, "tunnel state error"));
+                return Err(bdt_err!(P2pErrorCode::ErrorState, "tunnel state error"));
             }
             (inner.data_socket.as_ref().unwrap().socket().clone(),
              inner.sequence.clone(),
@@ -462,7 +462,7 @@ impl TunnelConnection for QuicTunnelConnection {
         }
     }
 
-    async fn accept_instance(&self) -> BdtResult<TunnelInstance> {
+    async fn accept_instance(&self) -> P2pResult<TunnelInstance> {
         let (socket, sequence, remote_id, remote_ep, local_id, local_ep, tunnel_stat) = {
             let inner = self.inner.lock().unwrap();
             (inner.data_socket.as_ref().unwrap().socket().clone(),
@@ -483,9 +483,9 @@ impl TunnelConnection for QuicTunnelConnection {
             ret = bi_accept => {
                 match ret {
                     Ok((send, mut recv)) => {
-                        let (cmd_code, cmd_body) = QuicTunnelConnectionImpl::read_pkg(&mut recv).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+                        let (cmd_code, cmd_body) = QuicTunnelConnectionImpl::read_pkg(&mut recv).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
                         if cmd_code == PackageCmdCode::SynStream {
-                            let syn = SynStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                            let syn = SynStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                             return Ok(TunnelInstance::Stream(Box::new(QuicTunnelStream::new(syn.to_vport,
                                 syn.session_id,
                                 sequence,
@@ -497,7 +497,7 @@ impl TunnelConnection for QuicTunnelConnection {
                                 recv,
                                 tunnel_stat))));
                         } else if cmd_code == PackageCmdCode::SynReverseStream {
-                            let syn = SynReverseStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                            let syn = SynReverseStream::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                             {
                                 let mut inner = self.inner.lock().unwrap();
                                 inner.sequence = syn.sequence;
@@ -513,7 +513,7 @@ impl TunnelConnection for QuicTunnelConnection {
                                 recv,
                                 tunnel_stat))));
                         } else if cmd_code == PackageCmdCode::SynReverseDatagram {
-                            let syn = SynReverseDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
+                            let syn = SynReverseDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
                             {
                                 let mut inner = self.inner.lock().unwrap();
                                 inner.sequence = syn.sequence;
@@ -526,22 +526,22 @@ impl TunnelConnection for QuicTunnelConnection {
                                 local_ep,
                                 tunnel_stat))))
                         } else {
-                            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel invalid syn stream"));
+                            return Err(bdt_err!(P2pErrorCode::InvalidData, "tunnel invalid syn stream"));
                         }
 
                     }
                     Err(e) => {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Error;
-                        return Err(bdt_err!(BdtErrorCode::IoError, "{:?}", e));
+                        return Err(bdt_err!(P2pErrorCode::IoError, "{:?}", e));
                     }}
             },
             ret = uni_accept => {
                 match ret {
                     Ok(mut recv) => {
-                        let (cmd_code, _cmd_body) = QuicTunnelConnectionImpl::read_pkg(&mut recv).await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+                        let (cmd_code, _cmd_body) = QuicTunnelConnectionImpl::read_pkg(&mut recv).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
                         if cmd_code != PackageCmdCode::SynDatagram {
-                            return Err(bdt_err!(BdtErrorCode::InvalidData, "tunnel invalid syn stream"));
+                            return Err(bdt_err!(P2pErrorCode::InvalidData, "tunnel invalid syn stream"));
                         }
                         return Ok(TunnelInstance::Datagram(Box::new(QuicTunnelDatagramRecv::new(sequence,
                             remote_id,
@@ -554,14 +554,14 @@ impl TunnelConnection for QuicTunnelConnection {
                     Err(e) => {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Error;
-                        return Err(bdt_err!(BdtErrorCode::IoError, "{:?}", e));
+                        return Err(bdt_err!(P2pErrorCode::IoError, "{:?}", e));
                     }
                 }
             }
         };
     }
 
-    async fn shutdown(&self) -> BdtResult<()> {
+    async fn shutdown(&self) -> P2pResult<()> {
         let data_socket = {
             let inner = self.inner.lock().unwrap();
             inner.data_socket.clone()
@@ -712,10 +712,10 @@ impl TunnelStream for QuicTunnelStream {
         self.local_ep.clone()
     }
 
-    async fn close(&mut self) -> BdtResult<()> {
-        self.send.finish().map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        self.send.stopped().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+    async fn close(&mut self) -> P2pResult<()> {
+        self.send.finish().map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        self.send.stopped().await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 }
@@ -827,9 +827,9 @@ impl TunnelDatagramSend for QuicTunnelDatagramSend {
         self.local_ep.clone()
     }
 
-    async fn close(&mut self) -> BdtResult<()> {
-        self.send.finish().map_err(into_bdt_err!(BdtErrorCode::IoError))?;
-        self.send.stopped().await.map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+    async fn close(&mut self) -> P2pResult<()> {
+        self.send.finish().map_err(into_bdt_err!(P2pErrorCode::IoError))?;
+        self.send.stopped().await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 }
@@ -915,8 +915,8 @@ impl TunnelDatagramRecv for QuicTunnelDatagramRecv {
     fn local_endpoint(&self) -> Endpoint {
         self.local_ep.clone()
     }
-    async fn close(&mut self) -> BdtResult<()> {
-        self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(BdtErrorCode::IoError))?;
+    async fn close(&mut self) -> P2pResult<()> {
+        self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 }
@@ -926,6 +926,6 @@ impl Drop for QuicTunnelDatagramRecv {
         log::info!("drop quic tunnel datagram {:?} local_id {} remote_id {}",
             self.sequence, self.local_id.to_string(), self.remote_id.to_string());
         self.tunnel_stat.decrease_work_instance();
-        let _ = self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(BdtErrorCode::IoError));
+        let _ = self.recv.stop(VarInt::from_u32(0)).map_err(into_bdt_err!(P2pErrorCode::IoError));
     }
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use bucky_raw_codec::{RawFrom};
 use bucky_time::bucky_time_now;
 use notify_future::NotifyFuture;
-use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, P2pErrorCode, P2pResult, into_bdt_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::v0::SnCalled;
@@ -258,7 +258,7 @@ impl TunnelListenPorts for ListenPorts {
 
 #[async_trait::async_trait]
 pub trait DeviceFinder: 'static + Send + Sync {
-    async fn get_device(&self, device_id: &P2pId) -> BdtResult<P2pIdentityCertRef>;
+    async fn get_device(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef>;
 }
 pub type DeviceFinderRef = Arc<dyn DeviceFinder>;
 
@@ -280,7 +280,7 @@ impl DefaultDeviceFinder {
 
 #[async_trait::async_trait]
 impl DeviceFinder for DefaultDeviceFinder {
-    async fn get_device(&self, device_id: &P2pId) -> BdtResult<P2pIdentityCertRef> {
+    async fn get_device(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
         if let Some(device) = self.device_cache.get(device_id) {
             return Ok(device);
         }
@@ -288,7 +288,7 @@ impl DeviceFinder for DefaultDeviceFinder {
         let resp = self.sn_service.query(device_id).await?;
         log::info!("query device {} resp {:?}", device_id, resp);
         if resp.peer_info.is_none() {
-            return Err(bdt_err!(BdtErrorCode::NotFound, "device not found"));
+            return Err(bdt_err!(P2pErrorCode::NotFound, "device not found"));
         }
         let device = resp.peer_info.unwrap();
         let mut device = self.cert_factory.create(&device)?;
@@ -432,7 +432,7 @@ impl TunnelManager {
         });
     }
 
-    async fn on_new_tcp_tunnel(&self, socket: TCPSocket) -> BdtResult<()> {
+    async fn on_new_tcp_tunnel(&self, socket: TCPSocket) -> P2pResult<()> {
         let remote_id = socket.remote_identity_id().clone();
         let remote_ep = socket.remote().clone();
         let local_id = socket.local_identity_id().clone();
@@ -531,7 +531,7 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn on_new_quic_tunnel(&self, socket: QuicSocket) -> BdtResult<()> {
+    async fn on_new_quic_tunnel(&self, socket: QuicSocket) -> P2pResult<()> {
         let remote_id = socket.remote_identity_id().clone();
         let remote_ep = socket.remote().clone();
         let local_id = socket.local_identity_id().clone();
@@ -661,7 +661,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef) -> P2pResult<Box<dyn TunnelDatagramSend>> {
         let remote_id = remote.get_id();
         let tunnels = self.get_tunnels(&remote_id);
 
@@ -690,7 +690,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId) -> BdtResult<Box<dyn TunnelDatagramSend>> {
+    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId) -> P2pResult<Box<dyn TunnelDatagramSend>> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_datagram().await;
@@ -718,7 +718,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_stream_tunnel(&self, remote: &P2pIdentityCertRef, session_id: IncreaseId, vport: u16) -> BdtResult<Box<dyn TunnelStream>> {
+    pub async fn create_stream_tunnel(&self, remote: &P2pIdentityCertRef, session_id: IncreaseId, vport: u16) -> P2pResult<Box<dyn TunnelStream>> {
         let remote_id = remote.get_id();
         let tunnels = self.get_tunnels(&remote_id);
 
@@ -747,7 +747,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_stream_tunnel_from_id(&self, remote_id: &P2pId, session_id: IncreaseId, vport: u16) -> BdtResult<Box<dyn TunnelStream>> {
+    pub async fn create_stream_tunnel_from_id(&self, remote_id: &P2pId, session_id: IncreaseId, vport: u16) -> P2pResult<Box<dyn TunnelStream>> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_stream(vport, session_id).await;
@@ -775,7 +775,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn on_sn_called(&self, sn_called: SnCalled) -> BdtResult<()> {
+    pub async fn on_sn_called(&self, sn_called: SnCalled) -> P2pResult<()> {
         log::info!("on_sn_called {:?}", sn_called);
 
         let cert = self.cert_factory.create(&sn_called.peer_info)?;
@@ -805,7 +805,7 @@ impl TunnelManager {
                 self.listen_ports.clone(),
                 self.cert_factory.clone());
 
-            let mut futures = Vec::<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramRecv>)>> + Send>>>::new();
+            let mut futures = Vec::<Pin<Box<dyn Future<Output=P2pResult<(Box<dyn TunnelConnection>, Box<dyn TunnelDatagramRecv>)>> + Send>>>::new();
             for ep in eps.iter() {
                 if ep.is_tcp() {
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(
@@ -881,8 +881,8 @@ impl TunnelManager {
                 self.listen_ports.clone(),
                 self.cert_factory.clone());
 
-            let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(BdtErrorCode::RawCodecError))?;
-            let mut futures = Vec::<Pin<Box<dyn Future<Output=BdtResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>>::new();
+            let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+            let mut futures = Vec::<Pin<Box<dyn Future<Output=P2pResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>>::new();
             for ep in eps.iter() {
                 if ep.is_tcp() {
                     let tunnel_conn: Box<dyn TunnelConnection> = Box::new(TcpTunnelConnection::new(

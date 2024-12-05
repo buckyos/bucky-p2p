@@ -5,7 +5,7 @@ use as_any::AsAny;
 use bucky_time::bucky_time_now;
 use futures::FutureExt;
 use crate::endpoint::Endpoint;
-use crate::error::{bdt_err, BdtErrorCode, BdtResult};
+use crate::error::{bdt_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::P2pId;
 use crate::runtime;
 use crate::types::{IncreaseId, TempSeq};
@@ -97,7 +97,7 @@ pub trait TunnelStream: 'static + Send + runtime::AsyncWrite + runtime::AsyncRea
     fn local_identity_id(&self) -> P2pId;
     fn remote_endpoint(&self) -> Endpoint;
     fn local_endpoint(&self) -> Endpoint;
-    async fn close(&mut self) -> BdtResult<()>;
+    async fn close(&mut self) -> P2pResult<()>;
 }
 
 #[async_trait::async_trait]
@@ -107,7 +107,7 @@ pub trait TunnelDatagramSend: 'static + Send + runtime::AsyncWrite {
     fn local_identity_id(&self) -> P2pId;
     fn remote_endpoint(&self) -> Endpoint;
     fn local_endpoint(&self) -> Endpoint;
-    async fn close(&mut self) -> BdtResult<()>;
+    async fn close(&mut self) -> P2pResult<()>;
 }
 
 #[async_trait::async_trait]
@@ -117,7 +117,7 @@ pub trait TunnelDatagramRecv: 'static + Send + runtime::AsyncRead {
     fn local_identity_id(&self) -> P2pId;
     fn remote_endpoint(&self) -> Endpoint;
     fn local_endpoint(&self) -> Endpoint;
-    async fn close(&mut self) -> BdtResult<()>;
+    async fn close(&mut self) -> P2pResult<()>;
 }
 
 pub enum TunnelInstance {
@@ -143,17 +143,17 @@ pub trait TunnelConnection: AsAny + Send + Sync {
     fn socket_type(&self) -> SocketType;
     fn is_idle(&self) -> bool;
     fn tunnel_stat(&self) -> TunnelStatRef;
-    async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>>;
-    async fn connect_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>>;
-    async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>>;
-    async fn connect_reverse_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramRecv>>;
-    async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> BdtResult<Box<dyn TunnelStream>>;
-    async fn open_datagram(&self) -> BdtResult<Box<dyn TunnelDatagramSend>>;
-    async fn accept_instance(&self) -> BdtResult<TunnelInstance>;
-    async fn shutdown(&self) -> BdtResult<()>;
+    async fn connect_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>>;
+    async fn connect_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramSend>>;
+    async fn connect_reverse_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>>;
+    async fn connect_reverse_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramRecv>>;
+    async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<Box<dyn TunnelStream>>;
+    async fn open_datagram(&self) -> P2pResult<Box<dyn TunnelDatagramSend>>;
+    async fn accept_instance(&self) -> P2pResult<TunnelInstance>;
+    async fn shutdown(&self) -> P2pResult<()>;
 }
 
-pub async fn select_successful<T, E, F>(futures: Vec<F>) -> BdtResult<T>
+pub async fn select_successful<T, E, F>(futures: Vec<F>) -> P2pResult<T>
 where
     F: Future<Output=Result<T, E>> + Unpin,
 {
@@ -170,5 +170,5 @@ where
             },
         }
     };
-    Err(bdt_err!(BdtErrorCode::ConnectFailed, "connect failed"))
+    Err(bdt_err!(P2pErrorCode::ConnectFailed, "connect failed"))
 }

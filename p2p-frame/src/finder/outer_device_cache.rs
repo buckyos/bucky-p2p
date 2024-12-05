@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::error::BdtResult;
+use crate::error::P2pResult;
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 
 #[async_trait]
@@ -15,10 +15,10 @@ pub trait OuterDeviceCache: Sync + Send + 'static {
     async fn flush(&self, device_id: &P2pId);
 
     // 本地查询，查询不到则发起查找操作
-    async fn search(&self, device_id: &P2pId) -> BdtResult<P2pIdentityCertRef>;
+    async fn search(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef>;
 
     // 校验device的owner签名是否有效
-    async fn verfiy_owner(&self, device_id: &P2pId, device: Option<&P2pIdentityCertRef>) -> BdtResult<()>;
+    async fn verfiy_owner(&self, device_id: &P2pId, device: Option<&P2pIdentityCertRef>) -> P2pResult<()>;
 
     fn clone_cache(&self) -> Box<dyn OuterDeviceCache>;
 }

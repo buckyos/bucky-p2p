@@ -5,7 +5,7 @@ use quinn::VarInt;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{P2pErrorCode, P2pResult, into_bdt_err};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 
@@ -40,7 +40,7 @@ impl QuicSocket {
                          remote_identity_id: P2pId,
                          remote: Endpoint,
                          timeout: Duration,
-                         idle_timeout: Duration) -> BdtResult<Self> {
+                         idle_timeout: Duration) -> P2pResult<Self> {
         log::info!("quic to {} connect begin", remote);
         let client_key = local_identity_ref.get_encoded_identity()?;
         let client_cert = local_identity_ref.get_identity_cert()?.get_encoded_cert()?;
@@ -51,7 +51,7 @@ impl QuicSocket {
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory)))
                 .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-                .map_err(into_bdt_err!(BdtErrorCode::TlsError))?;
+                .map_err(into_bdt_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;
 
         let mut client_config =
@@ -69,12 +69,12 @@ impl QuicSocket {
 
         let conn = runtime::timeout(timeout, endpoint.connect(remote.addr().clone(),
                                     remote_identity_id.to_string().as_str()).unwrap()).await
-            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
-            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
+            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
+            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
                      local_identity_ref.get_id(),
                      remote_identity_id,
-                     Endpoint::from((Protocol::Udp, endpoint.local_addr().map_err(into_bdt_err!(BdtErrorCode::TlsError))?)),
+                     Endpoint::from((Protocol::Udp, endpoint.local_addr().map_err(into_bdt_err!(P2pErrorCode::TlsError))?)),
                      remote))
     }
 
@@ -84,7 +84,7 @@ impl QuicSocket {
                                  remote_identity_id: P2pId,
                                  remote: Endpoint,
                                  timeout: Duration,
-                                 idle_timeout: Duration) -> BdtResult<Self> {
+                                 idle_timeout: Duration) -> P2pResult<Self> {
         log::info!("connect with ep remote = {}", remote);
         let client_key = local_identity_ref.get_encoded_identity()?;
         let client_cert = local_identity_ref.get_identity_cert()?.get_encoded_cert()?;
@@ -95,7 +95,7 @@ impl QuicSocket {
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory)))
                 .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-                .map_err(into_bdt_err!(BdtErrorCode::TlsError))?;
+                .map_err(into_bdt_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;
 
         let mut client_config =
@@ -110,12 +110,12 @@ impl QuicSocket {
         let conn = runtime::timeout(timeout, ep.connect_with(client_config,
                                    remote.addr().clone(),
                                    remote_identity_id.to_string().as_str()).unwrap()).await
-            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
-            .map_err(into_bdt_err!(BdtErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
+            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
+            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
                      local_identity_ref.get_id(),
                      remote_identity_id,
-                     Endpoint::from((Protocol::Udp, ep.local_addr().map_err(into_bdt_err!(BdtErrorCode::TlsError))?)),
+                     Endpoint::from((Protocol::Udp, ep.local_addr().map_err(into_bdt_err!(P2pErrorCode::TlsError))?)),
                      remote))
     }
 
@@ -139,7 +139,7 @@ impl QuicSocket {
         &self.remote_identity_id
     }
 
-    pub async fn shutdown(&self) -> BdtResult<()> {
+    pub async fn shutdown(&self) -> P2pResult<()> {
         self.socket.close(VarInt::from_u32(0), &[]);
         Ok(())
     }

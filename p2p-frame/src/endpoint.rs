@@ -5,7 +5,7 @@ use std::str::FromStr;
 use crate::*;
 use std::cmp::Ordering;
 use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
-use crate::error::{BdtError, BdtErrorCode};
+use crate::error::{P2pError, P2pErrorCode};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Protocol {
@@ -237,7 +237,7 @@ impl std::fmt::Display for Endpoint {
 }
 
 impl FromStr for Endpoint {
-    type Err = BdtError;
+    type Err = P2pError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let area = {
             match &s[0..1] {
@@ -245,8 +245,8 @@ impl FromStr for Endpoint {
                 "M" => Ok(EndpointArea::Mapped),
                 "L" => Ok(EndpointArea::Lan),
                 "D" => Ok(EndpointArea::Default),
-                _ => Err(BdtError::new(
-                    BdtErrorCode::InvalidInput,
+                _ => Err(P2pError::new(
+                    P2pErrorCode::InvalidInput,
                     "invalid endpoint string".to_string(),
                 )),
             }
@@ -258,19 +258,19 @@ impl FromStr for Endpoint {
                 "tcp" => Ok(Protocol::Tcp),
                 "udp" => Ok(Protocol::Udp),
                 "qic" => Ok(Protocol::Quic),
-                _ => Err(BdtError::new(
-                    BdtErrorCode::InvalidInput,
+                _ => Err(P2pError::new(
+                    P2pErrorCode::InvalidInput,
                     "invalid endpoint string".to_string(),
                 )),
             }
         }?;
 
         let addr = SocketAddr::from_str(&s[5..]).map_err(|_| {
-            BdtError::new(BdtErrorCode::InvalidInput, "invalid endpoint string".to_string())
+            P2pError::new(P2pErrorCode::InvalidInput, "invalid endpoint string".to_string())
         })?;
         if !(addr.is_ipv4() && version_str.eq("4") || addr.is_ipv6() && version_str.eq("6")) {
-            return Err(BdtError::new(
-                BdtErrorCode::InvalidInput,
+            return Err(P2pError::new(
+                P2pErrorCode::InvalidInput,
                 "invalid endpoint string".to_string(),
             ));
         }

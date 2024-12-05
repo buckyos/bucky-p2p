@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
-use crate::error::{bdt_err, BdtErrorCode, BdtResult};
+use crate::error::{bdt_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertRef};
 use crate::stream::StreamGuard;
 use crate::tunnel::{TunnelManagerRef, TunnelStream};
@@ -31,7 +31,7 @@ impl StreamListener {
         }
     }
 
-    pub async fn accept(&self) -> BdtResult<StreamGuard> {
+    pub async fn accept(&self) -> P2pResult<StreamGuard> {
         let future = self.waiter.create_result_future();
         let (abort_future, handle) = abortable(async move {
             future.await
@@ -48,7 +48,7 @@ impl StreamListener {
             state.abort_handle = None;
         }
         if let Err(_) = ret {
-            Err(bdt_err!(BdtErrorCode::UserCanceled, "user canceled"))
+            Err(bdt_err!(P2pErrorCode::UserCanceled, "user canceled"))
         } else {
             Ok(ret.unwrap().unwrap())
         }
@@ -132,22 +132,22 @@ impl StreamManager {
         stream
     }
 
-    pub async fn connect(&self, remote: &P2pIdentityCertRef, port: u16, ) -> BdtResult<StreamGuard> {
+    pub async fn connect(&self, remote: &P2pIdentityCertRef, port: u16, ) -> P2pResult<StreamGuard> {
         let session_id = self.session_gen.generate();
         let tunnel = self.tunnel_manager.create_stream_tunnel(remote, session_id, port).await?;
         Ok(StreamGuard::new(tunnel))
     }
 
-    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> BdtResult<StreamGuard> {
+    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> P2pResult<StreamGuard> {
         let session_id = self.session_gen.generate();
         let tunnel = self.tunnel_manager.create_stream_tunnel_from_id(remote_id, session_id, port).await?;
         Ok(StreamGuard::new(tunnel))
     }
 
-    pub async fn listen(self: &StreamManagerRef, port: u16) -> BdtResult<StreamListenerGuard> {
+    pub async fn listen(self: &StreamManagerRef, port: u16) -> P2pResult<StreamListenerGuard> {
         let mut listeners = self.listeners.lock().unwrap();
         if listeners.contains_key(&port) {
-            return Err(bdt_err!(BdtErrorCode::StreamPortAlreadyListen, "stream port already listen"));
+            return Err(bdt_err!(P2pErrorCode::StreamPortAlreadyListen, "stream port already listen"));
         }
         let listener = Arc::new(StreamListener::new(port));
         listeners.insert(port, listener.clone());

@@ -27,12 +27,12 @@ use winapi::{
         winsock2::{WSAGetLastError, WSAIoctl, SOCKET, SOCKET_ERROR},
     },
 };
-use crate::error::{bdt_err, into_bdt_err, BdtError, BdtErrorCode, BdtResult};
+use crate::error::{bdt_err, into_bdt_err, P2pError, P2pErrorCode, P2pResult};
 use crate::sockets::get_if_addrs::get_if_addrs;
 
-pub fn get_all_ips() -> BdtResult<Vec<IpAddr>> {
+pub fn get_all_ips() -> P2pResult<Vec<IpAddr>> {
     let mut ret = Vec::new();
-    for iface in get_if_addrs().map_err(into_bdt_err!(BdtErrorCode::Failed))? {
+    for iface in get_if_addrs().map_err(into_bdt_err!(P2pErrorCode::Failed))? {
         ret.push(iface.ip())
     }
     Ok(ret)
@@ -159,7 +159,7 @@ pub fn init_udp_socket(_socket: &UdpSocket) -> Result<(), BuckyError> {
 }
 
 #[cfg(windows)]
-pub fn init_udp_socket<S: AsRawSocket>(socket: &S) -> Result<(), BdtError> {
+pub fn init_udp_socket<S: AsRawSocket>(socket: &S) -> Result<(), P2pError> {
     unsafe {
         // Ignoring UdpSocket's WSAECONNRESET error
         // https://github.com/shadowsocks/shadowsocks-rust/issues/179
@@ -193,7 +193,7 @@ pub fn init_udp_socket<S: AsRawSocket>(socket: &S) -> Result<(), BdtError> {
             let err_code = WSAGetLastError();
             let err = Error::from_raw_os_error(err_code);
 
-            Err(bdt_err!(BdtErrorCode::Failed, "WSAIoctl failed: {}", err))
+            Err(bdt_err!(P2pErrorCode::Failed, "WSAIoctl failed: {}", err))
         } else {
             Ok(())
         }
@@ -201,14 +201,14 @@ pub fn init_udp_socket<S: AsRawSocket>(socket: &S) -> Result<(), BdtError> {
 }
 
 // 解析形如 port or host:port的格式
-pub fn parse_address(address: &str) -> Result<(String, u16), BdtError> {
+pub fn parse_address(address: &str) -> Result<(String, u16), P2pError> {
     let parts: Vec<&str> = address.split(':').collect();
     if parts.len() == 1 {
         match parts[0].parse::<u16>() {
             Ok(port) => Ok(("0.0.0.0".to_string(), port)),
             Err(e) => {
                 error!("invalid address port, address={}, e={}", address, e);
-                Err(bdt_err!(BdtErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
+                Err(bdt_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
             }
         }
     } else {
@@ -216,7 +216,7 @@ pub fn parse_address(address: &str) -> Result<(String, u16), BdtError> {
             Ok(port) => Ok((parts[0].to_string(), port)),
             Err(e) => {
                 error!("invalid address port, address={}, e={}", address, e);
-                Err(bdt_err!(BdtErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
+                Err(bdt_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
             }
         }
     }
@@ -257,7 +257,7 @@ pub fn bind_system_hosts(info: SystemHostInfo) {
     }
 }
 
-pub fn get_system_hosts() -> BdtResult<SystemHostInfo> {
+pub fn get_system_hosts() -> P2pResult<SystemHostInfo> {
     if SYSTEM_HOST_INFO.get().is_none() {
         let info = init_system_hosts()?;
         bind_system_hosts(info);
@@ -266,13 +266,13 @@ pub fn get_system_hosts() -> BdtResult<SystemHostInfo> {
     Ok(SYSTEM_HOST_INFO.get().unwrap().clone())
 }
 
-pub fn init_system_hosts() -> BdtResult<SystemHostInfo> {
+pub fn init_system_hosts() -> P2pResult<SystemHostInfo> {
     let ret = get_if_addrs();
     if let Err(e) = ret {
         let msg = format!("get_if_addrs error! err={}", e);
         error!("{}", msg);
 
-        return Err(BdtError::from(msg));
+        return Err(P2pError::from(msg));
     }
 
     let mut result = SystemHostInfo {

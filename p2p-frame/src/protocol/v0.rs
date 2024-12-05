@@ -1,6 +1,6 @@
 use bucky_raw_codec::{RawDecode, RawEncode};
 use crate::endpoint::Endpoint;
-use crate::error::{BdtErrorCode};
+use crate::error::{P2pErrorCode};
 use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert};
 use crate::types::{IncreaseId, TempSeq, Timestamp};
 use super::sn::*;
@@ -199,5 +199,5 @@ pub struct AckProxy {
     pub seq: TempSeq,
     pub to_peer_id: P2pId,
     pub proxy_endpoint: Option<Endpoint>,
-    pub err: Option<BdtErrorCode>,
+    pub err: Option<P2pErrorCode>,
 }

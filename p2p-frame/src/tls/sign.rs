@@ -3,7 +3,7 @@ use bucky_raw_codec::RawConvertTo;
 use rustls::pki_types::PrivateKeyDer;
 use rustls::sign::{Signer, SigningKey};
 use rustls::{SignatureAlgorithm, SignatureScheme};
-use crate::error::BdtError;
+use crate::error::P2pError;
 use crate::p2p_identity::P2pIdentityRef;
 
 #[derive(Clone)]

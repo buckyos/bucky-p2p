@@ -7,7 +7,7 @@ use rustls::ServerConfig;
 use rustls::version::TLS13;
 use crate::runtime::{TcpListener, TcpStream, TlsAcceptor};
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{bdt_err, P2pError, P2pErrorCode, P2pResult, into_bdt_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
@@ -21,7 +21,7 @@ pub trait TcpListenerEventListener: Send + Sync + 'static {
     async fn on_new_connection(
         &self,
         socket: TCPSocket,
-    ) -> BdtResult<()>;
+    ) -> P2pResult<()>;
 }
 
 struct TCPListenerState {
@@ -118,7 +118,7 @@ impl TCPListener {
         self.state.read().unwrap().mapping_port
     }
 
-    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> Result<(), BdtError> {
+    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> Result<(), P2pError> {
         let socket = {
             if local.addr().is_ipv6() {
                 #[cfg(windows)]
@@ -126,7 +126,7 @@ impl TCPListener {
                     let mut default_local = Endpoint::default_tcp(&local);
                     default_local.mut_addr().set_port(local.addr().port());
                     TcpListener::bind(default_local.addr()).await
-                        .map_err(into_bdt_err!(BdtErrorCode::AlreadyExists, "bind port failed"))
+                        .map_err(into_bdt_err!(P2pErrorCode::AlreadyExists, "bind port failed"))
                 }
                 #[cfg(not(windows))]
                 {
@@ -158,8 +158,8 @@ impl TCPListener {
                                 .unwrap(),
                         ) < 0
                         {
-                            Err(BdtError::new(
-                                BdtErrorCode::AlreadyExists,
+                            Err(P2pError::new(
+                                P2pErrorCode::AlreadyExists,
                                 "bind port failed".to_string(),
                             ))
                         } else {
@@ -178,9 +178,9 @@ impl TCPListener {
             } else if local.is_sys_default() {
                 let mut default_local = Endpoint::default_tcp(&local);
                 default_local.mut_addr().set_port(local.addr().port());
-                TcpListener::bind(default_local.addr()).await.map_err(into_bdt_err!(BdtErrorCode::AlreadyExists, "bind port failed"))
+                TcpListener::bind(default_local.addr()).await.map_err(into_bdt_err!(P2pErrorCode::AlreadyExists, "bind port failed"))
             } else {
-                TcpListener::bind(local.addr()).await.map_err(into_bdt_err!(BdtErrorCode::AlreadyExists, "bind port failed"))
+                TcpListener::bind(local.addr()).await.map_err(into_bdt_err!(P2pErrorCode::AlreadyExists, "bind port failed"))
             }
         }?;
 
@@ -193,24 +193,24 @@ impl TCPListener {
         Ok(())
     }
 
-    async fn accept(&self, socket: TcpStream) -> Result<TCPSocket, BdtError> {
-        let remote = socket.peer_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
-        let local = socket.local_addr().map_err(into_bdt_err!(BdtErrorCode::Failed))?;
+    async fn accept(&self, socket: TcpStream) -> Result<TCPSocket, P2pError> {
+        let remote = socket.peer_addr().map_err(into_bdt_err!(P2pErrorCode::Failed))?;
+        let local = socket.local_addr().map_err(into_bdt_err!(P2pErrorCode::Failed))?;
         let remote = Endpoint::from((Protocol::Tcp, remote));
         let local = Endpoint::from((Protocol::Tcp, local));
 
-        let tls_stream = self.tls_acceptor.accept(socket).await.map_err(into_bdt_err!(BdtErrorCode::ConnectFailed))?;
+        let tls_stream = self.tls_acceptor.accept(socket).await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed))?;
         let (_, tls_conn) = tls_stream.get_ref();
         let cert = tls_conn.peer_certificates();
         if cert.is_none() {
-            return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
+            return Err(bdt_err!(P2pErrorCode::CertError, "no cert"));
         }
         let cert = cert.unwrap();
         if cert.len() == 0 {
-            return Err(bdt_err!(BdtErrorCode::CertError, "no cert"));
+            return Err(bdt_err!(P2pErrorCode::CertError, "no cert"));
         }
 
-        let local_identity_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(BdtErrorCode::TlsError, "decode cert failed."))?;
+        let local_identity_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_bdt_err!(P2pErrorCode::TlsError, "decode cert failed."))?;
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
         self.device_cache.add(&remote_id, &remote_device);

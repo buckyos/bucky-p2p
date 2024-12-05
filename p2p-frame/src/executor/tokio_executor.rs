@@ -2,7 +2,7 @@ use std::future::Future;
 use once_cell::sync::OnceCell;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
-use crate::error::BdtResult;
+use crate::error::P2pResult;
 
 pub struct Executor;
 pub type SpawnHandle<Output> = JoinHandle<Output>;
@@ -19,14 +19,14 @@ impl Executor {
         });
     }
 
-    pub fn spawn_with_handle<Fut>(future: Fut) -> BdtResult<JoinHandle<Fut::Output>>
+    pub fn spawn_with_handle<Fut>(future: Fut) -> P2pResult<JoinHandle<Fut::Output>>
         where
             Fut: Future + Send + 'static,
             Fut::Output: Send, {
         Ok(EXECUTOR.get().unwrap().spawn(future))
     }
 
-    pub fn spawn<Fut>(future: Fut) -> BdtResult<()>
+    pub fn spawn<Fut>(future: Fut) -> P2pResult<()>
         where
             Fut: Future<Output = ()> + Send + 'static,{
         EXECUTOR.get().unwrap().spawn(future);

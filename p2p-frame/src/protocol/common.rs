@@ -9,7 +9,7 @@ mod dep {
 
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 pub use dep::*;
-use crate::error::{BdtError, BdtErrorCode, BdtResult};
+use crate::error::{P2pError, P2pErrorCode, P2pResult};
 use crate::types::{Timestamp};
 
 pub const MTU: usize = 1472;
@@ -63,7 +63,7 @@ impl PackageCmdCode {
 }
 
 impl TryFrom<u8> for PackageCmdCode {
-    type Error = BdtError;
+    type Error = P2pError;
     fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
         match v {
             1u8 => Ok(Self::SynStream),
@@ -92,8 +92,8 @@ impl TryFrom<u8> for PackageCmdCode {
             0x71u8 => Ok(Self::SynClose),
             0x72u8 => Ok(Self::AckClose),
 
-            _ => Err(BdtError::new(
-                BdtErrorCode::InvalidParam,
+            _ => Err(P2pError::new(
+                P2pErrorCode::InvalidParam,
                 format!("invalid package command type value {}", v),
             )),
         }
@@ -114,7 +114,7 @@ impl PackageHeader {
         }
     }
 
-    pub fn cmd_code(&self) -> BdtResult<PackageCmdCode> {
+    pub fn cmd_code(&self) -> P2pResult<PackageCmdCode> {
         PackageCmdCode::try_from(self.cmd_code)
     }
 
@@ -147,7 +147,7 @@ impl <T: RawEncode> Package<T> {
         }
     }
 
-    pub fn cmd_code(&self) -> BdtResult<PackageCmdCode> {
+    pub fn cmd_code(&self) -> P2pResult<PackageCmdCode> {
         self.header.cmd_code()
     }
 

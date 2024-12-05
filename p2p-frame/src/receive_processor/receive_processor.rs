@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use crate::error::BdtResult;
+use crate::error::P2pResult;
 use crate::p2p_identity::P2pId;
 use crate::sockets::{QuicListenerEventListener, QuicSocket};
 use crate::sockets::tcp::{TcpListenerEventListener, TCPSocket};
@@ -76,7 +76,7 @@ impl ReceiveDispatcher {
 #[async_trait::async_trait]
 impl TcpListenerEventListener for ReceiveDispatcher {
     async fn on_new_connection(&self,
-                               socket: TCPSocket,) -> BdtResult<()> {
+                               socket: TCPSocket,) -> P2pResult<()> {
         let processor = self.get_processor(socket.local_identity_id());
         if processor.is_none() {
             return Ok(());
@@ -93,7 +93,7 @@ impl TcpListenerEventListener for ReceiveDispatcher {
 #[async_trait::async_trait]
 impl QuicListenerEventListener for ReceiveDispatcher {
     async fn on_new_connection(&self,
-                               socket: QuicSocket, ) -> BdtResult<()> {
+                               socket: QuicSocket, ) -> P2pResult<()> {
         let processor = self.get_processor(socket.local_identity_id());
         if processor.is_none() {
             return Ok(());

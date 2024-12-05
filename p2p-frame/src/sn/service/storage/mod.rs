@@ -4,12 +4,12 @@ use std::sync::Arc;
 pub use sqlite_storage::SqliteStorage;
 
 use async_trait::async_trait;
-use crate::error::BdtError;
+use crate::error::P2pError;
 use crate::runtime::Mutex;
 
 #[async_trait]
 pub trait AsyncStorage: Send + Sync {
-    async fn set_item(&mut self, key: &str, value: String) -> Result<(), BdtError>;
+    async fn set_item(&mut self, key: &str, value: String) -> Result<(), P2pError>;
 
     async fn get_item(&self, key: &str) -> Option<String>;
 
