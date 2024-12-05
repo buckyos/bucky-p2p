@@ -74,7 +74,7 @@ impl QuicSocket {
         Ok(Self::new(conn,
                      local_identity_ref.get_id(),
                      remote_identity_id,
-                     Endpoint::from((Protocol::Udp, endpoint.local_addr().map_err(into_bdt_err!(P2pErrorCode::TlsError))?)),
+                     Endpoint::from((Protocol::Quic, endpoint.local_addr().map_err(into_bdt_err!(P2pErrorCode::TlsError))?)),
                      remote))
     }
 
@@ -115,7 +115,7 @@ impl QuicSocket {
         Ok(Self::new(conn,
                      local_identity_ref.get_id(),
                      remote_identity_id,
-                     Endpoint::from((Protocol::Udp, ep.local_addr().map_err(into_bdt_err!(P2pErrorCode::TlsError))?)),
+                     Endpoint::from((Protocol::Quic, ep.local_addr().map_err(into_bdt_err!(P2pErrorCode::TlsError))?)),
                      remote))
     }
 

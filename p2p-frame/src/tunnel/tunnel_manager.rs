@@ -83,7 +83,7 @@ impl Tunnels {
             state.tunnels.insert(tunnel.get_sequence(), tunnel.clone());
         }
         let this = self.clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             loop {
                 match tunnel.accept_instance().await {
                     Ok(instance) => {
@@ -462,7 +462,7 @@ impl TunnelManager {
         let tunnels = self.get_tunnels(&remote_id);
         let listener = self.listener.clone();
         let cert_factory = self.cert_factory.clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
                     log::info!("new tcp tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",
@@ -563,7 +563,7 @@ impl TunnelManager {
         let tunnels = self.get_tunnels(&remote_id);
         let listener = self.listener.clone();
         let cert_factory = self.cert_factory.clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
                     log::info!("new quic tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",

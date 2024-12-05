@@ -186,7 +186,7 @@ pub async fn create_p2p_stack(local_identity: P2pIdentityRef,
     tunnel_manager.register_pkg_processor(&mut processor);
     let processor = Arc::new(processor);
     RECEIVE_DISPATCHER.get().unwrap().add_processor(device_id, processor.clone());
-    sn_service.start().await;
+    let _ = sn_service.start().await;
 
     let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());
 

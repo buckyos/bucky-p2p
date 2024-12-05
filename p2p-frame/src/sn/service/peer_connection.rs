@@ -125,8 +125,8 @@ impl PeerConnection {
         if self.handle.is_some() {
             self.handle.take().unwrap().abort();
         }
-        self.send.finish();
-        self.send.stopped().await.map_err(into_bdt_err!(P2pErrorCode::IoError));
+        let _ = self.send.finish();
+        let _ = self.send.stopped().await.map_err(into_bdt_err!(P2pErrorCode::IoError));
         self.socket.shutdown().await?;
         Ok(())
     }
@@ -135,6 +135,6 @@ impl PeerConnection {
 impl Drop for PeerConnection {
     fn drop(&mut self) {
         log::info!("drop PeerConnection {:?}", self.conn_id);
-        Executor::block_on(self.shutdown());
+        let _ = Executor::block_on(self.shutdown());
     }
 }

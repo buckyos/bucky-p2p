@@ -161,7 +161,7 @@ impl QuicListener {
                                      local_id,
                                      remote_device.get_id(),
                                      self.local(),
-                                     Endpoint::from((Protocol::Udp, remote_addr)));
+                                     Endpoint::from((Protocol::Quic, remote_addr)));
         Ok(socket)
     }
 
@@ -169,7 +169,7 @@ impl QuicListener {
         let this = self.clone();
         let socket = self.state.read().unwrap().socket.clone().unwrap();
         let quic_listener = self.quic_listener.read().unwrap().as_ref().unwrap().clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             loop {
                 match socket.accept().await {
                     None => {
@@ -179,7 +179,7 @@ impl QuicListener {
                     Some(conn) => {
                         let this = this.clone();
                         let quic_listener = quic_listener.clone();
-                        Executor::spawn(async move {
+                        let _ = Executor::spawn(async move {
                             match this.accept(conn).await {
                                 Ok(socket) => {
                                     if let Err(e) = quic_listener.on_new_connection(socket).await {

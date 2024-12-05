@@ -249,7 +249,7 @@ impl SNClientService {
             }
             for active_sn in state.active_sn_list.iter() {
                 let mut peer_conn = active_sn.peer_connection.lock().await;
-                peer_conn.shutdown().await;
+                let _ = peer_conn.shutdown().await;
             }
         }
     }
@@ -353,7 +353,7 @@ impl SNClientService {
 
                         let this = self.clone();
                         Executor::spawn_ok(async move {
-                            recv_handle.await;
+                            let _ = recv_handle.await;
                             this.remote_sn_conn(conn_id);
                         });
                     }
@@ -471,7 +471,7 @@ impl SNClientService {
                 for ip in local_ips.iter() {
                     match ip.parse::<IpAddr>() {
                         Ok(ip) => {
-                            local_eps.push(Endpoint::from((Protocol::Udp, ip, listener.local().addr().port())));
+                            local_eps.push(Endpoint::from((Protocol::Quic, ip, listener.local().addr().port())));
                         }
                         Err(_) => {
                             continue;

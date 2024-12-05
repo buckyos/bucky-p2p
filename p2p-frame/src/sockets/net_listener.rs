@@ -74,7 +74,7 @@ impl NetListener {
             let (local, out) = ep_pair.unwrap();
 
             let r = match ep.protocol() {
-                Protocol::Udp => {
+                Protocol::Bdt => {
                     let mapping_port = {
                         let mut found_index = None;
                         for (index, (src_ep, _)) in port_mapping.iter().enumerate() {
@@ -116,7 +116,7 @@ impl NetListener {
                     listener.tcp.push(tcp_listener);
                     ret
                 },
-                Protocol::Unk => {
+                Protocol::Unk(_) => {
                     panic!()
                 },
                 Protocol::Quic => {
@@ -141,6 +141,9 @@ impl NetListener {
                     let ret= udp_listener.bind(local.clone(), out, mapping_port).await;
                     listener.udp.push(udp_listener);
                     ret
+                },
+                Protocol::Kcp => {
+                    panic!()
                 }
             };
 

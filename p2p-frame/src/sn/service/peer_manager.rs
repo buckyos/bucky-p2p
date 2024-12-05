@@ -201,7 +201,7 @@ impl PeerManager {
 
         let this = self.clone();
         Executor::spawn_ok(async move {
-            recv_handle.await;
+            let _ = recv_handle.await;
             this.remove_peer_connection(conn_id);
         });
     }
@@ -224,7 +224,7 @@ impl PeerManager {
         let mut device_conn_map = self.device_conn_map.lock().unwrap();
         if let Some(peer) = device_conn_map.get_mut(device_id) {
             if let Some(device) = device {
-                peer.update_desc(device);
+                let _ = peer.update_desc(device);
             }
             peer.tcp_map_port = tcp_map_port;
             peer.udp_map_port = udp_map_port;

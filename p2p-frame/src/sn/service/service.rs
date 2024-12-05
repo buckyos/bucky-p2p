@@ -119,7 +119,7 @@ impl SnService {
 
         // 清理过期数据
         let service = self.clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             loop {
                 {
                     if service.is_stopped() {
@@ -454,7 +454,7 @@ impl SnService {
                         map_ep.set_area(EndpointArea::Wan);
                     }
                     if device_info.udp_map_port.is_some() {
-                        let mut map_ep = Endpoint::from((Protocol::Udp, remote_ep.addr().ip(), device_info.udp_map_port.unwrap()));
+                        let mut map_ep = Endpoint::from((Protocol::Quic, remote_ep.addr().ip(), device_info.udp_map_port.unwrap()));
                         map_ep.set_area(EndpointArea::Wan);
                         end_point_array.push(map_ep);
                     }

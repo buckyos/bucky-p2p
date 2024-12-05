@@ -721,7 +721,7 @@ impl TunnelConnection for TcpTunnelConnection {
 impl Drop for TcpTunnelConnection {
     fn drop(&mut self) {
         log::info!("drop tunnel {:?}", self.inner.lock().unwrap().sequence);
-        Executor::block_on(self.shutdown());
+        let _ = Executor::block_on(self.shutdown());
     }
 
 }
@@ -833,7 +833,7 @@ impl TcpTunnelStream {
             self.write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_bdt_err!(P2pErrorCode::IoError))?;
             let mut tunnel = self.tunnel.lock().unwrap();
             tunnel.data_socket.as_mut().unwrap().unsplit(self.read.take().unwrap(), self.write.take().unwrap());
-            tunnel.enter_idle_mode();
+            let _ = tunnel.enter_idle_mode();
             Ok(())
         } else {
             let tunnel = self.tunnel.lock().unwrap();
@@ -1041,7 +1041,7 @@ impl Drop for TcpTunnelStream {
             let tunnel = self.tunnel.lock().unwrap();
             tunnel.tunnel_stat.decrease_work_instance();
         }
-        Executor::block_on(self.close());
+        let _ = Executor::block_on(self.close());
     }
 }
 
@@ -1259,7 +1259,7 @@ impl Drop for TcpTunnelDatagramSend {
             let tunnel = self.tunnel.lock().unwrap();
             tunnel.tunnel_stat.decrease_work_instance();
         }
-        Executor::block_on(self.close());
+        let _ = Executor::block_on(self.close());
     }
 }
 
@@ -1488,6 +1488,6 @@ impl Drop for TcpTunnelDatagramRecv {
             let tunnel = self.tunnel.lock().unwrap();
             tunnel.tunnel_stat.decrease_work_instance();
         }
-        Executor::block_on(self.close());
+        let _ = Executor::block_on(self.close());
     }
 }

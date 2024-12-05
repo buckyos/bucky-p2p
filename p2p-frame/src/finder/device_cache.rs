@@ -72,7 +72,7 @@ impl DeviceCache {
             let id = id.to_owned();
             let device = device.to_owned();
 
-            Executor::spawn(async move {
+            let _ = Executor::spawn(async move {
                 outer.add(&id, device).await;
             });
         }
@@ -96,7 +96,7 @@ impl DeviceCache {
             let id = id.to_owned();
             let device = device.to_owned();
 
-            Executor::spawn(async move {
+            let _ = Executor::spawn(async move {
                 outer.add(&id, device).await;
             });
         }

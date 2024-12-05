@@ -9,10 +9,11 @@ use crate::error::{P2pError, P2pErrorCode};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Protocol {
-    Unk = 0,
-    Tcp = 1,
-    Udp = 2,
-    Quic = 3,
+    Unk(u8),
+    Tcp,
+    Kcp,
+    Bdt,
+    Quic,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -61,10 +62,10 @@ impl Endpoint {
     pub fn default_of(ep: &Endpoint) -> Self {
         match ep.protocol {
             Protocol::Tcp => Self::default_tcp(ep),
-            Protocol::Udp => Self::default_udp(ep),
+            Protocol::Quic => Self::default_udp(ep),
             _ => Self {
                 area: EndpointArea::Lan,
-                protocol: Protocol::Unk,
+                protocol: Protocol::Quic,
                 addr: match ep.addr().is_ipv4() {
                     true => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                     false => SocketAddr::V6(SocketAddrV6::new(
@@ -97,7 +98,7 @@ impl Endpoint {
     pub fn default_udp(ep: &Endpoint) -> Self {
         Self {
             area: EndpointArea::Lan,
-            protocol: Protocol::Udp,
+            protocol: Protocol::Quic,
             addr: match ep.addr().is_ipv4() {
                 true => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 false => SocketAddr::V6(SocketAddrV6::new(
@@ -111,7 +112,7 @@ impl Endpoint {
     }
 
     pub fn is_udp(&self) -> bool {
-        self.protocol == Protocol::Udp
+        self.protocol != Protocol::Tcp
     }
     pub fn is_tcp(&self) -> bool {
         self.protocol == Protocol::Tcp
@@ -137,7 +138,7 @@ impl Default for Endpoint {
     fn default() -> Self {
         Self {
             area: EndpointArea::Lan,
-            protocol: Protocol::Unk,
+            protocol: Protocol::Quic,
             addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
         }
     }
@@ -224,11 +225,12 @@ impl std::fmt::Display for Endpoint {
         };
 
         result += match self.protocol {
-            Protocol::Unk => "unk",
-            Protocol::Tcp => "tcp",
-            Protocol::Udp => "udp",
-            Protocol::Quic => "qic",
-        };
+            Protocol::Unk(n) => format!("un{}", n),
+            Protocol::Tcp => "tcp".to_string(),
+            Protocol::Kcp => "kcp".to_string(),
+            Protocol::Bdt => "bdt".to_string(),
+            Protocol::Quic => "qic".to_string(),
+        }.as_str();
 
         result += self.addr.to_string().as_str();
 
@@ -256,7 +258,9 @@ impl FromStr for Endpoint {
         let protocol = {
             match &s[2..5] {
                 "tcp" => Ok(Protocol::Tcp),
-                "udp" => Ok(Protocol::Udp),
+                "udp" => Ok(Protocol::Quic),
+                "kcp" => Ok(Protocol::Kcp),
+                "bdt" => Ok(Protocol::Bdt),
                 "qic" => Ok(Protocol::Quic),
                 _ => Err(P2pError::new(
                     P2pErrorCode::InvalidInput,
@@ -301,10 +305,10 @@ pub fn endpoints_to_string(eps: &[Endpoint]) -> String {
 // 标识默认地址，socket bind的时候用0 地址
 const ENDPOINT_FLAG_DEFAULT: u8 = 1u8 << 0;
 
-const ENDPOINT_PROTOCOL_UNK: u8 = 0;
-const ENDPOINT_PROTOCOL_TCP: u8 = 1;
-const ENDPOINT_PROTOCOL_UDP: u8 = 2;
-const ENDPOINT_PROTOCOL_QUIC: u8 = 3;
+const ENDPOINT_PROTOCOL_TCP: u8 = 0;
+const ENDPOINT_PROTOCOL_QUIC: u8 = 1;
+const ENDPOINT_PROTOCOL_KCP: u8 = 2;
+const ENDPOINT_PROTOCOL_BDT: u8 = 3;
 
 const ENDPOINT_PROTOCOL_MASK: u8 = 0x07;
 
@@ -333,8 +337,9 @@ impl Endpoint {
         let mut flags = 0u8;
         flags |= match self.protocol {
             Protocol::Tcp => ENDPOINT_PROTOCOL_TCP,
-            Protocol::Unk => ENDPOINT_PROTOCOL_UNK,
-            Protocol::Udp => ENDPOINT_PROTOCOL_UDP,
+            Protocol::Unk(p) => p,
+            Protocol::Kcp => ENDPOINT_PROTOCOL_KCP,
+            Protocol::Bdt => ENDPOINT_PROTOCOL_BDT,
             Protocol::Quic => ENDPOINT_PROTOCOL_QUIC,
         };
         flags |= match self.area {
@@ -400,9 +405,10 @@ impl Endpoint {
     ) -> Result<(Self, &'de [u8]), CodecError> {
         let protocol = match flags & ENDPOINT_PROTOCOL_MASK {
             ENDPOINT_PROTOCOL_TCP => Protocol::Tcp,
-            ENDPOINT_PROTOCOL_UDP => Protocol::Udp,
+            ENDPOINT_PROTOCOL_KCP => Protocol::Kcp,
             ENDPOINT_PROTOCOL_QUIC => Protocol::Quic,
-            _ => Protocol::Unk,
+            ENDPOINT_PROTOCOL_BDT => Protocol::Bdt,
+            n => Protocol::Unk(n),
         };
         let area = match flags & ENDPOINT_AREA_MASK {
             ENDPOINT_AREA_LAN => EndpointArea::Lan,

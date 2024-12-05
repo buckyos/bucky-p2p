@@ -221,13 +221,13 @@ impl TCPListener {
         let this = self.clone();
         let socket: Arc<TcpListener> = self.state.read().unwrap().socket.clone().unwrap();
         let tcp_listener = self.tcp_listener.read().unwrap().as_ref().unwrap().clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             loop {
                 match socket.accept().await {
                     Ok((socket, _from_addr)) => {
                         let tcp_listener = tcp_listener.clone();
                         let this = this.clone();
-                        Executor::spawn(async move {
+                        let _ = Executor::spawn(async move {
                             match this.accept(socket).await {
                                 Ok(socket) => {
                                     if let Err(e) = tcp_listener.on_new_connection(socket).await {

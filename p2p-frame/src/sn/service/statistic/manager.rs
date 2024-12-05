@@ -34,7 +34,7 @@ impl StatisticManager {
         })));
 
         let arc_ret = ret.clone();
-        Executor::spawn(async move {
+        let _ = Executor::spawn(async move {
             let mut storage = SqliteStorage::new();
             match storage.init("sn-statistic").await {
                 Ok(_) => {
@@ -92,7 +92,7 @@ impl StatisticManager {
 
         if let Some(storage) = storage {
             let storage = unsafe {&mut *(Arc::as_ptr(&storage) as *mut SqliteStorage)};
-            Executor::spawn(async move {
+            let _ = Executor::spawn(async move {
                 if let Some(all) = all {
                     for a in all.iter() {
                         a.storage(storage).await;
