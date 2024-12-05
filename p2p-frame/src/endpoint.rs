@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
 use crate::error::{P2pError, P2pErrorCode};
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Protocol {
     Unk(u8),
     Tcp,

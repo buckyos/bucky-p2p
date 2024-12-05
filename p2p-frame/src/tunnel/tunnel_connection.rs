@@ -5,7 +5,7 @@ use as_any::AsAny;
 use bucky_time::bucky_time_now;
 use futures::FutureExt;
 use crate::endpoint::Endpoint;
-use crate::error::{bdt_err, P2pErrorCode, P2pResult};
+use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::P2pId;
 use crate::runtime;
 use crate::types::{IncreaseId, TempSeq};
@@ -170,5 +170,5 @@ where
             },
         }
     };
-    Err(bdt_err!(P2pErrorCode::ConnectFailed, "connect failed"))
+    Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect failed"))
 }

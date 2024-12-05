@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::error::Error;
 use std::path::PathBuf;
 use rusqlite::Connection;
-use crate::error::{into_bdt_err, P2pError, P2pErrorCode};
+use crate::error::{into_p2p_err, P2pError, P2pErrorCode};
 
 const TABLE_NAME: &str = "profile";
 
@@ -79,10 +79,10 @@ impl super::AsyncStorage for SqliteStorage {
     async fn set_item(&mut self, key: &str, value: String) -> Result<(), P2pError> {
         assert!(self.inited);
         //let conn = self.conn.as_ref().unwrap();
-        let conn = Connection::open(self.path.as_path()).map_err(into_bdt_err!(P2pErrorCode::Failed, "open db failed, db={}", self.path.display()))?;
+        let conn = Connection::open(self.path.as_path()).map_err(into_p2p_err!(P2pErrorCode::Failed, "open db failed, db={}", self.path.display()))?;
         let sql = format!("REPLACE INTO {} (key, value) VALUES (?1, ?2)", TABLE_NAME);
         conn.execute(&sql, rusqlite::params![key, value])
-            .map_err(into_bdt_err!(P2pErrorCode::Failed, "[sqlite] set item failed"))?;
+            .map_err(into_p2p_err!(P2pErrorCode::Failed, "[sqlite] set item failed"))?;
         Ok(())
     }
 

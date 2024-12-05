@@ -12,7 +12,7 @@ use bucky_crypto::{AesKey, KeyMixHash};
 use bucky_objects::DeviceId;
 use bucky_raw_codec::RawDecode;
 use bucky_time::bucky_time_now;
-use crate::error::{bdt_err, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{p2p_err, BdtErrorCode, BdtResult, into_p2p_err};
 use crate::executor::Executor;
 use crate::protocol::MTU_LARGE;
 
@@ -73,7 +73,7 @@ impl ProxyTunnel {
                 Ok((&mut self.device_pair.1, &mut self.device_pair.0))
             } else {
                 trace!("{} ignore device pair ({:?}, {:?}) for not match {:?}", self, left, right, self.device_pair);
-                Err(bdt_err!(BdtErrorCode::NotMatch, "device pair not match"))
+                Err(p2p_err!(BdtErrorCode::NotMatch, "device pair not match"))
             }
         }?;
         if left.timestamp > fl.timestamp {
@@ -236,7 +236,7 @@ impl TunnelsManager {
                 Ok((&mut tunnel.device_pair.1, &mut tunnel.device_pair.0))
             } else {
                 trace!("{} ignore device pair ({:?}, {:?}) for not match {:?}", tunnel, left, right, tunnel.device_pair);
-                Err(bdt_err!(BdtErrorCode::NotMatch, "device pair not match"))
+                Err(p2p_err!(BdtErrorCode::NotMatch, "device pair not match"))
             }
         }?;
         if left.timestamp > fl.timestamp {
@@ -371,7 +371,7 @@ thread_local! {
 impl ProxyInterface {
     fn open(config: Config, local: SocketAddr, outer: Option<SocketAddr>) -> BdtResult<Self> {
         let socket = UdpSocket::bind(local)
-            .map_err(into_bdt_err!(BdtErrorCode::IoError, "ProxyInterface bind socket on {:?} failed", local))?;
+            .map_err(into_p2p_err!(BdtErrorCode::IoError, "ProxyInterface bind socket on {:?} failed", local))?;
         let interface = Self(Arc::new(ProxyInterfaceImpl {
             config,
             socket,

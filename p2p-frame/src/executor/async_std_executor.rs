@@ -3,7 +3,7 @@ use futures::executor::ThreadPool;
 use futures::future::RemoteHandle;
 use futures::task::{Spawn, SpawnExt};
 use once_cell::sync::OnceCell;
-use crate::error::{P2pErrorCode, P2pResult, into_bdt_err};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
 
 pub struct Executor;
 
@@ -25,7 +25,7 @@ impl Executor {
         where
             Fut: Future + Send + 'static,
             Fut::Output: Send, {
-        EXECUTOR.get().unwrap().spawn_with_handle(future).map_err(into_bdt_err!(P2pErrorCode::ExecuteError))
+        EXECUTOR.get().unwrap().spawn_with_handle(future).map_err(into_p2p_err!(P2pErrorCode::ExecuteError))
     }
 
     pub fn spawn<Fut>(future: Fut) -> P2pResult<()>

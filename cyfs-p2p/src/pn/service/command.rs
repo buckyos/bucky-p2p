@@ -12,7 +12,7 @@ use crate::{
     types::*,
     protocol::{*, v0::*},
 };
-use crate::error::{bdt_err, BdtError, BdtErrorCode, BdtResult, into_bdt_err};
+use crate::error::{p2p_err, BdtError, BdtErrorCode, BdtResult, into_p2p_err};
 use crate::executor::Executor;
 use crate::history::keystore::EncryptedKey;
 use super::service::{Service, WeakService};
@@ -42,7 +42,7 @@ impl CommandTunnel {
     pub(super) fn open(service: WeakService, local: Endpoint) -> BdtResult<Self> {
         info!("command tunnel will listen on {:?}", local);
         let socket = UdpSocket::bind(local)
-            .map_err(into_bdt_err!(BdtErrorCode::IoError, "command tunnel will listen on {:?} failed", local))?;
+            .map_err(into_p2p_err!(BdtErrorCode::IoError, "command tunnel will listen on {:?} failed", local))?;
         let tunnel = Self(Arc::new(CommandTunnelImpl {
             service,
             socket,
@@ -88,12 +88,12 @@ impl CommandTunnel {
     fn on_package_box(&self, package_box: PackageBox, from: SocketAddr) -> Result<(), BdtError> {
         let packages = package_box.packages_no_exchange();
         if packages.len() != 1 {
-            let e = bdt_err!(BdtErrorCode::InvalidInput, "package box contains multi packages");
+            let e = p2p_err!(BdtErrorCode::InvalidInput, "package box contains multi packages");
             return Err(e);
         }
         let package = &packages[0];
         if package.cmd_code() != PackageCmdCode::SynProxy {
-            let e = bdt_err!(BdtErrorCode::InvalidInput, "package box contains invalid package");
+            let e = p2p_err!(BdtErrorCode::InvalidInput, "package box contains invalid package");
             return Err(e);
         }
 
@@ -164,9 +164,9 @@ impl CommandTunnel {
             let buf_len = crypto_buf.len();
             let next_ptr = package_box
                 .raw_encode_with_context(crypto_buf, &mut context, &None)
-                .map_err(into_bdt_err!(BdtErrorCode::RawCodecError, "send_box_to encode failed"))?;
+                .map_err(into_p2p_err!(BdtErrorCode::RawCodecError, "send_box_to encode failed"))?;
             let send_len = buf_len - next_ptr.len();
-            self.0.socket.send_to(&crypto_buf[..send_len], to).map_err(into_bdt_err!(BdtErrorCode::IoError))
+            self.0.socket.send_to(&crypto_buf[..send_len], to).map_err(into_p2p_err!(BdtErrorCode::IoError))
         })?;
 
         Ok(())

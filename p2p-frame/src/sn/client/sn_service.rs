@@ -9,7 +9,7 @@ use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{bdt_err, into_bdt_err, P2pErrorCode, P2pResult};
+use crate::error::{p2p_err, into_p2p_err, P2pErrorCode, P2pResult};
 use crate::runtime;
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
@@ -125,7 +125,7 @@ impl SNClientService {
     async fn handle(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()> {
         match cmd_code {
             PackageCmdCode::SnCallResp => {
-                let resp = SnCallResp::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let resp = SnCallResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 let mut state = self.state.write().unwrap();
                 for active_sn in state.active_sn_list.iter_mut() {
                     if active_sn.conn_id == conn_id {
@@ -138,7 +138,7 @@ impl SNClientService {
                 }
             },
             PackageCmdCode::SnQueryResp => {
-                let resp = SnQueryResp::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let resp = SnQueryResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 let mut state = self.state.write().unwrap();
                 for active_sn in state.active_sn_list.iter_mut() {
                     if active_sn.conn_id == conn_id {
@@ -151,11 +151,11 @@ impl SNClientService {
                 }
             },
             PackageCmdCode::SnCalled => {
-                let sn_called = SnCalled::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let sn_called = SnCalled::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 self.on_called(conn_id, sn_called).await?;
             },
             PackageCmdCode::ReportSnResp => {
-                let resp = ReportSnResp::clone_from_slice(cmd_body.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let resp = ReportSnResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 log::info!("report sn resp: {:?}", resp);
                 if let Some(cur_report_future) = {
                     let mut state = self.state.write().unwrap();
@@ -233,7 +233,7 @@ impl SNClientService {
         let this = self.clone();
         let handle = Executor::spawn_with_handle(async move {
             this.ping_proc().await;
-        }).map_err(into_bdt_err!(P2pErrorCode::Failed, "start sn ping proc failed"))?;
+        }).map_err(into_p2p_err!(P2pErrorCode::Failed, "start sn ping proc failed"))?;
         {
             let mut state = self.state.write().unwrap();
             state.pinging_handle = Some(handle);
@@ -378,7 +378,7 @@ impl SNClientService {
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(self.cert_factory.clone())))
                 .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-                .map_err(into_bdt_err!(P2pErrorCode::TlsError))?;
+                .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;
 
         let mut client_config =
@@ -389,9 +389,9 @@ impl SNClientService {
         client_config.transport_config(Arc::new(transport_config));
 
         let conning = quic_ep.connect_with(client_config, sn_ep.addr().clone(), sn.get_id().to_string().as_str())
-            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
+            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
 
-        let conn = conning.await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
+        let conn = conning.await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
         let quic_socket = QuicSocket::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
         let conn_id = self.gen_seq.generate();
         let this = self.clone();
@@ -405,7 +405,7 @@ impl SNClientService {
                     Ok(())
                 }
             }
-        }).await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
+        }).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
         Ok(peer_conn)
     }
 
@@ -503,7 +503,7 @@ impl SNClientService {
             state.cur_report_future = Some(future.clone());
         }
         conn.send(Package::new(PackageCmdCode::ReportSn, report)).await?;
-        let resp = runtime::timeout(self.call_timeout, future).await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "report timeout"))?;
+        let resp = runtime::timeout(self.call_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "report timeout"))?;
         {
             let mut state = self.state.write().unwrap();
             state.cur_report_future = None;
@@ -566,7 +566,7 @@ impl SNClientService {
 
             return Ok(resp);
         }
-        Err(bdt_err!(P2pErrorCode::ConnectFailed, "call timeout"))
+        Err(p2p_err!(P2pErrorCode::ConnectFailed, "call timeout"))
     }
 
     pub async fn query(&self, device_id: &P2pId) -> P2pResult<SnQueryResp> {
@@ -611,6 +611,6 @@ impl SNClientService {
 
             return Ok(resp);
         }
-        Err(bdt_err!(P2pErrorCode::ConnectFailed, "call timeout"))
+        Err(p2p_err!(P2pErrorCode::ConnectFailed, "call timeout"))
     }
 }

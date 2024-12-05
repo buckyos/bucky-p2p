@@ -4,7 +4,7 @@ use bucky_raw_codec::{RawConvertTo};
 use crate::runtime::{TcpStream, TlsConnector};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
-use crate::error::{bdt_err, P2pErrorCode, P2pResult, into_bdt_err};
+use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::runtime;
@@ -70,14 +70,14 @@ impl TCPSocket {
 
         let socket = runtime::timeout(timeout, TcpStream::connect(remote_ep.addr()))
             .await
-            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?
-            .map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?;
+            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?
+            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?;
 
-        let local = socket.local_addr().map_err(into_bdt_err!(P2pErrorCode::Failed))?;
+        let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let local = Endpoint::from((Protocol::Tcp, local));
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
-        let tls_stream = tls_connector.connect(remote_identity_id.to_string().try_into().unwrap(), socket).await.map_err(into_bdt_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let tls_stream = tls_connector.connect(remote_identity_id.to_string().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
         let socket = TCPSocket::new(runtime::TlsStream::from(tls_stream), local_identity_ref.get_id(), remote_identity_id, local, remote_ep);
         debug!("{} connected", socket);
         Ok(socket)
@@ -102,7 +102,7 @@ impl TCPSocket {
     pub fn split(&self) -> P2pResult<(runtime::ReadHalf<runtime::TlsStream<TcpStream>>, runtime::WriteHalf<runtime::TlsStream<TcpStream>>)> {
         let mut socket = self.socket.lock().unwrap();
         if socket.is_none() {
-            return Err(bdt_err!(P2pErrorCode::IoError, "socket is none"));
+            return Err(p2p_err!(P2pErrorCode::IoError, "socket is none"));
         }
         Ok(runtime::split(socket.take().unwrap()))
     }

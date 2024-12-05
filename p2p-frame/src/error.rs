@@ -1,8 +1,8 @@
 use bucky_raw_codec::{RawDecode, RawEncode};
 use num_derive::{FromPrimitive, ToPrimitive};
 use sfo_result::Result;
-pub use sfo_result::err as bdt_err;
-pub use sfo_result::into_err as into_bdt_err;
+pub use sfo_result::err as p2p_err;
+pub use sfo_result::into_err as into_p2p_err;
 
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default, FromPrimitive, ToPrimitive, RawEncode, RawDecode)]

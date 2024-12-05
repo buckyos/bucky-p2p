@@ -9,7 +9,7 @@ use std::{
 use bucky_raw_codec::{RawFrom};
 use bucky_time::bucky_time_now;
 use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
-use crate::error::{into_bdt_err, P2pErrorCode, P2pResult};
+use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
@@ -166,7 +166,7 @@ impl SnService {
     pub async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TempSeq) -> P2pResult<()> {
         match cmd_code {
             PackageCmdCode::SnCall => {
-                let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_call(
                     call_req,
                     conn_id,
@@ -174,16 +174,16 @@ impl SnService {
                 ).await;
             }
             PackageCmdCode::SnCalledResp => {
-                let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_called_resp(called_resp).await;
             }
             PackageCmdCode::ReportSn => {
-                let report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_report_sn(&conn_id, report_sn).await;
                 // self.peer_mgr.report_sn(report_sn).await;
             }
             PackageCmdCode::SnQuery => {
-                let query = SnQuery::clone_from_slice(cmd_body).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+                let query = SnQuery::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 self.handle_query_sn(&conn_id, query).await;
             }
             _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),

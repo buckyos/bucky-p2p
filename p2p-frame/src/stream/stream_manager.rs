@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
-use crate::error::{bdt_err, P2pErrorCode, P2pResult};
+use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertRef};
 use crate::stream::StreamGuard;
 use crate::tunnel::{TunnelManagerRef, TunnelStream};
@@ -48,7 +48,7 @@ impl StreamListener {
             state.abort_handle = None;
         }
         if let Err(_) = ret {
-            Err(bdt_err!(P2pErrorCode::UserCanceled, "user canceled"))
+            Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"))
         } else {
             Ok(ret.unwrap().unwrap())
         }
@@ -147,7 +147,7 @@ impl StreamManager {
     pub async fn listen(self: &StreamManagerRef, port: u16) -> P2pResult<StreamListenerGuard> {
         let mut listeners = self.listeners.lock().unwrap();
         if listeners.contains_key(&port) {
-            return Err(bdt_err!(P2pErrorCode::StreamPortAlreadyListen, "stream port already listen"));
+            return Err(p2p_err!(P2pErrorCode::StreamPortAlreadyListen, "stream port already listen"));
         }
         let listener = Arc::new(StreamListener::new(port));
         listeners.insert(port, listener.clone());

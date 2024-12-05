@@ -2,7 +2,7 @@ use std::collections::{BTreeSet};
 use std::sync::{Arc};
 use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{bdt_err, P2pError, P2pErrorCode, P2pResult};
+use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_identity::{P2pIdentityCertFactoryRef};
@@ -27,7 +27,7 @@ impl NetListener {
     ) -> P2pResult<Arc<Self>> {
         let ep_len = endpoints.len();
         if ep_len == 0 {
-            let err = bdt_err!(P2pErrorCode::InvalidParam, "no endpoint");
+            let err = p2p_err!(P2pErrorCode::InvalidParam, "no endpoint");
             warn!("NetListener bind failed for {}", err);
             return Err(err);
         }

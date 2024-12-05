@@ -5,7 +5,7 @@ use bucky_crypto::{PrivateKey, Signature};
 use bucky_objects::{Device, NamedObject, SingleKeyObjectDesc};
 use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
 use p2p_frame::endpoint::Endpoint;
-use p2p_frame::error::{into_bdt_err, P2pErrorCode, P2pResult};
+use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory};
 use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pStackRef};
 use p2p_frame::tunnel::{DeviceFinder, DeviceFinderRef};
@@ -40,7 +40,7 @@ impl P2pIdentityCert for CyfsIdentityCert {
     }
 
     fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
-        self.device.to_vec().map_err(into_bdt_err!(P2pErrorCode::CertError, "encode device to vec failed"))
+        self.device.to_vec().map_err(into_p2p_err!(P2pErrorCode::CertError, "encode device to vec failed"))
     }
 
     fn endpoints(&self) -> Vec<Endpoint> {
@@ -89,12 +89,12 @@ impl P2pIdentity for CyfsIdentity {
     }
 
     fn sign(&self, message: &[u8]) -> P2pResult<P2pSignature> {
-        self.key.sign(message).map_err(into_bdt_err!(P2pErrorCode::SignError, "sign error"))?
-            .to_vec().map_err(into_bdt_err!(P2pErrorCode::SignError, "sign error"))
+        self.key.sign(message).map_err(into_p2p_err!(P2pErrorCode::SignError, "sign error"))?
+            .to_vec().map_err(into_p2p_err!(P2pErrorCode::SignError, "sign error"))
     }
 
     fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
-        self.to_vec().map_err(into_bdt_err!(P2pErrorCode::Failed, "encode identity to vec failed"))
+        self.to_vec().map_err(into_p2p_err!(P2pErrorCode::Failed, "encode identity to vec failed"))
     }
 
     fn endpoints(&self) -> Vec<Endpoint> {
@@ -117,7 +117,7 @@ pub struct CyfsIdentityFactory;
 impl P2pIdentityFactory for CyfsIdentityFactory {
     fn create(&self, id: &EncodedP2pIdentity) -> P2pResult<P2pIdentityRef> {
         Ok(Arc::new(CyfsIdentity::clone_from_slice(id.as_slice())
-            .map_err(into_bdt_err!(P2pErrorCode::Failed, "decode identity from vec failed"))?))
+            .map_err(into_p2p_err!(P2pErrorCode::Failed, "decode identity from vec failed"))?))
     }
 }
 
@@ -126,7 +126,7 @@ pub struct CyfsIdentityCertFactory;
 impl P2pIdentityCertFactory for CyfsIdentityCertFactory {
     fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
         Device::clone_from_slice(cert.as_slice())
-            .map_err(into_bdt_err!(P2pErrorCode::Failed, "decode device from vec failed"))
+            .map_err(into_p2p_err!(P2pErrorCode::Failed, "decode device from vec failed"))
             .map(|device| Arc::new(CyfsIdentityCert::new(device)))
     }
 }

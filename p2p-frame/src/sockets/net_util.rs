@@ -27,12 +27,12 @@ use winapi::{
         winsock2::{WSAGetLastError, WSAIoctl, SOCKET, SOCKET_ERROR},
     },
 };
-use crate::error::{bdt_err, into_bdt_err, P2pError, P2pErrorCode, P2pResult};
+use crate::error::{p2p_err, into_p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::sockets::get_if_addrs::get_if_addrs;
 
 pub fn get_all_ips() -> P2pResult<Vec<IpAddr>> {
     let mut ret = Vec::new();
-    for iface in get_if_addrs().map_err(into_bdt_err!(P2pErrorCode::Failed))? {
+    for iface in get_if_addrs().map_err(into_p2p_err!(P2pErrorCode::Failed))? {
         ret.push(iface.ip())
     }
     Ok(ret)
@@ -193,7 +193,7 @@ pub fn init_udp_socket<S: AsRawSocket>(socket: &S) -> Result<(), P2pError> {
             let err_code = WSAGetLastError();
             let err = Error::from_raw_os_error(err_code);
 
-            Err(bdt_err!(P2pErrorCode::Failed, "WSAIoctl failed: {}", err))
+            Err(p2p_err!(P2pErrorCode::Failed, "WSAIoctl failed: {}", err))
         } else {
             Ok(())
         }
@@ -208,7 +208,7 @@ pub fn parse_address(address: &str) -> Result<(String, u16), P2pError> {
             Ok(port) => Ok(("0.0.0.0".to_string(), port)),
             Err(e) => {
                 error!("invalid address port, address={}, e={}", address, e);
-                Err(bdt_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
+                Err(p2p_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
             }
         }
     } else {
@@ -216,7 +216,7 @@ pub fn parse_address(address: &str) -> Result<(String, u16), P2pError> {
             Ok(port) => Ok((parts[0].to_string(), port)),
             Err(e) => {
                 error!("invalid address port, address={}, e={}", address, e);
-                Err(bdt_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
+                Err(p2p_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
             }
         }
     }

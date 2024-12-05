@@ -6,7 +6,7 @@ use std::time::Duration;
 use bucky_raw_codec::{RawFrom};
 use bucky_time::bucky_time_now;
 use notify_future::NotifyFuture;
-use crate::error::{bdt_err, P2pErrorCode, P2pResult, into_bdt_err};
+use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::v0::SnCalled;
@@ -288,7 +288,7 @@ impl DeviceFinder for DefaultDeviceFinder {
         let resp = self.sn_service.query(device_id).await?;
         log::info!("query device {} resp {:?}", device_id, resp);
         if resp.peer_info.is_none() {
-            return Err(bdt_err!(P2pErrorCode::NotFound, "device not found"));
+            return Err(p2p_err!(P2pErrorCode::NotFound, "device not found"));
         }
         let device = resp.peer_info.unwrap();
         let mut device = self.cert_factory.create(&device)?;
@@ -881,7 +881,7 @@ impl TunnelManager {
                 self.listen_ports.clone(),
                 self.cert_factory.clone());
 
-            let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_bdt_err!(P2pErrorCode::RawCodecError))?;
+            let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
             let mut futures = Vec::<Pin<Box<dyn Future<Output=P2pResult<(Box<dyn TunnelConnection>, Box<dyn TunnelStream>)>> + Send>>>::new();
             for ep in eps.iter() {
                 if ep.is_tcp() {

@@ -15,6 +15,7 @@ pub mod sn;
 pub mod finder;
 pub mod receive_processor;
 pub mod stack;
+mod p2p_connection;
 
 #[macro_use]
 extern crate log;
