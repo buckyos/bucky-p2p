@@ -16,7 +16,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIden
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCalled, SnCalledResp};
 use crate::sn::service::PeerConnection;
-use crate::sockets::{NetManagerRef, QuicSocket};
+use crate::sockets::{NetManagerRef, QuicConnection};
 use crate::types::{TempSeq, TempSeqGenerator};
 
 #[callback_trait::callback_trait]
@@ -392,10 +392,10 @@ impl SNClientService {
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
 
         let conn = conning.await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
-        let quic_socket = QuicSocket::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
+        let quic_socket = QuicConnection::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
         let conn_id = self.gen_seq.generate();
         let this = self.clone();
-        let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
+        let peer_conn = PeerConnection::connect(conn_id, Arc::new(quic_socket), move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
             let this = this.clone();
             async move {
                 if let Err(e) = this.handle(conn_id, cmd_code, cmd_body).await {

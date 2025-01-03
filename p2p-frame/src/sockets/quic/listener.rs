@@ -9,17 +9,10 @@ use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
+use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
-use crate::sockets::{QuicSocket, UpdateOuterResult};
+use crate::sockets::{QuicConnection, UpdateOuterResult};
 use crate::tls::ServerCertResolverRef;
-
-#[callback_trait::callback_trait]
-pub trait QuicListenerEventListener: Send + Sync + 'static {
-    async fn on_new_connection(
-        &self,
-        socket: QuicSocket,
-    ) -> P2pResult<()>;
-}
 
 struct QuicListenerState {
     local: Option<Endpoint>,
@@ -31,9 +24,8 @@ struct QuicListenerState {
 pub struct QuicListener {
     device_cache: Arc<DeviceCache>,
     cert_resolver: ServerCertResolverRef,
-    accept_timout: Duration,
     state: RwLock<QuicListenerState>,
-    quic_listener: RwLock<Option<Arc<dyn QuicListenerEventListener>>>,
+    quic_listener: RwLock<Option<Arc<dyn P2pConnectionEventListener>>>,
     cert_factory: P2pIdentityCertFactoryRef,
 }
 pub type QuicListenerRef = Arc<QuicListener>;
@@ -43,12 +35,10 @@ impl QuicListener {
         device_cache: Arc<DeviceCache>,
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
-        accept_timout: Duration
     ) -> Arc<Self> {
         Arc::new(Self {
             device_cache,
             cert_resolver,
-            accept_timout,
             state: RwLock::new(QuicListenerState {
                 local: None,
                 outer: None,
@@ -66,10 +56,6 @@ impl QuicListener {
 
     pub fn outer(&self) -> Option<Endpoint> {
         self.state.read().unwrap().outer.clone()
-    }
-
-    pub fn set_listener(&self, listener: Arc<dyn QuicListenerEventListener>) {
-        *self.quic_listener.write().unwrap() = Some(listener);
     }
 
     pub fn set_local(&self, local: Endpoint) {
@@ -132,7 +118,7 @@ impl QuicListener {
         Ok(())
     }
 
-    async fn accept(&self, conn: Incoming) -> P2pResult<QuicSocket> {
+    async fn accept(&self, conn: Incoming) -> P2pResult<QuicConnection> {
         let connection = conn.await.map_err(into_p2p_err!(P2pErrorCode::QuicError, "QuicListener accept error"))?;
         let handshake_data = connection.handshake_data();
         if handshake_data.is_none() {
@@ -157,11 +143,11 @@ impl QuicListener {
         let remote_device = self.cert_factory.create(&remote_cert.unwrap()[0].as_ref().to_vec())?;
         self.device_cache.add(&remote_device.get_id(), &remote_device);
         let remote_addr = connection.remote_address();
-        let socket = QuicSocket::new(connection,
-                                     local_id,
-                                     remote_device.get_id(),
-                                     self.local(),
-                                     Endpoint::from((Protocol::Quic, remote_addr)));
+        let socket = QuicConnection::new(connection,
+                                         local_id,
+                                         remote_device.get_id(),
+                                         self.local(),
+                                         Endpoint::from((Protocol::Quic, remote_addr)));
         Ok(socket)
     }
 
@@ -182,7 +168,7 @@ impl QuicListener {
                         let _ = Executor::spawn(async move {
                             match this.accept(conn).await {
                                 Ok(socket) => {
-                                    if let Err(e) = quic_listener.on_new_connection(socket).await {
+                                    if let Err(e) = quic_listener.on_new_connection(Arc::new(socket)).await {
                                         error!("QuicListener on_new_connection error: {}", e);
                                     }
                                 }
@@ -195,5 +181,11 @@ impl QuicListener {
                 }
             }
         });
+    }
+}
+
+impl P2pListener for QuicListener {
+    fn set_connection_event_listener(&self, event: impl P2pConnectionEventListener) {
+        *self.quic_listener.write().unwrap() = Some(Arc::new(event));
     }
 }

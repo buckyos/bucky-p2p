@@ -2,7 +2,6 @@ pub use std::net::{IpAddr, SocketAddr};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::str::FromStr;
 
-use crate::*;
 use std::cmp::Ordering;
 use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
 use crate::error::{P2pError, P2pErrorCode};

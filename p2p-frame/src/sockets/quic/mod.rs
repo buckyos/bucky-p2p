@@ -1,5 +1,7 @@
 mod listener;
-mod quic_socket;
+mod quic_connection;
+mod quic_factory;
 
 pub use listener::*;
-pub use quic_socket::*;
+pub use quic_connection::*;
+pub use quic_factory::*;

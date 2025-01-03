@@ -118,7 +118,7 @@ impl StreamManager {
         });
 
         let weak = Arc::downgrade(&stream);
-        tunnel_manager.set_stream_listener(move |tunnel: Box<dyn TunnelStream>| {
+        tunnel_manager.set_stream_listener(move |tunnel: TunnelStream| {
             let weak = weak.clone();
             async move {
                 if let Some(stream_manager) = weak.upgrade() {

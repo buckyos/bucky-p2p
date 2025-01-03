@@ -1,12 +1,12 @@
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
-use quinn::{RecvStream, SendStream};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
+use crate::p2p_connection::{P2pConnectionRef};
 use crate::p2p_identity::P2pId;
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
-use crate::sockets::QuicSocket;
+use crate::runtime;
 use crate::types::TempSeq;
 
 #[callback_trait::callback_trait]
@@ -16,18 +16,17 @@ pub trait PeerConnectionEvent: 'static + Send + Sync {
 
 pub struct PeerConnection {
     conn_id: TempSeq,
-    socket: QuicSocket,
-    send: SendStream,
+    socket: P2pConnectionRef,
+    send: Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>,
     handle: Option<SpawnHandle<P2pResult<()>>>,
 }
 
 impl PeerConnection {
-    pub async fn accept(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
-        let (send, recv) = socket.socket().accept_bi().await
-            .map_err(into_p2p_err!(crate::error::P2pErrorCode::QuicError))?;
+    pub async fn accept(conn_id: TempSeq, socket: P2pConnectionRef, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
+        let (recv, send) = socket.split()?;
 
         log::info!("recv PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            conn_id, socket.remote_identity_id().to_string(), socket.remote(), socket.local_identity_id().to_string(), socket.local());
+            conn_id, socket.remote_id().to_string(), socket.remote(), socket.local_id().to_string(), socket.local());
 
         let handle = Executor::spawn_with_handle(async move {
             if let Err(e) = Self::recv(conn_id, recv, listener).await {
@@ -44,11 +43,10 @@ impl PeerConnection {
         })
     }
 
-    pub async fn connect(conn_id: TempSeq, socket: QuicSocket, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
+    pub async fn connect(conn_id: TempSeq, socket: P2pConnectionRef, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
         log::info!("new PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            conn_id, socket.remote_identity_id().to_string(), socket.remote(), socket.local_identity_id().to_string(), socket.local());
-        let (send, recv) = socket.socket().open_bi().await
-            .map_err(into_p2p_err!(crate::error::P2pErrorCode::QuicError))?;
+            conn_id, socket.remote_id().to_string(), socket.remote(), socket.local_id().to_string(), socket.local());
+        let (recv, send) = socket.split()?;
         let handle = Executor::spawn_with_handle(async move {
             if let Err(e) = Self::recv(conn_id, recv, listener).await {
                 log::error!("recv error: {:?}", e);
@@ -63,7 +61,7 @@ impl PeerConnection {
         })
     }
 
-    async fn read_pkg(recv: &mut RecvStream) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
+    async fn read_pkg(recv: &mut Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
         let mut buf_header = [0u8; 16];
         recv.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
@@ -78,7 +76,7 @@ impl PeerConnection {
         Ok((cmd_code, cmd_body))
     }
 
-    async fn recv(conn_id: TempSeq, mut recv: RecvStream, listener: impl PeerConnectionEvent) -> P2pResult<()> {
+    async fn recv(conn_id: TempSeq, mut recv: Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, listener: impl PeerConnectionEvent) -> P2pResult<()> {
         log::info!("enter recv loop");
         loop {
             let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
@@ -93,20 +91,20 @@ impl PeerConnection {
         self.conn_id
     }
 
-    pub fn local(&self) -> &Endpoint {
-        &self.socket.local()
+    pub fn local(&self) -> Endpoint {
+        self.socket.local()
     }
 
-    pub fn remote(&self) -> &Endpoint {
-        &self.socket.remote()
+    pub fn remote(&self) -> Endpoint {
+        self.socket.remote()
     }
 
-    pub fn local_identity_id(&self) -> &P2pId {
-        &self.socket.local_identity_id()
+    pub fn local_identity_id(&self) -> P2pId {
+        self.socket.local_id()
     }
 
-    pub fn remote_identity_id(&self) -> &P2pId {
-        &self.socket.remote_identity_id()
+    pub fn remote_identity_id(&self) -> P2pId {
+        self.socket.remote_id()
     }
 
     pub fn take_recv_handle(&mut self) -> Option<SpawnHandle<P2pResult<()>>> {
@@ -125,9 +123,6 @@ impl PeerConnection {
         if self.handle.is_some() {
             self.handle.take().unwrap().abort();
         }
-        let _ = self.send.finish();
-        let _ = self.send.stopped().await.map_err(into_p2p_err!(P2pErrorCode::IoError));
-        self.socket.shutdown().await?;
         Ok(())
     }
 }

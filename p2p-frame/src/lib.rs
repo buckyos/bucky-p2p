@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 pub mod p2p_identity;
 pub mod error;
 pub mod sockets;
@@ -13,7 +15,6 @@ pub mod tls;
 // pub mod pn;
 pub mod sn;
 pub mod finder;
-pub mod receive_processor;
 pub mod stack;
 mod p2p_connection;
 

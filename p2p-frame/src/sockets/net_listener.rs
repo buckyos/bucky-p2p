@@ -5,14 +5,16 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
+use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pIdentityCertFactoryRef};
 use crate::tls::ServerCertResolverRef;
-use super::tcp::{TCPListener, TcpListenerEventListener, TCPListenerRef};
-use super::{QuicListener, QuicListenerEventListener, QuicListenerRef, UpdateOuterResult};
+use super::tcp::{TCPListener, TCPListenerRef};
+use super::{QuicListener, QuicListenerRef, UpdateOuterResult};
 
 pub struct NetListener {
-    udp: Vec<QuicListenerRef>,
+    quic: Vec<QuicListenerRef>,
     tcp: Vec<TCPListenerRef>,
+    port_mappint: Vec<(Endpoint, u16)>,
 }
 pub type NetListenerRef = Arc<NetListener>;
 
@@ -32,13 +34,14 @@ impl NetListener {
             return Err(err);
         }
 
+        let mut port_mapping = port_mapping.unwrap_or(vec![]);
         let mut listener = NetListener {
-            udp: vec![],
+            quic: vec![],
             tcp: vec![],
             // ip_set: BTreeSet::new(),
             // ep_set: BTreeSet::new(),
+            port_mappint: port_mapping.clone(),
         };
-        let mut port_mapping = port_mapping.unwrap_or(vec![]);
 
         let mut ep_index = 0;
 
@@ -75,27 +78,28 @@ impl NetListener {
 
             let r = match ep.protocol() {
                 Protocol::Bdt => {
-                    let mapping_port = {
-                        let mut found_index = None;
-                        for (index, (src_ep, _)) in port_mapping.iter().enumerate() {
-                            if *src_ep == *ep {
-                                found_index = Some(index);
-                                break;
-                            }
-                        }
-                        found_index.map(|index| {
-                            let (_, dst_port) = port_mapping.remove(index);
-                            dst_port
-                        })
-                    };
-                    let udp_listener = QuicListener::new(
-                        device_cache.clone(),
-                        cert_resolver.clone(),
-                        cert_factory.clone(),
-                        tcp_accept_timout);
-                    let ret= udp_listener.bind(local.clone(), out, mapping_port).await;
-                    listener.udp.push(udp_listener);
-                    ret
+                    // let mapping_port = {
+                    //     let mut found_index = None;
+                    //     for (index, (src_ep, _)) in port_mapping.iter().enumerate() {
+                    //         if *src_ep == *ep {
+                    //             found_index = Some(index);
+                    //             break;
+                    //         }
+                    //     }
+                    //     found_index.map(|index| {
+                    //         let (_, dst_port) = port_mapping.remove(index);
+                    //         dst_port
+                    //     })
+                    // };
+                    // let udp_listener = QuicListener::new(
+                    //     device_cache.clone(),
+                    //     cert_resolver.clone(),
+                    //     cert_factory.clone(),
+                    //     tcp_accept_timout);
+                    // let ret= udp_listener.bind(local.clone(), out, mapping_port).await;
+                    // listener.quic.push(udp_listener);
+                    // ret
+                    panic!()
                 },
                 Protocol::Tcp => {
                     let mapping_port = {
@@ -111,7 +115,7 @@ impl NetListener {
                             dst_port
                         })
                     };
-                    let tcp_listener = TCPListener::new(device_cache.clone(), cert_resolver.clone(), cert_factory.clone(), tcp_accept_timout);
+                    let tcp_listener = TCPListener::new(device_cache.clone(), cert_resolver.clone(), cert_factory.clone());
                     let ret = tcp_listener.bind(local, out, mapping_port).await;
                     listener.tcp.push(tcp_listener);
                     ret
@@ -136,10 +140,9 @@ impl NetListener {
                     let udp_listener = QuicListener::new(
                         device_cache.clone(),
                         cert_resolver.clone(),
-                        cert_factory.clone(),
-                        tcp_accept_timout);
+                        cert_factory.clone(),);
                     let ret= udp_listener.bind(local.clone(), out, mapping_port).await;
-                    listener.udp.push(udp_listener);
+                    listener.quic.push(udp_listener);
                     ret
                 },
                 Protocol::Kcp => {
@@ -160,18 +163,27 @@ impl NetListener {
         Ok(Arc::new(listener))
     }
 
-    pub fn set_udp_listener_event_listener(&self, listener: Arc<dyn QuicListenerEventListener>) {
-        for udp in self.udp.iter() {
-            udp.set_listener(listener.clone());
+    pub fn set_connect_event_listener(&self, listener: impl P2pConnectionEventListener) {
+        let listener = Arc::new(listener);
+        for i in &self.quic {
+            let listener = listener.clone();
+            i.set_connection_event_listener(move |conn| {
+                let listener = listener.clone();
+                async move {
+                    listener.on_new_connection(conn).await
+                }
+            });
+        }
+        for i in &self.tcp {
+            let listener = listener.clone();
+            i.set_connection_event_listener(move |conn| {
+                let listener = listener.clone();
+                async move {
+                    listener.on_new_connection(conn).await
+                }
+            });
         }
     }
-
-    pub fn set_tcp_listener_event_listener(&self, listener: Arc<dyn TcpListenerEventListener>) {
-        for tcp in self.tcp.iter() {
-            tcp.set_listener(listener.clone());
-        }
-    }
-
 
     pub async fn reset(self: &Arc<Self>, endpoints: Option<&[Endpoint]>) -> Arc<Self> {
         if let Some(endpoints) = endpoints {
@@ -205,7 +217,7 @@ impl NetListener {
 
         // let mut ip_set = BTreeSet::new();
         // let mut ep_set = BTreeSet::new();
-        let _udp = Vec::from_iter(self.udp.iter().map(|udp| {
+        let _udp = Vec::from_iter(self.quic.iter().map(|udp| {
             if let Some(new_ep) = local_of(udp.local(), &endpoints) {
                 // ep_set.insert(new_ep);
                 // ip_set.insert(new_ep.addr().ip());
@@ -232,7 +244,7 @@ impl NetListener {
     }
 
     pub fn start(&self) {
-        for i in self.udp() {
+        for i in self.quic() {
             i.start();
         }
         for l in &self.tcp {
@@ -243,7 +255,7 @@ impl NetListener {
     pub fn update_outer(&self, ep: &Endpoint, outer: &Endpoint) -> UpdateOuterResult {
         let outer = *outer;
         let mut reseult = UpdateOuterResult::None;
-        if let Some(interface) = self.udp_of(ep) {
+        if let Some(interface) = self.quic_of(ep) {
             let udp_result = interface.update_outer(&outer);
             if udp_result > reseult {
                 reseult = udp_result;
@@ -277,7 +289,7 @@ impl NetListener {
 
     pub fn endpoints(&self) -> BTreeSet<Endpoint> {
         let mut ep_set = BTreeSet::new();
-        for udp in self.udp() {
+        for udp in self.quic() {
             if udp.local().addr().is_ipv4() {
                 ep_set.insert(udp.local());
             }
@@ -299,8 +311,8 @@ impl NetListener {
     }
 
 
-    pub fn udp_of(&self, ep: &Endpoint) -> Option<&QuicListenerRef> {
-        for i in &self.udp {
+    pub fn quic_of(&self, ep: &Endpoint) -> Option<&QuicListenerRef> {
+        for i in &self.quic {
             if i.local() == *ep {
                 return Some(i);
             }
@@ -308,8 +320,8 @@ impl NetListener {
         None
     }
 
-    pub fn udp(&self) -> &Vec<QuicListenerRef> {
-        &self.udp
+    pub fn quic(&self) -> &Vec<QuicListenerRef> {
+        &self.quic
     }
 
     pub fn tcp_of(&self, ep: &Endpoint) -> Option<&TCPListenerRef> {
@@ -323,5 +335,9 @@ impl NetListener {
 
     pub fn tcp(&self) -> &Vec<TCPListenerRef> {
         &self.tcp
+    }
+
+    pub fn port_mapping(&self) -> &Vec<(Endpoint, u16)> {
+        &self.port_mappint
     }
 }

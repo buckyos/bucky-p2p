@@ -7,22 +7,15 @@ use rustls::ServerConfig;
 use rustls::version::TLS13;
 use crate::runtime::{TcpListener, TcpStream, TlsAcceptor};
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult, into_p2p_err};
+use crate::error::{p2p_err, P2pError, P2pErrorCode, into_p2p_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
+use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
 use super::super::UpdateOuterResult;
-use super::TCPSocket;
-
-#[callback_trait::callback_trait]
-pub trait TcpListenerEventListener: Send + Sync + 'static {
-    async fn on_new_connection(
-        &self,
-        socket: TCPSocket,
-    ) -> P2pResult<()>;
-}
+use super::TCPConnection;
 
 struct TCPListenerState {
     local: Option<Endpoint>,
@@ -33,10 +26,8 @@ struct TCPListenerState {
 
 pub struct TCPListener {
     device_cache: Arc<DeviceCache>,
-    cert_resolver: ServerCertResolverRef,
-    accept_timout: Duration,
     state: RwLock<TCPListenerState>,
-    tcp_listener: RwLock<Option<Arc<dyn TcpListenerEventListener>>>,
+    tcp_listener: RwLock<Option<Arc<dyn P2pConnectionEventListener>>>,
     tls_acceptor: TlsAcceptor,
     cert_factory: P2pIdentityCertFactoryRef,
 }
@@ -53,7 +44,6 @@ impl TCPListener {
         device_cache: Arc<DeviceCache>,
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
-        accept_timout: Duration,
     ) -> Arc<Self> {
         let mut server_config =
             ServerConfig::builder_with_provider(crate::tls::provider().into())
@@ -66,8 +56,6 @@ impl TCPListener {
 
         Arc::new(Self {
             device_cache,
-            cert_resolver,
-            accept_timout,
             state: RwLock::new(TCPListenerState {
                 local: None,
                 outer: None,
@@ -86,10 +74,6 @@ impl TCPListener {
 
     pub fn outer(&self) -> Option<Endpoint> {
         self.state.read().unwrap().outer.clone()
-    }
-
-    pub fn set_listener(&self, listener: Arc<dyn TcpListenerEventListener>) {
-        *self.tcp_listener.write().unwrap() = Some(listener);
     }
 
     pub fn set_local(&self, local: Endpoint) {
@@ -193,7 +177,7 @@ impl TCPListener {
         Ok(())
     }
 
-    async fn accept(&self, socket: TcpStream) -> Result<TCPSocket, P2pError> {
+    async fn accept(&self, socket: TcpStream) -> Result<TCPConnection, P2pError> {
         let remote = socket.peer_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let remote = Endpoint::from((Protocol::Tcp, remote));
@@ -214,7 +198,7 @@ impl TCPListener {
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
         self.device_cache.add(&remote_id, &remote_device);
-        Ok(TCPSocket::new(runtime::TlsStream::from(tls_stream), local_identity_id, remote_id, local, remote))
+        Ok(TCPConnection::new(runtime::TlsStream::from(tls_stream), local_identity_id, remote_id, local, remote))
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -230,7 +214,7 @@ impl TCPListener {
                         let _ = Executor::spawn(async move {
                             match this.accept(socket).await {
                                 Ok(socket) => {
-                                    if let Err(e) = tcp_listener.on_new_connection(socket).await {
+                                    if let Err(e) = tcp_listener.on_new_connection(Arc::new(socket)).await {
                                         error!("tcp-listener accept error({}).", e);
                                     }
                                 }
@@ -291,5 +275,11 @@ impl TCPListener {
                 }
             }
         }
+    }
+}
+
+impl P2pListener for TCPListener {
+    fn set_connection_event_listener(&self, event: impl P2pConnectionEventListener) {
+        *self.tcp_listener.write().unwrap() = Some(Arc::new(event));
     }
 }

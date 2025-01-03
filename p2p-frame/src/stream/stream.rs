@@ -2,11 +2,11 @@ use std::ops::{Deref, DerefMut};
 use crate::tunnel::TunnelStream;
 
 pub struct StreamGuard {
-    stream: Box<dyn TunnelStream>
+    stream: TunnelStream
 }
 
 impl StreamGuard {
-    pub fn new(stream: Box<dyn TunnelStream>) -> Self {
+    pub fn new(stream: TunnelStream) -> Self {
         Self {
             stream
         }
@@ -14,7 +14,7 @@ impl StreamGuard {
 }
 
 impl Deref for StreamGuard {
-    type Target = Box<dyn TunnelStream>;
+    type Target = TunnelStream;
 
     fn deref(&self) -> &Self::Target {
         &self.stream

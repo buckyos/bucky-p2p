@@ -5,18 +5,16 @@ use crate::endpoint::Endpoint;
 use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef};
+use crate::p2p_identity::{P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef};
 use crate::protocol::v0::SnCalled;
-use crate::receive_processor::{ReceiveDispatcher, ReceiveDispatcherRef, ReceiveProcessor, ReceiveProcessorRef};
-use crate::sn::client::{SNClientService, SNClientServiceRef, SNEvent};
+use crate::sn::client::{SNClientService, SNClientServiceRef};
 use crate::sockets::{NetManager, NetManagerRef};
 use crate::stream::{StreamManager, StreamManagerRef};
-use crate::tls::init_tls;
-use crate::tunnel::{DefaultDeviceFinder, DeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerEvent, TunnelManagerRef};
+use crate::tls::{init_tls, TlsServerCertResolver};
+use crate::tunnel::{DefaultDeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerRef};
 use crate::types::TempSeqGenerator;
 
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
-static RECEIVE_DISPATCHER: OnceCell<ReceiveDispatcherRef> = OnceCell::new();
 static IDENTITY_FACTORY: OnceCell<P2pIdentityFactoryRef> = OnceCell::new();
 static CERT_FACTORY: OnceCell<P2pIdentityCertFactoryRef> = OnceCell::new();
 
@@ -32,14 +30,15 @@ pub async fn init_p2p(
         expire: Duration::from_secs(600),
         capacity: 1024,
     }, None));
-    let net_manager = Arc::new(NetManager::open(device_cache, cert_factory.clone(), endpoints, port_mapping, tcp_accept_timout).await?);
-    let net_manager = NET_MANAGER.get_or_init(move || {
+    let net_manager = Arc::new(NetManager::open(device_cache,
+                                                TlsServerCertResolver::new(),
+                                                cert_factory.clone(),
+                                                endpoints,
+                                                port_mapping,
+                                                tcp_accept_timout).await?);
+    NET_MANAGER.get_or_init(move || {
         net_manager.clone()
     });
-    let dispatcher = RECEIVE_DISPATCHER.get_or_init(||ReceiveDispatcher::new());
-    net_manager.set_quic_listener_event_listener(dispatcher.clone());
-    net_manager.set_tcp_listener_event_listener(dispatcher.clone());
-    net_manager.listen();
 
     IDENTITY_FACTORY.get_or_init(||identity_factory.clone());
     CERT_FACTORY.get_or_init(||cert_factory.clone());
@@ -53,19 +52,8 @@ pub struct P2pStack {
     tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
     stream_manager: StreamManagerRef,
-    processor_holder: ReceiveProcessorHolder,
 }
 pub type P2pStackRef = Arc<P2pStack>;
-
-struct ReceiveProcessorHolder {
-    device_id: P2pId,
-}
-
-impl Drop for ReceiveProcessorHolder {
-    fn drop(&mut self) {
-        RECEIVE_DISPATCHER.get().unwrap().remove_processor(&self.device_id);
-    }
-}
 
 impl P2pStack {
     pub fn new(
@@ -75,16 +63,12 @@ impl P2pStack {
         stream_manager: StreamManagerRef,
         net_manager: NetManagerRef,) -> Self {
         net_manager.add_listen_device(local_identity.clone());
-        let device_id = local_identity.get_id();
         Self {
             local_identity,
             sn_service,
             tunnel_manager,
             net_manager,
             stream_manager,
-            processor_holder: ReceiveProcessorHolder {
-                device_id,
-            },
         }
     }
 
@@ -137,9 +121,7 @@ pub async fn create_p2p_stack(local_identity: P2pIdentityRef,
                           sn_ping_interval: Duration,
                           sn_call_timeout: Duration,) -> P2pResult<P2pStackRef> {
     let gen_seq = Arc::new(TempSeqGenerator::new());
-    let mut processor = ReceiveProcessor::new();
     let net_manager = NET_MANAGER.get().unwrap().clone();
-    let device_id = local_identity.get_id();
 
     let cert_factory = CERT_FACTORY.get().unwrap().clone();
     let sn_service = SNClientService::new(
@@ -160,7 +142,6 @@ pub async fn create_p2p_stack(local_identity: P2pIdentityRef,
     };
     let tunnel_manager = TunnelManager::new(
         net_manager.clone(),
-        RECEIVE_DISPATCHER.get().unwrap().clone(),
         sn_service.clone(),
         local_identity.clone(),
         device_finder,
@@ -182,10 +163,6 @@ pub async fn create_p2p_stack(local_identity: P2pIdentityRef,
         }
     });
 
-    // sn_service.register_pkg_processor(&mut processor);
-    tunnel_manager.register_pkg_processor(&mut processor);
-    let processor = Arc::new(processor);
-    RECEIVE_DISPATCHER.get().unwrap().add_processor(device_id, processor.clone());
     let _ = sn_service.start().await;
 
     let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());

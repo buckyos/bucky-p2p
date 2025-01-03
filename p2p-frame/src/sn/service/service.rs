@@ -12,11 +12,12 @@ use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
 use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
+use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sockets::{NetListener, NetListenerRef, QuicSocket};
+use crate::sockets::{NetListener, NetListenerRef};
 use crate::tls::TlsServerCertResolver;
 use crate::types::{TempSeq, TempSeqGenerator, Timestamp};
 use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConnection};
@@ -87,7 +88,7 @@ impl SnService {
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
         let this = self.clone();
-        self.net_listener.set_udp_listener_event_listener(Arc::new(move |socket: QuicSocket| {
+        self.net_listener.set_connect_event_listener(move |socket: P2pConnectionRef| {
             let this = this.clone();
             async move {
                 let id = this.peer_mgr.generate_conn_id();
@@ -99,7 +100,7 @@ impl SnService {
                     }
                 }).await {
                     Ok(conn) => {
-                        let peer_desc = this.device_cache.get(conn.remote_identity_id()).await;
+                        let peer_desc = this.device_cache.get(&conn.remote_identity_id()).await;
                         if peer_desc.is_some() {
                             this.peer_mgr.add_peer_connection(peer_desc.unwrap(), conn);
                         }
@@ -111,7 +112,7 @@ impl SnService {
                     }
                 }
             }
-        }));
+        });
         // self.net_listener.set_tcp_listener_event_listener(Arc::new(move |socket: TCPSocket| {
         //
         // }));
