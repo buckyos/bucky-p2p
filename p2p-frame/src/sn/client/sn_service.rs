@@ -369,30 +369,32 @@ impl SNClientService {
 
     async fn create_connection(self: &Arc<Self>, local_ep: Endpoint, quic_ep: quinn::Endpoint, sn: &P2pIdentityCertRef, sn_ep: &Endpoint) -> P2pResult<PeerConnection> {
         log::info!("connect to sn: {} sn_ep: {}", sn.get_id(), sn_ep);
-        let client_key = self.local_identity.get_encoded_identity()?;
-        let client_cert = self.local_identity.get_identity_cert()?.get_encoded_cert()?;
-        let mut config =
-            rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
-                .with_protocol_versions(&[&TLS13])
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(self.cert_factory.clone())))
-                .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-                .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
-        config.enable_early_data = true;
-
-        let mut client_config =
-            quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
-        let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
-        transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
-        client_config.transport_config(Arc::new(transport_config));
-
-        let conning = quic_ep.connect_with(client_config, sn_ep.addr().clone(), sn.get_id().to_string().as_str())
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
-
-        let conn = conning.await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
-        let quic_socket = QuicConnection::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
+        let mut quic_socket = QuicConnection::connect_with_ep(quic_ep, self.local_identity.clone(), self.cert_factory.clone(), sn.get_id(), sn_ep.clone(), self.conn_timeout, Duration::from_secs(120)).await?;
+        quic_socket.open_bi_stream().await?;
+        // let client_key = self.local_identity.get_encoded_identity()?;
+        // let client_cert = self.local_identity.get_identity_cert()?.get_encoded_cert()?;
+        // let mut config =
+        //     rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
+        //         .with_protocol_versions(&[&TLS13])
+        //         .unwrap()
+        //         .dangerous()
+        //         .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(self.cert_factory.clone())))
+        //         .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
+        //         .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
+        // config.enable_early_data = true;
+        //
+        // let mut client_config =
+        //     quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
+        // let mut transport_config = quinn::TransportConfig::default();
+        // transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
+        // transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
+        // client_config.transport_config(Arc::new(transport_config));
+        //
+        // let conning = quic_ep.connect_with(client_config, sn_ep.addr().clone(), sn.get_id().to_string().as_str())
+        //     .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
+        //
+        // let conn = conning.await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
+        // let mut quic_socket = QuicConnection::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
         let conn_id = self.gen_seq.generate();
         let this = self.clone();
         let peer_conn = PeerConnection::connect(conn_id, Arc::new(quic_socket), move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {

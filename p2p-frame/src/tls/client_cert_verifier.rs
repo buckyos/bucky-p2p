@@ -32,7 +32,8 @@ impl ClientCertVerifier for TlsClientCertVerifier {
     }
 
     fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
-        let _ = EncodedP2pIdentityCert::clone_from_slice(end_entity.as_ref()).map_err(|_e| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        let cert = end_entity.as_ref().to_vec();
+        let _ = self.cert_factory.create(&cert).map_err(|_e| Error::General("Invalid certificate".to_string()))?;
         return Ok(ClientCertVerified::assertion());
     }
 
@@ -41,8 +42,8 @@ impl ClientCertVerifier for TlsClientCertVerifier {
     }
 
     fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-        let device = EncodedP2pIdentityCert::clone_from_slice(cert.as_ref()).map_err(|_e| Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        let sign = P2pSignature::clone_from_slice(dss.signature()).map_err(|_e| Error::General("Invalid signature".to_string()))?;
+        let device = cert.as_ref().to_vec();
+        let sign = dss.signature().to_vec();
         let cert = self.cert_factory.create(&device).map_err(|_e| Error::General("Invalid certificate".to_string()))?;
         if cert.verify(message, &sign) {
             Ok(HandshakeSignatureValid::assertion())

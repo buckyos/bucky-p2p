@@ -10,7 +10,7 @@ use quinn::{VarInt};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::p2p_connection::{P2pConnection};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
@@ -165,6 +165,41 @@ impl QuicConnection {
         *self.send.lock().unwrap() = Some(send);
         self.is_stream = false;
         Ok(())
+    }
+
+    pub async fn accept(&mut self) -> P2pResult<()> {
+        let (bi_accept, uni_accept) = {
+            let bi_accept = self.socket.accept_bi();
+            let uni_accept = self.socket.accept_uni();
+            (bi_accept, uni_accept)
+        };
+        runtime::select! {
+            ret = bi_accept => {
+                match ret {
+                    Ok((send, mut recv)) => {
+                        *self.send.lock().unwrap() = Some(send);
+                        *self.recv.lock().unwrap() = Some(recv);
+                        self.is_stream = true;
+                        Ok(())
+                    },
+                    Err(e) => {
+                        return Err(p2p_err!(P2pErrorCode::IoError, "{:?}", e));
+                    }
+                }
+            },
+            ret = uni_accept => {
+                match ret {
+                    Ok(mut recv) => {
+                        *self.recv.lock().unwrap() = Some(recv);
+                        self.is_stream = false;
+                        Ok(())
+                    },
+                    Err(e) => {
+                        return Err(p2p_err!(P2pErrorCode::IoError, "{:?}", e));
+                    }
+                }
+            }
+        }
     }
 }
 

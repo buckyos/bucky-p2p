@@ -44,7 +44,7 @@ impl Signer for TlsKey {
         let sign = self.key.sign(message).map_err(|e| {
             rustls::Error::General(format!("sign error: {:?}", e))
         })?;
-        Ok(sign.to_vec().unwrap())
+        Ok(sign)
     }
 
     fn scheme(&self) -> SignatureScheme {

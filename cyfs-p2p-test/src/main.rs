@@ -3,18 +3,23 @@ extern crate core;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use bucky_crypto::PrivateKey;
-use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, EndpointArea, Protocol, UniqueId};
+use bucky_objects::{Area, Device, DeviceCategory, DeviceId, UniqueId};
 use bucky_raw_codec::FileDecoder;
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming, Record};
-use cyfs_p2p::{IncreaseIdGenerator, init_p2p, LocalDevice, P2pStackBuilder, P2pStackRef};
+use cyfs_p2p::{P2pStackBuilder, CyfsIdentity, init_cyfs_p2p, cyfs_to_p2p_endpoint, CyfsIdentityCertFactory, CyfsIdentityFactory};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use p2p_frame::error::{BdtError, BdtErrorCode, BdtResult};
-use p2p_frame::::{ReceiptWithSignature, SnServiceReceipt};
-use p2p_frame::::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
+use bucky_objects::{Endpoint, EndpointArea, Protocol};
+use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
+use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
+use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
+use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
+use cyfs_p2p::stack::{init_p2p, P2pStackRef};
+use cyfs_p2p::types::IncreaseIdGenerator;
 
 const APP_NAME: &str = "cyfs-p2p-test";
 
@@ -129,17 +134,18 @@ impl SnServiceContractServerImpl {
 }
 
 impl SnServiceContractServer for SnServiceContractServerImpl {
-    fn check_receipt(
-        &self,
-        _client_device: &Device,
-        _local_receipt: &SnServiceReceipt,
-        _client_receipt: &Option<ReceiptWithSignature>,
-        _last_request_time: &ReceiptRequestTime,
-    ) -> IsAcceptClient {
+
+    fn check_receipt(&self,
+                     _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
+                     _local_receipt: &SnServiceReceipt, // 本地(服务端)统计的服务清单
+                     _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
+                     _last_request_time: &ReceiptRequestTime, // 上次要求服务清单的时间
+    ) -> IsAcceptClient
+    {
         IsAcceptClient::Accept(false)
     }
 
-    fn verify_auth(&self, _client_device_id: &DeviceId) -> IsAcceptClient {
+    fn verify_auth(&self, _client_device_id: &P2pId) -> IsAcceptClient {
         IsAcceptClient::Accept(false)
     }
 }
@@ -174,7 +180,7 @@ async fn main() {
         )).get_matches();
 
     match matches.subcommand() {
-        ("all-in-on", _) => {
+        ("all-in-one", _) => {
             all_in_one().await;
         }
         ("client", Some(matches)) => {
@@ -227,16 +233,18 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         local_eps.push(ep);
         (local_eps, None)
     };
-    init_p2p(local_eps.as_slice(), map_port_lsit, std::time::Duration::from_secs(300)).await.unwrap();
+    init_cyfs_p2p(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>().as_slice(),
+                  map_port_lsit.map(|v| v.iter().map(|(ep, port)| (cyfs_to_p2p_endpoint(ep), *port)).collect()),
+                  std::time::Duration::from_secs(300)).await.unwrap();
 
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
 
     // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
     let remote_id = if target.is_some() {
-        target.unwrap()
+        P2pId::from(target.unwrap().object_id().as_slice())
     } else {
-        DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap()
+        P2pId::from(DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap().object_id().as_slice())
     };
 
     {
@@ -268,12 +276,14 @@ async fn server_instance(data_folder: &Path) {
         (local_eps, Some(map_port_list))
     } else {
         let mut local_eps = Vec::new();
-        let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
-        ep.set_area(EndpointArea::Lan);
+        let mut ep = bucky_objects::Endpoint::from((bucky_objects::Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
+        ep.set_area(bucky_objects::EndpointArea::Lan);
         local_eps.push(ep);
         (local_eps, None)
     };
-    init_p2p(local_eps.as_slice(), map_port_lsit, std::time::Duration::from_secs(300)).await.unwrap();
+    init_cyfs_p2p(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>().as_slice(),
+                  map_port_lsit.map(|v| v.iter().map(|(ep, port)| (cyfs_to_p2p_endpoint(ep), *port)).collect()),
+                  std::time::Duration::from_secs(300)).await.unwrap();
 
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
@@ -291,18 +301,20 @@ async fn server_instance(data_folder: &Path) {
 }
 
 async fn all_in_one() {
-    let sn_key = PrivateKey::generate_rsa(1024).map_err(|e| BdtError::from((BdtErrorCode::Failed, "", e))).unwrap();
+    let sn_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e))).unwrap();
     let sn_public_key = sn_key.public();
     let mut sn_desc = Device::new(None, UniqueId::default(), vec![], vec![], vec![], sn_public_key, Area::default(), DeviceCategory::OOD).build();
 
-    let eps = sn_desc.mut_connect_info().mut_endpoints();
+    let mut eps = sn_desc.mut_connect_info().mut_endpoints();
     if eps.len() == 0 {
         eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
         // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 3456, 0, 0)))));
     }
 
     let sn_service = SnService::new(
-        LocalDevice::new(sn_desc.clone(), sn_key),
+        Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
+        Arc::new(CyfsIdentityFactory),
+        Arc::new(CyfsIdentityCertFactory),
         Box::new(SnServiceContractServerImpl::new()),
     ).await;
     sn_service.start().await.unwrap();
@@ -335,10 +347,12 @@ async fn all_in_one() {
     // ep.set_area(EndpointArea::Wan);
     // local_eps.push(ep);
 
-    let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433))));
-    ep.set_area(EndpointArea::Lan);
+    let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433))));
+    ep.set_area(bucky_objects::EndpointArea::Lan);
     local_eps.push(ep);
-    init_p2p(local_eps.as_slice(), None, std::time::Duration::from_secs(300)).await.unwrap();
+    init_cyfs_p2p(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>().as_slice(),
+                  None,
+                  std::time::Duration::from_secs(300)).await.unwrap();
 
     let stack1 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack1.wait_online(None).await.unwrap();
@@ -347,20 +361,20 @@ async fn all_in_one() {
 
     let generator = IncreaseIdGenerator::new();
     tokio::task::spawn(async move {
-        let mut tunnel = stack1.tunnel_manager().create_stream_tunnel(stack2.local_identity().device(), generator.generate(), 0).await.unwrap();
+        let mut tunnel = stack1.tunnel_manager().create_stream_tunnel(&stack2.local_identity().get_identity_cert().unwrap(), generator.generate(), 0).await.unwrap();
         let mut buf = [0u8; 32];
         tunnel.read(buf.as_mut_slice()).await.unwrap();
         tokio::time::sleep(Duration::from_secs(30)).await;
     });
 
 }
-async fn create_stack(config_path: &Path, eps: Vec<Endpoint>, sn_list: Vec<Device>) -> BdtResult<P2pStackRef> {
+async fn create_stack(config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_list: Vec<Device>) -> P2pResult<P2pStackRef> {
     let (private_key, device) = if config_path.join("device.desc").exists() && config_path.join("device.sec").exists() {
-        let (device_desc, _) = Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new()).map_err(|e| BdtError::from((BdtErrorCode::Failed, "", e)))?;
-        let (private_key, _) = PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new()).map_err(|e| BdtError::from((BdtErrorCode::Failed, "", e)))?;
+        let (device_desc, _) = Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
+        let (private_key, _) = PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
         (private_key, device_desc)
     } else {
-        let private_key = PrivateKey::generate_rsa(1024).map_err(|e| BdtError::from((BdtErrorCode::Failed, "", e)))?;
+        let private_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
         let public_key = private_key.public();
         let device = Device::new(None, UniqueId::default(), eps, vec![], vec![], public_key, Area::default(), DeviceCategory::OOD).build();
         (private_key, device)

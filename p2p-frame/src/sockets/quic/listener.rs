@@ -120,34 +120,38 @@ impl QuicListener {
 
     async fn accept(&self, conn: Incoming) -> P2pResult<QuicConnection> {
         let connection = conn.await.map_err(into_p2p_err!(P2pErrorCode::QuicError, "QuicListener accept error"))?;
-        let handshake_data = connection.handshake_data();
-        if handshake_data.is_none() {
-            return Err(p2p_err!(P2pErrorCode::TlsError, "no handshake data"));
-        }
-        let handshake_data = handshake_data.as_ref().unwrap().as_ref().downcast_ref::<HandshakeData>();
-        if handshake_data.is_none() {
-            return Err(p2p_err!(P2pErrorCode::TlsError, "no handshake data"));
-        }
+        let (local_id, remote_cert) = {
+            let handshake_data = connection.handshake_data();
+            if handshake_data.is_none() {
+                return Err(p2p_err!(P2pErrorCode::TlsError, "no handshake data"));
+            }
+            let handshake_data = handshake_data.as_ref().unwrap().as_ref().downcast_ref::<HandshakeData>();
+            if handshake_data.is_none() {
+                return Err(p2p_err!(P2pErrorCode::TlsError, "no handshake data"));
+            }
 
-        let serve_name = handshake_data.unwrap().server_name.as_ref();
-        if serve_name.is_none() {
-            return Err(p2p_err!(P2pErrorCode::TlsError, "no server name"));
-        }
+            let serve_name = handshake_data.unwrap().server_name.as_ref();
+            if serve_name.is_none() {
+                return Err(p2p_err!(P2pErrorCode::TlsError, "no server name"));
+            }
+            let peer_identity = connection.peer_identity();
+            let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
+            if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {
+                return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
+            }
 
-        let local_id = P2pId::from_str(serve_name.unwrap())?;
-        let peer_identity = connection.peer_identity();
-        let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
-        if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {
-            return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
-        }
-        let remote_device = self.cert_factory.create(&remote_cert.unwrap()[0].as_ref().to_vec())?;
+            (P2pId::from_str(serve_name.unwrap())?, remote_cert.unwrap()[0].as_ref().to_vec())
+        };
+
+        let remote_device = self.cert_factory.create(&remote_cert)?;
         self.device_cache.add(&remote_device.get_id(), &remote_device);
         let remote_addr = connection.remote_address();
-        let socket = QuicConnection::new(connection,
+        let mut socket = QuicConnection::new(connection,
                                          local_id,
                                          remote_device.get_id(),
                                          self.local(),
                                          Endpoint::from((Protocol::Quic, remote_addr)));
+        socket.accept().await?;
         Ok(socket)
     }
 

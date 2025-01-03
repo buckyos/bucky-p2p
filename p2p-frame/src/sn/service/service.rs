@@ -13,12 +13,12 @@ use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::P2pConnectionRef;
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef};
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sockets::{NetListener, NetListenerRef};
-use crate::tls::TlsServerCertResolver;
+use crate::tls::{init_tls, TlsServerCertResolver};
 use crate::types::{TempSeq, TempSeqGenerator, Timestamp};
 use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConnection};
 
@@ -47,10 +47,12 @@ pub type SnServiceRef = Arc<SnService>;
 impl SnService {
     pub async fn new(
         local_identity: P2pIdentityRef,
+        identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
         Executor::init(None);
+        init_tls(identity_factory);
         let device_cache = Arc::new(DeviceCache::new(&DeviceCacheConfig {
             expire: Duration::from_secs(240),
             capacity: 10240,

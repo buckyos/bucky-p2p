@@ -21,12 +21,12 @@ log = "0.4.20"
 futures = { version = '0.3', features = ['default', 'thread-pool'] }
 rand = "0.7.3"
 sha2 = "0.8.2"
-quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "rustls", "ring"] }
+sfo-result = { version = "0.2.4", features = ["backtrace", "log"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = '0.24'
 
 [features]
 default = ["runtime-tokio"]
-runtime-tokio = ["quinn/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/macros", "tokio/io-std", "tokio/io-util", "tokio-rustls"]
-runtime-async-std = ["quinn/runtime-async-std", "async-std", "futures-rustls"]
+runtime-tokio = ["p2p-frame/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/macros", "tokio/io-std", "tokio/io-util", "tokio-rustls"]
+runtime-async-std = ["p2p-frame/runtime-async-std", "async-std", "futures-rustls"]

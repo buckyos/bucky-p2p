@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use bucky_crypto::PrivateKey;
 use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId};
@@ -7,12 +8,13 @@ use bucky_raw_codec::{FileDecoder, FileEncoder};
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming};
 use log::Record;
 
-use cyfs_p2p::LocalDevice;
+use cyfs_p2p::{CyfsIdentity, CyfsIdentityCertFactory, LocalDevice};
 use p2p_frame::::{ReceiptWithSignature, SnServiceReceipt};
 
 #[warn(unused_imports)]
 pub(crate) use sfo_result::err as miner_err;
 pub(crate) use sfo_result::into_err as into_miner_err;
+use cyfs_p2p::sn::service::SnService;
 use p2p_frame::::Executor;
 use p2p_frame::::service::*;
 
@@ -108,7 +110,8 @@ async fn main() {
             log::info!("sn-miner load device from {}, id {}", matches.value_of("desc").unwrap(), device.desc().object_id());
 
             let service = SnService::new(
-                LocalDevice::new(device, private_key),
+                Arc::new(CyfsIdentity::new(device, private_key)),
+                Arc::new(CyfsIdentityCertFactory),
                 Box::new(SnServiceContractServerImpl::new()),
             ).await;
 
