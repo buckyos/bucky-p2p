@@ -6,7 +6,7 @@ use bucky_objects::{Device, Endpoint, NamedObject, Protocol, SingleKeyObjectDesc
 use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory};
-use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pStackRef};
+use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pConfig, P2pStackConfig, P2pStackRef};
 use p2p_frame::tunnel::{DeviceFinder, DeviceFinderRef};
 
 pub struct CyfsIdentityCert {
@@ -144,75 +144,17 @@ pub fn cyfs_to_p2p_endpoint(ep: &Endpoint) -> p2p_frame::endpoint::Endpoint {
     }
 }
 
-pub async fn init_cyfs_p2p(eps: &[p2p_frame::endpoint::Endpoint],
-                           port_mapping: Option<Vec<(p2p_frame::endpoint::Endpoint, u16)>>,
-                           tcp_accept_timout: Duration,) -> P2pResult<()> {
+pub fn create_cyfs_p2p_config(ep: Vec<p2p_frame::endpoint::Endpoint>) -> P2pConfig {
     let identity_factory = Arc::new(CyfsIdentityFactory);
     let cert_factory = Arc::new(CyfsIdentityCertFactory);
-    init_p2p(identity_factory, cert_factory, eps, port_mapping, tcp_accept_timout).await
+    let config = P2pConfig::new(identity_factory, cert_factory, ep);
+    config
 }
 
-pub struct P2pStackBuilder {
-    local_identity: Device,
-    local_key: PrivateKey,
-    sn_list: Vec<Device>,
-    conn_timeout: Duration,
-    idle_timeout: Duration,
-    sn_ping_interval: Duration,
-    sn_call_timeout: Duration,
-    device_finder: Option<DeviceFinderRef>,
-}
-
-impl P2pStackBuilder {
-    pub fn new(local_identity: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> Self {
-        Self {
-            local_identity,
-            local_key,
-            sn_list,
-            conn_timeout: Duration::from_secs(30),
-            idle_timeout: Duration::from_secs(600),
-            sn_ping_interval: Duration::from_secs(300),
-            sn_call_timeout: Duration::from_secs(30),
-            device_finder: None,
-        }
+pub fn create_cyfs_p2p_stack_config(local_identity: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> P2pStackConfig {
+    let mut p2p_sn_list: Vec<Arc<dyn P2pIdentityCert>> = Vec::new();
+    for sn in sn_list {
+        p2p_sn_list.push(Arc::new(CyfsIdentityCert::new(sn)));
     }
-
-    pub fn set_conn_timeout(mut self, conn_timeout: Duration) -> Self {
-        self.conn_timeout = conn_timeout;
-        self
-    }
-
-    pub fn set_conn_idle_timeout(mut self, idle_timeout: Duration) -> Self {
-        self.idle_timeout = idle_timeout;
-        self
-    }
-
-    pub fn set_sn_ping_interval(mut self, sn_ping_interval: Duration) -> Self {
-        self.sn_ping_interval = sn_ping_interval;
-        self
-    }
-
-    pub fn set_sn_call_timeout(mut self, sn_call_timeout: Duration) -> Self {
-        self.sn_call_timeout = sn_call_timeout;
-        self
-    }
-
-    pub fn set_device_finder(mut self, device_finder: impl DeviceFinder) -> Self {
-        self.device_finder = Some(Arc::new(device_finder));
-        self
-    }
-
-    pub async fn build(self) -> P2pResult<P2pStackRef> {
-        let mut sn_list: Vec<Arc<dyn P2pIdentityCert>> = Vec::new();
-        for sn in self.sn_list {
-            sn_list.push(Arc::new(CyfsIdentityCert::new(sn)));
-        }
-        create_p2p_stack(Arc::new(CyfsIdentity::new(self.local_identity, self.local_key)),
-                         sn_list,
-                         self.device_finder,
-                         self.conn_timeout,
-                         self.idle_timeout,
-                         self.sn_ping_interval,
-                         self.sn_call_timeout).await
-    }
+    P2pStackConfig::new(Arc::new(CyfsIdentity::new(local_identity, local_key))).add_sn_list(p2p_sn_list)
 }

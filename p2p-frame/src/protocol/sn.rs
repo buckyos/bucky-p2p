@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
 use bucky_time::{bucky_time_to_system_time, system_time_to_bucky_time, MIN_BUCKY_TIME};
-use crate::endpoint::Endpoint;
+use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode};
 use crate::p2p_identity::{P2pId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
 use crate::types::{TempSeq, Timestamp};
@@ -416,8 +416,7 @@ pub struct ReportSn {
     pub send_time: Timestamp,                  //发送时间
     pub contract_id: Option<P2pId>,         //合约文件对象id
     pub receipt: Option<ReceiptWithSignature>, //客户端提供的服务清单
-    pub tcp_map_port: Option<u16>,
-    pub udp_map_port: Option<u16>,
+    pub map_ports: Vec<(Protocol, u16)>,
     pub local_eps: Vec<Endpoint>,
 }
 

@@ -3,6 +3,7 @@ use std::str::FromStr;
 use log::*;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use rustls::server::ResolvesServerCert;
 use rustls::ServerConfig;
 use rustls::version::TLS13;
 use crate::runtime::{TcpListener, TcpStream, TlsAcceptor};
@@ -11,7 +12,7 @@ use crate::error::{p2p_err, P2pError, P2pErrorCode, into_p2p_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
-use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
 use super::super::UpdateOuterResult;
@@ -25,7 +26,7 @@ struct TCPListenerState {
 }
 
 pub struct TCPListener {
-    device_cache: Arc<DeviceCache>,
+    cert_cache: P2pIdentityCertCacheRef,
     state: RwLock<TCPListenerState>,
     tcp_listener: RwLock<Option<Arc<dyn P2pConnectionEventListener>>>,
     tls_acceptor: TlsAcceptor,
@@ -41,7 +42,7 @@ enum BoxType {
 
 impl TCPListener {
     pub fn new(
-        device_cache: Arc<DeviceCache>,
+        cert_cache: P2pIdentityCertCacheRef,
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
     ) -> Arc<Self> {
@@ -50,12 +51,12 @@ impl TCPListener {
                 .with_protocol_versions(&[&TLS13])
                 .unwrap()
                 .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(cert_factory.clone())))
-                .with_cert_resolver(cert_resolver.clone());
+                .with_cert_resolver(cert_resolver.get_resolves_server_cert());
 
         server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
         Arc::new(Self {
-            device_cache,
+            cert_cache,
             state: RwLock::new(TCPListenerState {
                 local: None,
                 outer: None,
@@ -66,10 +67,6 @@ impl TCPListener {
             tls_acceptor: TlsAcceptor::from(Arc::new(server_config)),
             cert_factory,
         })
-    }
-
-    pub fn local(&self) -> Endpoint {
-        self.state.read().unwrap().local.clone().unwrap()
     }
 
     pub fn outer(&self) -> Option<Endpoint> {
@@ -96,10 +93,6 @@ impl TCPListener {
             state.outer = Some(*outer);
             UpdateOuterResult::Update
         }
-    }
-
-    pub fn mapping_port(&self) -> Option<u16> {
-        self.state.read().unwrap().mapping_port
     }
 
     pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> Result<(), P2pError> {
@@ -197,7 +190,7 @@ impl TCPListener {
         let local_identity_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_p2p_err!(P2pErrorCode::TlsError, "decode cert failed."))?;
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
-        self.device_cache.add(&remote_id, &remote_device);
+        self.cert_cache.add(&remote_id, &remote_device);
         Ok(TCPConnection::new(runtime::TlsStream::from(tls_stream), local_identity_id, remote_id, local, remote))
     }
 
@@ -276,10 +269,19 @@ impl TCPListener {
             }
         }
     }
+
+    pub fn set_connection_event_listener(&self, event: Arc<dyn P2pConnectionEventListener>) {
+        *self.tcp_listener.write().unwrap() = Some(event);
+    }
 }
 
 impl P2pListener for TCPListener {
-    fn set_connection_event_listener(&self, event: impl P2pConnectionEventListener) {
-        *self.tcp_listener.write().unwrap() = Some(Arc::new(event));
+
+    fn mapping_port(&self) -> Option<u16> {
+        self.state.read().unwrap().mapping_port
+    }
+
+    fn local(&self) -> Endpoint {
+        self.state.read().unwrap().local.clone().unwrap()
     }
 }

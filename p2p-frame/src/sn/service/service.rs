@@ -18,7 +18,7 @@ use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sockets::{NetListener, NetListenerRef};
-use crate::tls::{init_tls, TlsServerCertResolver};
+use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::types::{TempSeq, TempSeqGenerator, Timestamp};
 use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConnection};
 
@@ -57,8 +57,8 @@ impl SnService {
             expire: Duration::from_secs(240),
             capacity: 10240,
         }, None));
-        let cert_resolver = TlsServerCertResolver::new();
-        cert_resolver.add_device(local_identity.clone());
+        let cert_resolver = DefaultTlsServerCertResolver::new();
+        let _ = cert_resolver.add_server_identity(local_identity.clone()).await;
         let net_listener = NetListener::open(
             device_cache.clone(),
             cert_resolver,
@@ -424,8 +424,7 @@ impl SnService {
         if report_sn.from_peer_id.is_some() {
             self.peer_mgr.update_peer(report_sn.from_peer_id.as_ref().unwrap(),
                                       &report_sn.peer_info.map(|info| self.cert_factory.create(&info).unwrap()),
-                                      report_sn.tcp_map_port,
-                                      report_sn.udp_map_port,
+                                      report_sn.map_ports,
                                       &report_sn.local_eps);
         }
         let mut remote_ep = peer_conn.remote().clone();
@@ -452,12 +451,8 @@ impl SnService {
                 if conn.is_some() {
                     let peer_conn = conn.as_ref().unwrap().lock().await;
                     let remote_ep = peer_conn.remote().clone();
-                    if device_info.tcp_map_port.is_some() {
-                        let mut map_ep = Endpoint::from((Protocol::Tcp, remote_ep.addr().ip(), device_info.tcp_map_port.unwrap()));
-                        map_ep.set_area(EndpointArea::Wan);
-                    }
-                    if device_info.udp_map_port.is_some() {
-                        let mut map_ep = Endpoint::from((Protocol::Quic, remote_ep.addr().ip(), device_info.udp_map_port.unwrap()));
+                    for (protocol, port) in device_info.map_ports.iter() {
+                        let mut map_ep = Endpoint::from((*protocol, remote_ep.addr().ip(), *port));
                         map_ep.set_area(EndpointArea::Wan);
                         end_point_array.push(map_ep);
                     }

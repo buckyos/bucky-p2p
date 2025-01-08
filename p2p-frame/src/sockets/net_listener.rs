@@ -14,7 +14,7 @@ use super::{QuicListener, QuicListenerRef, UpdateOuterResult};
 pub struct NetListener {
     quic: Vec<QuicListenerRef>,
     tcp: Vec<TCPListenerRef>,
-    port_mappint: Vec<(Endpoint, u16)>,
+    port_mapping: Vec<(Endpoint, u16)>,
 }
 pub type NetListenerRef = Arc<NetListener>;
 
@@ -40,7 +40,7 @@ impl NetListener {
             tcp: vec![],
             // ip_set: BTreeSet::new(),
             // ep_set: BTreeSet::new(),
-            port_mappint: port_mapping.clone(),
+            port_mapping: port_mapping.clone(),
         };
 
         let mut ep_index = 0;
@@ -167,21 +167,21 @@ impl NetListener {
         let listener = Arc::new(listener);
         for i in &self.quic {
             let listener = listener.clone();
-            i.set_connection_event_listener(move |conn| {
+            i.set_connection_event_listener(Arc::new(move |conn| {
                 let listener = listener.clone();
                 async move {
                     listener.on_new_connection(conn).await
                 }
-            });
+            }));
         }
         for i in &self.tcp {
             let listener = listener.clone();
-            i.set_connection_event_listener(move |conn| {
+            i.set_connection_event_listener(Arc::new(move |conn| {
                 let listener = listener.clone();
                 async move {
                     listener.on_new_connection(conn).await
                 }
-            });
+            }));
         }
     }
 
@@ -338,6 +338,6 @@ impl NetListener {
     }
 
     pub fn port_mapping(&self) -> &Vec<(Endpoint, u16)> {
-        &self.port_mappint
+        &self.port_mapping
     }
 }

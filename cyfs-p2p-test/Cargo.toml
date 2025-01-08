@@ -17,3 +17,4 @@ bucky-raw-codec = {git = "https://github.com/buckyos/bucky-raw-codec.git", featu
 flexi_logger = "0.28.5"
 log = "0.4.22"
 toml = "0.8.19"
+sfo-log = "0.1.3"

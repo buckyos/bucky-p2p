@@ -1,7 +1,7 @@
 mod listener;
 mod tcp_connection;
-mod tcp_factory;
+mod tcp_network;
 
 pub use listener::*;
 pub use tcp_connection::*;
-pub use tcp_factory::*;
+pub use tcp_network::*;

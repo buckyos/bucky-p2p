@@ -9,8 +9,7 @@ use std::time::Duration;
 use bucky_crypto::PrivateKey;
 use bucky_objects::{Area, Device, DeviceCategory, DeviceId, UniqueId};
 use bucky_raw_codec::FileDecoder;
-use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming, Record};
-use cyfs_p2p::{P2pStackBuilder, CyfsIdentity, init_cyfs_p2p, cyfs_to_p2p_endpoint, CyfsIdentityCertFactory, CyfsIdentityFactory};
+use cyfs_p2p::{CyfsIdentity, cyfs_to_p2p_endpoint, CyfsIdentityCertFactory, CyfsIdentityFactory, create_cyfs_p2p_config, create_cyfs_p2p_stack_config};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bucky_objects::{Endpoint, EndpointArea, Protocol};
@@ -18,7 +17,7 @@ use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
 use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
-use cyfs_p2p::stack::{init_p2p, P2pStackRef};
+use cyfs_p2p::stack::{create_p2p_stack, init_p2p, P2pStackRef};
 use cyfs_p2p::types::IncreaseIdGenerator;
 
 const APP_NAME: &str = "cyfs-p2p-test";
@@ -104,27 +103,6 @@ pub struct Config {
     sn: EP,
 }
 
-fn custom_format(writer: &mut dyn std::io::Write, now: &mut DeferredNow, record: &Record) -> std::io::Result<()> {
-    let file = match record.file() {
-        None => {
-            "<unknown>".to_string()
-        }
-        Some(path) => {
-            Path::new(path).file_name().map(|v| v.to_string_lossy().to_string()).unwrap_or("<unknown>".to_string())
-        }
-    };
-    write!(
-        writer,
-        "{} [{}] [{}:{}] [{}] - {}",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        record.level(),
-        file,
-        record.line().unwrap_or(0),
-        thread::current().name().unwrap_or("<unnamed>"),
-        &record.args()
-    )
-}
-
 struct SnServiceContractServerImpl {}
 
 impl SnServiceContractServerImpl {
@@ -152,14 +130,10 @@ impl SnServiceContractServer for SnServiceContractServerImpl {
 
 #[tokio::main]
 async fn main() {
-    flexi_logger::Logger::try_with_str("info")
-        .unwrap()
-        .log_to_file(FileSpec::default().directory(std::env::current_dir().unwrap().join("logs")))
-        .duplicate_to_stderr(Duplicate::All)
-        .rotate(Criterion::Size(10 * 1024 * 1024), // 文件大小达到 10MB 时轮转
-                Naming::Numbers, // 使用数字命名轮转文件
-                Cleanup::KeepLogFiles(7), // 保留最近 7 个日志文件
-        ).format(custom_format)
+    sfo_log::Logger::new("cyfs-p2p-test")
+        .set_log_to_file(true)
+        .set_log_file_count(5)
+        .set_log_level("debug")
         .start().unwrap();
 
     let data_folder = std::env::current_dir().unwrap();
@@ -233,9 +207,14 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         local_eps.push(ep);
         (local_eps, None)
     };
-    init_cyfs_p2p(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>().as_slice(),
-                  map_port_lsit.map(|v| v.iter().map(|(ep, port)| (cyfs_to_p2p_endpoint(ep), *port)).collect()),
-                  std::time::Duration::from_secs(300)).await.unwrap();
+    let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
+    if let Some(map_port_list) = map_port_lsit {
+        for (ep, port) in map_port_list.iter() {
+            p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
+        }
+    }
+
+    init_p2p(p2p_config).await.unwrap();
 
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
@@ -281,9 +260,14 @@ async fn server_instance(data_folder: &Path) {
         local_eps.push(ep);
         (local_eps, None)
     };
-    init_cyfs_p2p(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>().as_slice(),
-                  map_port_lsit.map(|v| v.iter().map(|(ep, port)| (cyfs_to_p2p_endpoint(ep), *port)).collect()),
-                  std::time::Duration::from_secs(300)).await.unwrap();
+    let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
+    if let Some(map_port_list) = map_port_lsit {
+        for (ep, port) in map_port_list.iter() {
+            p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
+        }
+    }
+
+    init_p2p(p2p_config).await.unwrap();
 
     let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
@@ -350,9 +334,10 @@ async fn all_in_one() {
     let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433))));
     ep.set_area(bucky_objects::EndpointArea::Lan);
     local_eps.push(ep);
-    init_cyfs_p2p(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>().as_slice(),
-                  None,
-                  std::time::Duration::from_secs(300)).await.unwrap();
+
+    let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
+    p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(300));
+    init_p2p(p2p_config).await.unwrap();
 
     let stack1 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack1.wait_online(None).await.unwrap();
@@ -380,6 +365,8 @@ async fn create_stack(config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_
         (private_key, device)
     };
 
-    P2pStackBuilder::new(device, private_key, sn_list).build().await
+    let config = create_cyfs_p2p_stack_config(device, private_key, sn_list);
+
+    create_p2p_stack(config).await
 }
 

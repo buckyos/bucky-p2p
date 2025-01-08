@@ -7,7 +7,6 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
 use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
-use crate::p2p_connection::{P2pConnectionFactoryManager};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
@@ -123,9 +122,11 @@ impl Tunnel {
         });
         let mut reverse_eps = Vec::new();
         for (ep, port) in self.net_manager.port_mapping() {
-            let mut ep = Endpoint::from((ep.protocol(), SocketAddr::new(ep.addr().ip(), *port)));
-            ep.set_area(EndpointArea::Wan);
-            reverse_eps.push(ep);
+            for udp_ep in wan_udp_eps.iter() {
+                let mut ep = Endpoint::from((ep.protocol(), SocketAddr::new(udp_ep.addr().ip(), port)));
+                ep.set_area(EndpointArea::Wan);
+                reverse_eps.push(ep);
+            }
         }
         reverse_eps.extend_from_slice(wan_udp_eps.as_slice());
         reverse_eps
@@ -150,8 +151,9 @@ impl Tunnel {
                 let stack_version = self.stack_version;
                 let listen_ports = self.listen_ports.clone();
                 let cert_factory = self.cert_factory.clone();
+                let net_manager = self.net_manager.clone();
                 let future = Box::pin(async move {
-                    let conns = P2pConnectionFactoryManager::get().get_factory(&ep.protocol())?.create_stream_connect(ep, &remote_id).await?;
+                    let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, ep, &remote_id).await?;
                     let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
                     for conn in conns {
                         let tunnel_conn = TunnelConnection::new(
@@ -232,8 +234,9 @@ impl Tunnel {
                 let stack_version = self.stack_version;
                 let listen_ports = self.listen_ports.clone();
                 let cert_factory = self.cert_factory.clone();
+                let net_manager = self.net_manager.clone();
                 let future = Box::pin(async move {
-                    let conns = P2pConnectionFactoryManager::get().get_factory(&ep.protocol())?.create_stream_connect(ep, &remote_id).await?;
+                    let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, ep, &remote_id).await?;
                     let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>>> = Vec::new();
                     for conn in conns {
                         let tunnel_conn = TunnelConnection::new(
@@ -308,8 +311,9 @@ impl Tunnel {
             let stack_version = self.stack_version;
             let listen_ports = self.listen_ports.clone();
             let cert_factory = self.cert_factory.clone();
+            let net_manager = self.net_manager.clone();
             let future = Box::pin(async move {
-                let conns = P2pConnectionFactoryManager::get().get_factory(&ep.protocol())?.create_stream_connect(ep, &remote_id).await?;
+                let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, ep, &remote_id).await?;
                 let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
                 for conn in conns {
                     let tunnel_conn = TunnelConnection::new(
@@ -345,7 +349,7 @@ impl Tunnel {
                     return Ok(stream);
                 }
                 Err(e) => {
-                    log::error!("connect stream error: {:?} msg: {}", e.code(), e.msg());
+                    log::error!("connect stream error: {:?}", e);
                 }
             }
         }
@@ -368,8 +372,9 @@ impl Tunnel {
             let stack_version = self.stack_version;
             let listen_ports = self.listen_ports.clone();
             let cert_factory = self.cert_factory.clone();
+            let net_manager = self.net_manager.clone();
             let future = Box::pin(async move {
-                let conns = P2pConnectionFactoryManager::get().get_factory(&ep.protocol())?.create_stream_connect(ep, &remote_id).await?;
+                let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, ep, &remote_id).await?;
                 let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramRecv)>> + Send>>> = Vec::new();
                 for conn in conns {
                     let tunnel_conn = TunnelConnection::new(

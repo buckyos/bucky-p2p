@@ -12,6 +12,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, into_p2p_err, P2pErrorCode, P2pResult};
 use crate::runtime;
 use crate::executor::{Executor, SpawnHandle};
+use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCalled, SnCalledResp};
@@ -309,53 +310,65 @@ impl SNClientService {
                     continue;
                 }
             }
-            for listener in self.net_manager.quic_listeners().iter() {
-                let quic_ep = listener.quic_ep();
+            for p2p_network in self.net_manager.get_network(Protocol::Quic).iter() {
                 for sn_cert in self.sn_list.iter() {
                     for sn_ep in sn_cert.endpoints().iter() {
-                        let mut peer_conn = match self.create_connection(listener.local(), quic_ep.clone(), &sn_cert, sn_ep).await {
-                            Ok(peer_conn) => peer_conn,
+                        let mut stream_conn = match p2p_network.create_stream_connect(&self.local_identity, sn_ep, &sn_cert.get_id()).await {
+                            Ok(conns) => {
+                                conns
+                            },
                             Err(e) => {
                                 log::error!("connect to sn {} failed: {:?}", sn_cert.get_id(), e);
                                 continue;
                             }
                         };
-                        let report_resp = match self.report(&mut peer_conn).await {
-                            Ok(resp) => {
-                                resp
-                            }
-                            Err(e) => {
-                                log::error!("ping to {} failed: {:?}", sn_cert.get_id(), e);
-                                continue;
-                            }
-                        };
 
-                        let sn = match sn_cert.get_encoded_cert() {
-                            Ok(resp) => resp,
-                            Err(e) => {
-                                log::error!("ping to {} failed: {:?}", sn_cert.get_id(), e);
-                                continue;
-                            }
-                        };
+                        for conn in stream_conn {
+                            let mut peer_conn = match self.create_connection(conn).await {
+                                Ok(peer_conn) => peer_conn,
+                                Err(e) => {
+                                    log::error!("connect to sn {} failed: {:?}", sn_cert.get_id(), e);
+                                    continue;
+                                }
+                            };
+                            let report_resp = match self.report(&mut peer_conn).await {
+                                Ok(resp) => {
+                                    resp
+                                }
+                                Err(e) => {
+                                    log::error!("ping to {} failed: {:?}", sn_cert.get_id(), e);
+                                    continue;
+                                }
+                            };
 
-                        let recv_handle = peer_conn.take_recv_handle().unwrap();
-                        let conn_id = peer_conn.conn_id();
-                        let active_sn = ActiveSN {
-                            sn,
-                            latest_time: bucky_time_now(),
-                            conn_id: peer_conn.conn_id(),
-                            recv_future: Arc::new(Mutex::new(HashMap::new())),
-                            peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
-                            wan_ep_list: report_resp.end_point_array,
-                        };
-                        let mut state = self.state.write().unwrap();
-                        state.active_sn_list.push(active_sn);
+                            let sn = match sn_cert.get_encoded_cert() {
+                                Ok(resp) => resp,
+                                Err(e) => {
+                                    log::error!("ping to {} failed: {:?}", sn_cert.get_id(), e);
+                                    continue;
+                                }
+                            };
 
-                        let this = self.clone();
-                        Executor::spawn_ok(async move {
-                            let _ = recv_handle.await;
-                            this.remote_sn_conn(conn_id);
-                        });
+                            let recv_handle = peer_conn.take_recv_handle().unwrap();
+                            let conn_id = peer_conn.conn_id();
+                            let active_sn = ActiveSN {
+                                sn,
+                                latest_time: bucky_time_now(),
+                                conn_id: peer_conn.conn_id(),
+                                recv_future: Arc::new(Mutex::new(HashMap::new())),
+                                peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
+                                wan_ep_list: report_resp.end_point_array,
+                            };
+                            let mut state = self.state.write().unwrap();
+                            state.active_sn_list.push(active_sn);
+
+                            let this = self.clone();
+                            Executor::spawn_ok(async move {
+                                let _ = recv_handle.await;
+                                this.remote_sn_conn(conn_id);
+                            });
+                        }
+
                     }
                 }
             }
@@ -367,10 +380,7 @@ impl SNClientService {
         state.active_sn_list.retain(|sn| sn.conn_id != conn_id);
     }
 
-    async fn create_connection(self: &Arc<Self>, local_ep: Endpoint, quic_ep: quinn::Endpoint, sn: &P2pIdentityCertRef, sn_ep: &Endpoint) -> P2pResult<PeerConnection> {
-        log::info!("connect to sn: {} sn_ep: {}", sn.get_id(), sn_ep);
-        let mut quic_socket = QuicConnection::connect_with_ep(quic_ep, self.local_identity.clone(), self.cert_factory.clone(), sn.get_id(), sn_ep.clone(), self.conn_timeout, Duration::from_secs(120)).await?;
-        quic_socket.open_bi_stream().await?;
+    async fn create_connection(self: &Arc<Self>, quic_socket: P2pConnectionRef) -> P2pResult<PeerConnection> {
         // let client_key = self.local_identity.get_encoded_identity()?;
         // let client_cert = self.local_identity.get_identity_cert()?.get_encoded_cert()?;
         // let mut config =
@@ -397,7 +407,7 @@ impl SNClientService {
         // let mut quic_socket = QuicConnection::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
         let conn_id = self.gen_seq.generate();
         let this = self.clone();
-        let peer_conn = PeerConnection::connect(conn_id, Arc::new(quic_socket), move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
+        let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
             let this = this.clone();
             async move {
                 if let Err(e) = this.handle(conn_id, cmd_code, cmd_body).await {
@@ -447,41 +457,26 @@ impl SNClientService {
         }).unwrap_or(Vec::new());
 
         let mut local_eps = Vec::new();
-        let mut tcp_map_port = None;
-        for listener in self.net_manager.tcp_listeners().iter() {
-            tcp_map_port = listener.mapping_port();
-            if listener.local().addr().ip().is_unspecified() {
-                for ip in local_ips.iter() {
-                    match ip.parse::<IpAddr>() {
-                        Ok(ip) => {
-                            local_eps.push(Endpoint::from((Protocol::Tcp, ip, listener.local().addr().port())));
-                        }
-                        Err(_) => {
-                            continue;
+        let mut map_ports = Vec::new();
+        for p2p_network in self.net_manager.get_networks().iter() {
+            for listener in p2p_network.listeners().iter() {
+                if let Some(tcp_map_port) = listener.mapping_port() {
+                    map_ports.push((p2p_network.protocol(), tcp_map_port));
+                }
+                if listener.local().addr().ip().is_unspecified() {
+                    for ip in local_ips.iter() {
+                        match ip.parse::<IpAddr>() {
+                            Ok(ip) => {
+                                local_eps.push(Endpoint::from((p2p_network.protocol(), ip, listener.local().addr().port())));
+                            }
+                            Err(_) => {
+                                continue;
+                            }
                         }
                     }
+                } else {
+                    local_eps.push(listener.local());
                 }
-            } else {
-                local_eps.push(listener.local());
-            }
-        }
-
-        let mut udp_map_port = None;
-        for listener in self.net_manager.quic_listeners().iter() {
-            udp_map_port = listener.mapping_port();
-            if listener.local().addr().ip().is_unspecified() {
-                for ip in local_ips.iter() {
-                    match ip.parse::<IpAddr>() {
-                        Ok(ip) => {
-                            local_eps.push(Endpoint::from((Protocol::Quic, ip, listener.local().addr().port())));
-                        }
-                        Err(_) => {
-                            continue;
-                        }
-                    }
-                }
-            } else {
-                local_eps.push(listener.local());
             }
         }
 
@@ -495,8 +490,7 @@ impl SNClientService {
             send_time: bucky_time_now(),
             contract_id: None,
             receipt: None,
-            tcp_map_port,
-            udp_map_port,
+            map_ports,
             local_eps,
         };
         let future = NotifyFuture::<ReportSnResp>::new();

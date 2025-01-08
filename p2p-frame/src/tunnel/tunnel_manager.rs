@@ -255,7 +255,7 @@ impl TunnelListenPorts for ListenPorts {
 
 #[async_trait::async_trait]
 pub trait DeviceFinder: 'static + Send + Sync {
-    async fn get_device(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef>;
+    async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef>;
 }
 pub type DeviceFinderRef = Arc<dyn DeviceFinder>;
 
@@ -277,7 +277,7 @@ impl DefaultDeviceFinder {
 
 #[async_trait::async_trait]
 impl DeviceFinder for DefaultDeviceFinder {
-    async fn get_device(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
+    async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
         if let Some(device) = self.device_cache.get(device_id) {
             return Ok(device);
         }
@@ -368,7 +368,7 @@ impl TunnelManager {
         });
 
         let tmp_manager = manager.clone();
-        net_manager.set_conn_event_listener(move |conn| {
+        net_manager.set_connection_event_listener(manager.local_identity.get_id(), move |conn| {
             let tmp_manager = tmp_manager.clone();
             async move {
                 tmp_manager.on_new_tunnel(conn).await
@@ -577,7 +577,7 @@ impl TunnelManager {
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_datagram().await;
         } else {
-            let remote = self.device_finder.get_device(remote_id).await?;
+            let remote = self.device_finder.get_identity_cert(remote_id).await?;
             let seq = self.gen_seq.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
@@ -634,7 +634,7 @@ impl TunnelManager {
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_stream(vport, session_id).await;
         } else {
-            let remote = self.device_finder.get_device(remote_id).await?;
+            let remote = self.device_finder.get_identity_cert(remote_id).await?;
             let seq = self.gen_seq.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
@@ -728,6 +728,7 @@ impl TunnelManager {
 impl Drop for TunnelManager {
     fn drop(&mut self) {
         log::info!("tunnel manager drop.device {}", self.local_identity.get_id().to_string());
+        self.net_manager.remove_connection_event_listener(&self.local_identity.get_id());
         self.clear_handle.abort();
         Executor::block_on(self.close_all_tunnel());
     }

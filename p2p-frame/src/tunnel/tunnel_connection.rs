@@ -1,4 +1,4 @@
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
 use std::io::{Error, ErrorKind};
 use std::ops::DerefMut;
@@ -1527,7 +1527,7 @@ impl Drop for TunnelConnection {
 
 }
 
-pub async fn select_successful<T, E, F>(futures: Vec<F>) -> P2pResult<T>
+pub async fn select_successful<T, E: Debug, F>(futures: Vec<F>) -> P2pResult<T>
 where
     F: Future<Output=Result<T, E>> + Unpin,
 {
@@ -1539,7 +1539,8 @@ where
             (Ok(result), _index, _remaining) => {
                 return Ok(result);
             },
-            (Err(_), _index, remaining) => {
+            (Err(e), _index, remaining) => {
+                log::debug!("select failed {:?}", e);
                 futures = remaining;
             },
         }

@@ -4,13 +4,14 @@ use std::time::Duration;
 use quinn::Incoming;
 use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
 use rustls::pki_types::{CertificateDer};
+use rustls::server::ResolvesServerCert;
 use rustls::version::TLS13;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
-use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertCache, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
 use crate::sockets::{QuicConnection, UpdateOuterResult};
 use crate::tls::ServerCertResolverRef;
 
@@ -22,7 +23,7 @@ struct QuicListenerState {
 }
 
 pub struct QuicListener {
-    device_cache: Arc<DeviceCache>,
+    cert_cache: P2pIdentityCertCacheRef,
     cert_resolver: ServerCertResolverRef,
     state: RwLock<QuicListenerState>,
     quic_listener: RwLock<Option<Arc<dyn P2pConnectionEventListener>>>,
@@ -32,12 +33,12 @@ pub type QuicListenerRef = Arc<QuicListener>;
 
 impl QuicListener {
     pub fn new(
-        device_cache: Arc<DeviceCache>,
+        cert_cache: P2pIdentityCertCacheRef,
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
     ) -> Arc<Self> {
         Arc::new(Self {
-            device_cache,
+            cert_cache,
             cert_resolver,
             state: RwLock::new(QuicListenerState {
                 local: None,
@@ -94,12 +95,13 @@ impl QuicListener {
 
 
     pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> P2pResult<()> {
+        let cert_resolver = self.cert_resolver.clone();
         let mut server_config =
             rustls::ServerConfig::builder_with_provider(crate::tls::provider().into())
                 .with_protocol_versions(&[&TLS13])
                 .map_err(into_p2p_err!(P2pErrorCode::TlsError, "Create server config error"))?
                 .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(self.cert_factory.clone())))
-                .with_cert_resolver(self.cert_resolver.clone());
+                .with_cert_resolver(cert_resolver.get_resolves_server_cert());
         server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
         let mut server_config =
@@ -144,7 +146,7 @@ impl QuicListener {
         };
 
         let remote_device = self.cert_factory.create(&remote_cert)?;
-        self.device_cache.add(&remote_device.get_id(), &remote_device);
+        self.cert_cache.add(&remote_device.get_id(), &remote_device);
         let remote_addr = connection.remote_address();
         let mut socket = QuicConnection::new(connection,
                                          local_id,
@@ -186,10 +188,20 @@ impl QuicListener {
             }
         });
     }
+
+    pub fn set_connection_event_listener(&self, event: Arc<dyn P2pConnectionEventListener>) {
+        *self.quic_listener.write().unwrap() = Some(event);
+    }
+
 }
 
 impl P2pListener for QuicListener {
-    fn set_connection_event_listener(&self, event: impl P2pConnectionEventListener) {
-        *self.quic_listener.write().unwrap() = Some(Arc::new(event));
+    fn mapping_port(&self) -> Option<u16> {
+        self.state.read().unwrap().mapping_port
     }
+
+    fn local(&self) -> Endpoint {
+        self.state.read().unwrap().local.clone().unwrap()
+    }
+
 }

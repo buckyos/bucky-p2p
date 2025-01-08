@@ -4,8 +4,9 @@ use std::{
     collections::{BTreeMap}
 };
 use mini_moka::sync::{Cache, CacheBuilder};
+use crate::error::P2pResult;
 use crate::executor::Executor;
-use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertCache, P2pIdentityCertRef};
 use super::outer_device_cache::*;
 
 #[derive(Clone)]
@@ -119,5 +120,17 @@ impl DeviceCache {
 
     pub fn remove_inner(&self, id: &P2pId) {
         self.cache.lock().unwrap().remove(id);
+    }
+}
+
+#[async_trait::async_trait]
+impl P2pIdentityCertCache for DeviceCache {
+    async fn add(&self, id: &P2pId, device: &P2pIdentityCertRef) -> P2pResult<()> {
+        DeviceCache::add(self, id, device);
+        Ok(())
+    }
+
+    async fn get(&self, id: &P2pId) -> Option<P2pIdentityCertRef> {
+        DeviceCache::get(self, id).await
     }
 }

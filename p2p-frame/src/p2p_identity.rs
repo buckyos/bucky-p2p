@@ -102,3 +102,10 @@ pub trait P2pIdentityCertFactory: 'static + Send + Sync {
     fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef>;
 }
 pub type P2pIdentityCertFactoryRef = Arc<dyn P2pIdentityCertFactory>;
+
+#[async_trait::async_trait]
+pub trait P2pIdentityCertCache: 'static + Send + Sync {
+    async fn add(&self, id: &P2pId, device: &P2pIdentityCertRef) -> P2pResult<()>;
+    async fn get(&self, id: &P2pId) -> Option<P2pIdentityCertRef>;
+}
+pub type P2pIdentityCertCacheRef = Arc<dyn P2pIdentityCertCache>;
