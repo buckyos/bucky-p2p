@@ -220,7 +220,7 @@ impl P2pStack {
         Ok(())
     }
 
-    pub fn tunnel_manager(&self) -> &TunnelManagerRef {
+    pub(crate) fn tunnel_manager(&self) -> &TunnelManagerRef {
         &self.tunnel_manager
     }
 

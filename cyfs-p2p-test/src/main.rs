@@ -336,7 +336,9 @@ async fn all_in_one() {
     local_eps.push(ep);
 
     let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
-    p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(300));
+    p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(300))
+        .set_quic_connect_timeout(Duration::from_secs(300))
+        .set_quic_idle_time(Duration::from_secs(300));
     init_p2p(p2p_config).await.unwrap();
 
     let stack1 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
@@ -344,12 +346,27 @@ async fn all_in_one() {
     let stack2 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack2.wait_online(None).await.unwrap();
 
-    let generator = IncreaseIdGenerator::new();
+    let stack2_cert = stack2.local_identity().get_identity_cert().unwrap().clone();
     tokio::task::spawn(async move {
-        let mut tunnel = stack1.tunnel_manager().create_stream_tunnel(&stack2.local_identity().get_identity_cert().unwrap(), generator.generate(), 0).await.unwrap();
-        let mut buf = [0u8; 32];
-        tunnel.read(buf.as_mut_slice()).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        loop {
+            let mut stream = stack2.stream_manager().listen(1234).await.unwrap().accept().await.unwrap();
+            tokio::task::spawn(async move {
+                stream.write_all("test".as_bytes()).await.unwrap();
+
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+
+        }
+    });
+
+    tokio::task::spawn(async move {
+        loop {
+            let mut tunnel = stack1.stream_manager().connect(&stack2_cert, 1234).await.unwrap();
+            let mut buf = [0u8; 32];
+            let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
+            println!("{}", String::from_utf8_lossy(&buf[..len]));
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
     });
 
 }

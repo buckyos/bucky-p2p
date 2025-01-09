@@ -7,7 +7,6 @@ use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory};
 use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pConfig, P2pStackConfig, P2pStackRef};
-use p2p_frame::tunnel::{DeviceFinder, DeviceFinderRef};
 
 pub struct CyfsIdentityCert {
     device: Device,

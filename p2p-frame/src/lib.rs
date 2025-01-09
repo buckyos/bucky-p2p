@@ -3,7 +3,7 @@
 pub mod p2p_identity;
 pub mod error;
 pub mod sockets;
-pub mod tunnel;
+pub(crate) mod tunnel;
 pub mod stream;
 // pub mod stream;
 pub mod runtime;

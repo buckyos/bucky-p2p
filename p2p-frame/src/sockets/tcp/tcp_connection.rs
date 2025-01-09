@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,7 +10,7 @@ use rustls::version::TLS13;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::endpoint::{Endpoint, Protocol};
-use crate::p2p_connection::P2pConnection;
+use crate::p2p_connection::{P2pConnection, P2pRead, P2pWrite};
 use crate::runtime;
 
 #[derive(Eq, PartialEq)]
@@ -103,6 +104,17 @@ impl TCPRead {
     }
 }
 
+impl P2pRead for TCPRead {
+    fn get_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+
 impl runtime::AsyncRead for TCPRead {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -127,6 +139,16 @@ impl TCPWrite {
 
     pub fn take(&mut self) -> Option<runtime::WriteHalf<runtime::TlsStream<TcpStream>>> {
         self.write.take()
+    }
+}
+
+impl P2pWrite for TCPWrite {
+    fn get_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -178,7 +200,7 @@ impl P2pConnection for TCPConnection {
         self.local_identity_id.clone()
     }
 
-    fn split(&self) -> P2pResult<(Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>)> {
+    fn split(&self) -> P2pResult<(Box<dyn P2pRead>, Box<dyn P2pWrite>)> {
         let mut socket = self.socket.lock().unwrap();
         if socket.is_none() {
             return Err(p2p_err!(P2pErrorCode::IoError, "socket is none"));
@@ -187,10 +209,12 @@ impl P2pConnection for TCPConnection {
         Ok((Box::new(TCPRead::new(read)), Box::new(TCPWrite::new(write))))
     }
 
-    fn unsplit(&self, mut read: Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, mut write: Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>) {
+    fn unsplit(&self, mut read: Box<dyn P2pRead>, mut write: Box<dyn P2pWrite>) {
         let mut socket = self.socket.lock().unwrap();
+        let mut read = unsafe { std::mem::transmute::<_, &mut dyn Any>(read.get_any_mut())};
         if let Some(read) = read.downcast_mut::<TCPRead>() {
             if let Some(read) = read.take() {
+                let mut write = unsafe { std::mem::transmute::<_, &mut dyn Any>(write.get_any_mut())};
                 if let Some(write) = write.downcast_mut::<TCPWrite>() {
                     if let Some(write) = write.take() {
                         *socket = Some(read.unsplit(write));

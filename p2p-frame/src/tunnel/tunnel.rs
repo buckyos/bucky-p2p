@@ -422,6 +422,11 @@ impl Tunnel {
             return Err(p2p_err!(P2pErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
+        log::info!("Opening stream tunnel session_id {:?} vport {} remote_id {} local_id {}",
+            session_id,
+            vport,
+            self.remote_id.to_string(),
+            self.local_identity.get_id().to_string());
         let stream = self.tunnel_conn.as_ref().unwrap().open_stream(vport, session_id).await?;
         log::info!("Open stream tunnel {:?} session_id {:?} vport {} remote_id {} remote_ep {} local_id {} local_ep {}",
             stream.sequence(),

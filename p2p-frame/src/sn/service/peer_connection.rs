@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_connection::{P2pConnectionRef};
+use crate::p2p_connection::{P2pConnectionRef, P2pRead, P2pWrite};
 use crate::p2p_identity::P2pId;
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
 use crate::runtime;
@@ -17,7 +17,7 @@ pub trait PeerConnectionEvent: 'static + Send + Sync {
 pub struct PeerConnection {
     conn_id: TempSeq,
     socket: P2pConnectionRef,
-    send: Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>,
+    send: Box<dyn P2pWrite>,
     handle: Option<SpawnHandle<P2pResult<()>>>,
 }
 
@@ -61,7 +61,7 @@ impl PeerConnection {
         })
     }
 
-    async fn read_pkg(recv: &mut Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
+    async fn read_pkg(recv: &mut Box<dyn P2pRead>) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
         let mut buf_header = [0u8; 16];
         recv.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
@@ -76,7 +76,7 @@ impl PeerConnection {
         Ok((cmd_code, cmd_body))
     }
 
-    async fn recv(conn_id: TempSeq, mut recv: Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, listener: impl PeerConnectionEvent) -> P2pResult<()> {
+    async fn recv(conn_id: TempSeq, mut recv: Box<dyn P2pRead>, listener: impl PeerConnectionEvent) -> P2pResult<()> {
         log::info!("enter recv loop");
         loop {
             let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;

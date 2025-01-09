@@ -449,7 +449,7 @@ impl TunnelManager {
         let _ = Executor::spawn(async move {
             match tunnel_conn.accept_instance().await {
                 Ok(instance) => {
-                    log::info!("new tcp tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",
+                    log::info!("new tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",
                         instance,
                         remote_id.to_string(),
                         remote_ep.to_string(),

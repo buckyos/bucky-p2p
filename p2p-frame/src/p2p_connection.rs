@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
@@ -6,6 +7,16 @@ use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::P2pId;
 use crate::runtime;
 
+pub trait P2pRead: runtime::AsyncRead + Send + Sync + 'static + Unpin + Any {
+    fn get_any(&self) -> &dyn Any;
+    fn get_any_mut(&mut self) -> &mut dyn Any;
+}
+
+pub trait P2pWrite: runtime::AsyncWrite + Send + Sync + 'static + Unpin + Any {
+    fn get_any(&self) -> &dyn Any;
+    fn get_any_mut(&mut self) -> &mut dyn Any;
+}
+
 #[async_trait::async_trait]
 pub trait P2pConnection: Send + Sync + 'static {
     fn is_stream(&self) -> bool;
@@ -13,8 +24,8 @@ pub trait P2pConnection: Send + Sync + 'static {
     fn local(&self) -> Endpoint;
     fn remote_id(&self) -> P2pId;
     fn local_id(&self) -> P2pId;
-    fn split(&self) -> P2pResult<(Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>)>;
-    fn unsplit(&self, read: Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, write: Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>);
+    fn split(&self) -> P2pResult<(Box<dyn P2pRead>, Box<dyn P2pWrite>)>;
+    fn unsplit(&self, read: Box<dyn P2pRead>, write: Box<dyn P2pWrite>);
 }
 
 pub type P2pConnectionRef = Arc<dyn P2pConnection>;

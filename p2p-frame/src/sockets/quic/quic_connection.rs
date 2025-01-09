@@ -1,10 +1,11 @@
+use std::any::Any;
 use std::io;
 use std::io::Error;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use as_any::Downcast;
+use as_any::{AsAny, Downcast};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{VarInt};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -12,7 +13,7 @@ use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
-use crate::p2p_connection::{P2pConnection};
+use crate::p2p_connection::{P2pConnection, P2pRead, P2pWrite};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 
@@ -211,6 +212,16 @@ impl Drop for QuicConnection {
 }
 struct MockRead;
 
+impl P2pRead for MockRead {
+    fn get_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 impl runtime::AsyncRead for MockRead {
     fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut tokio::io::ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
         Poll::Ready(Ok(()))
@@ -242,6 +253,16 @@ impl QuicRead {
 impl Drop for QuicRead {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+impl P2pRead for QuicRead {
+    fn get_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -287,6 +308,16 @@ impl QuicWrite {
             let _ = send.finish();
             let _ = send.stopped().await;
         }
+    }
+}
+
+impl P2pWrite for QuicWrite {
+    fn get_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -376,23 +407,26 @@ impl P2pConnection for QuicConnection {
         self.local_identity_id.clone()
     }
 
-    fn split(&self) -> P2pResult<(Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>)> {
+    fn split(&self) -> P2pResult<(Box<dyn P2pRead>, Box<dyn P2pWrite>)> {
         if self.is_stream {
             Ok((Box::new(QuicRead::new(self.recv.lock().unwrap().take().unwrap())), Box::new(QuicWrite::new(self.send.lock().unwrap().take().unwrap()))))
         } else {
-            Ok((Box::new(MockRead), Box::new(self.send.lock().unwrap().take().unwrap())))
+            Ok((Box::new(MockRead), Box::new(QuicWrite::new(self.send.lock().unwrap().take().unwrap()))))
         }
     }
 
-    fn unsplit(&self, mut read: Box<dyn runtime::AsyncRead + Send + Sync + 'static + Unpin>, mut write: Box<dyn runtime::AsyncWrite + Send + Sync + 'static + Unpin>) {
+    fn unsplit(&self, mut read: Box<dyn P2pRead>, mut write: Box<dyn P2pWrite>) {
         if self.is_stream {
+            let mut read = unsafe { std::mem::transmute::<_, &mut dyn Any>(read.get_any_mut())};
             if let Some(read) = read.downcast_mut::<QuicRead>() {
                 *self.recv.lock().unwrap() = Some(read.take());
             }
+            let mut write = unsafe { std::mem::transmute::<_, &mut dyn Any>(write.get_any_mut())};
             if let Some(write) = write.downcast_mut::<QuicWrite>() {
                 *self.send.lock().unwrap() = Some(write.take());
             }
         } else {
+            let mut write = unsafe { std::mem::transmute::<_, &mut dyn Any>(write.get_any_mut())};
             if let Some(write) = write.downcast_mut::<QuicWrite>() {
                 *self.send.lock().unwrap() = Some(write.take());
             }
