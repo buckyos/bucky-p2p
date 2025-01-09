@@ -190,7 +190,7 @@ impl TCPListener {
         let local_identity_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_p2p_err!(P2pErrorCode::TlsError, "decode cert failed."))?;
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
-        self.cert_cache.add(&remote_id, &remote_device);
+        self.cert_cache.add(&remote_id, &remote_device).await?;
         Ok(TCPConnection::new(runtime::TlsStream::from(tls_stream), local_identity_id, remote_id, local, remote))
     }
 

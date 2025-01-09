@@ -146,7 +146,7 @@ impl QuicListener {
         };
 
         let remote_device = self.cert_factory.create(&remote_cert)?;
-        self.cert_cache.add(&remote_device.get_id(), &remote_device);
+        self.cert_cache.add(&remote_device.get_id(), &remote_device).await?;
         let remote_addr = connection.remote_address();
         let mut socket = QuicConnection::new(connection,
                                          local_id,

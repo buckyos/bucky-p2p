@@ -13,11 +13,13 @@ use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::P2pConnectionRef;
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
+use crate::p2p_network::P2pNetworkRef;
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sockets::{NetListener, NetListenerRef};
+use crate::sockets::{NetListener, NetListenerRef, NetManager, NetManagerRef, QuicNetwork};
+use crate::sockets::tcp::TcpNetwork;
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::types::{TempSeq, TempSeqGenerator, Timestamp};
 use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConnection};
@@ -30,7 +32,7 @@ use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConn
 
 pub struct SnService {
     seq_generator: TempSeqGenerator,
-    device_cache: Arc<DeviceCache>,
+    device_cache: P2pIdentityCertCacheRef,
     local_identity: P2pIdentityRef,
     stopped: AtomicBool,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
@@ -38,7 +40,7 @@ pub struct SnService {
     // call_tracker: CallTracker,
     peer_mgr: PeerManagerRef,
     call_stub: CallStub,
-    net_listener: NetListenerRef,
+    net_manager: NetManagerRef,
     cert_factory: P2pIdentityCertFactoryRef,
 }
 
@@ -59,14 +61,15 @@ impl SnService {
         }, None));
         let cert_resolver = DefaultTlsServerCertResolver::new();
         let _ = cert_resolver.add_server_identity(local_identity.clone()).await;
-        let net_listener = NetListener::open(
-            device_cache.clone(),
-            cert_resolver,
-            cert_factory.clone(),
-            local_identity.endpoints().as_slice(),
-            None,
-            Duration::from_secs(30),
-        ).await.unwrap();
+
+        let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(), cert_resolver.clone(), cert_factory.clone(), Duration::from_secs(30)));
+        let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(), cert_resolver.clone(), cert_factory.clone(), Duration::from_secs(30), Duration::from_secs(30)));
+
+        let mut networks = Vec::new();
+        networks.push(tcp_network as P2pNetworkRef);
+        networks.push(quic_network as P2pNetworkRef);
+
+        let net_manager = Arc::new(NetManager::new(networks, cert_resolver).unwrap());
         let service = SnService {
             seq_generator: TempSeqGenerator::new(),
             local_identity: local_identity.clone(),
@@ -78,7 +81,7 @@ impl SnService {
             //     calls: Default::default(),
             //     begin_time: Instant::now()
             // }
-            net_listener,
+            net_manager,
             device_cache,
             cert_factory,
         };
@@ -90,7 +93,7 @@ impl SnService {
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
         let this = self.clone();
-        self.net_listener.set_connect_event_listener(move |socket: P2pConnectionRef| {
+        self.net_manager.set_connection_event_listener(self.local_identity.get_id(), move |socket: P2pConnectionRef| {
             let this = this.clone();
             async move {
                 let id = this.peer_mgr.generate_conn_id();
@@ -115,10 +118,7 @@ impl SnService {
                 }
             }
         });
-        // self.net_listener.set_tcp_listener_event_listener(Arc::new(move |socket: TCPSocket| {
-        //
-        // }));
-        self.net_listener.start();
+        self.net_manager.listen(self.local_identity.endpoints().as_slice(), None).await.unwrap();
 
         // 清理过期数据
         let service = self.clone();
@@ -415,7 +415,11 @@ impl SnService {
 
     async fn handle_report_sn(&self, conn_id: &TempSeq, report_sn: ReportSn) {
         let conn = self.peer_mgr.find_connection(*conn_id);
-        assert!(conn.is_some());
+        if conn.is_none() {
+            log::error!("report sn failed, conn_id: {:?} not found.", conn_id);
+            return;
+        }
+
         let mut peer_conn = conn.as_ref().unwrap().lock().await;
         log::info!("report sn from {}.", peer_conn.remote_identity_id().to_string());
         if report_sn.peer_info.is_some() {
@@ -476,11 +480,12 @@ impl SnService {
         };
 
         let conn = self.peer_mgr.find_connection(*conn_id);
-        assert!(conn.is_some());
-        let mut peer_conn = conn.as_ref().unwrap().lock().await;
-        log::info!("query sn from {}.", peer_conn.remote_identity_id().to_string());
-        if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQueryResp, resp)).await {
-            log::error!("send query-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
+        if conn.is_some() {
+            let mut peer_conn = conn.as_ref().unwrap().lock().await;
+            log::info!("query sn from {}.", peer_conn.remote_identity_id().to_string());
+            if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQueryResp, resp)).await {
+                log::error!("send query-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
+            }
         }
     }
 }
