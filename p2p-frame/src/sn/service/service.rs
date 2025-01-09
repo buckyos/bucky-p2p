@@ -53,7 +53,7 @@ impl SnService {
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
-        Executor::init(None);
+        Executor::init_new_multi_thread(None);
         init_tls(identity_factory);
         let device_cache = Arc::new(DeviceCache::new(&DeviceCacheConfig {
             expire: Duration::from_secs(240),

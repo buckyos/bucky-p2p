@@ -11,7 +11,7 @@ pub type SpawnHandle<Output> = RemoteHandle<Output>;
 static EXECUTOR: OnceCell<ThreadPool> = OnceCell::new();
 
 impl Executor {
-    pub fn init(pool_size: Option<usize>) {
+    pub fn init_new_multi_thread(pool_size: Option<usize>) {
         EXECUTOR.get_or_init(|| {
             let mut builder = ThreadPool::builder();
             if pool_size.is_some() {
@@ -19,6 +19,10 @@ impl Executor {
             }
             builder.create().unwrap()
         });
+    }
+
+    pub fn init() {
+        Self::init_new_multi_thread(None);
     }
 
     pub fn spawn_with_handle<Fut>(future: Fut) -> P2pResult<SpawnHandle<Fut::Output>>

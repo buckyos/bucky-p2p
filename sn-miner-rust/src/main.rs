@@ -5,18 +5,17 @@ use std::thread;
 use bucky_crypto::PrivateKey;
 use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId};
 use bucky_raw_codec::{FileDecoder, FileEncoder};
-use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Naming};
 use log::Record;
 
-use cyfs_p2p::{CyfsIdentity, CyfsIdentityCertFactory, LocalDevice};
-use p2p_frame::::{ReceiptWithSignature, SnServiceReceipt};
+use cyfs_p2p::{CyfsIdentity, CyfsIdentityCertFactory, CyfsIdentityFactory};
 
 #[warn(unused_imports)]
 pub(crate) use sfo_result::err as miner_err;
 pub(crate) use sfo_result::into_err as into_miner_err;
-use cyfs_p2p::sn::service::SnService;
-use p2p_frame::::Executor;
-use p2p_frame::::service::*;
+use cyfs_p2p::executor::Executor;
+use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
+use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
+use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MinerErrorCode {
@@ -39,53 +38,25 @@ impl SnServiceContractServerImpl {
 impl SnServiceContractServer for SnServiceContractServerImpl {
     fn check_receipt(
         &self,
-        _client_device: &Device,
-        _local_receipt: &SnServiceReceipt,
-        _client_receipt: &Option<ReceiptWithSignature>,
+        _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
+        _local_receipt: &SnServiceReceipt, // 本地(服务端)统计的服务清单
+        _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
         _last_request_time: &ReceiptRequestTime,
     ) -> IsAcceptClient {
         IsAcceptClient::Accept(false)
     }
 
-    fn verify_auth(&self, _client_device_id: &DeviceId) -> IsAcceptClient {
+    fn verify_auth(&self, _client_peer_id: &P2pId) -> IsAcceptClient {
         IsAcceptClient::Accept(false)
     }
 }
 
-fn custom_format(writer: &mut dyn std::io::Write, now: &mut DeferredNow, record: &Record) -> std::io::Result<()> {
-    let file = match record.file() {
-        None => {
-            "<unknown>".to_string()
-        }
-        Some(path) => {
-            Path::new(path).file_name().map(|v| v.to_string_lossy().to_string()).unwrap_or("<unknown>".to_string())
-        }
-    };
-    write!(
-        writer,
-        "{} [{}] [{}:{}] [{}] - {}",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        record.level(),
-        file,
-        record.line().unwrap_or(0),
-        thread::current().name().unwrap_or("<unnamed>"),
-        &record.args()
-    )
-}
-
 #[tokio::main]
 async fn main() {
-    flexi_logger::Logger::try_with_str("debug")
-        .unwrap()
-        .log_to_file(FileSpec::default().directory(std::env::current_dir().unwrap().join("logs")))
-        .duplicate_to_stderr(Duplicate::All)
-        .rotate(Criterion::Size(10 * 1024 * 1024), // 文件大小达到 10MB 时轮转
-                Naming::Numbers, // 使用数字命名轮转文件
-                Cleanup::KeepLogFiles(7), // 保留最近 7 个日志文件
-        ).format(custom_format)
+    sfo_log::Logger::new("sn-miner")
         .start().unwrap();
 
-    Executor::init(None);
+    Executor::init_new_multi_thread(None);
     let default_desc_path = std::env::current_dir().unwrap().join("sn");
     let matches = clap::App::new(APP_NAME)
         .arg(clap::Arg::with_name("desc").short("d").long("desc").takes_value(true)
@@ -111,6 +82,7 @@ async fn main() {
 
             let service = SnService::new(
                 Arc::new(CyfsIdentity::new(device, private_key)),
+                Arc::new(CyfsIdentityFactory),
                 Arc::new(CyfsIdentityCertFactory),
                 Box::new(SnServiceContractServerImpl::new()),
             ).await;

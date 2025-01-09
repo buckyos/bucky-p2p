@@ -9,13 +9,19 @@ pub type SpawnHandle<Output> = JoinHandle<Output>;
 static EXECUTOR: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 
 impl Executor {
-    pub fn init(pool_size: Option<usize>) {
+    pub fn init_new_multi_thread(pool_size: Option<usize>) {
         EXECUTOR.get_or_init(|| {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             if let Some(size) = pool_size {
                 builder.worker_threads(size);
             }
             builder.enable_all().build().unwrap()
+        });
+    }
+
+    pub fn init() {
+        EXECUTOR.get_or_init(|| {
+            tokio::runtime::Runtime::new().unwrap()
         });
     }
 

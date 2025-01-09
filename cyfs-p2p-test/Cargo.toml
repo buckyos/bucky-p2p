@@ -10,11 +10,9 @@ tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread"]}
 clap = "2"
 cyfs-p2p = { path = "../cyfs-p2p" }
 serde = { version = "1.0.197", features = ["derive"] }
-serde_json = "1.0.117"
 bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
 bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
 bucky-raw-codec = {git = "https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
-flexi_logger = "0.28.5"
 log = "0.4.22"
 toml = "0.8.19"
 sfo-log = "0.1.3"

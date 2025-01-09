@@ -163,7 +163,7 @@ impl P2pConfig {
 pub async fn init_p2p(
     config: P2pConfig,
 ) -> P2pResult<()> {
-    Executor::init(None);
+    Executor::init_new_multi_thread(None);
     let identity_factory = config.identity_factory();
     let cert_factory = config.cert_factory();
     init_tls(config.identity_factory().clone());
