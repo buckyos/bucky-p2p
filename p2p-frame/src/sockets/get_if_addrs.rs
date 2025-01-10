@@ -540,11 +540,6 @@ mod getifaddrs_windows {
                                     {
                                         let x_byte = ipv4_addr.octets()[n];
                                         let y_byte = a.octets()[n];
-                                        // Clippy 0.0.128 doesn't handle the label on the `continue`
-                                        #[cfg_attr(
-                                            feature = "cargo-clippy",
-                                            allow(needless_continue)
-                                        )]
                                         for m in 0..8 {
                                             if (n * 8) + m > prefix.prefix_length as usize {
                                                 break;
@@ -601,11 +596,6 @@ mod getifaddrs_windows {
                                     {
                                         let x_word = ipv6_addr.segments()[n];
                                         let y_word = a.segments()[n];
-                                        // Clippy 0.0.128 doesn't handle the label on the `continue`
-                                        #[cfg_attr(
-                                            feature = "cargo-clippy",
-                                            allow(needless_continue)
-                                        )]
                                         for m in 0..16 {
                                             if (n * 16) + m > prefix.prefix_length as usize {
                                                 break;

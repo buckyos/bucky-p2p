@@ -10,7 +10,7 @@ description = "Rust sn-miner package"
 
 [dependencies]
 log = "0.4"
-tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread"]}
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"]}
 cyfs-p2p = { path = "../cyfs-p2p" }
 clap = "2"
 sfo-result = { version = "0.2.4", features = ["backtrace", "log"] }

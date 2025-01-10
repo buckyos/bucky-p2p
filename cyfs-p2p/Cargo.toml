@@ -13,11 +13,11 @@ bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
 bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
 p2p-frame = { path = "../p2p-frame" }
 
-async-std = { version = '1.12', features = ['unstable', 'attributes'], optional = true }
+async-std = { version = "1.13", features = ['unstable', 'attributes'], optional = true }
 futures-rustls = { version = "0.26", default-features = false, optional = true }
-tokio = { version = "1.37.0", optional = true}
-tokio-rustls = {  version = "0.26.0", default-features = false, optional = true }
-log = "0.4.20"
+tokio = { version = "1.43.0", optional = true}
+tokio-rustls = {  version = "0.26.1", default-features = false, optional = true }
+log = "0.4.22"
 futures = { version = '0.3', features = ['default', 'thread-pool'] }
 rand = "0.7.3"
 sha2 = "0.8.2"
