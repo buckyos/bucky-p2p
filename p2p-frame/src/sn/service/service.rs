@@ -118,7 +118,7 @@ impl SnService {
                 }
             }
         });
-        self.net_manager.listen(self.local_identity.endpoints().as_slice(), None).await.unwrap();
+        self.net_manager.listen(self.local_identity.endpoints().as_slice(), None).await?;
 
         // 清理过期数据
         let service = self.clone();

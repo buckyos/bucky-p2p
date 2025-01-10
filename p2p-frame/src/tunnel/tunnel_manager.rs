@@ -7,7 +7,7 @@ use notify_future::NotifyFuture;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::P2pConnectionRef;
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityCertCacheRef};
 use crate::protocol::v0::SnCalled;
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
@@ -260,15 +260,15 @@ pub trait DeviceFinder: 'static + Send + Sync {
 pub type DeviceFinderRef = Arc<dyn DeviceFinder>;
 
 pub struct DefaultDeviceFinder {
-    device_cache: mini_moka::sync::Cache<P2pId, P2pIdentityCertRef>,
+    cert_cache: P2pIdentityCertCacheRef,
     sn_service: SNClientServiceRef,
     cert_factory: P2pIdentityCertFactoryRef,
 }
 
 impl DefaultDeviceFinder {
-    pub fn new(sn_service: SNClientServiceRef, cert_factory: P2pIdentityCertFactoryRef) -> Arc<Self> {
+    pub fn new(sn_service: SNClientServiceRef, cert_factory: P2pIdentityCertFactoryRef, cert_cache: P2pIdentityCertCacheRef) -> Arc<Self> {
         Arc::new(Self {
-            device_cache: mini_moka::sync::Cache::builder().time_to_live(Duration::from_secs(600)).build(),
+            cert_cache,
             sn_service,
             cert_factory,
         })
@@ -278,7 +278,7 @@ impl DefaultDeviceFinder {
 #[async_trait::async_trait]
 impl DeviceFinder for DefaultDeviceFinder {
     async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
-        if let Some(device) = self.device_cache.get(device_id) {
+        if let Some(device) = self.cert_cache.get(device_id).await {
             return Ok(device);
         }
 
@@ -306,7 +306,7 @@ impl DeviceFinder for DefaultDeviceFinder {
 
             device = device.update_endpoints(eps);
         }
-        self.device_cache.insert(device_id.clone(), device.clone());
+        self.cert_cache.add(device_id, &device).await;
         Ok(device)
     }
 }

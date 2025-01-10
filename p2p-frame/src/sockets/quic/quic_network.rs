@@ -43,6 +43,10 @@ impl P2pNetwork for QuicNetwork {
         Protocol::Quic
     }
 
+    fn is_udp(&self) -> bool {
+        true
+    }
+
     async fn listen(&self, local: &Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>, event: Arc<dyn P2pConnectionEventListener>) -> P2pResult<P2pListenerRef> {
         let udp_listener = QuicListener::new(
             self.cert_cache.clone(),

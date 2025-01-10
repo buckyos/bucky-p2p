@@ -39,6 +39,10 @@ impl P2pNetwork for TcpNetwork {
         Protocol::Tcp
     }
 
+    fn is_udp(&self) -> bool {
+        false
+    }
+
     async fn listen(&self, local: &Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>, event: Arc<dyn P2pConnectionEventListener>) -> P2pResult<P2pListenerRef> {
         let tcp_listener = TCPListener::new(self.device_cache.clone(), self.cert_resolver.clone(), self.cert_factory.clone());
         tcp_listener.bind(local.clone(), out, mapping_port).await?;

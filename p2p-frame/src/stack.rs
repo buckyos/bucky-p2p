@@ -20,6 +20,7 @@ use crate::types::TempSeqGenerator;
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
 static IDENTITY_FACTORY: OnceCell<P2pIdentityFactoryRef> = OnceCell::new();
 static CERT_FACTORY: OnceCell<P2pIdentityCertFactoryRef> = OnceCell::new();
+static CERT_CACHE: OnceCell<P2pIdentityCertCacheRef> = OnceCell::new();
 
 pub struct P2pConfig {
     identity_factory: P2pIdentityFactoryRef,
@@ -185,6 +186,7 @@ pub async fn init_p2p(
 
     IDENTITY_FACTORY.get_or_init(||identity_factory.clone());
     CERT_FACTORY.get_or_init(||cert_factory.clone());
+    CERT_CACHE.get_or_init(||device_cache.clone());
 
     Ok(())
 }
@@ -199,7 +201,7 @@ pub struct P2pStack {
 pub type P2pStackRef = Arc<P2pStack>;
 
 impl P2pStack {
-    pub async fn new(
+    pub(crate) async fn new(
         local_identity: P2pIdentityRef,
         sn_service: SNClientServiceRef,
         tunnel_manager: TunnelManagerRef,
@@ -370,7 +372,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let device_finder = if device_finder.is_some() {
         device_finder.unwrap()
     } else {
-        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone())
+        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), CERT_CACHE.get().unwrap().clone())
     };
     let tunnel_manager = TunnelManager::new(
         net_manager.clone(),

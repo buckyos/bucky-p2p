@@ -310,9 +310,12 @@ impl SNClientService {
                     continue;
                 }
             }
-            for p2p_network in self.net_manager.get_network(Protocol::Quic).iter() {
+            for p2p_network in self.net_manager.get_networks().iter() {
                 for sn_cert in self.sn_list.iter() {
                     for sn_ep in sn_cert.endpoints().iter() {
+                        if sn_ep.protocol() != p2p_network.protocol() {
+                            continue;
+                        }
                         let mut stream_conn = match p2p_network.create_stream_connect(&self.local_identity, sn_ep, &sn_cert.get_id()).await {
                             Ok(conns) => {
                                 conns
@@ -381,30 +384,6 @@ impl SNClientService {
     }
 
     async fn create_connection(self: &Arc<Self>, quic_socket: P2pConnectionRef) -> P2pResult<PeerConnection> {
-        // let client_key = self.local_identity.get_encoded_identity()?;
-        // let client_cert = self.local_identity.get_identity_cert()?.get_encoded_cert()?;
-        // let mut config =
-        //     rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
-        //         .with_protocol_versions(&[&TLS13])
-        //         .unwrap()
-        //         .dangerous()
-        //         .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(self.cert_factory.clone())))
-        //         .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-        //         .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
-        // config.enable_early_data = true;
-        //
-        // let mut client_config =
-        //     quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
-        // let mut transport_config = quinn::TransportConfig::default();
-        // transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into().unwrap()));
-        // transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
-        // client_config.transport_config(Arc::new(transport_config));
-        //
-        // let conning = quic_ep.connect_with(client_config, sn_ep.addr().clone(), sn.get_id().to_string().as_str())
-        //     .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
-        //
-        // let conn = conning.await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
-        // let mut quic_socket = QuicConnection::new(conn, self.local_identity.get_id(), sn.get_id(), local_ep, sn_ep.clone());
         let conn_id = self.gen_seq.generate();
         let this = self.clone();
         let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {

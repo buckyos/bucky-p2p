@@ -7,6 +7,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityRef};
 #[async_trait::async_trait]
 pub trait P2pNetwork: Send + Sync + 'static {
     fn protocol(&self) -> Protocol;
+    fn is_udp(&self) -> bool;
     async fn listen(&self, local: &Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>, event: Arc<dyn P2pConnectionEventListener>) -> P2pResult<P2pListenerRef>;
     async fn close_all_listener(&self) -> P2pResult<()>;
     fn listeners(&self) -> Vec<P2pListenerRef>;
