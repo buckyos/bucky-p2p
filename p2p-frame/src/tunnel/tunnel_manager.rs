@@ -8,12 +8,12 @@ use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityCertCacheRef};
-use crate::protocol::v0::SnCalled;
+use crate::protocol::v0::{SnCallType, SnCalled};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef};
 use crate::types::{IncreaseId, TempSeq, TempSeqGenerator};
-use super::{ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelStream};
+use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelStream};
 
 struct TunnelsState {
     tunnels: HashMap<TempSeq, Arc<Tunnel>>,
@@ -44,6 +44,10 @@ impl TunnelsState {
 
     pub fn try_pop_pending_future(&mut self, seq: TempSeq) -> Option<NotifyFuture<ReverseResult>> {
         self.pending_tunnels.remove(&seq)
+    }
+
+    pub fn is_exist_pending_future(&self, seq: TempSeq) -> bool {
+            self.pending_tunnels.contains_key(&seq)
     }
 }
 
@@ -145,6 +149,11 @@ impl Tunnels {
     pub fn add_pending_future(&self, seq: TempSeq, future: NotifyFuture<ReverseResult>) {
         let mut state = self.state.lock().unwrap();
         state.add_pending_future(seq, future);
+    }
+
+    pub fn is_exist_pending_future(&self, seq: TempSeq) -> bool {
+        let state = self.state.lock().unwrap();
+        state.is_exist_pending_future(seq)
     }
 
     pub async fn close_all_tunnel(&self) {
@@ -322,7 +331,8 @@ pub struct TunnelManager {
     conn_timeout: Duration,
     idle_timeout: Duration,
     gen_seq: Arc<TempSeqGenerator>,
-    listen_ports: Arc<ListenPorts>,
+    stream_listen_ports: Arc<ListenPorts>,
+    datagram_listen_ports: Arc<ListenPorts>,
     clear_handle: SpawnHandle<()>,
     device_finder: DeviceFinderRef,
     cert_factory: P2pIdentityCertFactoryRef,
@@ -361,7 +371,8 @@ impl TunnelManager {
             conn_timeout,
             idle_timeout,
             gen_seq: Arc::new(TempSeqGenerator::new()),
-            listen_ports: ListenPorts::new(),
+            stream_listen_ports: ListenPorts::new(),
+            datagram_listen_ports: ListenPorts::new(),
             clear_handle: handle,
             device_finder,
             cert_factory,
@@ -429,7 +440,8 @@ impl TunnelManager {
         let conn_timeout = self.conn_timeout;
         let idle_timeout = self.idle_timeout;
 
-        let listen_ports = self.listen_ports.clone();
+        let stream_listen_ports = self.stream_listen_ports.clone();
+        let datagram_listen_ports = self.datagram_listen_ports.clone();
 
         let tunnel_conn = TunnelConnection::new(
             TempSeq::from(0),
@@ -440,7 +452,6 @@ impl TunnelManager {
             self.protocol_version,
             self.stack_version,
             Some(socket),
-            self.listen_ports.clone(),
             self.cert_factory.clone())?;
 
         let tunnels = self.get_tunnels(&remote_id);
@@ -468,7 +479,6 @@ impl TunnelManager {
                                 local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
-                                listen_ports.clone(),
                                 cert_factory.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
@@ -487,7 +497,6 @@ impl TunnelManager {
                                 local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
-                                listen_ports.clone(),
                                 cert_factory.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
                             if tunnels.add_tunnel(tunnel, listener.clone()) {
@@ -523,12 +532,20 @@ impl TunnelManager {
         self.listener.set_datagram_event_listener(listener);
     }
 
-    pub fn add_listen_port(&self, port: u16) {
-        self.listen_ports.add_listen_port(port)
+    pub fn add_stream_listen_port(&self, port: u16) {
+        self.stream_listen_ports.add_listen_port(port)
     }
 
-    pub fn remove_listen_port(&self, port: u16) {
-        self.listen_ports.remove_listen_port(port)
+    pub fn remove_stream_listen_port(&self, port: u16) {
+        self.stream_listen_ports.remove_listen_port(port)
+    }
+
+    pub fn add_datagram_listen_port(&self, port: u16) {
+        self.datagram_listen_ports.add_listen_port(port)
+    }
+
+    pub fn remove_datagram_listen_port(&self, port: u16) {
+        self.datagram_listen_ports.remove_listen_port(port)
     }
 
     fn get_tunnels(&self, remote_id: &P2pId) -> Arc<Tunnels> {
@@ -543,12 +560,12 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef) -> P2pResult<TunnelDatagramSend> {
+    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramSend> {
         let remote_id = remote.get_id();
         let tunnels = self.get_tunnels(&remote_id);
 
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
-            return tunnel.open_datagram().await;
+            return tunnel.open_datagram(vport, session_id).await;
         } else {
             let seq = self.gen_seq.generate();
             let mut tunnel = Tunnel::new(
@@ -562,20 +579,19 @@ impl TunnelManager {
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
-                self.listen_ports.clone(),
                 self.cert_factory.clone(),
             );
-            let datagram = tunnel.connect_datagram(tunnels.clone()).await?;
+            let datagram = tunnel.connect_datagram(vport, session_id, tunnels.clone(),).await?;
             let listener = self.listener.clone();
             tunnels.add_tunnel(tunnel, listener);
             Ok(datagram)
         }
     }
 
-    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId) -> P2pResult<TunnelDatagramSend> {
+    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramSend> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
-            return tunnel.open_datagram().await;
+            return tunnel.open_datagram(vport, session_id).await;
         } else {
             let remote = self.device_finder.get_identity_cert(remote_id).await?;
             let seq = self.gen_seq.generate();
@@ -590,10 +606,9 @@ impl TunnelManager {
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
-                self.listen_ports.clone(),
                 self.cert_factory.clone()
             );
-            let datagram = tunnel.connect_datagram(tunnels.clone()).await?;
+            let datagram = tunnel.connect_datagram(vport, session_id, tunnels.clone()).await?;
             let listener = self.listener.clone();
             tunnels.add_tunnel(tunnel, listener);
             Ok(datagram)
@@ -619,7 +634,6 @@ impl TunnelManager {
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
-                self.listen_ports.clone(),
                 self.cert_factory.clone(),
             );
             let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
@@ -647,7 +661,6 @@ impl TunnelManager {
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
-                self.listen_ports.clone(),
                 self.cert_factory.clone(),
             );
             let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
@@ -672,54 +685,56 @@ impl TunnelManager {
         };
 
         let from_device_id = cert.get_id();
-        if sn_called.payload.is_empty() {
-            let mut tunnel = Tunnel::new(
-                self.net_manager.clone(),
-                self.sn_service.clone(),
-                sn_called.tunnel_id,
-                self.protocol_version,
-                self.stack_version,
-                from_device_id.clone(),
-                eps.clone(),
-                self.local_identity.clone(),
-                self.conn_timeout,
-                self.idle_timeout,
-                self.listen_ports.clone(),
-                self.cert_factory.clone());
+        match sn_called.call_type {
+            SnCallType::Datagram => {
+                let mut tunnel = Tunnel::new(
+                    self.net_manager.clone(),
+                    self.sn_service.clone(),
+                    sn_called.tunnel_id,
+                    self.protocol_version,
+                    self.stack_version,
+                    from_device_id.clone(),
+                    eps.clone(),
+                    self.local_identity.clone(),
+                    self.conn_timeout,
+                    self.idle_timeout,
+                    self.cert_factory.clone());
 
-            let recv = tunnel.connect_reverse_datagram().await?;
+                let datagram_call = DatagramSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+                let recv = tunnel.connect_reverse_datagram(datagram_call.vport, datagram_call.session_id).await?;
 
-            let listener = self.listener.clone();
-            {
-                let tunnels = self.get_tunnels(&from_device_id);
-                tunnels.add_tunnel(tunnel, listener.clone());
+                let listener = self.listener.clone();
+                {
+                    let tunnels = self.get_tunnels(&from_device_id);
+                    tunnels.add_tunnel(tunnel, listener.clone());
+                }
+                let listener = self.listener.clone();
+                listener.on_new_tunnel_datagram(recv).await;
+            },
+            SnCallType::Stream => {
+                let mut tunnel = Tunnel::new(
+                    self.net_manager.clone(),
+                    self.sn_service.clone(),
+                    sn_called.tunnel_id,
+                    self.protocol_version,
+                    self.stack_version,
+                    self.cert_factory.create(&sn_called.peer_info)?.get_id(),
+                    eps.clone(),
+                    self.local_identity.clone(),
+                    self.conn_timeout,
+                    self.idle_timeout,
+                    self.cert_factory.clone());
+
+                let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+                let stream = tunnel.connect_reverse_stream(stream_call.vport, stream_call.session_id).await?;
+                let listener = self.listener.clone();
+                {
+                    let tunnels = self.get_tunnels(&from_device_id);
+                    tunnels.add_tunnel(tunnel, listener.clone());
+                }
+                let listener = self.listener.clone();
+                listener.on_new_tunnel_stream(stream).await;
             }
-            let listener = self.listener.clone();
-            listener.on_new_tunnel_datagram(recv).await;
-        } else {
-            let mut tunnel = Tunnel::new(
-                self.net_manager.clone(),
-                self.sn_service.clone(),
-                sn_called.tunnel_id,
-                self.protocol_version,
-                self.stack_version,
-                self.cert_factory.create(&sn_called.peer_info)?.get_id(),
-                eps.clone(),
-                self.local_identity.clone(),
-                self.conn_timeout,
-                self.idle_timeout,
-                self.listen_ports.clone(),
-                self.cert_factory.clone());
-
-            let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            let stream = tunnel.connect_reverse_stream(stream_call.vport, stream_call.session_id).await?;
-            let listener = self.listener.clone();
-            {
-                let tunnels = self.get_tunnels(&from_device_id);
-                tunnels.add_tunnel(tunnel, listener.clone());
-            }
-            let listener = self.listener.clone();
-            listener.on_new_tunnel_stream(stream).await;
         }
         Ok(())
     }

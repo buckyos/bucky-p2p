@@ -16,8 +16,9 @@ pub mod tls;
 pub mod sn;
 pub mod finder;
 pub mod stack;
-mod p2p_connection;
-mod p2p_network;
+pub mod p2p_connection;
+pub mod p2p_network;
+pub mod datagram;
 
 #[macro_use]
 extern crate log;

@@ -151,13 +151,13 @@ impl StreamManager {
         }
         let listener = Arc::new(StreamListener::new(port));
         listeners.insert(port, listener.clone());
-        self.tunnel_manager.add_listen_port(port);
+        self.tunnel_manager.add_stream_listen_port(port);
         Ok(StreamListenerGuard::new(listener, self.clone()))
     }
 
     fn remove_listener(&self, port: u16) {
         let mut listeners = self.listeners.lock().unwrap();
         listeners.remove(&port);
-        self.tunnel_manager.remove_listen_port(port);
+        self.tunnel_manager.remove_stream_listen_port(port);
     }
 }

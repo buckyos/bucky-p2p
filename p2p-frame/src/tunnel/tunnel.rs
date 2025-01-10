@@ -8,6 +8,7 @@ use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
+use crate::protocol::v0::SnCallType;
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
@@ -26,6 +27,12 @@ pub trait ReverseFutureCache: 'static + Send + Sync {
 
 #[derive(RawEncode, RawDecode)]
 pub struct StreamSnCall {
+    pub vport: u16,
+    pub session_id: IncreaseId,
+}
+
+#[derive(RawEncode, RawDecode)]
+pub struct DatagramSnCall {
     pub vport: u16,
     pub session_id: IncreaseId,
 }
@@ -57,7 +64,6 @@ pub struct Tunnel {
     remote_eps: Vec<Endpoint>,
     conn_timeout: Duration,
     idle_timeout: Duration,
-    listen_ports: TunnelListenPortsRef,
     cert_factory: P2pIdentityCertFactoryRef,
 }
 
@@ -73,7 +79,6 @@ impl Tunnel {
         local_identity: P2pIdentityRef,
         conn_timeout: Duration,
         idle_timeout: Duration,
-        listen_ports: TunnelListenPortsRef,
         cert_factory: P2pIdentityCertFactoryRef,) -> Self {
         Self {
             net_manager,
@@ -88,7 +93,6 @@ impl Tunnel {
             remote_eps,
             conn_timeout,
             idle_timeout,
-            listen_ports,
             cert_factory,
         }
     }
@@ -149,7 +153,6 @@ impl Tunnel {
                 let conn_timeout = self.conn_timeout;
                 let protocol_version = self.protocol_version;
                 let stack_version = self.stack_version;
-                let listen_ports = self.listen_ports.clone();
                 let cert_factory = self.cert_factory.clone();
                 let net_manager = self.net_manager.clone();
                 let future = Box::pin(async move {
@@ -165,7 +168,6 @@ impl Tunnel {
                             protocol_version,
                             stack_version,
                             Some(conn),
-                            listen_ports.clone(),
                             cert_factory.clone())?;
                         let future = Box::pin(async move {
                             let stream = tunnel_conn.connect_stream(vport, session_id).await?;
@@ -205,6 +207,7 @@ impl Tunnel {
         self.sn_service.call(self.get_sequence(),
                              Some(reverse_eps.as_slice()),
                              &self.remote_id,
+                             SnCallType::Stream,
                              call_data.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?).await?;
         let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
         if let ReverseResult::Stream(tunnel_conn, stream) = result {
@@ -215,9 +218,9 @@ impl Tunnel {
         }
     }
 
-    pub async fn connect_datagram(&mut self, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelDatagramSend> {
+    pub async fn connect_datagram(&mut self, vport: u16, session_id: IncreaseId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelDatagramSend> {
         if self.tunnel_conn.is_some() {
-            let datagram = self.tunnel_conn.as_ref().unwrap().connect_datagram().await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+            let datagram = self.tunnel_conn.as_ref().unwrap().connect_datagram(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(datagram);
         }
 
@@ -232,7 +235,6 @@ impl Tunnel {
                 let conn_timeout = self.conn_timeout;
                 let protocol_version = self.protocol_version;
                 let stack_version = self.stack_version;
-                let listen_ports = self.listen_ports.clone();
                 let cert_factory = self.cert_factory.clone();
                 let net_manager = self.net_manager.clone();
                 let future = Box::pin(async move {
@@ -248,10 +250,9 @@ impl Tunnel {
                             protocol_version,
                             stack_version,
                             Some(conn),
-                            listen_ports.clone(),
                             cert_factory.clone())?;
                         let future = Box::pin(async move {
-                            let stream = tunnel_conn.connect_datagram().await?;
+                            let stream = tunnel_conn.connect_datagram(vport, session_id).await?;
                             Ok((tunnel_conn, stream))
                         });
                         futures.push(future);
@@ -285,6 +286,7 @@ impl Tunnel {
         self.sn_service.call(self.get_sequence(),
                              Some(reverse_eps.as_slice()),
                              &self.remote_id,
+                             SnCallType::Datagram,
                              Vec::new()).await?;
         let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
         if let ReverseResult::Datagram(tunnel_conn, stream) = result {
@@ -309,7 +311,6 @@ impl Tunnel {
             let conn_timeout = self.conn_timeout;
             let protocol_version = self.protocol_version;
             let stack_version = self.stack_version;
-            let listen_ports = self.listen_ports.clone();
             let cert_factory = self.cert_factory.clone();
             let net_manager = self.net_manager.clone();
             let future = Box::pin(async move {
@@ -325,7 +326,6 @@ impl Tunnel {
                         protocol_version,
                         stack_version,
                         Some(conn),
-                        listen_ports.clone(),
                         cert_factory.clone())?;
                     let future = Box::pin(async move {
                         let stream = tunnel_conn.connect_reverse_stream(vport, session_id).await?;
@@ -356,9 +356,9 @@ impl Tunnel {
         Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
     }
 
-    pub async fn connect_reverse_datagram(&mut self) -> P2pResult<TunnelDatagramRecv> {
+    pub async fn connect_reverse_datagram(&mut self, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramRecv> {
         if self.tunnel_conn.is_some() {
-            let datagram = self.tunnel_conn.as_ref().unwrap().connect_reverse_datagram().await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+            let datagram = self.tunnel_conn.as_ref().unwrap().connect_reverse_datagram(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(datagram);
         }
 
@@ -370,7 +370,6 @@ impl Tunnel {
             let conn_timeout = self.conn_timeout;
             let protocol_version = self.protocol_version;
             let stack_version = self.stack_version;
-            let listen_ports = self.listen_ports.clone();
             let cert_factory = self.cert_factory.clone();
             let net_manager = self.net_manager.clone();
             let future = Box::pin(async move {
@@ -386,10 +385,9 @@ impl Tunnel {
                         protocol_version,
                         stack_version,
                         Some(conn),
-                        listen_ports.clone(),
                         cert_factory.clone())?;
                     let future = Box::pin(async move {
-                        let stream = tunnel_conn.connect_reverse_datagram().await?;
+                        let stream = tunnel_conn.connect_reverse_datagram(vport, session_id).await?;
                         Ok((tunnel_conn, stream))
                     });
                     futures.push(future);
@@ -440,12 +438,12 @@ impl Tunnel {
         Ok(stream)
     }
 
-    pub async fn open_datagram(&self) -> P2pResult<TunnelDatagramSend> {
+    pub async fn open_datagram(&self, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramSend> {
         if self.tunnel_conn.is_none() {
             return Err(p2p_err!(P2pErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
 
-        let datagram = self.tunnel_conn.as_ref().unwrap().open_datagram().await?;
+        let datagram = self.tunnel_conn.as_ref().unwrap().open_datagram(vport, session_id).await?;
 
         log::info!("Open stream tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
             datagram.sequence(),

@@ -15,7 +15,7 @@ use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
-use crate::protocol::v0::{SnCallResp, SnCalled, SnCalledResp};
+use crate::protocol::v0::{SnCallResp, SnCallType, SnCalled, SnCalledResp};
 use crate::sn::service::PeerConnection;
 use crate::sockets::{NetManagerRef, QuicConnection};
 use crate::types::{TempSeq, TempSeqGenerator};
@@ -490,6 +490,7 @@ impl SNClientService {
                       tunnel_id: TempSeq,
                       reverse_endpoints: Option<&[Endpoint]>,
                       remote: &P2pId,
+                      call_type: SnCallType,
                       payload_pkg: Vec<u8>) -> P2pResult<SnCallResp> {
         let active_list = self.get_active_sn_list();
         for active in active_list.iter() {
@@ -507,6 +508,7 @@ impl SNClientService {
                 active_pn_list: None,
                 peer_info: Some(self.local_identity.get_identity_cert()?.get_encoded_cert()?),
                 send_time: bucky_time_now(),
+                call_type,
                 payload: payload_pkg.clone(),
                 is_always_call: false,
             };

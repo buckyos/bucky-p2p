@@ -323,6 +323,7 @@ impl SnService {
                                 peer_info: from_peer_desc.get_encoded_cert().unwrap(),
                                 tunnel_id: call_req.tunnel_id,
                                 call_send_time: call_req.send_time,
+                                call_type: call_req.call_type,
                                 payload: vec![],
                                 reverse_endpoint_array: vec![],
                                 active_pn_list: vec![],

@@ -2388,6 +2388,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "once_cell",
+ "parking_lot",
  "quinn",
  "rand 0.7.3",
  "rand_core 0.6.4",

@@ -122,6 +122,8 @@ pub struct AckReverseStream {
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynDatagram {
     pub sequence: TempSeq,
+    pub to_vport: u16,
+    pub session_id: IncreaseId,
     pub payload: Vec<u8>,
 }
 
@@ -133,6 +135,8 @@ pub struct AckDatagram {
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynReverseDatagram {
     pub sequence: TempSeq,
+    pub to_vport: u16,
+    pub session_id: IncreaseId,
     pub payload: Vec<u8>,
 }
 
@@ -143,6 +147,7 @@ pub struct AckReverseDatagram {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynClose {
+    pub reason: u8,
     pub sequence: TempSeq,
 }
 
@@ -160,6 +165,12 @@ pub struct SnCallResp {
     pub to_peer_info: Option<EncodedP2pIdentityCert>, //
 }
 
+#[derive(Clone, Debug, RawEncode, RawDecode, Copy)]
+pub enum SnCallType {
+    Datagram,
+    Stream
+}
+
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SnCalled {
     pub seq: TempSeq,
@@ -170,6 +181,7 @@ pub struct SnCalled {
     pub peer_info: EncodedP2pIdentityCert,
     pub tunnel_id: TempSeq,
     pub call_send_time: Timestamp,
+    pub call_type: SnCallType,
     pub payload: Vec<u8>,
 }
 

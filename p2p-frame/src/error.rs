@@ -94,6 +94,7 @@ pub enum P2pErrorCode {
     TlsError,
     QuicError,
     TunnelNotConnected,
+    ConnectReset,
 }
 
 impl P2pErrorCode {

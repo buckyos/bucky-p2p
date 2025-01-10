@@ -5,6 +5,7 @@ use bucky_time::{bucky_time_to_system_time, system_time_to_bucky_time, MIN_BUCKY
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode};
 use crate::p2p_identity::{P2pId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
+use crate::protocol::v0::SnCallType;
 use crate::types::{TempSeq, Timestamp};
 
 #[derive(Clone, RawEncode, RawDecode)]
@@ -20,6 +21,7 @@ pub struct SnCall {
     pub active_pn_list: Option<Vec<P2pId>>,
     pub peer_info: Option<EncodedP2pIdentityCert>,
     pub send_time: Timestamp,
+    pub call_type: SnCallType,
     pub payload: Vec<u8>,
     pub is_always_call: bool,
 }
