@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionRef, P2pListenerRef};
+use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionInfoCacheRef, P2pConnectionRef, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::p2p_network::P2pNetworkRef;
 use crate::sockets::{NetListener, NetListenerRef, QuicListener, QuicListenerRef};
@@ -12,6 +12,7 @@ use crate::sockets::tcp::{TCPListener, TCPListenerRef};
 use crate::tls::{ServerCertResolverRef};
 
 pub struct NetManager {
+    connection_info_cache: P2pConnectionInfoCacheRef,
     cert_resolver: ServerCertResolverRef,
     p2p_networks: HashMap<Protocol, P2pNetworkRef>,
     port_mapping: Mutex<Vec<(Endpoint, u16)>>,
@@ -20,16 +21,18 @@ pub struct NetManager {
 pub type NetManagerRef = Arc<NetManager>;
 
 impl NetManager {
-    pub fn new(p2p_networks: Vec<P2pNetworkRef>, cert_resolver: ServerCertResolverRef) -> P2pResult<Self> {
+    pub fn new(p2p_networks: Vec<P2pNetworkRef>,
+               cert_resolver: ServerCertResolverRef,
+               connection_info_cache: P2pConnectionInfoCacheRef,) -> P2pResult<Self> {
         let mut p2p_networks = p2p_networks.into_iter().map(|network| (network.protocol(), network)).collect::<HashMap<Protocol, P2pNetworkRef>>();
         Ok(Self {
+            connection_info_cache,
             cert_resolver,
             p2p_networks,
             port_mapping: Mutex::new(vec![]),
             listener: Mutex::new(HashMap::new()),
         })
     }
-
 
     pub async fn listen(self: &Arc<Self>,
                         endpoints: &[Endpoint],
@@ -137,6 +140,10 @@ impl NetManager {
 
     pub fn remove_connection_event_listener(&self, local_id: &P2pId) {
         self.listener.lock().unwrap().remove(local_id);
+    }
+
+    pub fn get_connection_info_cache(&self) -> &P2pConnectionInfoCacheRef {
+        &self.connection_info_cache
     }
 
     // pub fn get_udp_socket(&self, ep: &Endpoint) -> Option<Arc<UDPSocket>> {

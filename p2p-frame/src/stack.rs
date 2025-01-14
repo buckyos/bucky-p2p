@@ -7,6 +7,7 @@ use crate::endpoint::Endpoint;
 use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
+use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
 use crate::p2p_identity::{P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
 use crate::p2p_network::P2pNetworkRef;
 use crate::protocol::v0::SnCalled;
@@ -28,6 +29,7 @@ pub struct P2pConfig {
     cert_factory: P2pIdentityCertFactoryRef,
     identity_cert_cache: P2pIdentityCertCacheRef,
     sever_cert_resolver: ServerCertResolverRef,
+    connection_info_cache: P2pConnectionInfoCacheRef,
     extra_networks: Vec<P2pNetworkRef>,
     endpoints: Vec<Endpoint>,
     port_mapping: Option<Vec<(Endpoint, u16)>>,
@@ -50,6 +52,7 @@ impl P2pConfig {
                 capacity: 1024,
             }, None)),
             sever_cert_resolver: DefaultTlsServerCertResolver::new(),
+            connection_info_cache: DefaultP2pConnectionInfoCache::new(),
             extra_networks: Vec::new(),
             endpoints,
             port_mapping: None,
@@ -160,6 +163,15 @@ impl P2pConfig {
         self.quic_idle_time = quic_idle_time;
         self
     }
+
+    pub fn set_connection_info_cache(mut self, connection_info_cache: P2pConnectionInfoCacheRef) -> Self {
+        self.connection_info_cache = connection_info_cache;
+        self
+    }
+
+    pub fn connection_info_cache(&self) -> &P2pConnectionInfoCacheRef {
+        &self.connection_info_cache
+    }
 }
 
 pub async fn init_p2p(
@@ -179,7 +191,7 @@ pub async fn init_p2p(
     networks.push(tcp_network as P2pNetworkRef);
     networks.push(quic_network as P2pNetworkRef);
 
-    let net_manager = Arc::new(NetManager::new(networks, tsl_server_cert_resolver.clone())?);
+    let net_manager = Arc::new(NetManager::new(networks, tsl_server_cert_resolver.clone(), config.connection_info_cache.clone())?);
     net_manager.listen(config.endpoints(), config.port_mapping().clone()).await?;
     NET_MANAGER.get_or_init(move || {
         net_manager.clone()

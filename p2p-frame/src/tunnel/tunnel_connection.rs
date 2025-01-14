@@ -1232,6 +1232,13 @@ pub(crate) struct TunnelConnectionInner {
     tunnel_stat: TunnelStatRef,
 }
 
+impl Drop for TunnelConnectionInner {
+    fn drop(&mut self) {
+        log::info!("drop tunnel connection inner {:?} local_id {} remote_id {}",
+            self.tunnel_id, self.local_identity.get_id().to_string(), self.remote_id.to_string());
+    }
+}
+
 impl TunnelConnectionInner {
     pub(crate) fn new(
         tunnel_id: TunnelId,
@@ -1246,6 +1253,8 @@ impl TunnelConnectionInner {
         let accept_future = TunnelFutureHolder::new();
         let recv_future = TunnelFutureHolder::new();
 
+        log::info!("create tunnel connection {:?} local_id {} remote_id {}",
+            tunnel_id, local_identity.get_id().to_string(), remote_id.to_string());
         let mut obj = Self {
             tunnel_id,
             local_identity,
@@ -1277,6 +1286,8 @@ impl TunnelConnectionInner {
             self.write = Some(write);
             self.accept_handle = Some(handle);
             self.tunnel_state = TunnelState::Idle;
+            log::info!("enter idle mode tunnel {:?} local_id {} remote_id {}",
+                self.tunnel_id, self.local_identity.get_id().to_string(), self.remote_id.to_string());
         }
         Ok(())
     }
@@ -1423,7 +1434,7 @@ impl TunnelConnection {
         })
     }
 
-    pub fn get_sequence(&self) -> TunnelId {
+    pub fn get_tunnel_id(&self) -> TunnelId {
         let inner = self.inner.lock().unwrap();
         inner.tunnel_id
     }

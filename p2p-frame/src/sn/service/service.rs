@@ -12,7 +12,7 @@ use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
 use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
-use crate::p2p_connection::P2pConnectionRef;
+use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnectionRef};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
 use crate::p2p_network::P2pNetworkRef;
 use crate::protocol::{v0::*, *};
@@ -69,7 +69,8 @@ impl SnService {
         networks.push(tcp_network as P2pNetworkRef);
         networks.push(quic_network as P2pNetworkRef);
 
-        let net_manager = Arc::new(NetManager::new(networks, cert_resolver).unwrap());
+        let connection_info_cache = DefaultP2pConnectionInfoCache::new();
+        let net_manager = Arc::new(NetManager::new(networks, cert_resolver, connection_info_cache).unwrap());
         let service = SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
             local_identity: local_identity.clone(),

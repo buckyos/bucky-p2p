@@ -330,7 +330,7 @@ pub struct TunnelManager {
     listener: TunnelManagerEventRef,
     conn_timeout: Duration,
     idle_timeout: Duration,
-    gen_seq: Arc<TunnelIdGenerator>,
+    gen_id: Arc<TunnelIdGenerator>,
     stream_listen_ports: Arc<ListenPorts>,
     datagram_listen_ports: Arc<ListenPorts>,
     clear_handle: SpawnHandle<()>,
@@ -370,7 +370,7 @@ impl TunnelManager {
             listener: TunnelManagerEvent::new(),
             conn_timeout,
             idle_timeout,
-            gen_seq: Arc::new(TunnelIdGenerator::new()),
+            gen_id: Arc::new(TunnelIdGenerator::new()),
             stream_listen_ports: ListenPorts::new(),
             datagram_listen_ports: ListenPorts::new(),
             clear_handle: handle,
@@ -397,7 +397,7 @@ impl TunnelManager {
                 let state = tunnels.state.lock().unwrap();
                 for (_, tunnel) in state.tunnels.iter() {
                     let tunnel_stat = tunnel.tunnel_stat();
-                    if tunnel.is_error() || (tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > 250 * 1000 * 1000) {
+                    if tunnel.is_error() || (tunnel.is_idle() && tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > 250 * 1000 * 1000) {
                         remove_list.push(tunnel.clone());
                     }
                 }
@@ -471,7 +471,7 @@ impl TunnelManager {
                             let mut tunnel = Tunnel::new(
                                 net_manager.clone(),
                                 sn_service.clone(),
-                                tunnel_conn.get_sequence(),
+                                tunnel_conn.get_tunnel_id(),
                                 protocol_version,
                                 stack_version,
                                 remote_id.clone(),
@@ -489,7 +489,7 @@ impl TunnelManager {
                             let mut tunnel = Tunnel::new(
                                 net_manager.clone(),
                                 sn_service.clone(),
-                                tunnel_conn.get_sequence(),
+                                tunnel_conn.get_tunnel_id(),
                                 protocol_version,
                                 stack_version,
                                 remote_id.clone(),
@@ -504,12 +504,12 @@ impl TunnelManager {
                             }
                         }
                         TunnelInstance::ReverseStream(stream) => {
-                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_sequence()) {
+                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()) {
                                 future.set_complete(ReverseResult::Stream(tunnel_conn, stream));
                             }
                         }
                         TunnelInstance::ReverseDatagram(datagram) => {
-                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_sequence()) {
+                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()) {
                                 future.set_complete(ReverseResult::Datagram(tunnel_conn, datagram));
                             }
                         }
@@ -575,7 +575,7 @@ impl TunnelManager {
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_datagram(vport, session_id).await;
         } else {
-            let seq = self.gen_seq.generate();
+            let seq = self.gen_id.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
                 self.sn_service.clone(),
@@ -602,7 +602,7 @@ impl TunnelManager {
             return tunnel.open_datagram(vport, session_id).await;
         } else {
             let remote = self.device_finder.get_identity_cert(remote_id).await?;
-            let seq = self.gen_seq.generate();
+            let seq = self.gen_id.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
                 self.sn_service.clone(),
@@ -630,7 +630,7 @@ impl TunnelManager {
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_stream(vport, session_id).await;
         } else {
-            let seq = self.gen_seq.generate();
+            let seq = self.gen_id.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
                 self.sn_service.clone(),
@@ -657,7 +657,7 @@ impl TunnelManager {
             return tunnel.open_stream(vport, session_id).await;
         } else {
             let remote = self.device_finder.get_identity_cert(remote_id).await?;
-            let seq = self.gen_seq.generate();
+            let seq = self.gen_id.generate();
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
                 self.sn_service.clone(),

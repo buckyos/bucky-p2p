@@ -407,6 +407,7 @@ async fn all_in_one() {
                         println!("write error: {:?}", e);
                     }
                 }
+                let mut tunnel2 = stack1.stream_manager().connect(&stack2_cert, 1235).await.unwrap();
             }
             {
                 let mut send = stack1.datagram_manager().connect(&stack2_cert, 1234).await.unwrap();

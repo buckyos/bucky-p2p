@@ -7,6 +7,7 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
 use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
+use crate::p2p_connection::{ConnectDirection, P2pConnectionInfo};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::protocol::v0::SnCallType;
 use crate::runtime;
@@ -140,10 +141,94 @@ impl Tunnel {
         reverse_eps
     }
 
+    fn create_stream_connection(&self, ep: &Endpoint, vport: u16, session_id: SessionId) -> Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>> {
+        let sequence = self.tunnel_id;
+        let local_identity = self.local_identity.clone();
+        let remote_id = self.remote_id.clone();
+        let conn_timeout = self.conn_timeout;
+        let protocol_version = self.protocol_version;
+        let stack_version = self.stack_version;
+        let cert_factory = self.cert_factory.clone();
+        let net_manager = self.net_manager.clone();
+        let ep = ep.clone();
+        let future = Box::pin(async move {
+            let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, &ep, &remote_id).await?;
+            let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
+            for conn in conns {
+                let tunnel_conn = TunnelConnection::new(
+                    sequence,
+                    local_identity.clone(),
+                    remote_id.clone(),
+                    ep.clone(),
+                    conn_timeout,
+                    protocol_version,
+                    stack_version,
+                    Some(conn),
+                    cert_factory.clone())?;
+                let future = Box::pin(async move {
+                    let stream = tunnel_conn.connect_stream(vport, session_id).await?;
+                    Ok((tunnel_conn, stream))
+                });
+                futures.push(future);
+            }
+            if futures.len() > 0 {
+                select_successful(futures).await
+            } else {
+                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+            }
+        });
+        future
+    }
     pub async fn connect_stream(&mut self, vport: u16, session_id: SessionId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelStream> {
         if self.tunnel_conn.is_some() {
             let stream = self.tunnel_conn.as_ref().unwrap().connect_stream(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(stream);
+        }
+
+        let mut has_reversed = false;
+        if let Some(latest_connection_info) = self.net_manager.get_connection_info_cache().get(&self.remote_id).await {
+            if latest_connection_info.direct == ConnectDirection::Direct {
+                for ep in self.remote_eps.iter() {
+                    if ep == &latest_connection_info.remote_ep {
+                        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
+                        let future = self.create_stream_connection(ep, vport, session_id);
+                        futures.push(future);
+                        if futures.len() > 0 {
+                            match select_successful(futures).await {
+                                Ok((conn, stream)) => {
+                                    self.tunnel_conn = Some(conn);
+                                    return Ok(stream);
+                                }
+                                Err(e) => {
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if latest_connection_info.direct == ConnectDirection::Reverse {
+                let future = NotifyFuture::new();
+                future_cache.add_reverse_future(self.tunnel_id, future.clone());
+                let call_data = StreamSnCall {
+                    vport,
+                    session_id,
+                };
+                self.sn_service.call(self.get_tunnel_id(),
+                                     None,
+                                     &self.remote_id,
+                                     SnCallType::Stream,
+                                     call_data.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?).await?;
+                let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
+                if let ReverseResult::Stream(tunnel_conn, stream) = result {
+                    self.tunnel_conn = Some(tunnel_conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Reverse,
+                        local_ep: stream.local_endpoint(),
+                        remote_ep: stream.remote_endpoint(),
+                    }).await;
+                    return Ok(stream)
+                }
+                has_reversed = true;
+            }
         }
 
         let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
@@ -151,40 +236,7 @@ impl Tunnel {
         let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
             if is_lan || ep.is_static_wan() {
-                let sequence = self.tunnel_id;
-                let local_identity = self.local_identity.clone();
-                let remote_id = self.remote_id.clone();
-                let conn_timeout = self.conn_timeout;
-                let protocol_version = self.protocol_version;
-                let stack_version = self.stack_version;
-                let cert_factory = self.cert_factory.clone();
-                let net_manager = self.net_manager.clone();
-                let future = Box::pin(async move {
-                    let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, ep, &remote_id).await?;
-                    let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
-                    for conn in conns {
-                        let tunnel_conn = TunnelConnection::new(
-                            sequence,
-                            local_identity.clone(),
-                            remote_id.clone(),
-                            ep.clone(),
-                            conn_timeout,
-                            protocol_version,
-                            stack_version,
-                            Some(conn),
-                            cert_factory.clone())?;
-                        let future = Box::pin(async move {
-                            let stream = tunnel_conn.connect_stream(vport, session_id).await?;
-                            Ok((tunnel_conn, stream))
-                        });
-                        futures.push(future);
-                    }
-                    if futures.len() > 0 {
-                        select_successful(futures).await
-                    } else {
-                        Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
-                    }
-                });
+                let future = self.create_stream_connection(ep, vport, session_id);
                 futures.push(future)
             }
         }
@@ -193,6 +245,11 @@ impl Tunnel {
             match select_successful(futures).await {
                 Ok((conn, stream)) => {
                     self.tunnel_conn = Some(conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Direct,
+                        local_ep: stream.local_endpoint(),
+                        remote_ep: stream.remote_endpoint(),
+                    }).await;
                     return Ok(stream);
                 }
                 Err(e) => {
@@ -200,26 +257,73 @@ impl Tunnel {
                 }
             }
         }
-        let reverse_eps = self.get_reverse_ep_list();
 
-        let future = NotifyFuture::new();
-        future_cache.add_reverse_future(self.tunnel_id, future.clone());
-        let call_data = StreamSnCall {
-            vport,
-            session_id,
-        };
-        self.sn_service.call(self.get_tunnel_id(),
-                             Some(reverse_eps.as_slice()),
-                             &self.remote_id,
-                             SnCallType::Stream,
-                             call_data.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?).await?;
-        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
-        if let ReverseResult::Stream(tunnel_conn, stream) = result {
-            self.tunnel_conn = Some(tunnel_conn);
-            Ok(stream)
+        if !has_reversed {
+            let future = NotifyFuture::new();
+            future_cache.add_reverse_future(self.tunnel_id, future.clone());
+            let call_data = StreamSnCall {
+                vport,
+                session_id,
+            };
+            self.sn_service.call(self.get_tunnel_id(),
+                                 None,
+                                 &self.remote_id,
+                                 SnCallType::Stream,
+                                 call_data.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?).await?;
+            let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
+            if let ReverseResult::Stream(tunnel_conn, stream) = result {
+                self.tunnel_conn = Some(tunnel_conn);
+                self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                    direct: ConnectDirection::Reverse,
+                    local_ep: stream.local_endpoint(),
+                    remote_ep: stream.remote_endpoint(),
+                }).await;
+                Ok(stream)
+            } else {
+                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+            }
         } else {
             Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
         }
+    }
+
+    fn create_datagram_connection(&self, ep: &Endpoint, vport: u16, session_id: SessionId) -> Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>> {
+        let sequence = self.tunnel_id;
+        let local_identity = self.local_identity.clone();
+        let remote_id = self.remote_id.clone();
+        let conn_timeout = self.conn_timeout;
+        let protocol_version = self.protocol_version;
+        let stack_version = self.stack_version;
+        let cert_factory = self.cert_factory.clone();
+        let net_manager = self.net_manager.clone();
+        let ep = ep.clone();
+        let future = Box::pin(async move {
+            let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, &ep, &remote_id).await?;
+            let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>>> = Vec::new();
+            for conn in conns {
+                let tunnel_conn = TunnelConnection::new(
+                    sequence,
+                    local_identity.clone(),
+                    remote_id.clone(),
+                    ep.clone(),
+                    conn_timeout,
+                    protocol_version,
+                    stack_version,
+                    Some(conn),
+                    cert_factory.clone())?;
+                let future = Box::pin(async move {
+                    let stream = tunnel_conn.connect_datagram(vport, session_id).await?;
+                    Ok((tunnel_conn, stream))
+                });
+                futures.push(future);
+            }
+            if futures.len() > 0 {
+                select_successful(futures).await
+            } else {
+                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+            }
+        });
+        future
     }
 
     pub async fn connect_datagram(&mut self, vport: u16, session_id: SessionId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelDatagramSend> {
@@ -228,45 +332,54 @@ impl Tunnel {
             return Ok(datagram);
         }
 
+        let mut is_reversed = false;
+        if let Some(connection_info) = self.net_manager.get_connection_info_cache().get(&self.remote_id).await {
+            if connection_info.direct == ConnectDirection::Direct {
+                for ep in self.remote_eps.iter() {
+                    if ep == &connection_info.remote_ep {
+                        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>>> = Vec::new();
+                        let future = self.create_datagram_connection(ep, vport, session_id);
+                        futures.push(future);
+                        if futures.len() > 0 {
+                            match select_successful(futures).await {
+                                Ok((conn, datagram_send)) => {
+                                    self.tunnel_conn = Some(conn);
+                                    return Ok(datagram_send);
+                                }
+                                Err(e) => {
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if connection_info.direct == ConnectDirection::Reverse {
+                let future = NotifyFuture::new();
+                future_cache.add_reverse_future(self.tunnel_id, future.clone());
+                self.sn_service.call(self.get_tunnel_id(),
+                                     None,
+                                     &self.remote_id,
+                                     SnCallType::Datagram,
+                                     Vec::new()).await?;
+                let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
+                if let ReverseResult::Datagram(tunnel_conn, datagram_send) = result {
+                    self.tunnel_conn = Some(tunnel_conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Reverse,
+                        local_ep: datagram_send.local_endpoint(),
+                        remote_ep: datagram_send.remote_endpoint(),
+                    }).await;
+                    return Ok(datagram_send);
+                }
+                is_reversed = true;
+            }
+        }
+
         let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>>> = Vec::new();
         let ep_list = &self.remote_eps;
         let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
             if is_lan || ep.is_static_wan() {
-                let sequence = self.tunnel_id;
-                let local_identity = self.local_identity.clone();
-                let remote_id = self.remote_id.clone();
-                let conn_timeout = self.conn_timeout;
-                let protocol_version = self.protocol_version;
-                let stack_version = self.stack_version;
-                let cert_factory = self.cert_factory.clone();
-                let net_manager = self.net_manager.clone();
-                let future = Box::pin(async move {
-                    let conns = net_manager.get_network(ep.protocol())?.create_stream_connect(&local_identity, ep, &remote_id).await?;
-                    let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>>> = Vec::new();
-                    for conn in conns {
-                        let tunnel_conn = TunnelConnection::new(
-                            sequence,
-                            local_identity.clone(),
-                            remote_id.clone(),
-                            ep.clone(),
-                            conn_timeout,
-                            protocol_version,
-                            stack_version,
-                            Some(conn),
-                            cert_factory.clone())?;
-                        let future = Box::pin(async move {
-                            let stream = tunnel_conn.connect_datagram(vport, session_id).await?;
-                            Ok((tunnel_conn, stream))
-                        });
-                        futures.push(future);
-                    }
-                    if futures.len() > 0 {
-                        select_successful(futures).await
-                    } else {
-                        Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
-                    }
-                });
+                let future = self.create_datagram_connection(ep, vport, session_id);
                 futures.push(future)
             }
         }
@@ -275,6 +388,11 @@ impl Tunnel {
             match select_successful(futures).await {
                 Ok((conn, datagram_send)) => {
                     self.tunnel_conn = Some(conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Direct,
+                        local_ep: datagram_send.local_endpoint(),
+                        remote_ep: datagram_send.remote_endpoint(),
+                    }).await;
                     return Ok(datagram_send);
                 }
                 Err(e) => {
@@ -283,19 +401,26 @@ impl Tunnel {
             }
         }
 
-        let reverse_eps = self.get_reverse_ep_list();
-
-        let future = NotifyFuture::new();
-        future_cache.add_reverse_future(self.tunnel_id, future.clone());
-        self.sn_service.call(self.get_tunnel_id(),
-                             Some(reverse_eps.as_slice()),
-                             &self.remote_id,
-                             SnCallType::Datagram,
-                             Vec::new()).await?;
-        let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
-        if let ReverseResult::Datagram(tunnel_conn, stream) = result {
-            self.tunnel_conn = Some(tunnel_conn);
-            Ok(stream)
+        if !is_reversed {
+            let future = NotifyFuture::new();
+            future_cache.add_reverse_future(self.tunnel_id, future.clone());
+            self.sn_service.call(self.get_tunnel_id(),
+                                 None,
+                                 &self.remote_id,
+                                 SnCallType::Datagram,
+                                 Vec::new()).await?;
+            let result = runtime::timeout(self.conn_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
+            if let ReverseResult::Datagram(tunnel_conn, datagram_send) = result {
+                self.tunnel_conn = Some(tunnel_conn);
+                self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                    direct: ConnectDirection::Reverse,
+                    local_ep: datagram_send.local_endpoint(),
+                    remote_ep: datagram_send.remote_endpoint(),
+                }).await;
+                Ok(datagram_send)
+            } else {
+                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+            }
         } else {
             Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
         }
@@ -350,6 +475,11 @@ impl Tunnel {
             match select_successful(futures).await {
                 Ok((conn, stream)) => {
                     self.tunnel_conn = Some(conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Direct,
+                        local_ep: stream.local_endpoint(),
+                        remote_ep: stream.remote_endpoint(),
+                    }).await;
                     return Ok(stream);
                 }
                 Err(e) => {
@@ -409,6 +539,11 @@ impl Tunnel {
             match select_successful(futures).await {
                 Ok((conn, datagram_send)) => {
                     self.tunnel_conn = Some(conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Direct,
+                        local_ep: datagram_send.local_endpoint(),
+                        remote_ep: datagram_send.remote_endpoint(),
+                    }).await;
                     return Ok(datagram_send);
                 }
                 Err(e) => {
