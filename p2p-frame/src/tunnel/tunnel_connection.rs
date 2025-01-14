@@ -1787,6 +1787,11 @@ impl TunnelConnection {
         let inner = self.inner.lock().unwrap();
         inner.tunnel_state == TunnelState::Idle
     }
+
+    pub fn is_error(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.tunnel_state == TunnelState::Error
+    }
 }
 
 impl Drop for TunnelConnection {

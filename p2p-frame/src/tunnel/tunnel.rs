@@ -117,6 +117,10 @@ impl Tunnel {
         self.tunnel_conn.as_ref().unwrap().is_idle()
     }
 
+    pub fn is_error(&self) -> bool {
+        self.tunnel_conn.as_ref().unwrap().is_error()
+    }
+
     fn get_reverse_ep_list(&self) -> Vec<Endpoint> {
         let mut wan_udp_eps = Vec::new();
         self.sn_service.get_active_sn_list().iter().map(|v| v.wan_ep_list.iter()).flatten().for_each(|ep| {

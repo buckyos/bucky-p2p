@@ -397,7 +397,7 @@ impl TunnelManager {
                 let state = tunnels.state.lock().unwrap();
                 for (_, tunnel) in state.tunnels.iter() {
                     let tunnel_stat = tunnel.tunnel_stat();
-                    if tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > 250 * 1000 * 1000 {
+                    if tunnel.is_error() || (tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > 250 * 1000 * 1000) {
                         remove_list.push(tunnel.clone());
                     }
                 }
