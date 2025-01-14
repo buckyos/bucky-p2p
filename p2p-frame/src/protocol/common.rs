@@ -38,9 +38,6 @@ pub enum PackageCmdCode {
     SnQuery = 0x26,
     SnQueryResp = 0x27,
 
-    SessionData = 0x40,
-    TcpAckAckConnection = 0x43,
-
     SynProxy = 0x50,
     AckProxy = 0x51,
 

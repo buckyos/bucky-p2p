@@ -347,6 +347,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-named-locker"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f5f291b4ed8da9d20859926e8f13b143628ffafd36e50529f6add843b7862c"
+dependencies = [
+ "lazy_static",
+ "log",
+ "notify-future",
+]
+
+[[package]]
 name = "async-process"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2368,6 +2379,7 @@ dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
  "as-any",
+ "async-named-locker",
  "async-std",
  "async-trait",
  "base-x",
@@ -2388,7 +2400,6 @@ dependencies = [
  "num-derive",
  "num-traits",
  "once_cell",
- "parking_lot",
  "quinn",
  "rand 0.7.3",
  "rand_core 0.6.4",

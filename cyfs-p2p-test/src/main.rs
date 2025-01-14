@@ -352,8 +352,11 @@ async fn all_in_one() {
             let mut stream = stack2.stream_manager().listen(1234).await.unwrap().accept().await.unwrap();
             tokio::task::spawn(async move {
                 stream.write_all("test".as_bytes()).await.unwrap();
+                let mut buf = [0u8; 32];
+                let len = stream.read(buf.as_mut_slice()).await.unwrap();
+                println!("{}", String::from_utf8_lossy(&buf[..len]));
 
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             });
 
         }
@@ -361,11 +364,32 @@ async fn all_in_one() {
 
     tokio::task::spawn(async move {
         loop {
-            let mut tunnel = stack1.stream_manager().connect(&stack2_cert, 1234).await.unwrap();
-            let mut buf = [0u8; 32];
-            let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
-            println!("{}", String::from_utf8_lossy(&buf[..len]));
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            {
+                let mut tunnel = stack1.stream_manager().connect(&stack2_cert, 1234).await.unwrap();
+                let mut buf = [0u8; 32];
+                let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
+                println!("{}", String::from_utf8_lossy(&buf[..len]));
+                tunnel.write_all("hello".as_bytes()).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                match tunnel.read(buf.as_mut_slice()).await {
+                    Ok(len) => {
+                        println!("{}", String::from_utf8_lossy(&buf[..len]));
+                    }
+                    Err(e) => {
+                        println!("read error: {:?}", e);
+                    }
+                }
+
+                match tunnel.write_all("test2".as_bytes()).await {
+                    Ok(_) => {
+                        println!("write ok");
+                    }
+                    Err(e) => {
+                        println!("write error: {:?}", e);
+                    }
+                }
+            }
         }
     });
 

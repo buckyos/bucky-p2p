@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use async_named_locker::ObjectHolder;
 use bucky_raw_codec::{RawConvertTo, RawFixedBytes, RawFrom};
 use bucky_time::bucky_time_now;
 use futures::future::abortable;
@@ -134,18 +135,27 @@ impl Display for TunnelInstance {
 
 async fn accept_first_pkg(mut read: Box<dyn P2pRead>) -> P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)> {
     let mut buf_header = [0u8; 16];
-    read.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-    let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-    let cmd_code = match header.cmd_code() {
-        Ok(cmd_code) => cmd_code,
-        Err(err) => {
-            return Err(err);
+    loop {
+        read.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        let cmd_code = match header.cmd_code() {
+            Ok(cmd_code) => cmd_code,
+            Err(err) => {
+                return Err(err);
+            }
+        };
+        let mut cmd_body = vec![0u8; header.pkg_len() as usize];
+        read.read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        if cmd_code == PackageCmdCode::SynStream || cmd_code == PackageCmdCode::AckStream
+            || cmd_code == PackageCmdCode::SynDatagram || cmd_code == PackageCmdCode::AckDatagram
+            || cmd_code == PackageCmdCode::SynReverseStream || cmd_code == PackageCmdCode::AckReverseStream
+            || cmd_code == PackageCmdCode::SynReverseDatagram || cmd_code == PackageCmdCode::AckReverseDatagram {
+            log::info!("accept first pkg cmd code {:?}", cmd_code);
+            break Ok((read, cmd_code, cmd_body));
+        } else {
+            log::info!("accept error pkg cmd code {:?}, discard", cmd_code);
         }
-    };
-    let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-    read.read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-    log::info!("accept first pkg cmd code {:?}", cmd_code);
-    Ok((read, cmd_code, cmd_body))
+    }
 }
 
 fn create_accept_handle(read: Box<dyn P2pRead>,
@@ -161,23 +171,62 @@ fn create_accept_handle(read: Box<dyn P2pRead>,
                 }
             }
         } else {
-            if let Some(_) = recv_future.try_complete(ret) {
-                accept_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "accept handle abort")));
+            if let Some(ret) = recv_future.try_complete(ret) {
+                accept_future.try_complete(ret);
             }
         }
     })
+}
+
+type ReadHolder = ObjectHolder<Option<Box<dyn P2pRead>>>;
+type WriteHolder = ObjectHolder<Option<Box<dyn P2pWrite>>>;
+
+pub struct TunnelStreamState {
+}
+
+async fn handle_cmd(cmd_code: PackageCmdCode, cmd_body: &[u8], read: &ReadHolder, write: &WriteHolder, tunnel: Arc<Mutex<TunnelConnectionInner>>) -> P2pResult<()> {
+    if cmd_code == PackageCmdCode::SynClose {
+        let syn_close = SynClose::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        let ack = AckClose {
+            sequence: syn_close.sequence,
+        };
+        let pkg = Package::new(PackageCmdCode::AckClose, ack);
+        let (mut read, mut write) = {
+            let write = write.get().await;
+            let read = read.get().await;
+            (read, write)
+        };
+        write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        let mut tunnel = tunnel.lock().unwrap();
+        tunnel.tunnel_stat.decrease_work_instance();
+        tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
+        let _ = tunnel.enter_idle_mode();
+        log::info!("close tunnel stream {:?} local_id {} remote_id {}",
+                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+        let reason = P2pErrorCode::from_u8(syn_close.reason).unwrap_or(P2pErrorCode::Ok);
+        if reason != P2pErrorCode::Ok {
+            Err(p2p_err!(reason, ""))
+        } else {
+            Ok(())
+        }
+    } else {
+        let tunnel = tunnel.lock().unwrap();
+        Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", tunnel.sequence, cmd_code))
+    }
 }
 
 pub struct TunnelStream {
     tunnel: Arc<Mutex<TunnelConnectionInner>>,
     session_id: IncreaseId,
     port: u16,
-    read: Option<Box<dyn P2pRead>>,
-    write: Option<Box<dyn P2pWrite>>,
+    read: ReadHolder,
+    write: WriteHolder,
     remainder: u16,
     read_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<usize>>>>>,
     write_future: Option<Pin<Box<dyn Send + Future<Output=std::io::Result<()>>>>>,
-    is_closed: bool,
+    flush_future: Option<Pin<Box<dyn Send + Future<Output=std::io::Result<()>>>>>,
+    shutdown_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<()>>>>>,
+    recv_header_handle: Option<SpawnHandle<P2pResult<(PackageCmdCode, PackageHeader)>>>,
 }
 
 impl TunnelStream {
@@ -191,45 +240,64 @@ impl TunnelStream {
             let tunnel = tunnel.lock().unwrap();
             tunnel.tunnel_stat.increase_work_instance();
         }
-        Self {
+        let mut this = Self {
             tunnel,
             session_id,
             port,
-            read: Some(read),
-            write: Some(write),
+            read: ReadHolder::new(Some(read)),
+            write: WriteHolder::new(Some(write)),
             remainder: 0,
             read_future: None,
             write_future: None,
-            is_closed: false,
-        }
+            flush_future: None,
+            shutdown_future: None,
+            recv_header_handle: None,
+        };
+        this.enter_recv_header().unwrap();
+        this
     }
 
-    async fn handle_cmd(&mut self, cmd_code: PackageCmdCode, cmd_body: &[u8]) -> P2pResult<()> {
-        if cmd_code == PackageCmdCode::SynClose {
-            let syn_close = SynClose::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            let ack = AckClose {
-                sequence: syn_close.sequence,
-            };
-            let pkg = Package::new(PackageCmdCode::AckClose, ack);
-            self.write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-            let mut tunnel = self.tunnel.lock().unwrap();
-            tunnel.tunnel_stat.decrease_work_instance();
-            tunnel.data_socket.as_mut().unwrap().unsplit(self.read.take().unwrap(), self.write.take().unwrap());
-            let _ = tunnel.enter_idle_mode();
-            self.is_closed = true;
-            let reason = P2pErrorCode::from_u8(syn_close.reason).unwrap_or(P2pErrorCode::Ok);
-            if reason != P2pErrorCode::Ok {
-                Err(p2p_err!(reason, ""))
-            } else {
-                Ok(())
-            }
-        } else {
-            let tunnel = self.tunnel.lock().unwrap();
-            Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", tunnel.sequence, cmd_code))
+
+    fn enter_recv_header(&mut self) -> P2pResult<()> {
+        if self.recv_header_handle.is_some() {
+            return Ok(());
         }
+
+        let write = self.write.clone();
+        let read = self.read.clone();
+        let tunnel = self.tunnel.clone();
+        let recv_header_handle = Executor::spawn_with_handle(async move {
+            let mut buf_header = [0u8; 16];
+            read.get().await.as_mut().unwrap().read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+            let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+            let cmd_code = match header.cmd_code() {
+                Ok(cmd_code) => cmd_code,
+                Err(err) => {
+                    return Err(err);
+                }
+            };
+            if cmd_code == PackageCmdCode::SynClose {
+                let mut cmd_body = vec![0u8; header.pkg_len() as usize];
+                read.get().await.as_mut().unwrap().read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                handle_cmd(cmd_code, cmd_body.as_slice(), &read, &write, tunnel.clone()).await?;
+                Ok((cmd_code, header))
+            } else if cmd_code == PackageCmdCode::PieceData {
+                Ok((cmd_code, header))
+            } else {
+                let mut cmd_body = vec![0u8; header.pkg_len() as usize];
+                read.get().await.as_mut().unwrap().read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                Ok((cmd_code, header))
+            }
+        }).map_err(into_p2p_err!(P2pErrorCode::Failed, "spawn error"))?;
+        self.recv_header_handle = Some(recv_header_handle);
+        Ok(())
     }
 
     async fn send_inner(&mut self, data: &[u8]) -> std::io::Result<()> {
+        let mut write = self.write.get().await;
+        if write.is_none() {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "tunnel is closed"));
+        }
         let mut remainder = data;
         while remainder.len() > 0 {
             let chunk = if remainder.len() > MTU_LARGE as usize {
@@ -238,8 +306,8 @@ impl TunnelStream {
                 remainder
             };
             let header = PackageHeader::new(PackageCmdCode::PieceData, chunk.len() as u16);
-            self.write.as_mut().unwrap().write_all(header.to_vec().unwrap().as_slice()).await?;
-            self.write.as_mut().unwrap().write_all(chunk).await?;
+            write.as_mut().unwrap().write_all(header.to_vec().unwrap().as_slice()).await?;
+            write.as_mut().unwrap().write_all(chunk).await?;
             remainder = &remainder[chunk.len()..];
         }
         Ok(())
@@ -265,33 +333,29 @@ impl TunnelStream {
                 return Ok(0);
             }
         }
-        if self.remainder == 0 {
-            let mut buf_header = [0u8; 16];
-            self.read.as_mut().unwrap().read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-            let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            let cmd_code = match header.cmd_code() {
-                Ok(cmd_code) => cmd_code,
-                Err(err) => {
-                    return Err(err);
-                }
-            };
-            if cmd_code != PackageCmdCode::PieceData {
-                let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-                self.read.as_mut().unwrap().read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                self.handle_cmd(cmd_code, cmd_body.as_slice()).await?;
+        if self.recv_header_handle.is_some() {
+            let (cmd_code, header) = self.recv_header_handle.take().unwrap().await.map_err(into_p2p_err!(P2pErrorCode::Failed, "get spawn result"))??;
+            if (cmd_code != PackageCmdCode::PieceData) {
                 return Ok(0);
-            } else {
-                self.remainder = header.pkg_len();
             }
+            self.remainder = header.pkg_len();
         }
         if self.remainder as usize > buf.len() {
-            let recv_len = self.read.as_mut().unwrap().read(buf).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+            let recv_len = self.read.get().await.as_mut().unwrap().read(buf).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
             self.remainder -= recv_len as u16;
+            if self.remainder == 0 {
+                self.enter_recv_header()?;
+            }
             Ok(recv_len)
         } else {
             let recv_len = self.remainder;
-            self.read.as_mut().unwrap().read_exact(&mut buf[..self.remainder as usize]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+            {
+                self.read.get().await.as_mut().unwrap().read_exact(&mut buf[..self.remainder as usize]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+            }
             self.remainder = 0;
+            if self.remainder == 0 {
+                self.enter_recv_header()?;
+            }
             Ok(recv_len as usize)
         }
     }
@@ -311,7 +375,11 @@ impl TunnelStream {
 
     async fn read_pkg(&mut self) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
         let mut buf_header = [0u8; 16];
-        self.read.as_mut().unwrap().read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        let mut read = self.read.get().await;
+        if read.is_none() {
+            return Err(p2p_err!(P2pErrorCode::Failed, "tunnel is closed"));
+        }
+        read.as_mut().unwrap().read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         let cmd_code = match header.cmd_code() {
             Ok(cmd_code) => cmd_code,
@@ -320,7 +388,7 @@ impl TunnelStream {
             }
         };
         let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-        self.read.as_mut().unwrap().read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        read.as_mut().unwrap().read_exact(cmd_body.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok((cmd_code, cmd_body))
     }
 
@@ -333,34 +401,55 @@ impl TunnelStream {
             sequence: sequence,
         });
 
-        self.write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-
-        loop {
-            let (cmd_code, cmd_body) = self.read_pkg().await?;
-            if cmd_code == PackageCmdCode::AckClose {
-                let close = AckClose::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                if close.sequence == sequence {
-                    break;
-                }
-            } else if cmd_code == PackageCmdCode::SynClose {
-                let close = SynClose::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                if close.sequence != sequence {
-                    continue;
-                }
-                let ack = AckClose {
-                    sequence: close.sequence,
-                };
-                let pkg = Package::new(PackageCmdCode::AckClose, ack);
-                self.write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        {
+            let mut write = self.write.get().await;
+            if write.is_none() {
+                return Ok(());
             }
+            write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         }
+        if self.recv_header_handle.is_some() {
+            let (cmd_code, header) = self.recv_header_handle.take().unwrap().await.map_err(into_p2p_err!(P2pErrorCode::Failed, "get spawn result"))??;
+            if cmd_code != PackageCmdCode::AckClose && cmd_code != PackageCmdCode::SynClose {
+                loop {
+                    let (cmd_code, cmd_body) = self.read_pkg().await?;
+                    if cmd_code == PackageCmdCode::AckClose {
+                        let close = AckClose::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+                        if close.sequence == sequence {
+                            break;
+                        }
+                    } else if cmd_code == PackageCmdCode::SynClose {
+                        return Ok(());
+                    }
+                }
+            }
+
+        }
+
 
         {
+            let mut write = self.write.get().await;
+            let mut read = self.read.get().await;
+            if write.is_none() || read.is_none() {
+                return Ok(());
+            }
+
             let mut tunnel = self.tunnel.lock().unwrap();
-            tunnel.data_socket.as_mut().unwrap().unsplit(self.read.take().unwrap(), self.write.take().unwrap());
+            tunnel.tunnel_stat.decrease_work_instance();
+            tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
             tunnel.enter_idle_mode()?;
+            log::info!("close tunnel stream {:?} local_id {} remote_id {}",
+                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
 
+        Ok(())
+    }
+
+    async fn flush_inner(&mut self) -> std::io::Result<()> {
+        let mut write = self.write.get().await;
+        if write.is_some() {
+            write.as_mut().unwrap().flush().await?;
+        }
         Ok(())
     }
 
@@ -398,13 +487,8 @@ impl TunnelStream {
     }
 
     pub async fn close(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
-        if self.is_closed {
-            return Ok(());
-        }
-        self.is_closed = true;
         let conn_timeout = {
             let tunnel = self.tunnel.lock().unwrap();
-            tunnel.tunnel_stat.decrease_work_instance();
             tunnel.conn_timeout
         };
         match runtime::timeout(conn_timeout, self.close_inner(reason)).await {
@@ -486,11 +570,49 @@ impl runtime::AsyncWrite for TunnelStream {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Pin::new(self.write.as_mut().unwrap()).poll_flush(cx)
+        unsafe {
+            if self.flush_future.is_none() {
+                let this: &'static mut Self = std::mem::transmute(self.as_mut().deref_mut());
+                let future = this.flush_inner();
+                self.as_mut().flush_future = Some(Box::pin(future));
+            }
+
+            match Pin::new(self.as_mut().flush_future.as_mut().unwrap()).poll(cx) {
+                Poll::Ready(ret) => {
+                    self.as_mut().flush_future = None;
+                    match ret {
+                        Ok(()) => Poll::Ready(Ok(())),
+                        Err(e) => Poll::Ready(Err(e))
+                    }
+                }
+                Poll::Pending => {
+                    Poll::Pending
+                }
+            }
+        }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Pin::new(self.write.as_mut().unwrap()).poll_shutdown(cx)
+        unsafe {
+            if self.shutdown_future.is_none() {
+                let this: &'static mut Self = std::mem::transmute(self.as_mut().deref_mut());
+                let future = this.close(P2pErrorCode::Ok);
+                self.as_mut().shutdown_future = Some(Box::pin(future));
+            }
+
+            match Pin::new(self.as_mut().shutdown_future.as_mut().unwrap()).poll(cx) {
+                Poll::Ready(ret) => {
+                    self.as_mut().shutdown_future = None;
+                    match ret {
+                        Ok(()) => Poll::Ready(Ok(())),
+                        Err(e) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                    }
+                }
+                Poll::Pending => {
+                    Poll::Pending
+                }
+            }
+        }
     }
 }
 
