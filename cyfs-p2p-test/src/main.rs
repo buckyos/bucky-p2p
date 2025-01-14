@@ -18,7 +18,7 @@ use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
 use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
 use cyfs_p2p::stack::{create_p2p_stack, init_p2p, P2pStackRef};
-use cyfs_p2p::types::IncreaseIdGenerator;
+use cyfs_p2p::types::SessionIdGenerator;
 
 const APP_NAME: &str = "cyfs-p2p-test";
 

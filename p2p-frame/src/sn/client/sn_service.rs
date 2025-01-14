@@ -18,7 +18,7 @@ use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, S
 use crate::protocol::v0::{SnCallResp, SnCallType, SnCalled, SnCalledResp};
 use crate::sn::service::PeerConnection;
 use crate::sockets::{NetManagerRef, QuicConnection};
-use crate::types::{TempSeq, TempSeqGenerator};
+use crate::types::{Sequence, SequenceGenerator, TunnelId, TunnelIdGenerator};
 
 #[callback_trait::callback_trait]
 pub trait SNEvent: 'static + Send + Sync {
@@ -35,8 +35,8 @@ pub enum SnResp {
 pub struct ActiveSN {
     pub sn: EncodedP2pIdentityCert,
     pub latest_time: u64,
-    pub conn_id: TempSeq,
-    pub recv_future: Arc<Mutex<HashMap<TempSeq, NotifyFuture<SnResp>>>>,
+    pub conn_id: TunnelId,
+    pub recv_future: Arc<Mutex<HashMap<Sequence, NotifyFuture<SnResp>>>>,
     pub peer_connection: Arc<runtime::Mutex<PeerConnection>>,
     pub wan_ep_list: Vec<Endpoint>,
 }
@@ -52,7 +52,8 @@ pub struct SNClientService {
     net_manager: NetManagerRef,
     sn_list: Vec<P2pIdentityCertRef>,
     local_identity: P2pIdentityRef,
-    gen_seq: Arc<TempSeqGenerator>,
+    gen_seq: Arc<SequenceGenerator>,
+    gen_id: Arc<TunnelIdGenerator>,
     ping_timeout: Duration,
     call_timeout: Duration,
     conn_timeout: Duration,
@@ -74,7 +75,8 @@ impl SNClientService {
     pub fn new(net_manager: NetManagerRef,
                sn_list: Vec<P2pIdentityCertRef>,
                local_identity: P2pIdentityRef,
-               gen_seq: Arc<TempSeqGenerator>,
+               gen_seq: Arc<SequenceGenerator>,
+               gen_id: Arc<TunnelIdGenerator>,
                cert_factory: P2pIdentityCertFactoryRef,
                ping_timeout: Duration,
                call_timeout: Duration,
@@ -84,6 +86,7 @@ impl SNClientService {
             sn_list,
             local_identity,
             gen_seq,
+            gen_id,
             ping_timeout,
             call_timeout,
             conn_timeout,
@@ -123,7 +126,7 @@ impl SNClientService {
         return false;
     }
 
-    async fn handle(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()> {
+    async fn handle(&self, conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()> {
         match cmd_code {
             PackageCmdCode::SnCallResp => {
                 let resp = SnCallResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
@@ -170,12 +173,12 @@ impl SNClientService {
         Ok(())
     }
 
-    async fn on_called(&self, conn_id: TempSeq, sn_called: SnCalled) -> P2pResult<()> {
+    async fn on_called(&self, conn_id: TunnelId, sn_called: SnCalled) -> P2pResult<()> {
         let listener = {
             let listener = self.listener.lock().unwrap();
             listener.clone()
         };
-        let seq = sn_called.tunnel_id.clone();
+        let seq = sn_called.seq.clone();
         let sn_peer_id = sn_called.sn_peer_id.clone();
         let to_peer_id = sn_called.to_peer_id.clone();
 
@@ -220,7 +223,7 @@ impl SNClientService {
         Ok(())
     }
 
-    fn get_peer_connection(&self, conn_id: TempSeq) -> Option<Arc<runtime::Mutex<PeerConnection>>> {
+    fn get_peer_connection(&self, conn_id: TunnelId) -> Option<Arc<runtime::Mutex<PeerConnection>>> {
         let state = self.state.read().unwrap();
         for active_sn in state.active_sn_list.iter() {
             if active_sn.conn_id == conn_id {
@@ -378,15 +381,15 @@ impl SNClientService {
         }
     }
 
-    fn remote_sn_conn(&self, conn_id: TempSeq) {
+    fn remote_sn_conn(&self, conn_id: TunnelId) {
         let mut state = self.state.write().unwrap();
         state.active_sn_list.retain(|sn| sn.conn_id != conn_id);
     }
 
     async fn create_connection(self: &Arc<Self>, quic_socket: P2pConnectionRef) -> P2pResult<PeerConnection> {
-        let conn_id = self.gen_seq.generate();
+        let conn_id = self.gen_id.generate();
         let this = self.clone();
-        let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
+        let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
             let this = this.clone();
             async move {
                 if let Err(e) = this.handle(conn_id, cmd_code, cmd_body).await {
@@ -487,7 +490,7 @@ impl SNClientService {
     }
 
     pub async fn call(&self,
-                      tunnel_id: TempSeq,
+                      tunnel_id: TunnelId,
                       reverse_endpoints: Option<&[Endpoint]>,
                       remote: &P2pId,
                       call_type: SnCallType,

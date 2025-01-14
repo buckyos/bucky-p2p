@@ -12,12 +12,12 @@ use crate::protocol::v0::{SnCallType, SnCalled};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef};
-use crate::types::{IncreaseId, TempSeq, TempSeqGenerator};
+use crate::types::{SessionId, TunnelId, TunnelIdGenerator};
 use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelStream};
 
 struct TunnelsState {
-    tunnels: HashMap<TempSeq, Arc<Tunnel>>,
-    pending_tunnels: HashMap<TempSeq, NotifyFuture<ReverseResult>>,
+    tunnels: HashMap<TunnelId, Arc<Tunnel>>,
+    pending_tunnels: HashMap<TunnelId, NotifyFuture<ReverseResult>>,
 }
 
 impl TunnelsState {
@@ -30,23 +30,23 @@ impl TunnelsState {
         None
     }
 
-    pub fn tunnel_exist(&mut self, seq: TempSeq) -> bool {
+    pub fn tunnel_exist(&mut self, seq: TunnelId) -> bool {
         self.tunnels.contains_key(&seq)
     }
 
-    pub fn remove_tunnel(&mut self, seq: TempSeq) {
+    pub fn remove_tunnel(&mut self, seq: TunnelId) {
         self.tunnels.remove(&seq);
     }
 
-    pub fn add_pending_future(&mut self, seq: TempSeq, future: NotifyFuture<ReverseResult>) {
+    pub fn add_pending_future(&mut self, seq: TunnelId, future: NotifyFuture<ReverseResult>) {
         self.pending_tunnels.insert(seq, future);
     }
 
-    pub fn try_pop_pending_future(&mut self, seq: TempSeq) -> Option<NotifyFuture<ReverseResult>> {
+    pub fn try_pop_pending_future(&mut self, seq: TunnelId) -> Option<NotifyFuture<ReverseResult>> {
         self.pending_tunnels.remove(&seq)
     }
 
-    pub fn is_exist_pending_future(&self, seq: TempSeq) -> bool {
+    pub fn is_exist_pending_future(&self, seq: TunnelId) -> bool {
             self.pending_tunnels.contains_key(&seq)
     }
 }
@@ -131,27 +131,27 @@ impl Tunnels {
         true
     }
 
-    pub fn tunnel_exist(&self, seq: TempSeq) -> bool {
+    pub fn tunnel_exist(&self, seq: TunnelId) -> bool {
         let mut state = self.state.lock().unwrap();
         state.tunnel_exist(seq)
     }
 
-    pub fn remove_tunnel(&self, seq: TempSeq) {
+    pub fn remove_tunnel(&self, seq: TunnelId) {
         let mut state = self.state.lock().unwrap();
         state.remove_tunnel(seq);
     }
 
-    pub fn try_pop_pending_future(&self, seq: TempSeq) -> Option<NotifyFuture<ReverseResult>> {
+    pub fn try_pop_pending_future(&self, seq: TunnelId) -> Option<NotifyFuture<ReverseResult>> {
         let mut state = self.state.lock().unwrap();
         state.try_pop_pending_future(seq)
     }
 
-    pub fn add_pending_future(&self, seq: TempSeq, future: NotifyFuture<ReverseResult>) {
+    pub fn add_pending_future(&self, seq: TunnelId, future: NotifyFuture<ReverseResult>) {
         let mut state = self.state.lock().unwrap();
         state.add_pending_future(seq, future);
     }
 
-    pub fn is_exist_pending_future(&self, seq: TempSeq) -> bool {
+    pub fn is_exist_pending_future(&self, seq: TunnelId) -> bool {
         let state = self.state.lock().unwrap();
         state.is_exist_pending_future(seq)
     }
@@ -169,11 +169,11 @@ impl Tunnels {
 }
 
 impl ReverseFutureCache for Tunnels {
-    fn add_reverse_future(&self, sequence: TempSeq, future: NotifyFuture<ReverseResult>) {
+    fn add_reverse_future(&self, sequence: TunnelId, future: NotifyFuture<ReverseResult>) {
         self.add_pending_future(sequence, future);
     }
 
-    fn remove_reverse_future(&self, sequence: TempSeq) {
+    fn remove_reverse_future(&self, sequence: TunnelId) {
         self.try_pop_pending_future(sequence);
     }
 }
@@ -330,7 +330,7 @@ pub struct TunnelManager {
     listener: TunnelManagerEventRef,
     conn_timeout: Duration,
     idle_timeout: Duration,
-    gen_seq: Arc<TempSeqGenerator>,
+    gen_seq: Arc<TunnelIdGenerator>,
     stream_listen_ports: Arc<ListenPorts>,
     datagram_listen_ports: Arc<ListenPorts>,
     clear_handle: SpawnHandle<()>,
@@ -370,7 +370,7 @@ impl TunnelManager {
             listener: TunnelManagerEvent::new(),
             conn_timeout,
             idle_timeout,
-            gen_seq: Arc::new(TempSeqGenerator::new()),
+            gen_seq: Arc::new(TunnelIdGenerator::new()),
             stream_listen_ports: ListenPorts::new(),
             datagram_listen_ports: ListenPorts::new(),
             clear_handle: handle,
@@ -444,7 +444,7 @@ impl TunnelManager {
         let datagram_listen_ports = self.datagram_listen_ports.clone();
 
         let tunnel_conn = TunnelConnection::new(
-            TempSeq::from(0),
+            TunnelId::from(0),
             self.local_identity.clone(),
             remote_id.clone(),
             socket.remote().clone(),
@@ -568,7 +568,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramSend> {
+    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
         let remote_id = remote.get_id();
         let tunnels = self.get_tunnels(&remote_id);
 
@@ -596,7 +596,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramSend> {
+    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_datagram(vport, session_id).await;
@@ -623,7 +623,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_stream_tunnel(&self, remote: &P2pIdentityCertRef, session_id: IncreaseId, vport: u16) -> P2pResult<TunnelStream> {
+    pub async fn create_stream_tunnel(&self, remote: &P2pIdentityCertRef, session_id: SessionId, vport: u16) -> P2pResult<TunnelStream> {
         let remote_id = remote.get_id();
         let tunnels = self.get_tunnels(&remote_id);
 
@@ -651,7 +651,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_stream_tunnel_from_id(&self, remote_id: &P2pId, session_id: IncreaseId, vport: u16) -> P2pResult<TunnelStream> {
+    pub async fn create_stream_tunnel_from_id(&self, remote_id: &P2pId, session_id: SessionId, vport: u16) -> P2pResult<TunnelStream> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             return tunnel.open_stream(vport, session_id).await;

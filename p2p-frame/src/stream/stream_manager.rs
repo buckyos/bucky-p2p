@@ -6,7 +6,7 @@ use futures::future::{abortable, AbortHandle};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertRef};
 use crate::tunnel::{TunnelManagerRef, TunnelStream};
-use crate::types::IncreaseIdGenerator;
+use crate::types::SessionIdGenerator;
 
 struct StreamListenerState {
     abort_handle: Option<AbortHandle>,
@@ -95,7 +95,7 @@ impl Deref for StreamListenerGuard {
 pub struct StreamManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
-    session_gen: IncreaseIdGenerator,
+    session_gen: SessionIdGenerator,
     listeners: Mutex<HashMap<u16, StreamListenerRef>>,
 }
 
@@ -112,7 +112,7 @@ impl StreamManager {
         let stream = Arc::new(Self {
             local_identity,
             tunnel_manager: tunnel_manager.clone(),
-            session_gen: IncreaseIdGenerator::new(),
+            session_gen: SessionIdGenerator::new(),
             listeners: Mutex::new(HashMap::new()),
         });
 

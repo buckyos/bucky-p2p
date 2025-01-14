@@ -6,14 +6,14 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode};
 use crate::p2p_identity::{P2pId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
 use crate::protocol::v0::SnCallType;
-use crate::types::{TempSeq, Timestamp};
+use crate::types::{TunnelId, Timestamp, Sequence};
 
 #[derive(Clone, RawEncode, RawDecode)]
 pub struct SnCall {
     pub protocol_version: u8,
     pub stack_version: u32,
-    pub seq: TempSeq,
-    pub tunnel_id: TempSeq,
+    pub seq: Sequence,
+    pub tunnel_id: TunnelId,
     pub sn_peer_id: P2pId,
     pub to_peer_id: P2pId,
     pub from_peer_id: P2pId,
@@ -411,7 +411,7 @@ pub struct ReportSn {
     pub protocol_version: u8,
     pub stack_version: u32,
     //ln与sn的keepalive包
-    pub seq: TempSeq,                          //序列号
+    pub seq: Sequence,                          //序列号
     pub sn_peer_id: P2pId,                  //sn的设备id
     pub from_peer_id: Option<P2pId>,        //发送者设备id
     pub peer_info: Option<EncodedP2pIdentityCert>,             //发送者设备信息
@@ -424,7 +424,7 @@ pub struct ReportSn {
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct ReportSnResp {
-    pub seq: TempSeq,                      //包序列包
+    pub seq: Sequence,                      //包序列包
     pub sn_peer_id: P2pId,              //sn的设备id
     pub result: u8,                        //是否接受device的接入
     pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
@@ -437,13 +437,13 @@ pub struct SnQuery {
     pub protocol_version: u8,
     pub stack_version: u32,
     //ln与sn的keepalive包
-    pub seq: TempSeq,                          //序列号
+    pub seq: Sequence,                          //序列号
     pub query_id: P2pId,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnQueryResp {
-    pub seq: TempSeq,                      //包序列包
+    pub seq: Sequence,                      //包序列包
     pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
     pub end_point_array: Vec<Endpoint>,    //外网地址列表
 }

@@ -5,12 +5,12 @@ use std::{
 use std::sync::Mutex;
 use bucky_time::bucky_time_now;
 use crate::p2p_identity::P2pId;
-use crate::types::{TempSeq, Timestamp};
+use crate::types::{TunnelId, Timestamp};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RemoteSeq {
     remote: P2pId,
-    seq: TempSeq,
+    seq: TunnelId,
 }
 
 struct StubImpl {
@@ -27,7 +27,7 @@ impl CallStub {
         }))
     }
 
-    pub fn insert(&self, remote: &P2pId, seq: &TempSeq) -> bool {
+    pub fn insert(&self, remote: &P2pId, seq: &TunnelId) -> bool {
         let remote_seq = RemoteSeq {
             remote: remote.clone(),
             seq: *seq

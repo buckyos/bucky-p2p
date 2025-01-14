@@ -16,7 +16,7 @@ use crate::sockets::tcp::TcpNetwork;
 use crate::stream::{StreamManager, StreamManagerRef};
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver};
 use crate::tunnel::{DefaultDeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerRef};
-use crate::types::TempSeqGenerator;
+use crate::types::{SequenceGenerator, TunnelIdGenerator};
 
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
 static IDENTITY_FACTORY: OnceCell<P2pIdentityFactoryRef> = OnceCell::new();
@@ -355,7 +355,8 @@ impl P2pStackConfig {
 }
 
 pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> {
-    let gen_seq = Arc::new(TempSeqGenerator::new());
+    let gen_id = Arc::new(TunnelIdGenerator::new());
+    let gen_seq = Arc::new(SequenceGenerator::new());
     let net_manager = NET_MANAGER.get().unwrap().clone();
 
     let cert_factory = CERT_FACTORY.get().unwrap().clone();
@@ -371,6 +372,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         sn_list,
         local_identity.clone(),
         gen_seq.clone(),
+        gen_id.clone(),
         cert_factory.clone(),
         sn_ping_interval,
         sn_call_timeout,

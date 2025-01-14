@@ -6,7 +6,7 @@ use futures::future::{abortable, AbortHandle};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
 use crate::tunnel::{TunnelDatagramRecv, TunnelDatagramSend, TunnelManagerRef};
-use crate::types::IncreaseIdGenerator;
+use crate::types::SessionIdGenerator;
 
 struct DatagramListenerState {
     abort_handle: Option<AbortHandle>,
@@ -99,7 +99,7 @@ impl DerefMut for DatagramListenerGuard {
 pub struct DatagramManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
-    session_gen: IncreaseIdGenerator,
+    session_gen: SessionIdGenerator,
     listeners: Mutex<HashMap<u16, DatagramListenerRef>>,
 }
 pub type DatagramManagerRef = std::sync::Arc<DatagramManager>;
@@ -115,7 +115,7 @@ impl DatagramManager {
         let datagram = Arc::new(DatagramManager {
             local_identity,
             tunnel_manager: tunnel_manager.clone(),
-            session_gen: IncreaseIdGenerator::new(),
+            session_gen: SessionIdGenerator::new(),
             listeners: Mutex::new(HashMap::new()),
         });
 

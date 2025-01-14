@@ -5,7 +5,7 @@ use std::{
 };
 use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef};
 use crate::protocol::{v0::*, *};
-use crate::types::TempSeq;
+use crate::types::TunnelId;
 
 pub trait ServiceAppraiser: Send + Sync {
     // 对SN服务进行评分，可以依据本地记录的服务清单和SN提供的服务清单作对比进行评价；
@@ -33,7 +33,7 @@ struct Contract {
 #[derive(Clone)]
 struct CallPeerStat {
     peerid: P2pId,
-    last_seq: TempSeq,
+    last_seq: TunnelId,
     is_connect_success: bool,
 }
 
@@ -81,7 +81,7 @@ impl Contract {
         }
     }
 
-    fn on_called(&self, called: &SnCalled, seq: TempSeq, call_time: SystemTime) {
+    fn on_called(&self, called: &SnCalled, seq: TunnelId, call_time: SystemTime) {
         let now = SystemTime::now();
         let mut stat = self.stat.lock().unwrap();
         let receipt = &mut stat.receipt;

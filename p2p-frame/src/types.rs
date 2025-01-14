@@ -37,10 +37,42 @@ impl Hash for Sequence {
     }
 }
 
-#[derive(Clone, Copy, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
-pub struct TempSeq(u32);
+pub struct SequenceGenerator {
+    cur: AtomicU32,
+}
 
-impl TempSeq {
+
+impl From<TunnelId> for SequenceGenerator {
+    fn from(init: TunnelId) -> Self {
+        Self {
+            cur: AtomicU32::new(init.value())
+        }
+    }
+}
+
+
+impl SequenceGenerator {
+    pub fn new() -> Self {
+        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
+        Self {
+            cur: AtomicU32::new(now),
+        }
+    }
+
+    pub fn generate(&self) -> Sequence {
+        let v = self.cur.fetch_add(1, Ordering::SeqCst);
+        if v == 0 {
+            Sequence(self.cur.fetch_add(1, Ordering::SeqCst))
+        } else {
+            Sequence(v)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
+pub struct TunnelId(u32);
+
+impl TunnelId {
     pub fn value(&self) -> u32 {
         self.0
     }
@@ -57,7 +89,7 @@ impl TempSeq {
     // }
 }
 
-impl PartialOrd for TempSeq {
+impl PartialOrd for TunnelId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         if self.0 == 0 || other.0 == 0 {
             self.0.partial_cmp(&other.0)
@@ -74,31 +106,31 @@ impl PartialOrd for TempSeq {
     }
 }
 
-impl Default for TempSeq {
+impl Default for TunnelId {
     fn default() -> Self {
         Self(0)
     }
 }
 
-impl From<u32> for TempSeq {
+impl From<u32> for TunnelId {
     fn from(v: u32) -> Self {
         Self(v)
     }
 }
 
-impl Hash for TempSeq {
+impl Hash for TunnelId {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u32(self.0)
     }
 }
 
-pub struct TempSeqGenerator {
+pub struct TunnelIdGenerator {
     cur: AtomicU32,
 }
 
 
-impl From<TempSeq> for TempSeqGenerator {
-    fn from(init: TempSeq) -> Self {
+impl From<TunnelId> for TunnelIdGenerator {
+    fn from(init: TunnelId) -> Self {
         Self {
             cur: AtomicU32::new(init.value())
         }
@@ -106,20 +138,20 @@ impl From<TempSeq> for TempSeqGenerator {
 }
 
 
-impl TempSeqGenerator {
+impl TunnelIdGenerator {
     pub fn new() -> Self {
-        let now = TempSeq::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
+        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
         Self {
             cur: AtomicU32::new(now),
         }
     }
 
-    pub fn generate(&self) -> TempSeq {
+    pub fn generate(&self) -> TunnelId {
         let v = self.cur.fetch_add(1, Ordering::SeqCst);
         if v == 0 {
-            TempSeq(self.cur.fetch_add(1, Ordering::SeqCst))
+            TunnelId(self.cur.fetch_add(1, Ordering::SeqCst))
         } else {
-            TempSeq(v)
+            TunnelId(v)
         }
     }
 }
@@ -127,21 +159,21 @@ impl TempSeqGenerator {
 pub type Timestamp = u64;
 
 #[derive(RawEncode, RawDecode, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct IncreaseId(u32);
+pub struct SessionId(u32);
 
-impl std::fmt::Display for IncreaseId {
+impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl Default for IncreaseId {
+impl Default for SessionId {
     fn default() -> Self {
         Self::invalid()
     }
 }
 
-impl IncreaseId {
+impl SessionId {
     pub fn invalid() -> Self {
         Self(0)
     }
@@ -151,11 +183,11 @@ impl IncreaseId {
     }
 }
 
-pub struct IncreaseIdGenerator {
+pub struct SessionIdGenerator {
     cur: AtomicU32,
 }
 
-impl IncreaseIdGenerator {
+impl SessionIdGenerator {
     pub fn new() -> Self {
         let mut rng = rand::thread_rng();
         Self {
@@ -163,8 +195,8 @@ impl IncreaseIdGenerator {
         }
     }
 
-    pub fn generate(&self) -> IncreaseId {
-        IncreaseId(self.cur.fetch_add(1, Ordering::SeqCst) + 1)
+    pub fn generate(&self) -> SessionId {
+        SessionId(self.cur.fetch_add(1, Ordering::SeqCst) + 1)
     }
 }
 

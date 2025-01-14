@@ -8,7 +8,7 @@ mod manager;
 pub use manager::StatisticManager;
 use crate::error::P2pErrorCode;
 use crate::p2p_identity::P2pId;
-use crate::types::{TempSeq, Timestamp};
+use crate::types::{TunnelId, Timestamp};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum StatisticKey {
@@ -56,9 +56,9 @@ struct PeerStatusImpl {
     id: StatisticKey,
     status: PeerStatusKind,
 
-    records: BTreeMap<(StatisticKey, TempSeq), StatusKind>,
+    records: BTreeMap<(StatisticKey, TunnelId), StatusKind>,
 
-    will_cache_record: Vec<(StatisticKey, Option<TempSeq>, StatusKind)>,
+    will_cache_record: Vec<(StatisticKey, Option<TunnelId>, StatusKind)>,
 }
 
 #[derive(Debug)]
@@ -125,7 +125,7 @@ impl PeerStatus {
         }
     }
 
-    pub fn online(&self, seq: TempSeq, now: Timestamp) {
+    pub fn online(&self, seq: TunnelId, now: Timestamp) {
         let status = &mut *self.0.write().unwrap();
 
         match status.status {
@@ -141,14 +141,14 @@ impl PeerStatus {
         }
     }
 
-    pub fn add_record(&self, peer_id: P2pId, seq: TempSeq) {
+    pub fn add_record(&self, peer_id: P2pId, seq: TunnelId) {
         self.0.write().unwrap()
             .records
             .entry((StatisticKey::RemoteId(peer_id), seq))
             .or_insert(StatusKind::CallResult(P2pErrorCode::Ok));
     }
 
-    pub fn record(&self, peer_id: P2pId, seq: TempSeq, errno: P2pErrorCode) {
+    pub fn record(&self, peer_id: P2pId, seq: TunnelId, errno: P2pErrorCode) {
 
         let w = &mut *self.0.write().unwrap();
         match w.records

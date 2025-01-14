@@ -13,7 +13,7 @@ use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
 use crate::tunnel::{select_successful, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPortsRef, TunnelStatRef, TunnelStream};
-use crate::types::{IncreaseId, TempSeq};
+use crate::types::{SessionId, TunnelId};
 
 pub enum ReverseResult {
     Stream(TunnelConnection, TunnelStream),
@@ -21,20 +21,20 @@ pub enum ReverseResult {
 }
 
 pub trait ReverseFutureCache: 'static + Send + Sync {
-    fn add_reverse_future(&self, sequence: TempSeq, future: NotifyFuture<ReverseResult>);
-    fn remove_reverse_future(&self, sequence: TempSeq);
+    fn add_reverse_future(&self, sequence: TunnelId, future: NotifyFuture<ReverseResult>);
+    fn remove_reverse_future(&self, sequence: TunnelId);
 }
 
 #[derive(RawEncode, RawDecode)]
 pub struct StreamSnCall {
     pub vport: u16,
-    pub session_id: IncreaseId,
+    pub session_id: SessionId,
 }
 
 #[derive(RawEncode, RawDecode)]
 pub struct DatagramSnCall {
     pub vport: u16,
-    pub session_id: IncreaseId,
+    pub session_id: SessionId,
 }
 
 pub enum TunnelStatus {
@@ -54,7 +54,7 @@ pub struct TunnelReceiver {
 pub struct Tunnel {
     net_manager: NetManagerRef,
     sn_service: SNClientServiceRef,
-    sequence: TempSeq,
+    sequence: TunnelId,
     tunnel_conn: Option<TunnelConnection>,
     state: Mutex<TunnelState>,
     protocol_version: u8,
@@ -71,7 +71,7 @@ impl Tunnel {
     pub fn new(
         net_manager: NetManagerRef,
         sn_service: SNClientServiceRef,
-        sequence: TempSeq,
+        sequence: TunnelId,
         protocol_version: u8,
         stack_version: u32,
         remote_id: P2pId,
@@ -105,7 +105,7 @@ impl Tunnel {
         self.tunnel_conn.as_ref().unwrap().accept_instance().await
     }
 
-    pub fn get_sequence(&self) -> TempSeq {
+    pub fn get_sequence(&self) -> TunnelId {
         self.sequence
     }
 
@@ -136,7 +136,7 @@ impl Tunnel {
         reverse_eps
     }
 
-    pub async fn connect_stream(&mut self, vport: u16, session_id: IncreaseId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelStream> {
+    pub async fn connect_stream(&mut self, vport: u16, session_id: SessionId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelStream> {
         if self.tunnel_conn.is_some() {
             let stream = self.tunnel_conn.as_ref().unwrap().connect_stream(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(stream);
@@ -218,7 +218,7 @@ impl Tunnel {
         }
     }
 
-    pub async fn connect_datagram(&mut self, vport: u16, session_id: IncreaseId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelDatagramSend> {
+    pub async fn connect_datagram(&mut self, vport: u16, session_id: SessionId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelDatagramSend> {
         if self.tunnel_conn.is_some() {
             let datagram = self.tunnel_conn.as_ref().unwrap().connect_datagram(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(datagram);
@@ -297,7 +297,7 @@ impl Tunnel {
         }
     }
 
-    pub async fn connect_reverse_stream(&mut self, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelStream> {
+    pub async fn connect_reverse_stream(&mut self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
         if self.tunnel_conn.is_some() {
             let datagram = self.tunnel_conn.as_ref().unwrap().connect_reverse_stream(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(datagram);
@@ -356,7 +356,7 @@ impl Tunnel {
         Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
     }
 
-    pub async fn connect_reverse_datagram(&mut self, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramRecv> {
+    pub async fn connect_reverse_datagram(&mut self, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramRecv> {
         if self.tunnel_conn.is_some() {
             let datagram = self.tunnel_conn.as_ref().unwrap().connect_reverse_datagram(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return Ok(datagram);
@@ -415,7 +415,7 @@ impl Tunnel {
         Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
     }
 
-    pub async fn open_stream(&self, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelStream> {
+    pub async fn open_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
         if self.tunnel_conn.is_none() {
             return Err(p2p_err!(P2pErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }
@@ -438,7 +438,7 @@ impl Tunnel {
         Ok(stream)
     }
 
-    pub async fn open_datagram(&self, vport: u16, session_id: IncreaseId) -> P2pResult<TunnelDatagramSend> {
+    pub async fn open_datagram(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
         if self.tunnel_conn.is_none() {
             return Err(p2p_err!(P2pErrorCode::TunnelNotConnected, "Tunnel not connected"));
         }

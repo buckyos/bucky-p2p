@@ -21,7 +21,7 @@ use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sockets::{NetListener, NetListenerRef, NetManager, NetManagerRef, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
-use crate::types::{TempSeq, TempSeqGenerator, Timestamp};
+use crate::types::{TunnelId, TunnelIdGenerator, Timestamp, SessionIdGenerator, SequenceGenerator};
 use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConnection};
 
 // const TRACKER_INTERVAL: Duration = Duration::from_secs(60);
@@ -31,7 +31,7 @@ use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConn
 // }
 
 pub struct SnService {
-    seq_generator: TempSeqGenerator,
+    seq_generator: Arc<SequenceGenerator>,
     device_cache: P2pIdentityCertCacheRef,
     local_identity: P2pIdentityRef,
     stopped: AtomicBool,
@@ -71,7 +71,7 @@ impl SnService {
 
         let net_manager = Arc::new(NetManager::new(networks, cert_resolver).unwrap());
         let service = SnService {
-            seq_generator: TempSeqGenerator::new(),
+            seq_generator: Arc::new(SequenceGenerator::new()),
             local_identity: local_identity.clone(),
             stopped: AtomicBool::new(false),
             peer_mgr: PeerManager::new(),
@@ -98,7 +98,7 @@ impl SnService {
             async move {
                 let id = this.peer_mgr.generate_conn_id();
                 let tmp = this.clone();
-                match PeerConnection::accept(id, socket, move |conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
+                match PeerConnection::accept(id, socket, move |conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
                     let this = tmp.clone();
                     async move {
                         this.handle(cmd_code, cmd_body.as_slice(), conn_id).await
@@ -166,7 +166,7 @@ impl SnService {
         // }
     }
 
-    pub async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TempSeq) -> P2pResult<()> {
+    pub async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TunnelId) -> P2pResult<()> {
         match cmd_code {
             PackageCmdCode::SnCall => {
                 let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
@@ -283,7 +283,7 @@ impl SnService {
     async fn handle_call(
         &self,
         mut call_req: SnCall,
-        conn_id: TempSeq,
+        conn_id: TunnelId,
         _send_time: Timestamp,
     ) {
         let from_peer_id = &call_req.from_peer_id;
@@ -414,7 +414,7 @@ impl SnService {
         // }
     }
 
-    async fn handle_report_sn(&self, conn_id: &TempSeq, report_sn: ReportSn) {
+    async fn handle_report_sn(&self, conn_id: &TunnelId, report_sn: ReportSn) {
         let conn = self.peer_mgr.find_connection(*conn_id);
         if conn.is_none() {
             log::error!("report sn failed, conn_id: {:?} not found.", conn_id);
@@ -422,7 +422,7 @@ impl SnService {
         }
 
         let mut peer_conn = conn.as_ref().unwrap().lock().await;
-        log::info!("report sn from {}.", peer_conn.remote_identity_id().to_string());
+        log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_conn.remote_identity_id().to_string(), report_sn.local_eps, report_sn.map_ports);
         if report_sn.peer_info.is_some() {
 
         }
@@ -446,7 +446,7 @@ impl SnService {
         }
     }
 
-    async fn handle_query_sn(&self, conn_id: &TempSeq, query: SnQuery) {
+    async fn handle_query_sn(&self, conn_id: &TunnelId, query: SnQuery) {
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();

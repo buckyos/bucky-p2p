@@ -13,7 +13,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 use crate::runtime;
 use crate::sn::service::PeerConnection;
 use crate::sn::service::statistic::{PeerStatus, StatisticManager};
-use crate::types::{TempSeq, TempSeqGenerator, Timestamp};
+use crate::types::{TunnelId, TunnelIdGenerator, Timestamp};
 
 struct Config {
     pub client_ping_interval: Duration,
@@ -32,7 +32,7 @@ impl Default for Config {
 
 pub struct FoundPeer {
     pub desc: P2pIdentityCertRef,
-    pub conn_id: TempSeq,
+    pub conn_id: TunnelId,
     pub is_wan: bool,
     pub peer_status: PeerStatus,
 }
@@ -40,7 +40,7 @@ pub struct FoundPeer {
 
 #[derive(Clone)]
 pub struct CachedPeerInfo {
-    pub conn_list: Vec<TempSeq>,
+    pub conn_list: Vec<TunnelId>,
     pub desc: P2pIdentityCertRef,
     pub map_ports: Vec<(Protocol, u16)>,
     pub last_send_time: Timestamp,
@@ -74,7 +74,7 @@ fn contain_addr(dev: &P2pIdentityCertRef, addr: &SocketAddr) -> bool {
 impl CachedPeerInfo {
     fn new(
         desc: P2pIdentityCertRef,
-        conn_id: TempSeq,
+        conn_id: TunnelId,
         send_time: Timestamp) -> CachedPeerInfo {
         CachedPeerInfo {
             conn_list: vec![conn_id],
@@ -90,11 +90,11 @@ impl CachedPeerInfo {
         }
     }
 
-    fn add_conn(&mut self, conn_id: TempSeq) {
+    fn add_conn(&mut self, conn_id: TunnelId) {
         self.conn_list.push(conn_id);
     }
 
-    fn remove_conn(&mut self, conn_id: TempSeq) {
+    fn remove_conn(&mut self, conn_id: TunnelId) {
         self.conn_list.retain(|c| c != &conn_id);
     }
 
@@ -154,9 +154,9 @@ impl Peers {
 pub struct PeerManager {
     config: Config,
     statistic_manager: &'static StatisticManager,
-    conn_cache: Mutex<HashMap<TempSeq, (P2pId, Arc<runtime::Mutex<PeerConnection>>)>>,
+    conn_cache: Mutex<HashMap<TunnelId, (P2pId, Arc<runtime::Mutex<PeerConnection>>)>>,
     device_conn_map: Mutex<HashMap<P2pId, CachedPeerInfo>>,
-    conn_id_generator: TempSeqGenerator,
+    conn_id_generator: TunnelIdGenerator,
 }
 pub type PeerManagerRef = Arc<PeerManager>;
 
@@ -173,11 +173,11 @@ impl PeerManager {
             statistic_manager: StatisticManager::get_instance(),
             conn_cache: Mutex::new(Default::default()),
             device_conn_map: Mutex::new(Default::default()),
-            conn_id_generator: TempSeqGenerator::new(),
+            conn_id_generator: TunnelIdGenerator::new(),
         })
     }
 
-    pub fn generate_conn_id(&self) -> TempSeq {
+    pub fn generate_conn_id(&self) -> TunnelId {
         self.conn_id_generator.generate()
     }
 
@@ -204,7 +204,7 @@ impl PeerManager {
         });
     }
 
-    pub fn remove_peer_connection(&self, conn_id: TempSeq) {
+    pub fn remove_peer_connection(&self, conn_id: TunnelId) {
         let mut conn_cache = self.conn_cache.lock().unwrap();
         if let Some(conn) = conn_cache.remove(&conn_id) {
             let remote_id = conn.0.clone();
@@ -229,7 +229,7 @@ impl PeerManager {
         }
     }
 
-    pub fn find_connection(&self, conn_id: TempSeq) -> Option<Arc<runtime::Mutex<PeerConnection>>> {
+    pub fn find_connection(&self, conn_id: TunnelId) -> Option<Arc<runtime::Mutex<PeerConnection>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
         conn_cache.get(&conn_id).map(|c| c.1.clone())
     }

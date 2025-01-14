@@ -2,7 +2,7 @@ use bucky_raw_codec::{RawDecode, RawEncode};
 use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode};
 use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert};
-use crate::types::{IncreaseId, TempSeq, Timestamp};
+use crate::types::{SessionId, TunnelId, Timestamp, Sequence};
 use super::sn::*;
 
 
@@ -82,9 +82,9 @@ use super::sn::*;
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynStream {
-    pub sequence: TempSeq,
+    pub tunnel_id: TunnelId,
     pub to_vport: u16,
-    pub session_id: IncreaseId,
+    pub session_id: SessionId,
     pub payload: Vec<u8>,
 }
 
@@ -108,8 +108,8 @@ pub struct AckStream {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynReverseStream {
-    pub sequence: TempSeq,
-    pub session_id: IncreaseId,
+    pub tunnel_id: TunnelId,
+    pub session_id: SessionId,
     pub vport: u16,
     pub payload: Vec<u8>,
 }
@@ -121,9 +121,9 @@ pub struct AckReverseStream {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynDatagram {
-    pub sequence: TempSeq,
+    pub tunnel_id: TunnelId,
     pub to_vport: u16,
-    pub session_id: IncreaseId,
+    pub session_id: SessionId,
     pub payload: Vec<u8>,
 }
 
@@ -134,9 +134,9 @@ pub struct AckDatagram {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynReverseDatagram {
-    pub sequence: TempSeq,
+    pub tunnel_id: TunnelId,
     pub to_vport: u16,
-    pub session_id: IncreaseId,
+    pub session_id: SessionId,
     pub payload: Vec<u8>,
 }
 
@@ -148,18 +148,18 @@ pub struct AckReverseDatagram {
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SynClose {
     pub reason: u8,
-    pub sequence: TempSeq,
+    pub tunnel_id: TunnelId,
 }
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct AckClose {
-    pub sequence: TempSeq
+    pub tunnel_id: TunnelId
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnCallResp {
     //sn call的响应包
-    pub seq: TempSeq,                 //序列事情
+    pub seq: Sequence,                 //序列事情
     pub sn_peer_id: P2pId,         //sn设备id
     pub result: u8,                   //
     pub to_peer_info: Option<EncodedP2pIdentityCert>, //
@@ -173,13 +173,13 @@ pub enum SnCallType {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SnCalled {
-    pub seq: TempSeq,
+    pub seq: Sequence,
     pub sn_peer_id: P2pId,
     pub to_peer_id: P2pId,
     pub reverse_endpoint_array: Vec<Endpoint>,
     pub active_pn_list: Vec<P2pId>,
     pub peer_info: EncodedP2pIdentityCert,
-    pub tunnel_id: TempSeq,
+    pub tunnel_id: TunnelId,
     pub call_send_time: Timestamp,
     pub call_type: SnCallType,
     pub payload: Vec<u8>,
@@ -188,7 +188,7 @@ pub struct SnCalled {
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnCalledResp {
     //sn called的应答报文
-    pub seq: TempSeq,         //序列号
+    pub seq: Sequence,         //序列号
     pub sn_peer_id: P2pId, //sn的设备id
     pub result: u8,           //
 }
@@ -197,7 +197,7 @@ pub struct SnCalledResp {
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnPingResp {
     //SN Server收到来自device的SNPing包时，返回device的外网地址
-    pub seq: TempSeq,                      //包序列包
+    pub seq: Sequence,                      //包序列包
     pub sn_peer_id: P2pId,              //sn的设备id
     pub result: u8,                        //是否接受device的接入
     pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
@@ -208,7 +208,7 @@ pub struct SnPingResp {
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct AckProxy {
-    pub seq: TempSeq,
+    pub seq: Sequence,
     pub to_peer_id: P2pId,
     pub proxy_endpoint: Option<Endpoint>,
     pub err: Option<P2pErrorCode>,

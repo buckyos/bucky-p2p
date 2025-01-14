@@ -7,22 +7,22 @@ use crate::p2p_connection::{P2pConnectionRef, P2pRead, P2pWrite};
 use crate::p2p_identity::P2pId;
 use crate::protocol::{Package, PackageCmdCode, PackageHeader};
 use crate::runtime;
-use crate::types::TempSeq;
+use crate::types::TunnelId;
 
 #[callback_trait::callback_trait]
 pub trait PeerConnectionEvent: 'static + Send + Sync {
-    async fn on_recv(&self, conn_id: TempSeq, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()>;
+    async fn on_recv(&self, conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()>;
 }
 
 pub struct PeerConnection {
-    conn_id: TempSeq,
+    conn_id: TunnelId,
     socket: P2pConnectionRef,
     send: Box<dyn P2pWrite>,
     handle: Option<SpawnHandle<P2pResult<()>>>,
 }
 
 impl PeerConnection {
-    pub async fn accept(conn_id: TempSeq, socket: P2pConnectionRef, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
+    pub async fn accept(conn_id: TunnelId, socket: P2pConnectionRef, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
         let (recv, send) = socket.split()?;
 
         log::info!("recv PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
@@ -43,7 +43,7 @@ impl PeerConnection {
         })
     }
 
-    pub async fn connect(conn_id: TempSeq, socket: P2pConnectionRef, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
+    pub async fn connect(conn_id: TunnelId, socket: P2pConnectionRef, listener: impl PeerConnectionEvent) -> P2pResult<Self> {
         log::info!("new PeerConnection {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
             conn_id, socket.remote_id().to_string(), socket.remote(), socket.local_id().to_string(), socket.local());
         let (recv, send) = socket.split()?;
@@ -76,7 +76,7 @@ impl PeerConnection {
         Ok((cmd_code, cmd_body))
     }
 
-    async fn recv(conn_id: TempSeq, mut recv: Box<dyn P2pRead>, listener: impl PeerConnectionEvent) -> P2pResult<()> {
+    async fn recv(conn_id: TunnelId, mut recv: Box<dyn P2pRead>, listener: impl PeerConnectionEvent) -> P2pResult<()> {
         log::info!("enter recv loop");
         loop {
             let (cmd_code, cmd_body) = Self::read_pkg(&mut recv).await?;
@@ -87,7 +87,7 @@ impl PeerConnection {
         }
     }
 
-    pub fn conn_id(&self) -> TempSeq {
+    pub fn conn_id(&self) -> TunnelId {
         self.conn_id
     }
 
