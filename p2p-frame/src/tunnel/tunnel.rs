@@ -54,7 +54,7 @@ pub struct TunnelReceiver {
 pub struct Tunnel {
     net_manager: NetManagerRef,
     sn_service: SNClientServiceRef,
-    sequence: TunnelId,
+    tunnel_id: TunnelId,
     tunnel_conn: Option<TunnelConnection>,
     state: Mutex<TunnelState>,
     protocol_version: u8,
@@ -83,7 +83,7 @@ impl Tunnel {
         Self {
             net_manager,
             sn_service,
-            sequence,
+            tunnel_id: sequence,
             tunnel_conn: None,
             state: Mutex::new(TunnelState { status: TunnelStatus::Connecting }),
             protocol_version,
@@ -105,8 +105,8 @@ impl Tunnel {
         self.tunnel_conn.as_ref().unwrap().accept_instance().await
     }
 
-    pub fn get_sequence(&self) -> TunnelId {
-        self.sequence
+    pub fn get_tunnel_id(&self) -> TunnelId {
+        self.tunnel_id
     }
 
     pub fn tunnel_stat(&self) -> TunnelStatRef {
@@ -147,7 +147,7 @@ impl Tunnel {
         let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
             if is_lan || ep.is_static_wan() {
-                let sequence = self.sequence;
+                let sequence = self.tunnel_id;
                 let local_identity = self.local_identity.clone();
                 let remote_id = self.remote_id.clone();
                 let conn_timeout = self.conn_timeout;
@@ -199,12 +199,12 @@ impl Tunnel {
         let reverse_eps = self.get_reverse_ep_list();
 
         let future = NotifyFuture::new();
-        future_cache.add_reverse_future(self.sequence, future.clone());
+        future_cache.add_reverse_future(self.tunnel_id, future.clone());
         let call_data = StreamSnCall {
             vport,
             session_id,
         };
-        self.sn_service.call(self.get_sequence(),
+        self.sn_service.call(self.get_tunnel_id(),
                              Some(reverse_eps.as_slice()),
                              &self.remote_id,
                              SnCallType::Stream,
@@ -229,7 +229,7 @@ impl Tunnel {
         let is_lan = self.sn_service.is_same_lan(ep_list);
         for ep in ep_list.iter() {
             if is_lan || ep.is_static_wan() {
-                let sequence = self.sequence;
+                let sequence = self.tunnel_id;
                 let local_identity = self.local_identity.clone();
                 let remote_id = self.remote_id.clone();
                 let conn_timeout = self.conn_timeout;
@@ -282,8 +282,8 @@ impl Tunnel {
         let reverse_eps = self.get_reverse_ep_list();
 
         let future = NotifyFuture::new();
-        future_cache.add_reverse_future(self.sequence, future.clone());
-        self.sn_service.call(self.get_sequence(),
+        future_cache.add_reverse_future(self.tunnel_id, future.clone());
+        self.sn_service.call(self.get_tunnel_id(),
                              Some(reverse_eps.as_slice()),
                              &self.remote_id,
                              SnCallType::Datagram,
@@ -305,7 +305,7 @@ impl Tunnel {
 
         let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelStream)>> + Send>>> = Vec::new();
         for ep in self.remote_eps.iter() {
-            let sequence = self.sequence;
+            let sequence = self.tunnel_id;
             let local_identity = self.local_identity.clone();
             let remote_id = self.remote_id.clone();
             let conn_timeout = self.conn_timeout;
@@ -364,7 +364,7 @@ impl Tunnel {
 
         let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramRecv)>> + Send>>> = Vec::new();
         for ep in self.remote_eps.iter() {
-            let sequence = self.sequence;
+            let sequence = self.tunnel_id;
             let local_identity = self.local_identity.clone();
             let remote_id = self.remote_id.clone();
             let conn_timeout = self.conn_timeout;
@@ -427,7 +427,7 @@ impl Tunnel {
             self.local_identity.get_id().to_string());
         let stream = self.tunnel_conn.as_ref().unwrap().open_stream(vport, session_id).await?;
         log::info!("Open stream tunnel {:?} session_id {:?} vport {} remote_id {} remote_ep {} local_id {} local_ep {}",
-            stream.sequence(),
+            stream.tunnel_id(),
             stream.session_id(),
             vport,
             stream.remote_identity_id().to_string(),
@@ -446,7 +446,7 @@ impl Tunnel {
         let datagram = self.tunnel_conn.as_ref().unwrap().open_datagram(vport, session_id).await?;
 
         log::info!("Open stream tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-            datagram.sequence(),
+            datagram.tunnel_id(),
             datagram.remote_identity_id().to_string(),
             datagram.remote_endpoint().to_string(),
             datagram.local_identity_id().to_string(),
@@ -456,7 +456,7 @@ impl Tunnel {
     }
 
     pub async fn shutdown(&self) -> P2pResult<()> {
-        log::info!("shutdown tunnel {:?}", self.sequence);
+        log::info!("shutdown tunnel {:?}", self.tunnel_id);
         if self.tunnel_conn.is_some() {
             self.tunnel_conn.as_ref().unwrap().shutdown().await
         } else {
@@ -467,6 +467,6 @@ impl Tunnel {
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        log::info!("drop tunnel {:?}", self.sequence);
+        log::info!("drop tunnel {:?}", self.tunnel_id);
     }
 }

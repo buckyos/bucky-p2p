@@ -78,10 +78,10 @@ impl Tunnels {
         let tunnel = Arc::new(tunnel);
         {
             let mut state = self.state.lock().unwrap();
-            if state.tunnels.contains_key(&tunnel.get_sequence()) {
+            if state.tunnels.contains_key(&tunnel.get_tunnel_id()) {
                 return false;
             }
-            state.tunnels.insert(tunnel.get_sequence(), tunnel.clone());
+            state.tunnels.insert(tunnel.get_tunnel_id(), tunnel.clone());
         }
         let this = self.clone();
         let _ = Executor::spawn(async move {
@@ -91,7 +91,7 @@ impl Tunnels {
                         match instance {
                             TunnelInstance::Stream(stream) => {
                                 log::info!("accept stream tunnel {:?} stream_id {} port {} remote_id {} remote_ep {} local_id {} local_ep {}",
-                                    stream.sequence(),
+                                    stream.tunnel_id(),
                                     stream.session_id(),
                                     stream.port(),
                                     stream.remote_identity_id().to_string(),
@@ -103,7 +103,7 @@ impl Tunnels {
                             }
                             TunnelInstance::Datagram(datagram) => {
                                 log::info!("accept datagram tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                                    datagram.sequence(),
+                                    datagram.tunnel_id(),
                                     datagram.remote_identity_id().to_string(),
                                     datagram.remote_endpoint().to_string(),
                                     datagram.local_identity_id().to_string(),
@@ -126,7 +126,7 @@ impl Tunnels {
                 }
             }
             let mut state = this.state.lock().unwrap();
-            state.tunnels.remove(&tunnel.get_sequence());
+            state.tunnels.remove(&tunnel.get_tunnel_id());
         });
         true
     }
@@ -403,7 +403,7 @@ impl TunnelManager {
                 }
             }
             for tunnel in remove_list.into_iter() {
-                let seq = tunnel.get_sequence();
+                let seq = tunnel.get_tunnel_id();
                 Executor::spawn_ok(async move {
                     if let Err(e) = tunnel.shutdown().await {
                         log::error!("shutdown tunnel error: {:?}", e);

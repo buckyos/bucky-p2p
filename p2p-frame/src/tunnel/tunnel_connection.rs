@@ -124,10 +124,10 @@ pub enum TunnelInstance {
 impl Display for TunnelInstance {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TunnelInstance::Stream(stream) => write!(f, "Stream(seq {:?} session {} port {})", stream.sequence(), stream.session_id(), stream.port()),
-            TunnelInstance::Datagram(datagram) => write!(f, "Datagram({:?})", datagram.sequence()),
-            TunnelInstance::ReverseStream(stream) => write!(f, "ReverseStream(seq {:?} session {} port {})", stream.sequence(), stream.session_id(), stream.port()),
-            TunnelInstance::ReverseDatagram(datagram) => write!(f, "ReverseDatagram({:?})", datagram.sequence()),
+            TunnelInstance::Stream(stream) => write!(f, "Stream(seq {:?} session {} port {})", stream.tunnel_id(), stream.session_id(), stream.port()),
+            TunnelInstance::Datagram(datagram) => write!(f, "Datagram({:?})", datagram.tunnel_id()),
+            TunnelInstance::ReverseStream(stream) => write!(f, "ReverseStream(seq {:?} session {} port {})", stream.tunnel_id(), stream.session_id(), stream.port()),
+            TunnelInstance::ReverseDatagram(datagram) => write!(f, "ReverseDatagram({:?})", datagram.tunnel_id()),
         }
     }
 }
@@ -201,7 +201,7 @@ async fn handle_cmd(cmd_code: PackageCmdCode, cmd_body: &[u8], read: &ReadHolder
         tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
         let _ = tunnel.enter_idle_mode();
         log::info!("close tunnel stream {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         let reason = P2pErrorCode::from_u8(syn_close.reason).unwrap_or(P2pErrorCode::Ok);
         if reason != P2pErrorCode::Ok {
             Err(p2p_err!(reason, ""))
@@ -210,7 +210,7 @@ async fn handle_cmd(cmd_code: PackageCmdCode, cmd_body: &[u8], read: &ReadHolder
         }
     } else {
         let tunnel = tunnel.lock().unwrap();
-        Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", tunnel.sequence, cmd_code))
+        Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", tunnel.tunnel_id, cmd_code))
     }
 }
 
@@ -393,7 +393,7 @@ impl TunnelStream {
 
     async fn close_inner(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
         let sequence = {
-            self.tunnel.lock().unwrap().sequence
+            self.tunnel.lock().unwrap().tunnel_id
         };
         let pkg = Package::new(PackageCmdCode::SynClose, SynClose {
             reason: reason.as_u8(),
@@ -438,7 +438,7 @@ impl TunnelStream {
             tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
             tunnel.enter_idle_mode()?;
             log::info!("close stream {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
 
         Ok(())
@@ -460,9 +460,9 @@ impl TunnelStream {
         self.session_id
     }
 
-    pub fn sequence(&self) -> TunnelId {
+    pub fn tunnel_id(&self) -> TunnelId {
         let tunnel = self.tunnel.lock().unwrap();
-        tunnel.sequence
+        tunnel.tunnel_id
     }
 
     pub fn remote_identity_id(&self) -> P2pId {
@@ -513,7 +513,7 @@ impl Drop for TunnelStream {
         {
             let tunnel = self.tunnel.lock().unwrap();
             log::info!("drop tunnel stream {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
         let _ = Executor::block_on(self.close(P2pErrorCode::Ok));
     }
@@ -702,7 +702,7 @@ impl TunnelDatagramSend {
                 log::info!("recv error pkg cmd code {:?}", cmd_code);
                 let mut tunnel = tunnel.lock().unwrap();
                 tunnel.tunnel_state = TunnelState::Error;
-                Err(p2p_err!(P2pErrorCode::Failed, "tunnel {:?} invalid cmd code {:?}", tunnel.sequence, cmd_code))
+                Err(p2p_err!(P2pErrorCode::Failed, "tunnel {:?} invalid cmd code {:?}", tunnel.tunnel_id, cmd_code))
             }
         }).map_err(into_p2p_err!(P2pErrorCode::Failed, "spawn error"))?;
         self.recv_handle = Some(recv_header_handle);
@@ -753,7 +753,7 @@ impl TunnelDatagramSend {
 
     async fn close_inner(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
         let sequence = {
-            self.tunnel.lock().unwrap().sequence
+            self.tunnel.lock().unwrap().tunnel_id
         };
         let pkg = Package::new(PackageCmdCode::SynClose, SynClose {
             reason: reason.as_u8(),
@@ -787,7 +787,7 @@ impl TunnelDatagramSend {
             tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
             tunnel.enter_idle_mode()?;
             log::info!("close stream {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
 
         Ok(())
@@ -873,9 +873,9 @@ impl AsyncWrite for TunnelDatagramSend {
 }
 
 impl TunnelDatagramSend {
-    pub fn sequence(&self) -> TunnelId {
+    pub fn tunnel_id(&self) -> TunnelId {
         let tunnel = self.tunnel.lock().unwrap();
-        tunnel.sequence
+        tunnel.tunnel_id
     }
 
     pub fn remote_identity_id(&self) -> P2pId {
@@ -926,7 +926,7 @@ impl Drop for TunnelDatagramSend {
         {
             let tunnel = self.tunnel.lock().unwrap();
             log::info!("drop tunnel datagram {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
         let _ = Executor::block_on(self.close(P2pErrorCode::Ok));
     }
@@ -990,7 +990,7 @@ impl TunnelDatagramRecv {
             }
         } else {
             let tunnel = self.tunnel.lock().unwrap();
-            Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", tunnel.sequence, cmd_code))
+            Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", tunnel.tunnel_id, cmd_code))
         }
     }
 
@@ -1041,7 +1041,7 @@ impl TunnelDatagramRecv {
 
     async fn close_inner(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
         let sequence = {
-            self.tunnel.lock().unwrap().sequence
+            self.tunnel.lock().unwrap().tunnel_id
         };
         let pkg = Package::new(PackageCmdCode::SynClose, SynClose {
             reason: reason.as_u8(),
@@ -1076,7 +1076,7 @@ impl TunnelDatagramRecv {
             tunnel.enter_idle_mode()?;
             tunnel.tunnel_stat.decrease_work_instance();
             log::info!("close datagram {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
 
         Ok(())
@@ -1113,9 +1113,9 @@ impl AsyncRead for TunnelDatagramRecv {
 }
 
 impl TunnelDatagramRecv {
-    pub(crate) fn sequence(&self) -> TunnelId {
+    pub(crate) fn tunnel_id(&self) -> TunnelId {
         let tunnel = self.tunnel.lock().unwrap();
-        tunnel.sequence
+        tunnel.tunnel_id
     }
 
     pub(crate) fn remote_identity_id(&self) -> P2pId {
@@ -1170,7 +1170,7 @@ impl Drop for TunnelDatagramRecv {
         {
             let tunnel = self.tunnel.lock().unwrap();
             log::info!("drop tunnel datagram {:?} local_id {} remote_id {}",
-                tunnel.sequence, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
+                tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
         }
         let _ = Executor::block_on(self.close(P2pErrorCode::Ok));
     }
@@ -1215,7 +1215,7 @@ pub type TunnelFutureHolder = FutureHolder<P2pResult<(Box<dyn P2pRead>, PackageC
 pub type TunnelFutureHolderRef = Arc<FutureHolder<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>>;
 
 pub(crate) struct TunnelConnectionInner {
-    sequence: TunnelId,
+    tunnel_id: TunnelId,
     local_identity: P2pIdentityRef,
     remote_id: P2pId,
     remote_ep: Endpoint,
@@ -1234,7 +1234,7 @@ pub(crate) struct TunnelConnectionInner {
 
 impl TunnelConnectionInner {
     pub(crate) fn new(
-        sequence: TunnelId,
+        tunnel_id: TunnelId,
         local_identity: P2pIdentityRef,
         remote_id: P2pId,
         remote_ep: Endpoint,
@@ -1247,7 +1247,7 @@ impl TunnelConnectionInner {
         let recv_future = TunnelFutureHolder::new();
 
         let mut obj = Self {
-            sequence,
+            tunnel_id,
             local_identity,
             remote_id,
             remote_ep,
@@ -1281,13 +1281,13 @@ impl TunnelConnectionInner {
         Ok(())
     }
 
-    async fn open_stream_inner(sequence: TunnelId,
+    async fn open_stream_inner(tunnel_id: TunnelId,
                                write: &mut Box<dyn P2pWrite>,
                                recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
                                vport: u16,
                                session_id: SessionId) -> P2pResult<Box<dyn P2pRead>> {
         let syn = SynStream {
-            tunnel_id: sequence,
+            tunnel_id,
             to_vport: vport,
             session_id,
             payload: Vec::new(),
@@ -1298,24 +1298,24 @@ impl TunnelConnectionInner {
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckStream {
-            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", tunnel_id));
         }
 
         let ack = AckStream::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         if ack.result != 0 {
-            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", tunnel_id, ack.result));
         }
 
         Ok(read)
     }
 
-    async fn open_reverse_stream_inner(sequence: TunnelId,
+    async fn open_reverse_stream_inner(tunnel_id: TunnelId,
                                        write: &mut Box<dyn P2pWrite>,
                                        recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
                                        vport: u16,
                                        session_id: SessionId) -> P2pResult<Box<dyn P2pRead>> {
         let syn = SynReverseStream {
-            tunnel_id: sequence,
+            tunnel_id,
             session_id,
             vport,
             payload: Vec::new(),
@@ -1326,24 +1326,24 @@ impl TunnelConnectionInner {
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckReverseStream {
-            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", tunnel_id));
         }
 
         let ack = AckReverseStream::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         if ack.result != 0 {
-            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", tunnel_id, ack.result));
         }
 
         Ok(read)
     }
 
-    async fn open_datagram_inner(sequence: TunnelId,
+    async fn open_datagram_inner(tunnel_id: TunnelId,
                                  write: &mut Box<dyn P2pWrite>,
                                  recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
                                  vport: u16,
                                  session_id: SessionId) -> P2pResult<Box<dyn P2pRead>> {
         let syn = SynDatagram {
-            tunnel_id: sequence,
+            tunnel_id,
             to_vport: vport,
             session_id,
             payload: Vec::new(),
@@ -1354,24 +1354,24 @@ impl TunnelConnectionInner {
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckDatagram {
-            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", tunnel_id));
         }
 
         let ack = AckDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         if ack.result != 0 {
-            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", tunnel_id, ack.result));
         }
 
         Ok(read)
     }
 
-    async fn open_reverse_datagram_inner(sequence: TunnelId,
+    async fn open_reverse_datagram_inner(tunnel_id: TunnelId,
                                          write: &mut Box<dyn P2pWrite>,
                                          recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
                                          vport: u16,
                                          session_id: SessionId,) -> P2pResult<Box<dyn P2pRead>> {
         let syn = SynReverseDatagram {
-            tunnel_id: sequence,
+            tunnel_id,
             to_vport: vport,
             session_id,
             payload: Vec::new(),
@@ -1382,12 +1382,12 @@ impl TunnelConnectionInner {
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckReverseDatagram {
-            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", sequence));
+            return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid ack stream", tunnel_id));
         }
 
         let ack = AckReverseDatagram::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         if ack.result != 0 {
-            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", sequence, ack.result));
+            return Err(p2p_err!(P2pErrorCode::ConnectionRefused, "tunnel {:?} open stream failed. return {}", tunnel_id, ack.result));
         }
 
         Ok(read)
@@ -1400,7 +1400,7 @@ pub struct TunnelConnection {
 
 impl TunnelConnection {
     pub fn new(
-        sequence: TunnelId,
+        tunnel_id: TunnelId,
         local_identity: P2pIdentityRef,
         remote_id: P2pId,
         remote_ep: Endpoint,
@@ -1411,7 +1411,7 @@ impl TunnelConnection {
         cert_factory: P2pIdentityCertFactoryRef, ) -> P2pResult<Self> {
         Ok(Self {
             inner: Arc::new(Mutex::new(TunnelConnectionInner::new(
-                sequence,
+                tunnel_id,
                 local_identity,
                 remote_id,
                 remote_ep,
@@ -1425,21 +1425,21 @@ impl TunnelConnection {
 
     pub fn get_sequence(&self) -> TunnelId {
         let inner = self.inner.lock().unwrap();
-        inner.sequence
+        inner.tunnel_id
     }
 
     async fn open_reverse_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
         let (conn_timeout, sequence, mut write, recv_future) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.sequence, inner.tunnel_state));
+                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.tunnel_id, inner.tunnel_state));
             }
             inner.tunnel_state = TunnelState::Opening;
 
             let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
 
-            (inner.conn_timeout, inner.sequence, inner.write.take().unwrap(), future)
+            (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
         };
         match runtime::timeout(conn_timeout, TunnelConnectionInner::open_reverse_stream_inner(sequence, &mut write, recv_future, vport, session_id.clone())).await {
             Ok(Ok(read)) => {
@@ -1464,12 +1464,12 @@ impl TunnelConnection {
         let (conn_timeout, sequence, mut write, recv_future) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.sequence, inner.tunnel_state));
+                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.tunnel_id, inner.tunnel_state));
             }
             inner.tunnel_state = TunnelState::Opening;
             let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
-            (inner.conn_timeout, inner.sequence, inner.write.take().unwrap(), future)
+            (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
         };
         match runtime::timeout(conn_timeout, TunnelConnectionInner::open_reverse_datagram_inner(sequence, &mut write, recv_future, vport, session_id)).await {
             Ok(Ok(read)) => {
@@ -1576,14 +1576,14 @@ impl TunnelConnection {
         let (conn_timeout, sequence, mut write, recv_future) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.sequence, inner.tunnel_state));
+                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.tunnel_id, inner.tunnel_state));
             }
             inner.tunnel_state = TunnelState::Opening;
 
             let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
 
-            (inner.conn_timeout, inner.sequence, inner.write.take().unwrap(), future)
+            (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
         };
         match runtime::timeout(conn_timeout, TunnelConnectionInner::open_stream_inner(sequence, &mut write, recv_future, vport, session_id.clone())).await {
             Ok(Ok(read)) => {
@@ -1611,12 +1611,12 @@ impl TunnelConnection {
         let (conn_timeout, sequence, mut write, recv_future) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.tunnel_state != TunnelState::Idle {
-                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.sequence, inner.tunnel_state));
+                return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.tunnel_id, inner.tunnel_state));
             }
             inner.tunnel_state = TunnelState::Opening;
             let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
-            (inner.conn_timeout, inner.sequence, inner.write.take().unwrap(), future)
+            (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
         };
         match runtime::timeout(conn_timeout, TunnelConnectionInner::open_datagram_inner(sequence, &mut write, recv_future, vport, session_id)).await {
             Ok(Ok(read)) => {
@@ -1660,7 +1660,7 @@ impl TunnelConnection {
                             continue;
                         }
                         inner.tunnel_state = TunnelState::Accepting;
-                        inner.sequence = syn_stream.tunnel_id;
+                        inner.tunnel_id = syn_stream.tunnel_id;
                         let write = inner.write.take().unwrap();
                         write
                     };
@@ -1683,7 +1683,7 @@ impl TunnelConnection {
                             continue;
                         }
                         inner.tunnel_state = TunnelState::Accepting;
-                        inner.sequence = reserve_stream.tunnel_id;
+                        inner.tunnel_id = reserve_stream.tunnel_id;
                         let write = inner.write.take().unwrap();
                         write
                     };
@@ -1706,7 +1706,7 @@ impl TunnelConnection {
                             continue;
                         }
                         inner.tunnel_state = TunnelState::Accepting;
-                        inner.sequence = syn_datagram.tunnel_id;
+                        inner.tunnel_id = syn_datagram.tunnel_id;
                         let write = inner.write.take().unwrap();
                         write
                     };
@@ -1729,7 +1729,7 @@ impl TunnelConnection {
                             continue;
                         }
                         inner.tunnel_state = TunnelState::Accepting;
-                        inner.sequence = reverse_datagram.tunnel_id;
+                        inner.tunnel_id = reverse_datagram.tunnel_id;
                         let write = inner.write.take().unwrap();
                         write
                     };
@@ -1750,7 +1750,7 @@ impl TunnelConnection {
                 }
                 _ => {
                     let inner = self.inner.lock().unwrap();
-                    return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid cmd code {:?}", inner.sequence, cmd_code));
+                    return Err(p2p_err!(P2pErrorCode::InvalidData, "tunnel {:?} invalid cmd code {:?}", inner.tunnel_id, cmd_code));
                 }
             }
         }
@@ -1758,7 +1758,7 @@ impl TunnelConnection {
 
     pub(crate) async fn shutdown(&self) -> P2pResult<()> {
         {
-            log::info!("tunnel {:?} shutdown", self.inner.lock().unwrap().sequence);
+            log::info!("tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id);
         }
         let (accept_handle, recv_future, accept_future) = {
             let mut inner = self.inner.lock().unwrap();
@@ -1772,8 +1772,8 @@ impl TunnelConnection {
             accept_handle.unwrap().abort();
         }
 
-        recv_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().sequence)));
-        accept_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().sequence)));
+        recv_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id)));
+        accept_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id)));
 
         // inner.data_socket.as_ref().unwrap().shutdown().await?;
         Ok(())
@@ -1791,7 +1791,7 @@ impl TunnelConnection {
 
 impl Drop for TunnelConnection {
     fn drop(&mut self) {
-        log::info!("drop tunnel {:?}", self.inner.lock().unwrap().sequence);
+        log::info!("drop tunnel {:?}", self.inner.lock().unwrap().tunnel_id);
         let _ = Executor::block_on(self.shutdown());
     }
 
