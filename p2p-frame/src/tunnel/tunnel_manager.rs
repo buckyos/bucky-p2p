@@ -536,12 +536,20 @@ impl TunnelManager {
         self.stream_listen_ports.add_listen_port(port)
     }
 
+    pub fn is_exist_stream_listen_port(&self, port: u16) -> bool {
+        self.stream_listen_ports.is_listen(port)
+    }
+
     pub fn remove_stream_listen_port(&self, port: u16) {
         self.stream_listen_ports.remove_listen_port(port)
     }
 
     pub fn add_datagram_listen_port(&self, port: u16) {
         self.datagram_listen_ports.add_listen_port(port)
+    }
+
+    pub fn is_exist_datagram_listen_port(&self, port: u16) -> bool {
+        self.datagram_listen_ports.is_listen(port)
     }
 
     pub fn remove_datagram_listen_port(&self, port: u16) {

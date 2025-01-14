@@ -5,7 +5,6 @@ use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertRef};
-use crate::stream::StreamGuard;
 use crate::tunnel::{TunnelManagerRef, TunnelStream};
 use crate::types::IncreaseIdGenerator;
 
@@ -15,7 +14,7 @@ struct StreamListenerState {
 }
 pub struct StreamListener {
     listener_port: u16,
-    waiter: SingleCallbackWaiter<StreamGuard>,
+    waiter: SingleCallbackWaiter<TunnelStream>,
     state: Mutex<StreamListenerState>
 }
 
@@ -31,7 +30,7 @@ impl StreamListener {
         }
     }
 
-    pub async fn accept(&self) -> P2pResult<StreamGuard> {
+    pub async fn accept(&self) -> P2pResult<TunnelStream> {
         let future = self.waiter.create_result_future();
         let (abort_future, handle) = abortable(async move {
             future.await
@@ -124,7 +123,7 @@ impl StreamManager {
                 if let Some(stream_manager) = weak.upgrade() {
                     let listeners = stream_manager.listeners.lock().unwrap();
                     if let Some(listener) = listeners.get(&tunnel.port()) {
-                        listener.waiter.set_result_with_cache(StreamGuard::new(tunnel));
+                        listener.waiter.set_result_with_cache(tunnel);
                     }
                 }
             }
@@ -132,22 +131,22 @@ impl StreamManager {
         stream
     }
 
-    pub async fn connect(&self, remote: &P2pIdentityCertRef, port: u16, ) -> P2pResult<StreamGuard> {
+    pub async fn connect(&self, remote: &P2pIdentityCertRef, port: u16, ) -> P2pResult<TunnelStream> {
         let session_id = self.session_gen.generate();
         let tunnel = self.tunnel_manager.create_stream_tunnel(remote, session_id, port).await?;
-        Ok(StreamGuard::new(tunnel))
+        Ok(tunnel)
     }
 
-    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> P2pResult<StreamGuard> {
+    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> P2pResult<TunnelStream> {
         let session_id = self.session_gen.generate();
         let tunnel = self.tunnel_manager.create_stream_tunnel_from_id(remote_id, session_id, port).await?;
-        Ok(StreamGuard::new(tunnel))
+        Ok(tunnel)
     }
 
     pub async fn listen(self: &StreamManagerRef, port: u16) -> P2pResult<StreamListenerGuard> {
         let mut listeners = self.listeners.lock().unwrap();
         if listeners.contains_key(&port) {
-            return Err(p2p_err!(P2pErrorCode::StreamPortAlreadyListen, "stream port already listen"));
+            return Err(p2p_err!(P2pErrorCode::StreamPortAlreadyListen, "stream port {} already listen", port));
         }
         let listener = Arc::new(StreamListener::new(port));
         listeners.insert(port, listener.clone());

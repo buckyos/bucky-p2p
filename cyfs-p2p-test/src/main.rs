@@ -347,13 +347,31 @@ async fn all_in_one() {
     stack2.wait_online(None).await.unwrap();
 
     let stack2_cert = stack2.local_identity().get_identity_cert().unwrap().clone();
+    let tmp_stack2 = stack2.clone();
     tokio::task::spawn(async move {
+        let listener = tmp_stack2.stream_manager().listen(1234).await.unwrap();
         loop {
-            let mut stream = stack2.stream_manager().listen(1234).await.unwrap().accept().await.unwrap();
+            let mut stream = listener.accept().await.unwrap();
             tokio::task::spawn(async move {
                 stream.write_all("test".as_bytes()).await.unwrap();
                 let mut buf = [0u8; 32];
                 let len = stream.read(buf.as_mut_slice()).await.unwrap();
+                println!("{}", String::from_utf8_lossy(&buf[..len]));
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+
+        }
+    });
+
+    let tmp_stack2 = stack2.clone();
+    tokio::task::spawn(async move {
+        let listener = tmp_stack2.datagram_manager().listen(1234).await.unwrap();
+        loop {
+            let mut recv = listener.accept().await.unwrap();
+            tokio::task::spawn(async move {
+                let mut buf = [0u8; 32];
+                let len = recv.read(buf.as_mut_slice()).await.unwrap();
                 println!("{}", String::from_utf8_lossy(&buf[..len]));
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -369,7 +387,7 @@ async fn all_in_one() {
                 let mut buf = [0u8; 32];
                 let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
                 println!("{}", String::from_utf8_lossy(&buf[..len]));
-                tunnel.write_all("hello".as_bytes()).await.unwrap();
+                tunnel.write_all("stream hello".as_bytes()).await.unwrap();
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
                 match tunnel.read(buf.as_mut_slice()).await {
@@ -389,6 +407,10 @@ async fn all_in_one() {
                         println!("write error: {:?}", e);
                     }
                 }
+            }
+            {
+                let mut send = stack1.datagram_manager().connect(&stack2_cert, 1234).await.unwrap();
+                send.write_all("datagram hello".as_bytes()).await.unwrap();
             }
         }
     });

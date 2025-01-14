@@ -90,6 +90,7 @@ pub enum P2pErrorCode {
     RawCodecError,
     SignError,
     StreamPortAlreadyListen,
+    DatagramPortAlreadyListen,
     CertError,
     TlsError,
     QuicError,

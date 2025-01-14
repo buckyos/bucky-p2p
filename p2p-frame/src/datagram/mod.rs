@@ -1,2 +1,3 @@
 mod datagram_manager;
-mod datagram;
+
+pub use datagram_manager::*;

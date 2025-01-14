@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use once_cell::sync::OnceCell;
 use rustls::server::ResolvesServerCert;
+use crate::datagram::{DatagramManager, DatagramManagerRef};
 use crate::endpoint::Endpoint;
 use crate::error::P2pResult;
 use crate::executor::Executor;
@@ -197,6 +198,7 @@ pub struct P2pStack {
     tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
     stream_manager: StreamManagerRef,
+    datagram_manager: DatagramManagerRef,
 }
 pub type P2pStackRef = Arc<P2pStack>;
 
@@ -206,6 +208,7 @@ impl P2pStack {
         sn_service: SNClientServiceRef,
         tunnel_manager: TunnelManagerRef,
         stream_manager: StreamManagerRef,
+        datagram_manager: DatagramManagerRef,
         net_manager: NetManagerRef,) -> P2pResult<Self> {
         net_manager.add_listen_device(local_identity.clone()).await?;
         Ok(Self {
@@ -214,6 +217,7 @@ impl P2pStack {
             tunnel_manager,
             net_manager,
             stream_manager,
+            datagram_manager,
         })
     }
 
@@ -232,6 +236,10 @@ impl P2pStack {
 
     pub fn stream_manager(&self) -> &StreamManagerRef {
         &self.stream_manager
+    }
+
+    pub fn datagram_manager(&self) -> &DatagramManagerRef {
+        &self.datagram_manager
     }
 
     pub fn sn_client(&self) -> &SNClientServiceRef {
@@ -400,11 +408,13 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let _ = sn_service.start().await;
 
     let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());
+    let datagram_maanger = DatagramManager::new(local_identity.clone(), tunnel_manager.clone());
 
     Ok(Arc::new(P2pStack::new(
         local_identity.clone(),
         sn_service,
         tunnel_manager,
         stream_manager,
+        datagram_maanger,
         net_manager.clone(),).await?))
 }
