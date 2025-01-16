@@ -45,7 +45,7 @@ pub struct CachedPeerInfo {
     pub map_ports: Vec<(Protocol, u16)>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
-    pub local_eps: Arc<mini_moka::sync::Cache<String, Endpoint>>,
+    pub local_eps: Vec<Endpoint>,
     pub is_wan: bool,
     // pub call_peers: HashMap<DeviceId, TempSeq>, // <peerid, last_call_seq>
     // pub receipt: SnServiceReceipt,
@@ -86,7 +86,7 @@ impl CachedPeerInfo {
             // call_peers: Default::default(),
             // receipt: Default::default(),
             // last_receipt_request_time: ReceiptRequestTime::None,
-            local_eps: Arc::new(mini_moka::sync::CacheBuilder::new(100).time_to_idle(Duration::from_secs(1800)).build()),
+            local_eps: Vec::new(),
         }
     }
 
@@ -109,9 +109,7 @@ impl CachedPeerInfo {
     }
 
     fn update_local_eps(&mut self, local_ips: &Vec<Endpoint>) {
-        for ip in local_ips {
-            self.local_eps.insert(ip.to_string(), ip.clone());
-        }
+        self.local_eps = local_ips.clone();
     }
 }
 

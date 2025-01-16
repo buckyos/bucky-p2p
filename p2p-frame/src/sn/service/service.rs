@@ -297,6 +297,7 @@ impl SnService {
         info!("{}.", log_key);
 
         let call_resp =
+        if let Some(from_peer_cache) = self.peer_manager().find_peer(&call_req.from_peer_id) {
             if let Some(to_peer_cache) = self.peer_manager().find_peer(&call_req.to_peer_id) {
                 // Self::call_stat_contract(to_peer_cache, &call_req);
                 let from_peer_desc = if call_req.peer_info.is_none() {
@@ -304,6 +305,24 @@ impl SnService {
                 } else {
                     call_req.peer_info.map(|info| self.cert_factory.create(&info).unwrap())
                 };
+
+                let mut reverse_eps = Vec::new();
+                for conn_id in from_peer_cache.conn_list.iter().rev() {
+                    let conn = self.peer_mgr.find_connection(*conn_id);
+                    if conn.is_some() {
+                        let peer_conn = conn.as_ref().unwrap().lock().await;
+                        let remote_ep = peer_conn.remote().clone();
+                        for (protocol, port) in from_peer_cache.map_ports.iter() {
+                            let mut map_ep = Endpoint::from((*protocol, remote_ep.addr().ip(), *port));
+                            map_ep.set_area(EndpointArea::Wan);
+                            reverse_eps.push(map_ep);
+                        }
+                        let mut remote_ep = peer_conn.remote().clone();
+                        remote_ep.set_area(EndpointArea::Wan);
+                        reverse_eps.push(remote_ep);
+                        reverse_eps.extend_from_slice(from_peer_cache.local_eps.as_slice());
+                    }
+                }
 
                 if let Some(from_peer_desc) = from_peer_desc {
                     info!(
@@ -337,6 +356,7 @@ impl SnService {
                             if let Some(pn_list) = call_req.active_pn_list.as_mut() {
                                 std::mem::swap(pn_list, &mut called_req.active_pn_list);
                             }
+                            called_req.reverse_endpoint_array.extend_from_slice(reverse_eps.as_slice());
 
                             let called_log =
                                 format!("{} called-req seq({})", log_key, called_seq.value());
@@ -386,7 +406,17 @@ impl SnService {
                     result: P2pErrorCode::NotFound.into_u8(),
                     to_peer_info: None,
                 }
-            };
+            }
+        } else {
+            warn!("{} from-peer not found.", log_key);
+            SnCallResp {
+                seq: call_req.seq,
+                sn_peer_id: self.local_identity_id().clone(),
+                result: P2pErrorCode::NotFound.into_u8(),
+                to_peer_info: None,
+            }
+        };
+
 
         let conn = self.peer_mgr.find_connection(conn_id);
         if conn.is_some() {
@@ -465,7 +495,7 @@ impl SnService {
                     let mut remote_ep = peer_conn.remote().clone();
                     remote_ep.set_area(EndpointArea::Wan);
                     end_point_array.push(remote_ep);
-                    end_point_array.extend_from_slice(device_info.local_eps.iter().map(|v| v.value().clone()).collect::<Vec<_>>().as_slice());
+                    end_point_array.extend_from_slice(device_info.local_eps.as_slice());
                 }
             }
             SnQueryResp {

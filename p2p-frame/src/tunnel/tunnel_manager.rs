@@ -336,6 +336,7 @@ pub struct TunnelManager {
     clear_handle: SpawnHandle<()>,
     device_finder: DeviceFinderRef,
     cert_factory: P2pIdentityCertFactoryRef,
+    sn_calling: Mutex<HashMap<P2pId, HashSet<TunnelId>>>,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
@@ -376,6 +377,7 @@ impl TunnelManager {
             clear_handle: handle,
             device_finder,
             cert_factory,
+            sn_calling: Mutex::new(Default::default()),
         });
 
         let tmp_manager = manager.clone();
@@ -679,9 +681,41 @@ impl TunnelManager {
     }
 
     pub async fn on_sn_called(&self, sn_called: SnCalled) -> P2pResult<()> {
+        let tunnel_id = sn_called.tunnel_id.clone();
+        let cert = self.cert_factory.create(&sn_called.peer_info)?;
+        let from_id = cert.get_id();
+        {
+            let mut calling = self.sn_calling.lock().unwrap();
+            if let Some(tunnels) = calling.get_mut(&from_id) {
+                if tunnels.contains(&tunnel_id) {
+                    return Ok(());
+                } else {
+                    tunnels.insert(tunnel_id);
+                }
+            } else {
+                let mut tunnels = HashSet::new();
+                tunnels.insert(tunnel_id);
+                calling.insert(from_id.clone(), tunnels);
+            }
+        }
+        let ret = self.on_sn_called_inner(sn_called, cert).await;
+
+        {
+            let mut calling = self.sn_calling.lock().unwrap();
+            if let Some(tunnels) = calling.get_mut(&from_id) {
+                tunnels.remove(&tunnel_id);
+                if tunnels.len() == 0 {
+                    calling.remove(&from_id);
+                }
+            }
+        }
+
+        ret
+    }
+
+    async fn on_sn_called_inner(&self, sn_called: SnCalled, cert: P2pIdentityCertRef) -> P2pResult<()> {
         log::info!("on_sn_called {:?}", sn_called);
 
-        let cert = self.cert_factory.create(&sn_called.peer_info)?;
         let eps = if self.sn_service.is_same_lan(&sn_called.reverse_endpoint_array) {
             let mut eps = cert.endpoints().clone();
             eps.extend_from_slice(sn_called.reverse_endpoint_array.as_slice());
@@ -692,7 +726,16 @@ impl TunnelManager {
             eps
         };
 
+
         let from_device_id = cert.get_id();
+
+        {
+            let tunnels = self.get_tunnels(&from_device_id);
+            if tunnels.tunnel_exist(sn_called.tunnel_id) {
+                return Ok(());
+            }
+        }
+
         match sn_called.call_type {
             SnCallType::Datagram => {
                 let mut tunnel = Tunnel::new(
