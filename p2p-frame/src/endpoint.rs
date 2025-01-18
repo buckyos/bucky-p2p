@@ -131,6 +131,10 @@ impl Endpoint {
     pub fn set_area(&mut self, area: EndpointArea) {
         self.area = area;
     }
+
+    pub fn get_area(&self) -> EndpointArea {
+        self.area
+    }
 }
 
 impl Default for Endpoint {
@@ -224,7 +228,7 @@ impl std::fmt::Display for Endpoint {
         };
 
         result += match self.protocol {
-            Protocol::Unk(n) => format!("un{}", n),
+            Protocol::Unk(n) => format!("u{:02}", n),
             Protocol::Tcp => "tcp".to_string(),
             Protocol::Kcp => "kcp".to_string(),
             Protocol::Bdt => "bdt".to_string(),
@@ -248,33 +252,47 @@ impl FromStr for Endpoint {
                 "D" => Ok(EndpointArea::Default),
                 _ => Err(P2pError::new(
                     P2pErrorCode::InvalidInput,
-                    "invalid endpoint string".to_string(),
+                    format!("invalid endpoint string {}", s),
                 )),
             }
         }?;
         let version_str = &s[1..2];
 
         let protocol = {
-            match &s[2..5] {
-                "tcp" => Ok(Protocol::Tcp),
-                "udp" => Ok(Protocol::Quic),
-                "kcp" => Ok(Protocol::Kcp),
-                "bdt" => Ok(Protocol::Bdt),
-                "qic" => Ok(Protocol::Quic),
-                _ => Err(P2pError::new(
+            let protocol_str = &s[2..5];
+            if protocol_str == "tcp" {
+                Ok(Protocol::Tcp)
+            } else if protocol_str == "udp" {
+                Ok(Protocol::Quic)
+            } else if protocol_str == "kcp" {
+                Ok(Protocol::Kcp)
+            } else if protocol_str == "bdt" {
+                Ok(Protocol::Bdt)
+            } else if protocol_str == "qic" {
+                Ok(Protocol::Quic)
+            } else if protocol_str.starts_with("u") {
+                let n = u8::from_str(&protocol_str[1..]).map_err(|_| {
+                    P2pError::new(
+                        P2pErrorCode::InvalidInput,
+                        format!("invalid endpoint string {}", s),
+                    )
+                })?;
+                Ok(Protocol::Unk(n))
+            } else{
+                Err(P2pError::new(
                     P2pErrorCode::InvalidInput,
-                    "invalid endpoint string".to_string(),
-                )),
+                    format!("invalid endpoint string {}", s),
+                ))
             }
         }?;
 
         let addr = SocketAddr::from_str(&s[5..]).map_err(|_| {
-            P2pError::new(P2pErrorCode::InvalidInput, "invalid endpoint string".to_string())
+            P2pError::new(P2pErrorCode::InvalidInput, format!("invalid endpoint string {}", s))
         })?;
         if !(addr.is_ipv4() && version_str.eq("4") || addr.is_ipv6() && version_str.eq("6")) {
             return Err(P2pError::new(
                 P2pErrorCode::InvalidInput,
-                "invalid endpoint string".to_string(),
+                format!("invalid endpoint string {}", s),
             ));
         }
         Ok(Endpoint {
@@ -309,18 +327,18 @@ const ENDPOINT_PROTOCOL_QUIC: u8 = 1;
 const ENDPOINT_PROTOCOL_KCP: u8 = 2;
 const ENDPOINT_PROTOCOL_BDT: u8 = 3;
 
-const ENDPOINT_PROTOCOL_MASK: u8 = 0x07;
+const ENDPOINT_PROTOCOL_MASK: u8 = 0x0f;
 
 const ENDPOINT_IP_VERSION_4: u8 = 0u8 << 4;
 const ENDPOINT_IP_VERSION_6: u8 = 1u8 << 4;
-const ENDPOINT_IP_VERSION_MASK: u8 = 0x08;
+const ENDPOINT_IP_VERSION_MASK: u8 = 0x10;
 
 const ENDPOINT_AREA_LAN: u8 = 0u8 << 5;
 const ENDPOINT_AREA_DEFAULT: u8 = 1u8 << 5;
 const ENDPOINT_AREA_WAN: u8 = 2u8 << 5;
 const ENDPOINT_AREA_MAPPED: u8 = 3u8 << 5;
 
-const ENDPOINT_AREA_MASK: u8 = 0x30;
+const ENDPOINT_AREA_MASK: u8 = 0x60;
 
 impl RawFixedBytes for Endpoint {
     // TOFIX: C BDT union addr and addrV6 should not memcpy directly

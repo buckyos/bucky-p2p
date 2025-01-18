@@ -633,6 +633,13 @@ impl TunnelManager {
             return tunnel.open_stream(vport, session_id).await;
         } else {
             let seq = self.gen_id.generate();
+
+            let remote = match self.device_finder.get_identity_cert(&remote.get_id()).await {
+                Ok(remote) => remote,
+                Err(_) => {
+                    remote.clone()
+                }
+            };
             let mut tunnel = Tunnel::new(
                 self.net_manager.clone(),
                 self.sn_service.clone(),

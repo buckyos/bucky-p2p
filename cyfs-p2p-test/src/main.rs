@@ -1,6 +1,6 @@
 extern crate core;
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -194,7 +194,7 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
     let sn_desc_path = data_folder.join("sn.desc");
     let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new()).unwrap().0;
     let config_path = data_folder.join("config.toml");
-    let (local_eps, map_port_lsit) = if config_path.exists() {
+    let (local_eps, map_port_list) = if config_path.exists() {
         let config = std::fs::read_to_string(config_path.as_path()).unwrap();
         let config: P2pConfig = toml::from_str(config.as_str()).unwrap();
         let local_eps = config.get_ep_list();
@@ -208,7 +208,7 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         (local_eps, None)
     };
     let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
-    if let Some(map_port_list) = map_port_lsit {
+    if let Some(map_port_list) = map_port_list {
         for (ep, port) in map_port_list.iter() {
             p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
         }
@@ -291,8 +291,8 @@ async fn all_in_one() {
 
     let mut eps = sn_desc.mut_connect_info().mut_endpoints();
     if eps.len() == 0 {
-        eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
-        // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 3456, 0, 0)))));
+        // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
+        eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 3456, 0, 0)))));
     }
 
     let sn_service = SnService::new(
@@ -331,7 +331,11 @@ async fn all_in_one() {
     // ep.set_area(EndpointArea::Wan);
     // local_eps.push(ep);
 
-    let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433))));
+    // let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 4433))));
+    // ep.set_area(bucky_objects::EndpointArea::Lan);
+    // local_eps.push(ep);
+
+    let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0))));
     ep.set_area(bucky_objects::EndpointArea::Lan);
     local_eps.push(ep);
 
@@ -383,7 +387,7 @@ async fn all_in_one() {
     tokio::task::spawn(async move {
         loop {
             {
-                let mut tunnel = stack1.stream_manager().connect(&stack2_cert, 1234).await.unwrap();
+                let mut tunnel = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
                 let mut buf = [0u8; 32];
                 let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
                 println!("{}", String::from_utf8_lossy(&buf[..len]));
@@ -407,10 +411,10 @@ async fn all_in_one() {
                         println!("write error: {:?}", e);
                     }
                 }
-                let mut tunnel2 = stack1.stream_manager().connect(&stack2_cert, 1235).await.unwrap();
+                let mut tunnel2 = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1235).await.unwrap();
             }
             {
-                let mut send = stack1.datagram_manager().connect(&stack2_cert, 1234).await.unwrap();
+                let mut send = stack1.datagram_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
                 send.write_all("datagram hello".as_bytes()).await.unwrap();
             }
         }

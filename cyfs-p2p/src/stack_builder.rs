@@ -1,9 +1,11 @@
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use bucky_crypto::{PrivateKey, Signature};
 use bucky_objects::{Device, Endpoint, NamedObject, Protocol, SingleKeyObjectDesc};
 use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
+use p2p_frame::endpoint::EndpointArea;
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory};
 use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pConfig, P2pStackConfig, P2pStackRef};
@@ -42,7 +44,7 @@ impl P2pIdentityCert for CyfsIdentityCert {
     }
 
     fn endpoints(&self) -> Vec<p2p_frame::endpoint::Endpoint> {
-        self.device.connect_info().endpoints().iter().map(|ep| p2p_frame::endpoint::Endpoint::from_str(ep.to_string().as_str()).unwrap()).collect::<Vec<_>>()
+        self.device.connect_info().endpoints().iter().filter(|ep| !ep.addr().ip().is_unspecified()).map(|ep| p2p_frame::endpoint::Endpoint::from_str(ep.to_string().as_str()).unwrap()).collect::<Vec<_>>()
     }
 
     fn sn_list(&self) -> Vec<P2pIdentityCertRef> {
@@ -54,7 +56,26 @@ impl P2pIdentityCert for CyfsIdentityCert {
         let ep_list = device.mut_connect_info().mut_endpoints();
         ep_list.clear();
         for ep in eps {
-            ep_list.push(bucky_objects::Endpoint::from_str(ep.to_string().as_str()).unwrap());
+            let mut cyfs_ep = if ep.protocol() == p2p_frame::endpoint::Protocol::Tcp {
+                bucky_objects::Endpoint::from((bucky_objects::Protocol::Tcp, ep.addr().clone()))
+            } else {
+                bucky_objects::Endpoint::from((bucky_objects::Protocol::Udp, ep.addr().clone()))
+            };
+            match ep.get_area() {
+                EndpointArea::Lan => {
+                    cyfs_ep.set_area(bucky_objects::EndpointArea::Lan);
+                }
+                EndpointArea::Default => {
+                    cyfs_ep.set_area(bucky_objects::EndpointArea::Default);
+                }
+                EndpointArea::Wan => {
+                    cyfs_ep.set_area(bucky_objects::EndpointArea::Wan);
+                }
+                EndpointArea::Mapped => {
+                    cyfs_ep.set_area(bucky_objects::EndpointArea::Mapped);
+                }
+            }
+            ep_list.push(cyfs_ep);
         }
         Arc::new(CyfsIdentityCert::new(device))
     }

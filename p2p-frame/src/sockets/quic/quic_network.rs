@@ -74,6 +74,9 @@ impl P2pNetwork for QuicNetwork {
             self.quic_listener.lock().unwrap().clone()
         };
         for listener in quic_listener.iter() {
+            if !listener.local().is_same_ip_version(remote) {
+                continue;
+            }
             let mut conn = QuicConnection::connect_with_ep(listener.quic_ep(), local_identity.clone(), self.cert_factory.clone(), remote_id.clone(), remote.clone(), self.timeout, self.idle_timeout).await?;
             conn.open_bi_stream().await?;
             conn_list.push(Arc::new(conn));
