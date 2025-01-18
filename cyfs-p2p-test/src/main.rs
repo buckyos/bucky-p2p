@@ -226,19 +226,22 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         P2pId::from(DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap().object_id().as_slice())
     };
 
-    {
-        let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
-        stream.write_all("test".as_bytes()).await.unwrap();
-        let mut buf = [0u8; 1024];
-        let len = stream.read(buf.as_mut_slice()).await.unwrap();
-        log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
-    }
-    {
-        let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
-        stream.write_all("test".as_bytes()).await.unwrap();
-        let mut buf = [0u8; 1024];
-        let len = stream.read(buf.as_mut_slice()).await.unwrap();
-        log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+    loop {
+        {
+            let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+            stream.write_all("test".as_bytes()).await.unwrap();
+            let mut buf = [0u8; 1024];
+            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+        }
+        {
+            let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+            stream.write_all("test".as_bytes()).await.unwrap();
+            let mut buf = [0u8; 1024];
+            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
