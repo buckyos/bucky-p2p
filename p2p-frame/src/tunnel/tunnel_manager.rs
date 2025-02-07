@@ -1,19 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use bucky_raw_codec::{RawFrom};
+use async_named_locker::Locker;
+use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use notify_future::NotifyFuture;
+use tokio::io::AsyncWriteExt;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityCertCacheRef};
-use crate::protocol::v0::{SnCallType, SnCalled};
+use crate::protocol::{Package, PackageCmdCode};
+use crate::protocol::v0::{AckDatagram, AckReverseDatagram, AckReverseStream, AckStream, SnCallType, SnCalled};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef};
 use crate::types::{SessionId, TunnelId, TunnelIdGenerator};
-use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPorts, TunnelStream};
+use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPorts, TunnelStream};
 
 struct TunnelsState {
     tunnels: HashMap<TunnelId, Arc<Tunnel>>,
@@ -89,7 +92,7 @@ impl Tunnels {
                 match tunnel.accept_instance().await {
                     Ok(instance) => {
                         match instance {
-                            TunnelInstance::Stream(stream) => {
+                            TunnelSession::Stream(stream) => {
                                 log::info!("accept stream tunnel {:?} stream_id {} port {} remote_id {} remote_ep {} local_id {} local_ep {}",
                                     stream.tunnel_id(),
                                     stream.session_id(),
@@ -101,7 +104,7 @@ impl Tunnels {
 
                                     listener.on_new_tunnel_stream(stream).await;
                             }
-                            TunnelInstance::Datagram(datagram) => {
+                            TunnelSession::Datagram(datagram) => {
                                 log::info!("accept datagram tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
                                     datagram.tunnel_id(),
                                     datagram.remote_identity_id().to_string(),
@@ -111,10 +114,10 @@ impl Tunnels {
 
                                     listener.on_new_tunnel_datagram(datagram).await;
                             }
-                            TunnelInstance::ReverseStream(_stream) => {
+                            TunnelSession::ReverseStream(_stream) => {
 
                             }
-                            TunnelInstance::ReverseDatagram(_datagram) => {
+                            TunnelSession::ReverseDatagram(_datagram) => {
 
                             }
                         }
@@ -460,16 +463,16 @@ impl TunnelManager {
         let listener = self.listener.clone();
         let cert_factory = self.cert_factory.clone();
         let _ = Executor::spawn(async move {
-            match tunnel_conn.accept_instance().await {
+            match tunnel_conn.accept_first_session().await {
                 Ok(instance) => {
-                    log::info!("new tunnel {} remote_id {} remote_ep {} local_id {} local_ep {}",
+                    log::info!("new tunnel {} connection remote_id {} remote_ep {} local_id {} local_ep {}",
                         instance,
                         remote_id.to_string(),
                         remote_ep.to_string(),
                         local_id.to_string(),
                         local_ep.to_string());
                     match instance {
-                        TunnelInstance::Stream(stream) => {
+                        TunnelSession::Stream(mut stream) => {
                             let mut tunnel = Tunnel::new(
                                 net_manager.clone(),
                                 sn_service.clone(),
@@ -483,11 +486,48 @@ impl TunnelManager {
                                 idle_timeout,
                                 cert_factory.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
-                            if tunnels.add_tunnel(tunnel, listener.clone()) {
-                                listener.on_new_tunnel_stream(stream).await;
+                            let (ack, mut stream) = {
+                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel.get_tunnel_id())).await;
+                                if tunnels.tunnel_exist(tunnel.get_tunnel_id()) {
+                                    let ack = AckStream {
+                                        result: 1
+                                    };
+                                    (Some(ack), Some(stream))
+                                } else {
+                                    let ack = AckStream {
+                                        result: 0
+                                    };
+                                    let pkg = Package::new(PackageCmdCode::AckStream, ack);
+                                    match stream.send_pkg(pkg).await {
+                                        Ok(_) => {
+                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        tunnel.get_tunnel_id(),
+                        remote_id.to_string(),
+                        remote_ep.to_string(),
+                        local_id.to_string(),
+                        local_ep.to_string());
+                                            tunnels.add_tunnel(tunnel, listener.clone());
+                                            (None, Some(stream))
+                                        }
+                                        Err(e) => {
+                                            log::error!("write tunnel {:?} ack stream error: {:?}", tunnel.get_tunnel_id(), e);
+                                            (None, None)
+                                        }
+                                    }
+                                }
+                            };
+                            if let Some(ack) = ack {
+                                let pkg = Package::new(PackageCmdCode::AckStream, ack);
+                                let _ = stream.as_mut().unwrap().send_pkg(pkg).await;
+                            } else {
+                                if stream.is_some() {
+                                    let mut stream = stream.unwrap();
+                                    let _ = stream.enter_recv_header();
+                                    listener.on_new_tunnel_stream(stream).await;
+                                }
                             }
                         }
-                        TunnelInstance::Datagram(datagram) => {
+                        TunnelSession::Datagram(mut datagram) => {
                             let mut tunnel = Tunnel::new(
                                 net_manager.clone(),
                                 sn_service.clone(),
@@ -501,18 +541,120 @@ impl TunnelManager {
                                 idle_timeout,
                                 cert_factory.clone());
                             tunnel.set_tunnel_conn(tunnel_conn);
-                            if tunnels.add_tunnel(tunnel, listener.clone()) {
-                                listener.on_new_tunnel_datagram(datagram).await;
+
+                            let (ack, mut datagram) = {
+                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel.get_tunnel_id())).await;
+                                if tunnels.tunnel_exist(tunnel.get_tunnel_id()) {
+                                    let ack = AckDatagram {
+                                        result: 1
+                                    };
+                                    (Some(ack), Some(datagram))
+                                } else {
+                                    let ack = AckDatagram {
+                                        result: 0
+                                    };
+                                    let pkg = Package::new(PackageCmdCode::AckDatagram, ack);
+                                    match datagram.send_pkg(pkg).await {
+                                        Ok(_) => {
+                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        tunnel.get_tunnel_id(),
+                        remote_id.to_string(),
+                        remote_ep.to_string(),
+                        local_id.to_string(),
+                        local_ep.to_string());
+                                            tunnels.add_tunnel(tunnel, listener.clone());
+                                            (None, Some(datagram))
+                                        }
+                                        Err(e) => {
+                                            log::error!("write tunnel {:?} ack datagram error: {:?}", tunnel.get_tunnel_id(), e);
+                                            (None, None)
+                                        }
+                                    }
+                                }
+                            };
+                            if let Some(ack) = ack {
+                                let pkg = Package::new(PackageCmdCode::AckDatagram, ack);
+                                let _ = datagram.as_mut().unwrap().send_pkg(pkg).await;
+                            } else {
+                                if datagram.is_some() {
+                                    listener.on_new_tunnel_datagram(datagram.unwrap()).await;
+                                }
                             }
                         }
-                        TunnelInstance::ReverseStream(stream) => {
-                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()) {
-                                future.set_complete(ReverseResult::Stream(tunnel_conn, stream));
+                        TunnelSession::ReverseStream(mut stream) => {
+                            let (ack, mut stream) = {
+                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel_conn.get_tunnel_id())).await;
+                                if tunnels.is_exist_pending_future(tunnel_conn.get_tunnel_id()) {
+                                    let ack = AckReverseStream {
+                                        result: 0
+                                    };
+                                    let pkg = Package::new(PackageCmdCode::AckReverseStream, ack);
+                                    match stream.send_pkg(pkg).await {
+                                        Ok(_) => {
+                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        tunnel_conn.get_tunnel_id(),
+                        remote_id.to_string(),
+                        remote_ep.to_string(),
+                        local_id.to_string(),
+                        local_ep.to_string());
+                                            let _ = stream.enter_recv_header();
+                                            let future = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()).unwrap();
+                                            future.set_complete(ReverseResult::Stream(tunnel_conn, stream));
+                                            (None, None)
+                                        }
+                                        Err(e) => {
+                                            log::error!("write tunnel {:?} ack reverse stream error: {:?}", tunnel_conn.get_tunnel_id(), e);
+                                            (None, None)
+                                        }
+                                    }
+                                } else {
+                                    let ack = AckReverseStream {
+                                        result: 1
+                                    };
+                                    (Some(ack), Some(stream))
+                                }
+                            };
+                            if let Some(ack) = ack {
+                                let pkg = Package::new(PackageCmdCode::AckReverseStream, ack);
+                                let _ = stream.as_mut().unwrap().send_pkg(pkg).await;
                             }
                         }
-                        TunnelInstance::ReverseDatagram(datagram) => {
-                            if let Some(future) = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()) {
-                                future.set_complete(ReverseResult::Datagram(tunnel_conn, datagram));
+                        TunnelSession::ReverseDatagram(mut datagram) => {
+                            let (ack, mut datagram) = {
+                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel_conn.get_tunnel_id())).await;
+                                if tunnels.is_exist_pending_future(tunnel_conn.get_tunnel_id()) {
+                                    let ack = AckReverseDatagram {
+                                        result: 0
+                                    };
+                                    let pkg = Package::new(PackageCmdCode::AckReverseDatagram, ack);
+                                    match datagram.send_pkg(pkg).await {
+                                        Ok(_) => {
+                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                        tunnel_conn.get_tunnel_id(),
+                        remote_id.to_string(),
+                        remote_ep.to_string(),
+                        local_id.to_string(),
+                        local_ep.to_string());
+                                            let future = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()).unwrap();
+                                            let _ = datagram.enter_recv_header();
+                                            future.set_complete(ReverseResult::Datagram(tunnel_conn, datagram));
+                                            (None, None)
+                                        }
+                                        Err(e) => {
+                                            log::error!("write tunnel {:?} ack reverse datagram error: {:?}", tunnel_conn.get_tunnel_id(), e);
+                                            (None, None)
+                                        }
+                                    }
+                                } else {
+                                    let ack = AckReverseDatagram {
+                                        result: 1
+                                    };
+                                    (Some(ack), Some(datagram))
+                                }
+                            };
+                            if let Some(ack) = ack {
+                                let pkg = Package::new(PackageCmdCode::AckReverseDatagram, ack);
+                                let _ = datagram.as_mut().unwrap().send_pkg(pkg).await;
                             }
                         }
                     }

@@ -225,6 +225,10 @@ impl SNClientService {
         *_listener = Some(Arc::new(listener));
     }
 
+    pub fn get_cmd_client(&self) -> &SnCmdClientRef {
+        &self.cmd_client
+    }
+
     pub fn get_wan_ip_list(&self) -> Vec<Endpoint> {
         let mut wan_list = Vec::new();
         self.get_active_sn_list().iter().map(|v| v.wan_ep_list.as_slice()).flatten().for_each(|ep| {

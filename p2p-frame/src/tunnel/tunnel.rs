@@ -13,7 +13,7 @@ use crate::protocol::v0::SnCallType;
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
-use crate::tunnel::{select_successful, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelInstance, TunnelListenPortsRef, TunnelStatRef, TunnelStream};
+use crate::tunnel::{select_successful, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPortsRef, TunnelStatRef, TunnelStream};
 use crate::types::{SessionId, TunnelId};
 
 pub enum ReverseResult {
@@ -102,8 +102,8 @@ impl Tunnel {
         self.tunnel_conn = Some(tunnel_conn);
     }
 
-    pub async fn accept_instance(&self) -> P2pResult<TunnelInstance> {
-        self.tunnel_conn.as_ref().unwrap().accept_instance().await
+    pub async fn accept_instance(&self) -> P2pResult<TunnelSession> {
+        self.tunnel_conn.as_ref().unwrap().accept_next_session().await
     }
 
     pub fn get_tunnel_id(&self) -> TunnelId {

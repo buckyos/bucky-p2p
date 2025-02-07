@@ -3399,9 +3399,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-result"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b313b781722fec95d117520f0b699872ec40096a1eacf5f5c25caed1a1382841"
+checksum = "fd5d3da92660f9d681e351fe424ed10df82a4d11f52cd6c4c2e0c27f16a191e2"
 dependencies = [
  "log",
 ]
