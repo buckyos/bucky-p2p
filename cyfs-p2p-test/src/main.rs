@@ -360,10 +360,17 @@ async fn all_in_one() {
         loop {
             let mut stream = listener.accept().await.unwrap();
             tokio::task::spawn(async move {
-                stream.write_all("test".as_bytes()).await.unwrap();
-                let mut buf = [0u8; 32];
-                let len = stream.read(buf.as_mut_slice()).await.unwrap();
-                println!("{}", String::from_utf8_lossy(&buf[..len]));
+                let ret: std::io::Result<()> = async move {
+                    stream.write_all("test".as_bytes()).await?;
+                    let mut buf = [0u8; 32];
+                    let len = stream.read(buf.as_mut_slice()).await?;
+                    println!("{}", String::from_utf8_lossy(&buf[..len]));
+                    Ok(())
+                }.await;
+
+                if let Err(e) = ret {
+                    println!("error: {:?}", e);
+                }
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
             });

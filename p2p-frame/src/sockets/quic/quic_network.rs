@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::P2pResult;
+use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionRef, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
@@ -84,7 +84,28 @@ impl P2pNetwork for QuicNetwork {
         Ok(conn_list)
     }
 
+    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+        let quic_listener = {
+            self.quic_listener.lock().unwrap().clone()
+        };
+        for listener in quic_listener.iter() {
+            let listen_ep = listener.local();
+            if &listen_ep != local_ep || !listener.local().is_same_ip_version(remote) {
+                continue;
+            }
+
+            let mut conn = QuicConnection::connect_with_ep(listener.quic_ep(), local_identity.clone(), self.cert_factory.clone(), remote_id.clone(), remote.clone(), self.timeout, self.idle_timeout).await?;
+            conn.open_bi_stream().await?;
+            return Ok(Arc::new(conn));
+        }
+        Err(p2p_err!(P2pErrorCode::NotFound, "no listener found for local ep: {}", local_ep))
+    }
+
     async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>> {
         self.create_stream_connect(local_identity, remote, remote_id).await
+    }
+
+    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+        self.create_stream_connect_with_local_ep(local_identity, local_ep, remote, remote_id).await
     }
 }

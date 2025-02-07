@@ -296,7 +296,7 @@ impl TunnelStream {
     async fn send_inner(&mut self, data: &[u8]) -> std::io::Result<()> {
         let mut write = self.write.get().await;
         if write.is_none() {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "tunnel is closed"));
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, format!("tunnel {:?} is closed", self.session_id)));
         }
         let mut remainder = data;
         while remainder.len() > 0 {
@@ -377,7 +377,7 @@ impl TunnelStream {
         let mut buf_header = [0u8; 16];
         let mut read = self.read.get().await;
         if read.is_none() {
-            return Err(p2p_err!(P2pErrorCode::Failed, "tunnel is closed"));
+            return Err(p2p_err!(P2pErrorCode::Failed, "tunnel {:?} is closed", self.session_id));
         }
         read.as_mut().unwrap().read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;

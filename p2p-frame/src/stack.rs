@@ -286,6 +286,7 @@ pub struct P2pStackConfig {
     sn_ping_interval: Duration,
     sn_call_timeout: Duration,
     device_finder: Option<DeviceFinderRef>,
+    sn_tunnel_count: u16,
 }
 
 impl P2pStackConfig {
@@ -299,6 +300,7 @@ impl P2pStackConfig {
             sn_ping_interval: Duration::from_secs(30),
             sn_call_timeout: Duration::from_secs(30),
             device_finder: None,
+            sn_tunnel_count: 5,
         }
     }
 
@@ -364,6 +366,17 @@ impl P2pStackConfig {
         self.device_finder = Some(device_finder);
         self
     }
+
+    pub fn sn_tunnel_count(&self) -> u16 {
+        self.sn_tunnel_count
+    }
+
+    pub fn set_sn_tunnel_count(mut self, tunnel_count: u16) -> Self {
+        if tunnel_count > 0 {
+            self.sn_tunnel_count = tunnel_count;
+        }
+        self
+    }
 }
 
 pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> {
@@ -379,6 +392,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let sn_call_timeout = config.sn_call_timeout();
     let device_finder = config.device_finder().clone();
     let idle_timeout = config.idle_timeout();
+    let sn_tunnel_count = config.sn_tunnel_count();
     let sn_service = SNClientService::new(
         net_manager.clone(),
         sn_list,
@@ -386,6 +400,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         gen_seq.clone(),
         gen_id.clone(),
         cert_factory.clone(),
+        sn_tunnel_count,
         sn_ping_interval,
         sn_call_timeout,
         conn_timeout,

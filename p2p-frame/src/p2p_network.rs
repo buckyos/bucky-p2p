@@ -12,6 +12,8 @@ pub trait P2pNetwork: Send + Sync + 'static {
     async fn close_all_listener(&self) -> P2pResult<()>;
     fn listeners(&self) -> Vec<P2pListenerRef>;
     async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>>;
+    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef>;
     async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>>;
+    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef>;
 }
 pub type P2pNetworkRef = Arc<dyn P2pNetwork>;

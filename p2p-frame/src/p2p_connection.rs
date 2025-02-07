@@ -36,7 +36,7 @@ pub trait P2pConnectionEventListener: 'static + Send + Sync {
     async fn on_new_connection(&self, conn: P2pConnectionRef) -> P2pResult<()>;
 }
 
-pub trait P2pListener {
+pub trait P2pListener: 'static + Send + Sync {
     fn mapping_port(&self) -> Option<u16>;
     fn local(&self) -> Endpoint;
 }

@@ -15,7 +15,7 @@ pub enum Protocol {
     Quic,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum EndpointArea {
     Lan,
     Default,
@@ -23,7 +23,7 @@ pub enum EndpointArea {
     Mapped
 }
 
-#[derive(Copy, Clone, Eq)]
+#[derive(Copy, Clone, Eq, Hash)]
 pub struct Endpoint {
     area: EndpointArea,
     protocol: Protocol,

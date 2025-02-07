@@ -34,6 +34,12 @@ pub type EncodedP2pIdentityCert = Vec<u8>;
 #[derive(RawDecode, RawEncode, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub struct P2pId(Vec<u8>);
 
+impl P2pId {
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
 impl FromStr for P2pId {
     type Err = P2pError;
 

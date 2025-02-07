@@ -66,7 +66,16 @@ impl P2pNetwork for TcpNetwork {
         Ok(vec![Arc::new(conn)])
     }
 
+    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+        let conn = TCPConnection::connect_with_ep(self.cert_factory.clone(), local_identity.clone(), local_ep.clone(), remote.clone(), remote_id.clone(), self.timeout).await?;
+        Ok(Arc::new(conn))
+    }
+
     async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>> {
         self.create_stream_connect(local_identity, remote, remote_id).await
+    }
+
+    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+        self.create_stream_connect_with_local_ep(local_identity, local_ep, remote, remote_id).await
     }
 }

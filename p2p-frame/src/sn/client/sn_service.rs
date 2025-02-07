@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration};
-use bucky_raw_codec::{RawFrom};
+use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use notify_future::NotifyFuture;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
+use sfo_cmd_server::client::{ClassifiedCmdClient, ClassifiedCmdSend, ClassifiedCmdTunnelFactory};
+use sfo_cmd_server::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
+use sfo_cmd_server::PeerId;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, into_p2p_err, P2pErrorCode, P2pResult};
 use crate::runtime;
@@ -16,8 +19,8 @@ use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCallType, SnCalled, SnCalledResp};
-use crate::sn::service::PeerConnection;
-use crate::sockets::{NetManagerRef, QuicConnection};
+use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnel, SnTunnelClassification};
+use crate::sockets::{NetManager, NetManagerRef, QuicConnection};
 use crate::types::{Sequence, SequenceGenerator, TunnelId, TunnelIdGenerator};
 
 #[callback_trait::callback_trait]
@@ -34,10 +37,10 @@ pub enum SnResp {
 #[derive(Clone)]
 pub struct ActiveSN {
     pub sn: EncodedP2pIdentityCert,
+    pub sn_peer_id: P2pId,
     pub latest_time: u64,
-    pub conn_id: TunnelId,
+    pub conn_id: CmdTunnelId,
     pub recv_future: Arc<Mutex<HashMap<Sequence, NotifyFuture<SnResp>>>>,
-    pub peer_connection: Arc<runtime::Mutex<PeerConnection>>,
     pub wan_ep_list: Vec<Endpoint>,
 }
 
@@ -48,6 +51,119 @@ pub struct SNServiceState {
     pub cur_report_future: Option<NotifyFuture<ReportSnResp>>,
 }
 
+pub struct SnClientTunnelFactory {
+    net_manager: NetManagerRef,
+    local_identity: P2pIdentityRef,
+    sn_list: Vec<P2pIdentityCertRef>,
+}
+
+impl SnClientTunnelFactory {
+    pub fn new(net_manager: NetManagerRef,
+               local_identity: P2pIdentityRef,
+               sn_list: Vec<P2pIdentityCertRef>,) -> Self {
+        Self {
+            net_manager,
+            local_identity,
+            sn_list,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClientTunnelFactory {
+    async fn create_tunnel(&self, classification: Option<SnTunnelClassification>) -> CmdResult<Arc<SnTunnel>> {
+        if classification.is_some() {
+            let classification = classification.unwrap();
+            if classification.local_ep.is_some() {
+                let local_ep = classification.local_ep.unwrap();
+                let p2p_network = self.net_manager.get_network(local_ep.protocol()).map_err(into_cmd_err!(CmdErrorCode::Failed, "get network failed"))?;
+                for sn_cert in self.sn_list.iter() {
+                    for sn_ep in sn_cert.endpoints().iter() {
+                        if sn_ep.protocol() != local_ep.protocol() || sn_ep != &classification.remote_ep {
+                            continue;
+                        }
+
+                        let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await
+                            .map_err(into_cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))?;
+                        return Ok(Arc::new(SnTunnel::new(conn)));
+                    }
+                }
+            } else {
+                for sn_cert in self.sn_list.iter() {
+                    for sn_ep in sn_cert.endpoints().iter() {
+                        if sn_ep.protocol() != classification.remote_ep.protocol() || sn_ep != &classification.remote_ep {
+                            continue;
+                        }
+
+                        let p2p_network = self.net_manager.get_network(classification.remote_ep.protocol()).map_err(into_cmd_err!(CmdErrorCode::Failed, "get network failed"))?;
+                        let quic_listener = p2p_network.listeners();
+                        for listener in quic_listener.iter() {
+                            let local_ep = listener.local();
+                            let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await
+                                .map_err(into_cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))?;
+                            return Ok(Arc::new(SnTunnel::new(conn)));
+                        }
+                    }
+                }
+            }
+        } else {
+            if let Ok(quic_network) = self.net_manager.get_network(Protocol::Quic) {
+                let quic_listener = quic_network.listeners();
+                for listener in quic_listener.iter() {
+                    let local_ep = listener.local();
+                    for sn_cert in self.sn_list.iter() {
+                        for sn_ep in sn_cert.endpoints().iter() {
+                            if sn_ep.protocol() != Protocol::Quic {
+                                continue;
+                            }
+
+                            match quic_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await {
+                                Ok(conn) => {
+                                    return Ok(Arc::new(SnTunnel::new(conn)));
+                                }
+                                Err(_) => {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for p2p_network in self.net_manager.get_networks().iter() {
+                if p2p_network.protocol() == Protocol::Quic {
+                    continue;
+                }
+
+                let quic_listener = p2p_network.listeners();
+                for listener in quic_listener.iter() {
+                    let local_ep = listener.local();
+                    for sn_cert in self.sn_list.iter() {
+                        for sn_ep in sn_cert.endpoints().iter() {
+                            if sn_ep.protocol() == Protocol::Quic || sn_ep.protocol() == Protocol::Tcp {
+                                continue;
+                            }
+
+                            match p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await {
+                                Ok(conn) => {
+                                    return Ok(Arc::new(SnTunnel::new(conn)));
+                                }
+                                Err(_) => {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))
+    }
+}
+
+pub type SnCmdClient = ClassifiedCmdClient<SnTunnelClassification, SnTunnel, SnClientTunnelFactory, u16, u8>;
+
+pub type SnCmdClientRef = Arc<SnCmdClient>;
 pub struct SNClientService {
     net_manager: NetManagerRef,
     sn_list: Vec<P2pIdentityCertRef>,
@@ -60,7 +176,7 @@ pub struct SNClientService {
     state: RwLock<SNServiceState>,
     listener: Mutex<Option<SNEventRef>>,
     cert_factory: P2pIdentityCertFactoryRef,
-
+    cmd_client: SnCmdClientRef,
 }
 pub type SNClientServiceRef = Arc<SNClientService>;
 
@@ -78,9 +194,11 @@ impl SNClientService {
                gen_seq: Arc<SequenceGenerator>,
                gen_id: Arc<TunnelIdGenerator>,
                cert_factory: P2pIdentityCertFactoryRef,
+               tunnel_count: u16,
                ping_timeout: Duration,
                call_timeout: Duration,
                conn_timeout: Duration,) -> Arc<Self> {
+        let cmd_client = ClassifiedCmdClient::new(SnClientTunnelFactory::new(net_manager.clone(), local_identity.clone(), sn_list.clone()), tunnel_count);
         Arc::new(Self {
             net_manager,
             sn_list,
@@ -98,6 +216,7 @@ impl SNClientService {
             }),
             listener: Mutex::new(None),
             cert_factory,
+            cmd_client,
         })
     }
 
@@ -126,54 +245,88 @@ impl SNClientService {
         return false;
     }
 
-    async fn handle(&self, conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>) -> P2pResult<()> {
-        match cmd_code {
-            PackageCmdCode::SnCallResp => {
-                let resp = SnCallResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                let mut state = self.state.write().unwrap();
-                for active_sn in state.active_sn_list.iter_mut() {
-                    if active_sn.conn_id == conn_id {
-                        let mut recv_futures = active_sn.recv_future.lock().unwrap();
-                        if let Some(recv_future) = recv_futures.remove(&resp.seq) {
-                            recv_future.set_complete(SnResp::SnCallResp(resp));
-                        }
-                        break;
-                    }
+    fn register_cmd_handler(self: &Arc<Self>) {
+        let this = self.clone();
+        self.cmd_client.register_cmd_handler(PackageCmdCode::SnCallResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, body: Vec<u8>| {
+            let this = this.clone();
+            async move {
+                let resp = SnCallResp::clone_from_slice(body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                this.sn_call_resp_handle(tunnel_id, resp).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "sn call resp handle failed"))?;
+                Ok(())
+            }
+        });
+
+        let this = self.clone();
+        self.cmd_client.register_cmd_handler(PackageCmdCode::SnQueryResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, body: Vec<u8>| {
+            let this = this.clone();
+            async move {
+                let resp = SnQueryResp::clone_from_slice(body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                this.sn_query_resp_handle(tunnel_id, resp).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "sn query resp handle failed"))?;
+                Ok(())
+            }
+        });
+
+        let this = self.clone();
+        self.cmd_client.register_cmd_handler(PackageCmdCode::SnCalled as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, body: Vec<u8>| {
+            let this = this.clone();
+            async move {
+                let sn_called = SnCalled::clone_from_slice(body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                this.on_called(tunnel_id, sn_called).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "sn called handle failed"))?;
+                Ok(())
+            }
+        });
+
+        let this = self.clone();
+        self.cmd_client.register_cmd_handler(PackageCmdCode::ReportSnResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, body: Vec<u8>| {
+            let this = this.clone();
+            async move {
+                let resp = ReportSnResp::clone_from_slice(body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                this.report_sn_resp_handle(tunnel_id, resp).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "report sn resp handle failed"))?;
+                Ok(())
+            }
+        });
+    }
+
+    async fn sn_call_resp_handle(&self, conn_id: CmdTunnelId, resp: SnCallResp) -> P2pResult<()> {
+        let mut state = self.state.write().unwrap();
+        for active_sn in state.active_sn_list.iter_mut() {
+            if active_sn.conn_id == conn_id {
+                let mut recv_futures = active_sn.recv_future.lock().unwrap();
+                if let Some(recv_future) = recv_futures.remove(&resp.seq) {
+                    recv_future.set_complete(SnResp::SnCallResp(resp));
                 }
-            },
-            PackageCmdCode::SnQueryResp => {
-                let resp = SnQueryResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                let mut state = self.state.write().unwrap();
-                for active_sn in state.active_sn_list.iter_mut() {
-                    if active_sn.conn_id == conn_id {
-                        let mut recv_futures = active_sn.recv_future.lock().unwrap();
-                        if let Some(recv_future) = recv_futures.remove(&resp.seq) {
-                            recv_future.set_complete(SnResp::SnQueryResp(resp));
-                        }
-                        break;
-                    }
-                }
-            },
-            PackageCmdCode::SnCalled => {
-                let sn_called = SnCalled::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                self.on_called(conn_id, sn_called).await?;
-            },
-            PackageCmdCode::ReportSnResp => {
-                let resp = ReportSnResp::clone_from_slice(cmd_body.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                log::info!("report sn resp: {:?}", resp);
-                if let Some(cur_report_future) = {
-                    let mut state = self.state.write().unwrap();
-                    state.cur_report_future.take()
-                } {
-                    cur_report_future.set_complete(resp);
-                }
-            },
-            _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
+                break;
+            }
         }
         Ok(())
     }
 
-    async fn on_called(&self, conn_id: TunnelId, sn_called: SnCalled) -> P2pResult<()> {
+    async fn sn_query_resp_handle(&self, conn_id: CmdTunnelId, resp: SnQueryResp) -> P2pResult<()> {
+        let mut state = self.state.write().unwrap();
+        for active_sn in state.active_sn_list.iter_mut() {
+            if active_sn.conn_id == conn_id {
+                let mut recv_futures = active_sn.recv_future.lock().unwrap();
+                if let Some(recv_future) = recv_futures.remove(&resp.seq) {
+                    recv_future.set_complete(SnResp::SnQueryResp(resp));
+                }
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn report_sn_resp_handle(&self, tunnel_id: CmdTunnelId, resp: ReportSnResp) -> P2pResult<()> {
+        log::info!("report sn resp: {:?}", resp);
+        if let Some(cur_report_future) = {
+            let mut state = self.state.write().unwrap();
+            state.cur_report_future.take()
+        } {
+            cur_report_future.set_complete(resp);
+        }
+        Ok(())
+    }
+
+    async fn on_called(&self, conn_id: CmdTunnelId, sn_called: SnCalled) -> P2pResult<()> {
         let listener = {
             let listener = self.listener.lock().unwrap();
             listener.clone()
@@ -216,24 +369,14 @@ impl SNClientService {
             }
         };
 
-        let peer_conn = self.get_peer_connection(conn_id);
-        if let Some(peer_conn) = peer_conn {
-            peer_conn.lock().await.send(Package::new(PackageCmdCode::SnCalledResp, resp)).await?;
-        }
+        let mut send = self.cmd_client.get_send_of_tunnel_id(conn_id).await.map_err(into_p2p_err!(P2pErrorCode::Failed))?;
+        send.send(PackageCmdCode::SnCalledResp as u8, resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError, "send SnCalledResp failed"))?;
         Ok(())
     }
 
-    fn get_peer_connection(&self, conn_id: TunnelId) -> Option<Arc<runtime::Mutex<PeerConnection>>> {
-        let state = self.state.read().unwrap();
-        for active_sn in state.active_sn_list.iter() {
-            if active_sn.conn_id == conn_id {
-                return Some(active_sn.peer_connection.clone());
-            }
-        }
-        None
-    }
-
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
+        self.register_cmd_handler();
         let this = self.clone();
         let handle = Executor::spawn_with_handle(async move {
             this.ping_proc().await;
@@ -250,10 +393,6 @@ impl SNClientService {
             let state = self.state.read().unwrap();
             if state.pinging_handle.is_some() {
                 state.pinging_handle.as_ref().unwrap().abort();
-            }
-            for active_sn in state.active_sn_list.iter() {
-                let mut peer_conn = active_sn.peer_connection.lock().await;
-                let _ = peer_conn.shutdown().await;
             }
         }
     }
@@ -297,8 +436,7 @@ impl SNClientService {
                     }
 
                     for active_sn in ping_sn_list.iter() {
-                        let mut peer_conn = active_sn.peer_connection.lock().await;
-                        match self.report(&mut peer_conn).await {
+                        match self.report(active_sn.conn_id, active_sn.sn_peer_id.clone()).await {
                             Ok(_) => {}
                             Err(e) => {
                                 if let Ok(sn) = self.cert_factory.create(&active_sn.sn) {
@@ -319,25 +457,30 @@ impl SNClientService {
                         if sn_ep.protocol() != p2p_network.protocol() {
                             continue;
                         }
-                        let mut stream_conn = match p2p_network.create_stream_connect(&self.local_identity, sn_ep, &sn_cert.get_id()).await {
-                            Ok(conns) => {
-                                conns
-                            },
-                            Err(e) => {
-                                log::error!("connect to sn {} failed: {:?}", sn_cert.get_id(), e);
-                                continue;
-                            }
-                        };
-
-                        for conn in stream_conn {
-                            let mut peer_conn = match self.create_connection(conn).await {
-                                Ok(peer_conn) => peer_conn,
-                                Err(e) => {
-                                    log::error!("connect to sn {} failed: {:?}", sn_cert.get_id(), e);
-                                    continue;
+                        for listener in p2p_network.listeners().iter() {
+                            let local_ep = listener.local();
+                            let ret = if local_ep.addr().ip().is_unspecified() {
+                                self.cmd_client.get_classified_send(SnTunnelClassification::new(None, sn_ep.clone())).await
+                            } else {
+                                if local_ep.protocol() == Protocol::Tcp {
+                                    let mut ep = local_ep.clone();
+                                    ep.mut_addr().set_port(0);
+                                    self.cmd_client.get_classified_send(SnTunnelClassification::new(Some(ep), sn_ep.clone())).await
+                                } else {
+                                    self.cmd_client.get_classified_send(SnTunnelClassification::new(Some(local_ep.clone()), sn_ep.clone())).await
                                 }
                             };
-                            let report_resp = match self.report(&mut peer_conn).await {
+
+                            if ret.is_err() {
+                                continue;
+                            }
+
+                            let tunnel_id = {
+                                let mut tunnel = ret.unwrap();
+                                tunnel.get_tunnel_id()
+                            };
+
+                            let report_resp = match self.report(tunnel_id, sn_cert.get_id()).await {
                                 Ok(resp) => {
                                     resp
                                 }
@@ -355,52 +498,26 @@ impl SNClientService {
                                 }
                             };
 
-                            let recv_handle = peer_conn.take_recv_handle().unwrap();
-                            let conn_id = peer_conn.conn_id();
                             let active_sn = ActiveSN {
                                 sn,
+                                sn_peer_id: sn_cert.get_id(),
                                 latest_time: bucky_time_now(),
-                                conn_id: peer_conn.conn_id(),
+                                conn_id: tunnel_id,
                                 recv_future: Arc::new(Mutex::new(HashMap::new())),
-                                peer_connection: Arc::new(runtime::Mutex::new(peer_conn)),
                                 wan_ep_list: report_resp.end_point_array,
                             };
                             let mut state = self.state.write().unwrap();
                             state.active_sn_list.push(active_sn);
-
-                            let this = self.clone();
-                            Executor::spawn_ok(async move {
-                                let _ = recv_handle.await;
-                                this.remote_sn_conn(conn_id);
-                            });
                         }
-
                     }
                 }
             }
         }
     }
 
-    fn remote_sn_conn(&self, conn_id: TunnelId) {
+    fn remote_sn_conn(&self, conn_id: CmdTunnelId) {
         let mut state = self.state.write().unwrap();
         state.active_sn_list.retain(|sn| sn.conn_id != conn_id);
-    }
-
-    async fn create_connection(self: &Arc<Self>, quic_socket: P2pConnectionRef) -> P2pResult<PeerConnection> {
-        let conn_id = self.gen_id.generate();
-        let this = self.clone();
-        let peer_conn = PeerConnection::connect(conn_id, quic_socket, move |conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
-            let this = this.clone();
-            async move {
-                if let Err(e) = this.handle(conn_id, cmd_code, cmd_body).await {
-                    log::error!("handle cmd {:?} error: {:?}", cmd_code, e);
-                    Err(e)
-                } else {
-                    Ok(())
-                }
-            }
-        }).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "connect to sn failed"))?;
-        Ok(peer_conn)
     }
 
     pub async fn wait_online(&self, _timeout: Option<Duration>) -> P2pResult<()> {
@@ -421,7 +538,15 @@ impl SNClientService {
         state.active_sn_list.clone()
     }
 
-    async fn report(&self, conn: &mut PeerConnection) -> P2pResult<ReportSnResp> {
+
+    async fn report(&self, conn_id: CmdTunnelId, sn_peer_id: P2pId) -> P2pResult<ReportSnResp> {
+        let mut conn = match self.cmd_client.get_send_of_tunnel_id(conn_id).await.map_err(into_p2p_err!(P2pErrorCode::Failed)) {
+            Ok(conn) => conn,
+            Err(e) => {
+                self.remote_sn_conn(conn_id);
+                return Err(e);
+            }
+        };
         let seq = self.gen_seq.generate();
         let local_ips = if_addrs::get_if_addrs().map(|addrs| {
             addrs.iter().filter(|addr| !addr.name.contains("VMware")
@@ -466,7 +591,7 @@ impl SNClientService {
             protocol_version: 0,
             stack_version: 0,
             seq,
-            sn_peer_id: conn.remote_identity_id().clone(),
+            sn_peer_id,
             from_peer_id: Some(self.local_identity.get_id()),
             peer_info: Some(self.local_identity.get_identity_cert()?.get_encoded_cert()?),
             send_time: bucky_time_now(),
@@ -480,7 +605,7 @@ impl SNClientService {
             let mut state = self.state.write().unwrap();
             state.cur_report_future = Some(future.clone());
         }
-        conn.send(Package::new(PackageCmdCode::ReportSn, report)).await?;
+        conn.send(PackageCmdCode::ReportSn as u8, report.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let resp = runtime::timeout(self.call_timeout, future).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "report timeout"))?;
         {
             let mut state = self.state.write().unwrap();
@@ -515,13 +640,20 @@ impl SNClientService {
                 payload: payload_pkg.clone(),
                 is_always_call: false,
             };
-            let mut peer_conn = active.peer_connection.lock().await;
+            let mut peer_conn = match self.cmd_client.get_send_of_tunnel_id(active.conn_id).await.map_err(into_p2p_err!(P2pErrorCode::Failed)) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    self.remote_sn_conn(active.conn_id);
+                    return Err(e);
+                }
+            };
+
             let future = NotifyFuture::<SnResp>::new();
             {
                 let mut recv_future = active.recv_future.lock().unwrap();
                 recv_future.insert(seq, future.clone());
             }
-            if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnCall, call)).await {
+            if let Err(e) = peer_conn.send(PackageCmdCode::SnCall as u8, call.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
                 log::error!("send call to {} failed: {:?}", sn.get_id(), e);
                 continue;
             }
@@ -560,13 +692,19 @@ impl SNClientService {
                 seq,
                 query_id: device_id.clone(),
             };
-            let mut peer_conn = active.peer_connection.lock().await;
+            let mut peer_conn = match self.cmd_client.get_send_of_tunnel_id(active.conn_id).await.map_err(into_p2p_err!(P2pErrorCode::Failed)) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    self.remote_sn_conn(active.conn_id);
+                    return Err(e);
+                }
+            };
             let future = NotifyFuture::<SnResp>::new();
             {
                 let mut recv_future = active.recv_future.lock().unwrap();
                 recv_future.insert(seq, future.clone());
             }
-            if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQuery, query)).await {
+            if let Err(e) = peer_conn.send(PackageCmdCode::SnQuery as u8, query.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
                 log::error!("send call to {} failed: {:?}", sn.get_id(), e);
                 continue;
             }

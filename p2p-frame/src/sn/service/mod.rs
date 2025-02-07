@@ -6,9 +6,7 @@ mod service;
 mod call_stub;
 mod statistic;
 mod storage;
-mod peer_connection;
 
 pub use receipt::*;
 pub use service::*;
-pub use peer_connection::*;
 

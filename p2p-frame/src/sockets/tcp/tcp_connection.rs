@@ -7,6 +7,7 @@ use bucky_raw_codec::{RawConvertTo};
 use crate::runtime::{TcpStream, TlsConnector};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
+use tokio::net::TcpSocket;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::endpoint::{Endpoint, Protocol};
@@ -73,6 +74,43 @@ impl TCPConnection {
                                        PrivatePkcs8KeyDer::from(local_identity_ref.get_encoded_identity()?).into()).unwrap();
 
         let socket = runtime::timeout(timeout, TcpStream::connect(remote_ep.addr()))
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?
+            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?;
+
+        let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
+        let local = Endpoint::from((Protocol::Tcp, local));
+
+        let tls_connector = TlsConnector::from(Arc::new(client_config));
+        let tls_stream = tls_connector.connect(remote_identity_id.to_string().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let socket = TCPConnection::new(runtime::TlsStream::from(tls_stream), local_identity_ref.get_id(), remote_identity_id, local, remote_ep);
+        debug!("{} connected", socket);
+        Ok(socket)
+    }
+
+    pub async fn connect_with_ep(
+        cert_factory: P2pIdentityCertFactoryRef,
+        local_identity_ref: P2pIdentityRef,
+        local_ep: Endpoint,
+        remote_ep: Endpoint,
+        remote_identity_id: P2pId,
+        timeout: Duration,) -> P2pResult<TCPConnection> {
+        let client_config =
+            rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
+                .with_protocol_versions(&[&TLS13])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory)))
+                .with_client_auth_cert(vec![CertificateDer::from(local_identity_ref.get_name().to_vec().unwrap())],
+                                       PrivatePkcs8KeyDer::from(local_identity_ref.get_encoded_identity()?).into()).unwrap();
+
+        let socket = if local_ep.addr().is_ipv4() {
+            TcpSocket::new_v4().map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "create socket failed"))?
+        } else {
+            TcpSocket::new_v6().map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "create socket failed"))?
+        };
+        socket.bind(local_ep.addr().clone()).map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "bind to {} failed", local_ep))?;
+        let socket = runtime::timeout(timeout, socket.connect(remote_ep.addr().clone()))
             .await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tcp socket to {} connect failed", remote_ep))?;

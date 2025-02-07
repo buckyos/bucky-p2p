@@ -6,8 +6,12 @@ use std::{
     },
     time::Duration,
 };
-use bucky_raw_codec::{RawFrom};
+use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
+use callback_result::SingleCallbackWaiter;
+use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
+use sfo_cmd_server::server::{CmdServer, CmdTunnelListener};
 use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
 use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
@@ -18,17 +22,52 @@ use crate::p2p_network::P2pNetworkRef;
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
+use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnel};
 use crate::sockets::{NetListener, NetListenerRef, NetManager, NetManagerRef, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::types::{TunnelId, TunnelIdGenerator, Timestamp, SessionIdGenerator, SequenceGenerator};
-use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*, PeerConnection};
+use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*};
 
 // const TRACKER_INTERVAL: Duration = Duration::from_secs(60);
 // struct CallTracker {
 //     calls: HashMap<TempSeq, (u64, Instant, DeviceId)>, // <called_seq, (call_send_time, called_send_time)>
 //     begin_time: Instant,
 // }
+
+pub struct SnTunnelListener {
+    net_manager: NetManagerRef,
+    waiter: Arc<SingleCallbackWaiter<P2pConnectionRef>>,
+}
+
+impl SnTunnelListener {
+    pub fn new(local_identity: P2pIdentityRef,
+               net_manager: NetManagerRef) -> Self {
+        let waiter = Arc::new(SingleCallbackWaiter::new());
+        let socket_waiter = waiter.clone();
+        net_manager.set_connection_event_listener(local_identity.get_id(), move |socket: P2pConnectionRef| {
+            let socket_waiter = socket_waiter.clone();
+            async move {
+                socket_waiter.set_result_with_cache(socket);
+                Ok(())
+            }
+        });
+        Self {
+            net_manager,
+            waiter,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CmdTunnelListener<SnTunnel> for SnTunnelListener {
+    async fn accept(&self) -> CmdResult<Arc<SnTunnel>> {
+        let socket = self.waiter.create_result_future().await.map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))?;
+        Ok(Arc::new(SnTunnel::new(socket)))
+    }
+}
+
+pub type SnCmdServerRef = Arc<CmdServer<u16, u8, SnTunnel, SnTunnelListener>>;
 
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
@@ -40,8 +79,9 @@ pub struct SnService {
     // call_tracker: CallTracker,
     peer_mgr: PeerManagerRef,
     call_stub: CallStub,
-    net_manager: NetManagerRef,
     cert_factory: P2pIdentityCertFactoryRef,
+    net_manager: NetManagerRef,
+    cmd_server: SnCmdServerRef,
 }
 
 pub type SnServiceRef = Arc<SnService>;
@@ -71,6 +111,7 @@ impl SnService {
 
         let connection_info_cache = DefaultP2pConnectionInfoCache::new();
         let net_manager = Arc::new(NetManager::new(networks, cert_resolver, connection_info_cache).unwrap());
+        let sn_cmd_server  = CmdServer::new(SnTunnelListener::new(local_identity.clone(), net_manager.clone()));
         let service = SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
             local_identity: local_identity.clone(),
@@ -78,13 +119,10 @@ impl SnService {
             peer_mgr: PeerManager::new(),
             call_stub: CallStub::new(),
             contract,
-            // call_tracker: CallTracker {
-            //     calls: Default::default(),
-            //     begin_time: Instant::now()
-            // }
-            net_manager,
             device_cache,
             cert_factory,
+            net_manager,
+            cmd_server: sn_cmd_server,
         };
 
         let service_ref = Arc::new(service);
@@ -92,48 +130,52 @@ impl SnService {
         service_ref
     }
 
-    pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
-        let this = self.clone();
-        self.net_manager.set_connection_event_listener(self.local_identity.get_id(), move |socket: P2pConnectionRef| {
-            let this = this.clone();
-            async move {
-                let id = this.peer_mgr.generate_conn_id();
-                let tmp = this.clone();
-                match PeerConnection::accept(id, socket, move |conn_id: TunnelId, cmd_code: PackageCmdCode, cmd_body: Vec<u8>| {
-                    let this = tmp.clone();
-                    async move {
-                        this.handle(cmd_code, cmd_body.as_slice(), conn_id).await
-                    }
-                }).await {
-                    Ok(conn) => {
-                        let peer_desc = this.device_cache.get(&conn.remote_identity_id()).await;
-                        if peer_desc.is_some() {
-                            this.peer_mgr.add_peer_connection(peer_desc.unwrap(), conn);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        log::error!("accept error: {:?}", e);
-                        Err(e)
-                    }
-                }
-            }
-        });
-        self.net_manager.listen(self.local_identity.endpoints().as_slice(), None).await?;
-
-        // 清理过期数据
+    fn register_sn_cmd_handler(self: &Arc<Self>) {
         let service = self.clone();
-        let _ = Executor::spawn(async move {
-            loop {
-                {
-                    if service.is_stopped() {
-                        return;
-                    }
-                    service.clean_timeout_resource().await;
-                }
-                runtime::sleep(Duration::from_secs(100)).await;
+        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCall as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, cmd_body: Vec<u8>| {
+            let service = service.clone();
+            async move {
+                let call_req = SnCall::clone_from_slice(cmd_body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                service.handle_call(call_req, &peer_id, tunnel_id, bucky_time_now()).await;
+                Ok(())
             }
         });
+
+        let service = self.clone();
+        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCalledResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, header: SnCmdHeader, cmd_body: Vec<u8>| {
+            let service = service.clone();
+            async move {
+                let called_resp = SnCalledResp::clone_from_slice(cmd_body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                service.handle_called_resp(called_resp).await;
+                Ok(())
+            }
+        });
+
+        let service = self.clone();
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ReportSn as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, cmd_body: Vec<u8>| {
+            let service = service.clone();
+            async move {
+                let report_sn = ReportSn::clone_from_slice(cmd_body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                service.handle_report_sn(&peer_id, tunnel_id, report_sn).await;
+                Ok(())
+            }
+        });
+
+        let service = self.clone();
+        self.cmd_server.register_cmd_handler(PackageCmdCode::SnQuery as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, cmd_body: Vec<u8>| {
+            let service = service.clone();
+            async move {
+                let query = SnQuery::clone_from_slice(cmd_body.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                service.handle_query_sn(&peer_id, tunnel_id, query).await;
+                Ok(())
+            }
+        });
+    }
+
+    pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
+        self.net_manager.listen(self.local_identity.endpoints().as_slice(), None).await?;
+        self.register_sn_cmd_handler();
+        self.cmd_server.start();
 
         Ok(())
     }
@@ -154,139 +196,13 @@ impl SnService {
         &self.peer_mgr
     }
 
-    async fn clean_timeout_resource(&self) {
-        let now = bucky_time_now();
-
-        self.call_stub.recycle(now);
-        // {
-        //     let tracker = &mut self.call_tracker;
-        //     if let Ordering::Greater = now.duration_since(tracker.begin_time).cmp(&TRACKER_INTERVAL) {
-        //         tracker.calls.clear();
-        //         tracker.begin_time = now;
-        //     }
-        // }
-    }
-
-    pub async fn handle(&self, cmd_code: PackageCmdCode, cmd_body: &[u8], conn_id: TunnelId) -> P2pResult<()> {
-        match cmd_code {
-            PackageCmdCode::SnCall => {
-                let call_req = SnCall::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                self.handle_call(
-                    call_req,
-                    conn_id,
-                    bucky_time_now(),
-                ).await;
-            }
-            PackageCmdCode::SnCalledResp => {
-                let called_resp = SnCalledResp::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                self.handle_called_resp(called_resp).await;
-            }
-            PackageCmdCode::ReportSn => {
-                let report_sn = ReportSn::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                self.handle_report_sn(&conn_id, report_sn).await;
-                // self.peer_mgr.report_sn(report_sn).await;
-            }
-            PackageCmdCode::SnQuery => {
-                let query = SnQuery::clone_from_slice(cmd_body).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                self.handle_query_sn(&conn_id, query).await;
-            }
-            _ => warn!("invalid cmd-package, conn: {:?} cmd_code {:?}.", conn_id, cmd_code),
-        }
-        Ok(())
-    }
-
-
-    // fn verify_receipt_sign(
-    //     &self,
-    //     client_desc: &DeviceDesc,
-    //     signed_receipt: &Option<ReceiptWithSignature>) -> bool {
-    //     match signed_receipt {
-    //         None => false,
-    //         Some(receipt) => {
-    //             receipt.receipt().verify(sn_peerid, receipt.signature(), client_desc)
-    //         }
-    //     }
-    // }
-
-    // // 处理ping服务证明
-    // fn ping_receipt(&self, ping_req: &SnPing, from_id: &DeviceId) -> Option<(IsAcceptClient, SnServiceReceipt)> {
-    //     let mut cache_peer = self.peer_mgr.find_peer(from_id, FindPeerReason::Other);
-
-    //     let (device, local_receipt, last_receipt_request_time) = match &cache_peer {
-    //         Some(cache) => (&cache.desc, cache.receipt.clone(), cache.last_receipt_request_time),
-    //         None => {
-    //             let dev = match ping_req.peer_info.as_ref() {
-    //                 Some(dev) => dev,
-    //                 None => return None,
-    //             };
-    //             (
-    //                 dev,
-    //                 SnServiceReceipt::default(),
-    //                 ReceiptRequestTime::None
-    //             )
-    //         }
-    //     };
-
-    //     let is_verify_ok = self.verify_receipt_sign(ping_req.peer_info.desc(), &ping_req.receipt);
-    //     let client_receipt = if is_verify_ok { &ping_req.receipt } else { &None };
-    //     let check_receipt = self.contract.check_receipt(device, &local_receipt, client_receipt, &last_receipt_request_time);
-
-    //     let is_reset_receipt = if is_verify_ok {
-    //         match cache_peer.as_mut() {
-    //             Some(cache_peer) => match last_receipt_request_time {
-    //                 ReceiptRequestTime::Wait(t) => {
-    //                     cache_peer.last_receipt_request_time = ReceiptRequestTime::Last(t);
-    //                     // 重置统计计数
-    //                     true
-    //                 }
-    //                 _ => false
-    //             }
-    //             None => false
-    //         }
-    //     } else {
-    //         false
-    //     };
-
-    //     let is_request_receipt = match check_receipt {
-    //         IsAcceptClient::Refuse => {
-    //             warn!("[ping from {} seq({})] refused by contract.", from_id, ping_req.seq.value());
-    //             return Some((IsAcceptClient::Refuse, local_receipt))
-    //         },
-    //         IsAcceptClient::Accept(r) => r,
-    //     };
-
-    //     if let Some(cache_peer) = cache_peer {
-    //         if is_reset_receipt {
-    //             cache_peer.receipt.start_time = SystemTime::now();
-    //             cache_peer.receipt.ping_count = 0;
-    //             cache_peer.receipt.ping_resp_count = 0;
-    //             cache_peer.receipt.called_count = 0;
-    //             cache_peer.receipt.call_peer_count = 0;
-    //             cache_peer.call_peers.clear();
-    //         }
-
-    //         if cache_peer.last_ping_seq != ping_req.seq {
-    //             cache_peer.receipt.ping_count += 1;
-    //             cache_peer.receipt.ping_resp_count += 1;
-    //             cache_peer.last_ping_seq = ping_req.seq;
-    //         }
-
-    //         if is_request_receipt {
-    //             if let ReceiptRequestTime::Last(_) = cache_peer.last_receipt_request_time { // 一次新的请求
-    //                 cache_peer.last_receipt_request_time = ReceiptRequestTime::Wait(SystemTime::now());
-    //             }
-    //         }
-    //     }
-
-    //     Some((IsAcceptClient::Accept(is_request_receipt), local_receipt))
-    // }
-
     async fn handle_call(
         &self,
         mut call_req: SnCall,
-        conn_id: TunnelId,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
         _send_time: Timestamp,
-    ) {
+    ) -> P2pResult<()> {
         let from_peer_id = &call_req.from_peer_id;
         let log_key = format!(
             "[call {}->{} seq({})]",
@@ -306,23 +222,8 @@ impl SnService {
                     call_req.peer_info.map(|info| self.cert_factory.create(&info).unwrap())
                 };
 
-                let mut reverse_eps = Vec::new();
-                for conn_id in from_peer_cache.conn_list.iter().rev() {
-                    let conn = self.peer_mgr.find_connection(*conn_id);
-                    if conn.is_some() {
-                        let peer_conn = conn.as_ref().unwrap().lock().await;
-                        let remote_ep = peer_conn.remote().clone();
-                        for (protocol, port) in from_peer_cache.map_ports.iter() {
-                            let mut map_ep = Endpoint::from((*protocol, remote_ep.addr().ip(), *port));
-                            map_ep.set_area(EndpointArea::Wan);
-                            reverse_eps.push(map_ep);
-                        }
-                        let mut remote_ep = peer_conn.remote().clone();
-                        remote_ep.set_area(EndpointArea::Wan);
-                        reverse_eps.push(remote_ep);
-                        reverse_eps.extend_from_slice(from_peer_cache.local_eps.as_slice());
-                    }
-                }
+                let mut reverse_eps = self.get_peer_wan_ep_with_map_port(&peer_id, from_peer_cache.map_ports.as_slice()).await;
+                reverse_eps.extend_from_slice(from_peer_cache.local_eps.as_slice());
 
                 if let Some(from_peer_desc) = from_peer_desc {
                     info!(
@@ -366,17 +267,10 @@ impl SnService {
                                 called_req.payload.len(),
                                 called_req.active_pn_list
                             );
-                            for conn_id in to_peer_cache.conn_list.iter() {
-                                let conn = self.peer_mgr.find_connection(*conn_id);
-                                if conn.is_some() {
-                                    let mut peer_conn = conn.as_ref().unwrap().lock().await;
-                                    if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnCalled, called_req.clone())).await {
-                                        log::info!("send called-req failed, conn_id: {:?}, error: {:?}", conn_id, e);
-                                        continue;
-                                    }
-                                }
-                            }
-                            // self.call_tracker.calls.insert(called_seq, (call_req.send_time, Instant::now(), call_req.to_peer_id.clone()));
+
+                            self.cmd_server.send_to_peer_from_all_tunnels(&PeerId::from(call_req.to_peer_id.as_slice()),
+                                                         PackageCmdCode::SnCalled as u8,
+                                                         called_req.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                         }
                     } else {
                         info!("{} ignore send called req for already exists.", log_key);
@@ -418,13 +312,11 @@ impl SnService {
         };
 
 
-        let conn = self.peer_mgr.find_connection(conn_id);
-        if conn.is_some() {
-            let mut conn = conn.as_ref().unwrap().lock().await;
-            if let Err(e) = conn.send(Package::new(PackageCmdCode::SnCallResp, call_resp)).await {
-                log::info!("send call-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
-            }
-        }
+        self.cmd_server.send_to_peer_from_tunnel(peer_id,
+                                                 tunnel_id,
+                                                 PackageCmdCode::SnCallResp as u8,
+                                                 call_resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        Ok(())
     }
 
     async fn handle_called_resp(&self, called_resp: SnCalledResp) {
@@ -445,59 +337,69 @@ impl SnService {
         // }
     }
 
-    async fn handle_report_sn(&self, conn_id: &TunnelId, report_sn: ReportSn) {
-        let conn = self.peer_mgr.find_connection(*conn_id);
-        if conn.is_none() {
-            log::error!("report sn failed, conn_id: {:?} not found.", conn_id);
-            return;
+    async fn get_peer_wan_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
+        let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
+        let mut remotes = Vec::new();
+        for tunnel in tunnels.iter() {
+            let remote = tunnel.p2p_connection().remote();
+            if !remotes.contains(&remote) {
+                remotes.push(remote);
+            }
         }
+        let mut remote_ep = remotes.iter_mut().map(|remote| {
+            remote.set_area(EndpointArea::Wan);
+            remote.clone()
+        }).collect();
+        remote_ep
+    }
 
-        let mut peer_conn = conn.as_ref().unwrap().lock().await;
-        log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_conn.remote_identity_id().to_string(), report_sn.local_eps, report_sn.map_ports);
-        if report_sn.peer_info.is_some() {
-
+    async fn get_peer_wan_ep_with_map_port(&self, peer_id: &PeerId, map_ports: &[(Protocol, u16)]) -> Vec<Endpoint> {
+        let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
+        let mut map_eps = Vec::new();
+        for ep in remote_ep.iter() {
+            for (protocol, port) in map_ports.iter() {
+                let mut map_ep = Endpoint::from((*protocol, ep.addr().ip(), *port));
+                if map_eps.contains(&map_ep) {
+                    continue;
+                }
+                map_ep.set_area(EndpointArea::Wan);
+                map_eps.push(map_ep);
+            }
         }
+        remote_ep.extend_from_slice(map_eps.as_slice());
+        remote_ep
+    }
+
+    async fn handle_report_sn(&self, peer_id: &PeerId, tunnel_id: CmdTunnelId, report_sn: ReportSn) -> P2pResult<()> {
+        let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
+        log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_id.to_base58(), report_sn.local_eps, report_sn.map_ports);
+        let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
+
         if report_sn.from_peer_id.is_some() {
-            self.peer_mgr.update_peer(report_sn.from_peer_id.as_ref().unwrap(),
-                                      &report_sn.peer_info.map(|info| self.cert_factory.create(&info).unwrap()),
-                                      report_sn.map_ports,
-                                      &report_sn.local_eps);
+            self.peer_mgr.add_or_update_peer(report_sn.from_peer_id.as_ref().unwrap(),
+                                             &report_sn.peer_info.map(|info| self.cert_factory.create(&info).unwrap()),
+                                             report_sn.map_ports,
+                                             &report_sn.local_eps);
         }
-        let mut remote_ep = peer_conn.remote().clone();
-        remote_ep.set_area(EndpointArea::Wan);
-        if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::ReportSnResp, ReportSnResp {
+        if let Err(e) = self.cmd_server.send_to_peer_from_tunnel(peer_id, tunnel_id, PackageCmdCode::ReportSnResp as u8, ReportSnResp {
             seq: report_sn.seq,
             sn_peer_id: self.local_identity_id().clone(),
             result: P2pErrorCode::Ok.into_u8(),
             peer_info: None,
-            end_point_array: vec![remote_ep],
+            end_point_array: remote_ep,
             receipt: None,
-        })).await {
-            log::error!("send report-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
+        }.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
+            log::error!("send report-sn-resp failed, peer_id: {:?}, error: {:?}", peer_id, e);
         }
+        Ok(())
     }
 
-    async fn handle_query_sn(&self, conn_id: &TunnelId, query: SnQuery) {
+    async fn handle_query_sn(&self, peer_id: &PeerId, tunnel_id: CmdTunnelId, query: SnQuery) -> P2pResult<()> {
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();
-            let mut end_point_array = Vec::new();
-            for conn_id in device_info.conn_list.iter().rev() {
-                let conn = self.peer_mgr.find_connection(*conn_id);
-                if conn.is_some() {
-                    let peer_conn = conn.as_ref().unwrap().lock().await;
-                    let remote_ep = peer_conn.remote().clone();
-                    for (protocol, port) in device_info.map_ports.iter() {
-                        let mut map_ep = Endpoint::from((*protocol, remote_ep.addr().ip(), *port));
-                        map_ep.set_area(EndpointArea::Wan);
-                        end_point_array.push(map_ep);
-                    }
-                    let mut remote_ep = peer_conn.remote().clone();
-                    remote_ep.set_area(EndpointArea::Wan);
-                    end_point_array.push(remote_ep);
-                    end_point_array.extend_from_slice(device_info.local_eps.as_slice());
-                }
-            }
+            let mut end_point_array = self.get_peer_wan_ep_with_map_port(&peer_id, device_info.map_ports.as_slice()).await;
+            end_point_array.extend_from_slice(device_info.local_eps.as_slice());
             SnQueryResp {
                 seq: query.seq,
                 peer_info: Some(device_info.desc.get_encoded_cert().unwrap()),
@@ -511,14 +413,11 @@ impl SnService {
             }
         };
 
-        let conn = self.peer_mgr.find_connection(*conn_id);
-        if conn.is_some() {
-            let mut peer_conn = conn.as_ref().unwrap().lock().await;
-            log::info!("query sn from {}.", peer_conn.remote_identity_id().to_string());
-            if let Err(e) = peer_conn.send(Package::new(PackageCmdCode::SnQueryResp, resp)).await {
-                log::error!("send query-sn-resp failed, conn_id: {:?}, error: {:?}", conn_id, e);
-            }
-        }
+        self.cmd_server.send_to_peer_from_tunnel(peer_id,
+                                                 tunnel_id,
+                                                 PackageCmdCode::SnQueryResp as u8,
+                                                 resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        Ok(())
     }
 }
 
