@@ -9,11 +9,13 @@ use crate::endpoint::{Endpoint, EndpointArea};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::p2p_connection::{ConnectDirection, P2pConnectionInfo};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
+use crate::pn::{PnClient, PnClientRef};
 use crate::protocol::v0::SnCallType;
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
 use crate::tunnel::{select_successful, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPortsRef, TunnelStatRef, TunnelStream};
+use crate::tunnel::proxy_connection::ProxyConnection;
 use crate::types::{SessionId, TunnelId};
 
 pub enum ReverseResult {
@@ -66,6 +68,7 @@ pub struct Tunnel {
     conn_timeout: Duration,
     idle_timeout: Duration,
     cert_factory: P2pIdentityCertFactoryRef,
+    pn_client: Option<PnClientRef>,
 }
 
 impl Tunnel {
@@ -80,7 +83,8 @@ impl Tunnel {
         local_identity: P2pIdentityRef,
         conn_timeout: Duration,
         idle_timeout: Duration,
-        cert_factory: P2pIdentityCertFactoryRef,) -> Self {
+        cert_factory: P2pIdentityCertFactoryRef,
+        pn_client: Option<PnClientRef>) -> Self {
         Self {
             net_manager,
             sn_service,
@@ -95,6 +99,7 @@ impl Tunnel {
             conn_timeout,
             idle_timeout,
             cert_factory,
+            pn_client,
         }
     }
 
@@ -179,6 +184,30 @@ impl Tunnel {
         });
         future
     }
+
+    async fn create_proxy_connection(&self) -> P2pResult<Option<TunnelConnection>> {
+        if self.pn_client.is_none() {
+            return Ok(None);
+        }
+
+        let pn_client = self.pn_client.as_ref().unwrap();
+
+        let (read, write) = runtime::timeout(self.conn_timeout,
+                                             pn_client.connect(self.tunnel_id, self.remote_id.clone())).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
+        let proxy_conn = Arc::new(ProxyConnection::new(self.remote_id.clone(), self.local_identity.get_id(), read, write));
+        let conn = TunnelConnection::new(
+            self.tunnel_id,
+            self.local_identity.clone(),
+            self.remote_id.clone(),
+            Endpoint::default(),
+            self.conn_timeout,
+            self.protocol_version,
+            self.stack_version,
+            Some(proxy_conn),
+            self.cert_factory.clone())?;
+        Ok(Some(conn))
+    }
+
     pub async fn connect_stream(&mut self, vport: u16, session_id: SessionId, future_cache: Arc<dyn ReverseFutureCache>) -> P2pResult<TunnelStream> {
         if self.tunnel_conn.is_some() {
             let stream = self.tunnel_conn.as_ref().unwrap().connect_stream(vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
@@ -228,6 +257,19 @@ impl Tunnel {
                     return Ok(stream)
                 }
                 has_reversed = true;
+            } else if latest_connection_info.direct == ConnectDirection::Proxy {
+                let proxy_conn = self.create_proxy_connection().await?;
+                if proxy_conn.is_some() {
+                    let conn = proxy_conn.unwrap();
+                    let stream = conn.connect_stream(vport, session_id).await?;
+                    self.tunnel_conn = Some(conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Proxy,
+                        local_ep: stream.local_endpoint(),
+                        remote_ep: stream.remote_endpoint(),
+                    }).await;
+                    return Ok(stream);
+                }
             }
         }
 
@@ -278,13 +320,23 @@ impl Tunnel {
                     local_ep: stream.local_endpoint(),
                     remote_ep: stream.remote_endpoint(),
                 }).await;
-                Ok(stream)
-            } else {
-                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+                return Ok(stream);
             }
-        } else {
-            Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
         }
+
+        let proxy_conn = self.create_proxy_connection().await?;
+        if proxy_conn.is_some() {
+            let conn = proxy_conn.unwrap();
+            let stream = conn.connect_stream(vport, session_id).await?;
+            self.tunnel_conn = Some(conn);
+            self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                direct: ConnectDirection::Proxy,
+                local_ep: stream.local_endpoint(),
+                remote_ep: stream.remote_endpoint(),
+            }).await;
+            return Ok(stream);
+        }
+        Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
     }
 
     fn create_datagram_connection(&self, ep: &Endpoint, vport: u16, session_id: SessionId) -> Pin<Box<dyn Future<Output=P2pResult<(TunnelConnection, TunnelDatagramSend)>> + Send>> {
@@ -371,6 +423,19 @@ impl Tunnel {
                     return Ok(datagram_send);
                 }
                 is_reversed = true;
+            } else if connection_info.direct == ConnectDirection::Proxy {
+                let proxy_conn = self.create_proxy_connection().await?;
+                if proxy_conn.is_some() {
+                    let conn = proxy_conn.unwrap();
+                    let send = conn.connect_datagram(vport, session_id).await?;
+                    self.tunnel_conn = Some(conn);
+                    self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                        direct: ConnectDirection::Proxy,
+                        local_ep: send.local_endpoint(),
+                        remote_ep: send.remote_endpoint(),
+                    }).await;
+                    return Ok(send);
+                }
             }
         }
 
@@ -417,13 +482,24 @@ impl Tunnel {
                     local_ep: datagram_send.local_endpoint(),
                     remote_ep: datagram_send.remote_endpoint(),
                 }).await;
-                Ok(datagram_send)
-            } else {
-                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+                return Ok(datagram_send);
             }
-        } else {
-            Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
         }
+
+        let proxy_conn = self.create_proxy_connection().await?;
+        if proxy_conn.is_some() {
+            let conn = proxy_conn.unwrap();
+            let send = conn.connect_datagram(vport, session_id).await?;
+            self.tunnel_conn = Some(conn);
+            self.net_manager.get_connection_info_cache().add(self.remote_id.clone(), P2pConnectionInfo {
+                direct: ConnectDirection::Proxy,
+                local_ep: send.local_endpoint(),
+                remote_ep: send.remote_endpoint(),
+            }).await;
+            return Ok(send);
+        }
+
+        Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
     }
 
     pub async fn connect_reverse_stream(&mut self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {

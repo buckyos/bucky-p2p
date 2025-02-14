@@ -8,12 +8,12 @@ use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::P2pId;
 use crate::runtime;
 
-pub trait P2pRead: runtime::AsyncRead + Send + Sync + 'static + Unpin + Any {
+pub trait P2pRead: runtime::AsyncRead + Send + 'static + Unpin + Any {
     fn get_any(&self) -> &dyn Any;
     fn get_any_mut(&mut self) -> &mut dyn Any;
 }
 
-pub trait P2pWrite: runtime::AsyncWrite + Send + Sync + 'static + Unpin + Any {
+pub trait P2pWrite: runtime::AsyncWrite + Send + 'static + Unpin + Any {
     fn get_any(&self) -> &dyn Any;
     fn get_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -47,6 +47,7 @@ pub type P2pListenerRef = Arc<dyn P2pListener>;
 pub enum ConnectDirection {
     Direct,
     Reverse,
+    Proxy,
 }
 
 #[derive(Debug, Clone, RawDecode, RawEncode)]

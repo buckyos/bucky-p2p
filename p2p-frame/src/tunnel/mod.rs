@@ -1,6 +1,7 @@
 mod tunnel_manager;
 mod tunnel;
 mod tunnel_connection;
+mod proxy_connection;
 // mod tcp_tunnel_connection;
 // mod quic_tunnel_connection;
 

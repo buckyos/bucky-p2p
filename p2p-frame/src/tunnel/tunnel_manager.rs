@@ -10,11 +10,13 @@ use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::P2pConnectionRef;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityCertCacheRef};
+use crate::pn::PnClientRef;
 use crate::protocol::{Package, PackageCmdCode};
 use crate::protocol::v0::{AckDatagram, AckReverseDatagram, AckReverseStream, AckStream, SnCallType, SnCalled};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef};
+use crate::tunnel::proxy_connection::ProxyConnection;
 use crate::types::{SessionId, TunnelId, TunnelIdGenerator};
 use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPorts, TunnelStream};
 
@@ -340,6 +342,7 @@ pub struct TunnelManager {
     device_finder: DeviceFinderRef,
     cert_factory: P2pIdentityCertFactoryRef,
     sn_calling: Mutex<HashMap<P2pId, HashSet<TunnelId>>>,
+    pn_client: Option<PnClientRef>,
 }
 pub type TunnelManagerRef = Arc<TunnelManager>;
 
@@ -350,6 +353,7 @@ impl TunnelManager {
         local_identity: P2pIdentityRef,
         device_finder: DeviceFinderRef,
         cert_factory: P2pIdentityCertFactoryRef,
+        pn_client: Option<PnClientRef>,
         protocol_version: u8,
         stack_version: u32,
         conn_timeout: Duration,
@@ -362,7 +366,6 @@ impl TunnelManager {
                 Self::clear_idle_tunnel(tmp.clone()).await;
             }
         }).unwrap();
-
 
         let manager = Arc::new(Self {
             tunnels,
@@ -381,16 +384,49 @@ impl TunnelManager {
             device_finder,
             cert_factory,
             sn_calling: Mutex::new(Default::default()),
+            pn_client: pn_client.clone(),
         });
 
-        let tmp_manager = manager.clone();
+        let tmp_manager = Arc::downgrade(&manager);
         net_manager.set_connection_event_listener(manager.local_identity.get_id(), move |conn| {
             let tmp_manager = tmp_manager.clone();
             async move {
-                tmp_manager.on_new_tunnel(conn).await
+                if let Some(manager) = tmp_manager.upgrade() {
+                    manager.on_new_tunnel(conn).await
+                } else {
+                    Err(p2p_err!(P2pErrorCode::Failed, "tunnel manager has dropped"))
+                }
             }
         });
 
+        if pn_client.is_some() {
+            let local_id = manager.local_identity.get_id();
+            let pn_client = pn_client.unwrap();
+            let tmp_manager = Arc::downgrade(&manager);
+            Executor::spawn(async move {
+                loop {
+                    match pn_client.accept().await {
+                        Ok((read, write)) => {
+                            let proxy_conn = Arc::new(ProxyConnection::new(read.remote_id().clone(), local_id.clone(), read, write));
+                            let manager = tmp_manager.clone();
+                            Executor::spawn(async move {
+                                if let Some(manager) = manager.upgrade() {
+                                    if let Err(e) = manager.on_new_tunnel(proxy_conn).await {
+                                        log::error!("accept proxy connection error: {:?}", e);
+                                    }
+                                } else {
+                                    log::error!("tunnel manager has dropped");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            log::error!("accept proxy connection error: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
         manager
     }
 
@@ -484,7 +520,7 @@ impl TunnelManager {
                                 local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
-                                cert_factory.clone());
+                                cert_factory.clone(), None);
                             tunnel.set_tunnel_conn(tunnel_conn);
                             let (ack, mut stream) = {
                                 let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel.get_tunnel_id())).await;
@@ -539,7 +575,8 @@ impl TunnelManager {
                                 local_identity.clone(),
                                 conn_timeout,
                                 idle_timeout,
-                                cert_factory.clone());
+                                cert_factory.clone(),
+                                None);
                             tunnel.set_tunnel_conn(tunnel_conn);
 
                             let (ack, mut datagram) = {
@@ -732,6 +769,7 @@ impl TunnelManager {
                 self.conn_timeout,
                 self.idle_timeout,
                 self.cert_factory.clone(),
+                self.pn_client.clone()
             );
             let datagram = tunnel.connect_datagram(vport, session_id, tunnels.clone(),).await?;
             let listener = self.listener.clone();
@@ -758,7 +796,8 @@ impl TunnelManager {
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
-                self.cert_factory.clone()
+                self.cert_factory.clone(),
+                self.pn_client.clone()
             );
             let datagram = tunnel.connect_datagram(vport, session_id, tunnels.clone()).await?;
             let listener = self.listener.clone();
@@ -794,6 +833,7 @@ impl TunnelManager {
                 self.conn_timeout,
                 self.idle_timeout,
                 self.cert_factory.clone(),
+                self.pn_client.clone()
             );
             let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
             let listener = self.listener.clone();
@@ -821,6 +861,7 @@ impl TunnelManager {
                 self.conn_timeout,
                 self.idle_timeout,
                 self.cert_factory.clone(),
+                self.pn_client.clone()
             );
             let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
             let listener = self.listener.clone();
@@ -898,7 +939,8 @@ impl TunnelManager {
                     self.local_identity.clone(),
                     self.conn_timeout,
                     self.idle_timeout,
-                    self.cert_factory.clone());
+                    self.cert_factory.clone(),
+                    self.pn_client.clone());
 
                 let datagram_call = DatagramSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 let recv = tunnel.connect_reverse_datagram(datagram_call.vport, datagram_call.session_id).await?;
@@ -923,7 +965,8 @@ impl TunnelManager {
                     self.local_identity.clone(),
                     self.conn_timeout,
                     self.idle_timeout,
-                    self.cert_factory.clone());
+                    self.cert_factory.clone(),
+                    self.pn_client.clone());
 
                 let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
                 let stream = tunnel.connect_reverse_stream(stream_call.vport, stream_call.session_id).await?;

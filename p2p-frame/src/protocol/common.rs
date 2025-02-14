@@ -38,8 +38,13 @@ pub enum PackageCmdCode {
     SnQuery = 0x26,
     SnQueryResp = 0x27,
 
-    SynProxy = 0x50,
-    AckProxy = 0x51,
+    FromProxy = 0x50,
+    FromProxyResp = 0x51,
+    ToProxy = 0x52,
+    ToProxyResp = 0x53,
+    ProxyHeart = 0x54,
+    ProxyHeartResp = 0x55,
+
 
     PieceData = 0x60,
     PieceControl = 0x61,
@@ -55,7 +60,7 @@ impl PackageCmdCode {
     }
 
     pub fn is_proxy(&self) -> bool {
-        (*self >= Self::SynProxy) && (*self <= Self::AckProxy)
+        (*self >= Self::FromProxy) && (*self <= Self::ToProxyResp)
     }
 }
 
@@ -80,8 +85,12 @@ impl TryFrom<u8> for PackageCmdCode {
             0x26u8 => Ok(Self::SnQuery),
             0x27u8 => Ok(Self::SnQueryResp),
 
-            0x50u8 => Ok(Self::SynProxy),
-            0x51u8 => Ok(Self::AckProxy),
+            0x50u8 => Ok(Self::FromProxy),
+            0x51u8 => Ok(Self::FromProxyResp),
+            0x52u8 => Ok(Self::ToProxy),
+            0x53u8 => Ok(Self::ToProxyResp),
+            0x54u8 => Ok(Self::ProxyHeart),
+            0x55u8 => Ok(Self::ProxyHeartResp),
 
             0x60u8 => Ok(Self::PieceData),
             0x61u8 => Ok(Self::PieceControl),

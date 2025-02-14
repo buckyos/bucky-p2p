@@ -85,9 +85,8 @@ async fn main() {
                 Arc::new(CyfsIdentityFactory),
                 Arc::new(CyfsIdentityCertFactory),
                 Box::new(SnServiceContractServerImpl::new()),
+                true
             ).await;
-
-            let _ = service.start().await;
 
             std::future::pending::<u8>().await;
         }

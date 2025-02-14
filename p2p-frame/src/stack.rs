@@ -10,6 +10,7 @@ use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
 use crate::p2p_identity::{P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
 use crate::p2p_network::P2pNetworkRef;
+use crate::pn::{DefaultPnClient, PnClientRef};
 use crate::protocol::v0::SnCalled;
 use crate::sn::client::{SNClientService, SNClientServiceRef};
 use crate::sockets::{NetManager, NetManagerRef, QuicNetwork};
@@ -62,6 +63,7 @@ impl P2pConfig {
             quic_idle_time: Duration::from_secs(60),
         }
     }
+
     pub fn identity_factory(&self) -> &P2pIdentityFactoryRef {
         &self.identity_factory
     }
@@ -287,6 +289,8 @@ pub struct P2pStackConfig {
     sn_call_timeout: Duration,
     device_finder: Option<DeviceFinderRef>,
     sn_tunnel_count: u16,
+    support_proxy: bool,
+    proxy_client: Option<PnClientRef>,
 }
 
 impl P2pStackConfig {
@@ -301,6 +305,8 @@ impl P2pStackConfig {
             sn_call_timeout: Duration::from_secs(30),
             device_finder: None,
             sn_tunnel_count: 5,
+            support_proxy: false,
+            proxy_client: None,
         }
     }
 
@@ -377,6 +383,24 @@ impl P2pStackConfig {
         }
         self
     }
+
+    pub fn support_proxy(&self) -> bool {
+        self.support_proxy
+    }
+
+    pub fn set_support_proxy(mut self, support_proxy: bool) -> Self {
+        self.support_proxy = support_proxy;
+        self
+    }
+
+    pub fn proxy_client(&self) -> &Option<PnClientRef> {
+        &self.proxy_client
+    }
+
+    pub fn set_proxy_client(mut self, proxy_client: PnClientRef) -> Self {
+        self.proxy_client = Some(proxy_client);
+        self
+    }
 }
 
 pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> {
@@ -393,6 +417,9 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let device_finder = config.device_finder().clone();
     let idle_timeout = config.idle_timeout();
     let sn_tunnel_count = config.sn_tunnel_count();
+    let support_proxy = config.support_proxy();
+    let proxy_client = config.proxy_client().clone();
+
     let sn_service = SNClientService::new(
         net_manager.clone(),
         sn_list,
@@ -406,6 +433,18 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         conn_timeout,
     );
 
+    let proxy_client = if support_proxy {
+        let proxy_client = if let Some(proxy_client) = proxy_client {
+            proxy_client
+        } else {
+            let default = DefaultPnClient::new(sn_service.get_cmd_client().clone());
+            default
+        };
+        Some(proxy_client)
+    } else {
+        None
+    };
+
     let device_finder = if device_finder.is_some() {
         device_finder.unwrap()
     } else {
@@ -417,6 +456,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         local_identity.clone(),
         device_finder,
         cert_factory.clone(),
+        proxy_client.clone(),
         0,
         0,
         conn_timeout,

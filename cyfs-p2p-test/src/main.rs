@@ -303,6 +303,7 @@ async fn all_in_one() {
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
         Box::new(SnServiceContractServerImpl::new()),
+        true
     ).await;
     sn_service.start().await.unwrap();
 

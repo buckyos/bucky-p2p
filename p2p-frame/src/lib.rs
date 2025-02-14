@@ -19,6 +19,7 @@ pub mod stack;
 pub mod p2p_connection;
 pub mod p2p_network;
 pub mod datagram;
+pub mod pn;
 
 #[macro_use]
 extern crate log;
