@@ -682,6 +682,6 @@ impl Tunnel {
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        log::info!("drop tunnel {:?}", self.tunnel_id);
+        log::info!("drop tunnel {:?} local {}", self.tunnel_id, self.local_identity.get_id());
     }
 }
