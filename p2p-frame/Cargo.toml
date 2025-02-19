@@ -27,7 +27,7 @@ sfo-result = { version = "0.2.6", features = ["backtrace"] }
 as-any = "0.3.1"
 num-traits = "0.2"
 num-derive = "0.4"
-quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "rustls", "ring"] }
+quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "rustls", "ring"] }
 #quinn-proto = { version = "0.11", default-features = false, features = ["log"] }
 rustls = { version = "0.23.20", default-features = false, features = ["ring", "std"] }
 libc = '0.2'
@@ -35,13 +35,16 @@ c_linked_list = '1.1.1'
 rusqlite = { version = '0.30.0', features = ['bundled', 'blob'] }
 if-addrs = { version = "0.13.3" }
 async-named-locker = "0.1.2"
-sfo-cmd-server = { git = "https://github.com/wugren/sfo-cmd-server.git" }
+#sfo-cmd-server = { git = "https://github.com/wugren/sfo-cmd-server.git" }
+sfo-cmd-server = { path = "../../sfo-cmd-server" }
 
 hmac = "0.12.1"
 aes-gcm = "0.10.3"
 rand_core = "0.6.4"
 x25519-dalek = "2"
 base-x = "0.2.11"
+hex = "0.4.3"
+base58 = "0.2.0"
 
 [target.'cfg(unix)'.dependencies]
 nix = '0.24'

@@ -197,6 +197,7 @@ async fn handle_cmd(cmd_code: PackageCmdCode, cmd_body: &[u8], read: &ReadHolder
             (read, write)
         };
         write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let mut tunnel = tunnel.lock().unwrap();
         tunnel.tunnel_stat.decrease_work_instance();
         tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
@@ -333,6 +334,7 @@ impl TunnelStream {
             let header = PackageHeader::new(PackageCmdCode::PieceData, chunk.len() as u16);
             write.as_mut().unwrap().write_all(header.to_vec().unwrap().as_slice()).await?;
             write.as_mut().unwrap().write_all(chunk).await?;
+            write.as_mut().unwrap().flush().await?;
             remainder = &remainder[chunk.len()..];
         }
         Ok(())
@@ -361,6 +363,7 @@ impl TunnelStream {
         if self.recv_header_handle.is_some() {
             let (cmd_code, header) = self.recv_header_handle.take().unwrap().await.map_err(into_p2p_err!(P2pErrorCode::Failed, "get spawn result"))??;
             if (cmd_code != PackageCmdCode::PieceData) {
+                log::error!("tunnel {:?} invalid cmd code {:?}", self.session_id, cmd_code);
                 return Ok(0);
             }
             self.remainder = header.pkg_len();
@@ -445,6 +448,7 @@ impl TunnelStream {
                         return Ok(());
                     }
                     write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                    write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                 }
                 if recv_header_handle.is_some() {
                     let (cmd_code, header) = recv_header_handle.unwrap().await.map_err(into_p2p_err!(P2pErrorCode::Failed, "get spawn result"))??;
@@ -792,6 +796,7 @@ impl TunnelDatagramSend {
             let header = PackageHeader::new(PackageCmdCode::PieceData, chunk.len() as u16);
             write.as_mut().unwrap().write_all(header.to_vec().unwrap().as_slice()).await?;
             write.as_mut().unwrap().write_all(chunk).await?;
+            write.as_mut().unwrap().flush().await?;
             remainder = &remainder[chunk.len()..];
         }
         Ok(data_len)
@@ -837,6 +842,7 @@ impl TunnelDatagramSend {
                         return Ok(());
                     }
                     write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                    write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                 }
                 if recv_handle.is_some() {
                     let (cmd_code, header) = recv_handle.unwrap().await.map_err(into_p2p_err!(P2pErrorCode::Failed, "get spawn result"))??;
@@ -1039,6 +1045,7 @@ impl TunnelDatagramRecv {
             };
             let pkg = Package::new(PackageCmdCode::AckClose, ack);
             self.write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+            self.write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
             let mut tunnel = self.tunnel.lock().unwrap();
             tunnel.tunnel_stat.decrease_work_instance();
             tunnel.data_socket.as_mut().unwrap().unsplit(self.read.take().unwrap(), self.write.take().unwrap());
@@ -1126,6 +1133,7 @@ impl TunnelDatagramRecv {
                     return Ok(());
                 }
                 write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
 
                 loop {
                     let (cmd_code, cmd_body) = read_pkg(read.as_mut().unwrap()).await?;
@@ -1144,6 +1152,7 @@ impl TunnelDatagramRecv {
                         };
                         let pkg = Package::new(PackageCmdCode::AckClose, ack);
                         write.as_mut().unwrap().write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                        write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                     }
                 }
 
@@ -1354,7 +1363,6 @@ impl TunnelConnectionInner {
             tunnel_stat: TunnelStat::new(),
             cert_factory,
         };
-        obj.enter_idle_mode()?;
         Ok(obj)
     }
 
@@ -1388,6 +1396,7 @@ impl TunnelConnectionInner {
         let pkg = Package::new(PackageCmdCode::SynStream, syn);
 
         write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckStream {
@@ -1416,6 +1425,7 @@ impl TunnelConnectionInner {
         let pkg = Package::new(PackageCmdCode::SynReverseStream, syn);
 
         write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckReverseStream {
@@ -1444,6 +1454,7 @@ impl TunnelConnectionInner {
         let pkg = Package::new(PackageCmdCode::SynDatagram, syn);
 
         write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckDatagram {
@@ -1472,6 +1483,7 @@ impl TunnelConnectionInner {
         let pkg = Package::new(PackageCmdCode::SynReverseDatagram, syn);
 
         write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let (read, cmd_code, cmd_body) = recv_future.await?;
 
         if cmd_code != PackageCmdCode::AckReverseDatagram {
@@ -1585,7 +1597,8 @@ impl TunnelConnection {
 
     pub(crate) async fn connect_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
         let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            inner.enter_idle_mode()?;
             (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
         if has_socket {
@@ -1604,7 +1617,8 @@ impl TunnelConnection {
 
     pub(crate) async fn connect_datagram(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
         let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            inner.enter_idle_mode()?;
             (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
 
@@ -1625,7 +1639,8 @@ impl TunnelConnection {
 
     pub(crate) async fn connect_reverse_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
         let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            inner.enter_idle_mode()?;
             (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
 
@@ -1646,7 +1661,8 @@ impl TunnelConnection {
 
     pub(crate) async fn connect_reverse_datagram(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramRecv> {
         let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            inner.enter_idle_mode()?;
             (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
         };
 
@@ -1762,6 +1778,7 @@ impl TunnelConnection {
                     };
                     let pkg = Package::new(PackageCmdCode::AckStream, ack);
                     write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                    write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                     {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Worked;
@@ -1785,6 +1802,7 @@ impl TunnelConnection {
                     };
                     let pkg = Package::new(PackageCmdCode::AckReverseStream, ack);
                     write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                    write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                     {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Worked;
@@ -1808,6 +1826,7 @@ impl TunnelConnection {
                     };
                     let pkg = Package::new(PackageCmdCode::AckDatagram, ack);
                     write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                    write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                     {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Worked;
@@ -1831,6 +1850,7 @@ impl TunnelConnection {
                     };
                     let pkg = Package::new(PackageCmdCode::AckReverseDatagram, ack);
                     write.write_all(pkg.to_vec().unwrap().as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                    write.flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                     {
                         let mut inner = self.inner.lock().unwrap();
                         inner.tunnel_state = TunnelState::Worked;
@@ -1853,8 +1873,9 @@ impl TunnelConnection {
         loop {
             let future = NotifyFuture::new();
             {
-                let inner = self.inner.lock().unwrap();
+                let mut inner = self.inner.lock().unwrap();
                 inner.accept_future.set_future(future.clone());
+                inner.enter_idle_mode()?;
             };
 
             let (read, cmd_code, cmd_body) = future.await?;
@@ -1946,7 +1967,7 @@ impl TunnelConnection {
     }
     pub(crate) async fn shutdown(&self) -> P2pResult<()> {
         {
-            log::info!("tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id);
+            log::info!("tunnel {:?} shutdown.local {}", {self.inner.lock().unwrap().tunnel_id}, {self.inner.lock().unwrap().local_identity.get_id()});
         }
         let (accept_handle, recv_future, accept_future) = {
             let mut inner = self.inner.lock().unwrap();
@@ -1963,6 +1984,9 @@ impl TunnelConnection {
         recv_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id)));
         accept_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id)));
 
+        {
+            log::info!("tunnel {:?} shutdowned.local {}", {self.inner.lock().unwrap().tunnel_id}, {self.inner.lock().unwrap().local_identity.get_id()});
+        }
         // inner.data_socket.as_ref().unwrap().shutdown().await?;
         Ok(())
     }

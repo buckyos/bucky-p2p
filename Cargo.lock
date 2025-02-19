@@ -739,7 +739,7 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-raw-codec.git#791a13de5152c7ce47b90eea06dbc29e59b5904f"
+source = "git+https://github.com/buckyos/bucky-raw-codec.git#7a40427bcc928972746c94598b33a2b5e7b25508"
 dependencies = [
  "bucky-error",
  "bucky-raw-codec-derive",
@@ -756,7 +756,7 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec-derive"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-raw-codec.git#791a13de5152c7ce47b90eea06dbc29e59b5904f"
+source = "git+https://github.com/buckyos/bucky-raw-codec.git#7a40427bcc928972746c94598b33a2b5e7b25508"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -882,9 +882,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.13"
+version = "1.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7777341816418c02e033934a09f20dc0ccaf65a5201ef8a450ae0105a573fda"
+checksum = "0c3d1b2e905a3a7b00a6141adb0e4c0bb941d11caf55349d863942a1cc44e3c9"
 dependencies = [
  "shlex",
 ]
@@ -1352,9 +1352,9 @@ checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
 
 [[package]]
 name = "equivalent"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
+checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "erased-serde"
@@ -2601,6 +2601,7 @@ dependencies = [
  "async-std",
  "async-trait",
  "base-x",
+ "base58",
  "bucky-raw-codec",
  "bucky-time",
  "c_linked_list",
@@ -2608,6 +2609,7 @@ dependencies = [
  "callback-trait",
  "futures",
  "futures-rustls",
+ "hex",
  "hmac 0.12.1",
  "if-addrs",
  "libc",
@@ -3069,9 +3071,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.9"
+version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c40286217b4ba3a71d644d752e6a0b71f13f1b6a2c5311acfcbe0c2418ed904"
+checksum = "e46f3055866785f6b92bc6164b76be02ca8f2eb4b002c0354b28cf4c119e5944"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -3207,15 +3209,14 @@ checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
 name = "ring"
-version = "0.17.8"
+version = "0.17.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c17fa4cb658e3583423e915b9f3acc01cceaee1860e33d59ebae66adc3a2dc0d"
+checksum = "e75ec5e92c4d8aede845126adc388046234541629e76029599ed35a003c7ed24"
 dependencies = [
  "cc",
  "cfg-if 1.0.0",
  "getrandom 0.2.14",
  "libc",
- "spin",
  "untrusted",
  "windows-sys 0.52.0",
 ]
@@ -3567,13 +3568,14 @@ dependencies = [
 [[package]]
 name = "sfo-cmd-server"
 version = "0.1.0"
-source = "git+https://github.com/wugren/sfo-cmd-server.git#903d150f2c3aeb3c9b7f5234f56c31589767e793"
 dependencies = [
  "async-trait",
+ "base-x",
  "base58",
  "bucky-raw-codec",
  "callback-result",
  "callback-trait",
+ "hex",
  "log",
  "num",
  "sfo-pool",
@@ -3727,9 +3729,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.13.2"
+version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
+checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
 
 [[package]]
 name = "sn-miner"
@@ -4257,7 +4259,6 @@ version = "0.1.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "784e0ac535deb450455cbfa28a6f0df145ea1bb7ae51b821cf5e7927fdcfbdd0"
 dependencies = [
- "log",
  "pin-project-lite 0.2.16",
  "tracing-core",
 ]

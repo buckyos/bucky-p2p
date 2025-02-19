@@ -228,13 +228,13 @@ impl TunnelManagerEvent {
 
 #[callback_trait::callback_trait]
 pub trait TunnelManagerStreamEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_stream(&self, tunnel: TunnelStream) -> ();
+    async fn on_new_tunnel_stream(&self, tunnel: TunnelStream) -> P2pResult<()>;
 }
 pub type TunnelManagerStreamEventRef = Arc<dyn TunnelManagerStreamEvent>;
 
 #[callback_trait::callback_trait]
 pub trait TunnelManagerDatagramEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_datagram(&self, tunnel: TunnelDatagramRecv) -> ();
+    async fn on_new_tunnel_datagram(&self, tunnel: TunnelDatagramRecv) -> P2pResult<()>;
 }
 pub type TunnelManagerDatagramEventRef = Arc<dyn TunnelManagerDatagramEvent>;
 
@@ -360,9 +360,11 @@ impl TunnelManager {
         idle_timeout: Duration,) -> Arc<Self> {
         let tunnels = Arc::new(RwLock::new(HashMap::<P2pId, Arc<Tunnels>>::new()));
         let tmp = tunnels.clone();
+        let local_id = local_identity.get_id();
         let handle = Executor::spawn_with_handle(async move {
             loop {
                 runtime::sleep(Duration::from_secs(120)).await;
+                log::info!("{} start clear idle tunnel", local_id);
                 Self::clear_idle_tunnel(tmp.clone()).await;
             }
         }).unwrap();

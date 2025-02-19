@@ -16,12 +16,12 @@ pub struct PingSessionResp {
     pub endpoints: Vec<Endpoint>
 }
 
-pub(crate) struct SnTunnel {
+pub struct SnTunnel {
     conn: P2pConnectionRef,
 }
 
 impl SnTunnel {
-    pub fn new(conn: P2pConnectionRef) -> Self {
+    pub(crate) fn new(conn: P2pConnectionRef) -> Self {
         Self {
             conn,
         }

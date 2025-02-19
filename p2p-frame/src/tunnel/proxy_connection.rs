@@ -107,6 +107,12 @@ impl ProxyConnection {
     }
 }
 
+impl Drop for ProxyConnection {
+    fn drop(&mut self) {
+        log::info!("proxy connection drop remote_id: {}, local_id: {}", self.remote_id, self.local_id);
+    }
+}
+
 impl P2pConnection for ProxyConnection {
     fn is_stream(&self) -> bool {
         true

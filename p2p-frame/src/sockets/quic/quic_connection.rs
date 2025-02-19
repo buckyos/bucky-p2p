@@ -269,11 +269,12 @@ impl P2pRead for QuicRead {
 impl runtime::AsyncRead for QuicRead {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
         let recv = self.recv.as_mut().unwrap();
-        match recv.poll_read(cx, buf.initialized_mut()) {
+        match recv.poll_read(cx, buf.initialize_unfilled()) {
             Poll::Ready(ret) => {
                 match ret {
                     Ok(size) => {
-                        buf.set_filled(size);
+                        buf.advance(size);
+                        log::trace!("quic read size {} data {}", size, hex::encode(buf.filled()));
                         Poll::Ready(Ok(()))
                     },
                     Err(e) => {
@@ -334,6 +335,7 @@ impl runtime::AsyncWrite for QuicWrite {
             Poll::Ready(ret) => {
                 match ret {
                     Ok(size) => {
+                        log::trace!("quic connection send data {}", hex::encode(buf));
                         Poll::Ready(Ok(size))
                     },
                     Err(e) => {

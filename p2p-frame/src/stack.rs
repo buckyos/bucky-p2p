@@ -437,7 +437,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         let proxy_client = if let Some(proxy_client) = proxy_client {
             proxy_client
         } else {
-            let default = DefaultPnClient::new(sn_service.get_cmd_client().clone());
+            let default = DefaultPnClient::new(sn_service.get_cmd_client().clone(), local_identity.clone());
             default
         };
         Some(proxy_client)

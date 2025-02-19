@@ -363,9 +363,10 @@ async fn all_in_one() {
             tokio::task::spawn(async move {
                 let ret: std::io::Result<()> = async move {
                     stream.write_all("test".as_bytes()).await?;
+                    stream.flush().await?;
                     let mut buf = [0u8; 32];
                     let len = stream.read(buf.as_mut_slice()).await?;
-                    println!("{}", String::from_utf8_lossy(&buf[..len]));
+                    println!("read len {} content:{}", len, String::from_utf8_lossy(&buf[..len]));
                     Ok(())
                 }.await;
 
@@ -403,6 +404,7 @@ async fn all_in_one() {
                 let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
                 println!("{}", String::from_utf8_lossy(&buf[..len]));
                 tunnel.write_all("stream hello".as_bytes()).await.unwrap();
+                tunnel.flush().await.unwrap();
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
                 match tunnel.read(buf.as_mut_slice()).await {
@@ -422,6 +424,7 @@ async fn all_in_one() {
                         println!("write error: {:?}", e);
                     }
                 }
+                tunnel.flush().await.unwrap();
                 let mut tunnel2 = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1235).await.unwrap();
             }
             {
@@ -444,7 +447,7 @@ async fn create_stack(config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_
         (private_key, device)
     };
 
-    let config = create_cyfs_p2p_stack_config(device, private_key, sn_list);
+    let config = create_cyfs_p2p_stack_config(device, private_key, sn_list).set_support_proxy(true);
 
     create_p2p_stack(config).await
 }

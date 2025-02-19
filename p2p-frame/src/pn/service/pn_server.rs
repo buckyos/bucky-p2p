@@ -26,7 +26,9 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
             async move {
                 let from = P2pId::from(peer_id.as_slice());
                 let data = body.read_all().await?;
+                log::trace!("recv to proxy data from: {} tunnel: {:?} len: {} data: {}", peer_id, _tunnel_id, data.len(), hex::encode(&data));
                 let (to_proxy, buf) = ToProxy::raw_decode(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                log::trace!("proxy from {} to {} seq {} len {}", from, to_proxy.to, to_proxy.seq, buf.len());
                 let from_proxy = FromProxy {
                     seq: to_proxy.seq,
                     from,
@@ -75,7 +77,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 let data = body.read_all().await?;
                 let proxy_heart= ProxyHeart::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
-                                     PackageCmdCode::ProxyHeartResp as u8,
+                                     PackageCmdCode::ProxyHeart as u8,
                                      data.as_slice()).await?;
                 Ok(())
             }

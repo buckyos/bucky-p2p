@@ -30,6 +30,7 @@ struct RecvCacheState {
     pub expect_seq: u32,
     pub waiter: Option<NotifyFuture<P2pResult<(usize, Vec<u8>)>>>,
     pub latest_heart: SystemTime,
+    pub poll_waiter: Option<NotifyFuture<P2pResult<(usize, Vec<u8>)>>>,
 }
 
 pub trait HeartState {
@@ -47,9 +48,10 @@ impl RecvCache {
         Self {
             state: Arc::new(Mutex::new(RecvCacheState {
                 cache: Default::default(),
-                expect_seq: 0,
+                expect_seq: 1,
                 waiter: None,
                 latest_heart: SystemTime::now(),
+                poll_waiter: None,
             })),
         }
     }
@@ -117,15 +119,37 @@ impl Future for RecvCache {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let state = &mut self.state.lock().unwrap();
-        let expect_seq = state.expect_seq;
-        if state.cache.contains_key(&expect_seq) {
-            let data = state.cache.remove(&expect_seq).unwrap();
-            state.expect_seq += 1;
-            Poll::Ready(data)
+        if state.poll_waiter.is_none() {
+            let expect_seq = state.expect_seq;
+            if state.cache.contains_key(&expect_seq) {
+                let data = state.cache.remove(&expect_seq).unwrap();
+                state.expect_seq += 1;
+                Poll::Ready(data)
+            } else {
+                let mut waiter = NotifyFuture::new();
+                state.waiter = Some(waiter.clone());
+                state.poll_waiter = Some(waiter.clone());
+                match Pin::new(&mut waiter).poll(cx) {
+                    Poll::Ready(ret) => {
+                        state.poll_waiter = None;
+                        Poll::Ready(ret)
+                    }
+                    Poll::Pending => {
+                        Poll::Pending
+                    }
+                }
+            }
         } else {
-            let mut waiter = NotifyFuture::new();
-            state.waiter = Some(waiter.clone());
-            Pin::new(&mut waiter).poll(cx)
+            let mut waiter = state.poll_waiter.as_ref().unwrap().clone();
+            match Pin::new(&mut waiter).poll(cx) {
+                Poll::Ready(ret) => {
+                    state.poll_waiter = None;
+                    Poll::Ready(ret)
+                }
+                Poll::Pending => {
+                    Poll::Pending
+                }
+            }
         }
     }
 }
@@ -144,12 +168,11 @@ impl<T: CmdClient<u16, u8>> DefaultPnTunnelRead<T> {
         let recv_cache = RecvCache::new();
         cmd_client.add_tunnel_recv_cache(p2p_id.clone(), tunnel_id, recv_cache.clone());
         let heart_state = recv_cache.clone();
-        let timout_check_handle = Executor::spawn_with_handle(async move {
+        let timeout_check_handle = Executor::spawn_with_handle(async move {
             loop {
                 runtime::sleep(Duration::from_secs(20)).await;
                 if heart_state.has_timout() {
-                    log::error!("heart timeout");
-                    heart_state.insert_err(p2p_err!(P2pErrorCode::ConnectionAborted, "heart timeout"));
+                    heart_state.insert_err(p2p_err!(P2pErrorCode::ConnectionAborted, "tunnel {:?} heart timeout", tunnel_id));
                     break;
                 }
             }
@@ -206,20 +229,27 @@ impl<T: CmdClient<u16, u8>> runtime::AsyncRead for DefaultPnTunnelRead<T> {
             }
         }
 
-        let buf = buf.initialize_unfilled();
-        let (size, data) = self.read_cache.as_mut().unwrap();
-        if buf.len() > data.len() {
-            buf.copy_from_slice(data.as_slice());
-            self.read_cache = None;
-            Poll::Ready(Ok(()))
-        } else {
-            buf.copy_from_slice(&data[..buf.len()]);
-            *size += buf.len();
-            if *size == data.len() {
+        let len = {
+            let buf_ref = buf.initialize_unfilled();
+            let (size, data) = self.read_cache.as_mut().unwrap();
+            log::trace!("cache data offset {} len {}", *size, data.len());
+            let data_slice = &data[*size..];
+            if buf_ref.len() > data_slice.len() {
+                buf_ref[..data_slice.len()].copy_from_slice(data_slice);
+                let len = data_slice.len();
                 self.read_cache = None;
+                len
+            } else {
+                buf_ref.copy_from_slice(&data_slice[..buf_ref.len()]);
+                *size += buf_ref.len();
+                if *size == data.len() {
+                    self.read_cache = None;
+                }
+                buf_ref.len()
             }
-            Poll::Ready(Ok(()))
-        }
+        };
+        buf.advance(len);
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -288,15 +318,15 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
     }
 
     async fn send(&mut self, data: &[u8]) -> P2pResult<()> {
-        let cmd_code = PackageCmdCode::FromProxy as u8;
+        let cmd_code = PackageCmdCode::ToProxy as u8;
         self.seq += 1;
+        log::trace!("send data to: {}, tunnel_id: {:?}, seq: {} len: {}", self.to, self.tunnel_id, self.seq, data.len());
         let from_proxy = ToProxy {
             tunnel_id: self.tunnel_id,
             seq: self.seq,
             to: self.to.clone(),
         };
         let mut body = from_proxy.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-        body.extend_from_slice(data);
         self.cmd_client.send2(cmd_code, vec![body.as_slice(), data].as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
@@ -352,20 +382,21 @@ impl<T: CmdClient<u16, u8>> PnTunnelWrite for DefaultPnTunnelWrite<T> {
     }
 }
 
-pub struct DefaultPnClient<T: CmdClient<u16, u8>> {
+struct DefaultPnClientImpl<T: CmdClient<u16, u8>> {
     cmd_client: Arc<T>,
     tunnel_recv_cache: Arc<Mutex<HashMap<P2pId, HashMap<TunnelId, RecvCache>>>>,
     accept_waiter: Arc<SingleCallbackWaiter<P2pResult<(Box<dyn crate::pn::PnTunnelRead>, Box<dyn crate::pn::PnTunnelWrite>)>>>,
     local_identity: P2pIdentityRef,
 }
 
+pub struct DefaultPnClient<T: CmdClient<u16, u8>> {
+    inner: Arc<DefaultPnClientImpl<T>>
+}
+
 impl<T: CmdClient<u16, u8>> Clone for DefaultPnClient<T> {
     fn clone(&self) -> Self {
         Self {
-            cmd_client: self.cmd_client.clone(),
-            tunnel_recv_cache: self.tunnel_recv_cache.clone(),
-            accept_waiter: self.accept_waiter.clone(),
-            local_identity: self.local_identity.clone(),
+            inner: self.inner.clone()
         }
     }
 }
@@ -373,10 +404,12 @@ impl<T: CmdClient<u16, u8>> Clone for DefaultPnClient<T> {
 impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
     pub fn new(cmd_client: Arc<T>, local_identity: P2pIdentityRef) -> Arc<Self> {
         let this = Arc::new(Self {
-            cmd_client,
-            tunnel_recv_cache: Arc::new(Mutex::new(Default::default())),
-            accept_waiter: Arc::new(SingleCallbackWaiter::new()),
-            local_identity,
+            inner: Arc::new(DefaultPnClientImpl {
+                cmd_client,
+                tunnel_recv_cache: Arc::new(Mutex::new(Default::default())),
+                accept_waiter: Arc::new(SingleCallbackWaiter::new()),
+                local_identity,
+            })
         });
         this.register_cmd_handler();
         this
@@ -384,12 +417,12 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
 
     fn register_cmd_handler(self: &Arc<Self>) {
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::ToProxyResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ToProxyResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
                 let (resp, buf) = ToProxyResp::raw_decode(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let tunnel_recv_cache = this.tunnel_recv_cache.lock().unwrap();
+                let tunnel_recv_cache = this.inner.tunnel_recv_cache.lock().unwrap();
                 if let Some(recv_cache_map) = tunnel_recv_cache.get(&resp.to) {
                     if let Some(recv_cache) = recv_cache_map.get(&resp.tunnel_id) {
                         recv_cache.insert_err(p2p_err!(P2pErrorCode::Failed, "err {}", resp.result));
@@ -400,52 +433,78 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
         });
 
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::FromProxy as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::FromProxy as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
+                log::trace!("recv proxy data tunnel: {:?} len: {} local: {} data: {}", _tunnel_id, data.len(), this.inner.local_identity.get_id(), hex::encode(&data));
                 let (from, buf) = FromProxy::raw_decode(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                {
-                    let tunnel_recv_cache = this.tunnel_recv_cache.lock().unwrap();
+                log::trace!("recv proxy data from: {}, to: {:?}, tunnel_id: {:?}, seq: {}, len: {}", from.from, this.inner.local_identity.get_id(), from.tunnel_id, from.seq, buf.len());
+                let recv_cache = {
+                    let tunnel_recv_cache = this.inner.tunnel_recv_cache.lock().unwrap();
                     if let Some(recv_cache_map) = tunnel_recv_cache.get(&from.from) {
                         if let Some(recv_cache) = recv_cache_map.get(&from.tunnel_id) {
-                            if recv_cache.insert(from.seq, (data.len() - buf.len(), data)) {
-                                return Ok(())
-                            }
-                            log::info!("recv cache is full");
+                            Some(recv_cache.clone())
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
+                };
+                if recv_cache.is_some() {
+                    let recv_cache = recv_cache.unwrap();
+                    if recv_cache.insert(from.seq, (data.len() - buf.len(), data)) {
+                        return Ok(())
+                    } else {
+                        log::info!("recv cache is full");
+                        recv_cache.insert_err(p2p_err!(P2pErrorCode::Failed, "recv cache is full"));
+                        let resp = FromProxyResp {
+                            from: from.from.clone(),
+                            tunnel_id: from.tunnel_id,
+                            result: 1,
+                        };
+                        this.inner.cmd_client.send(PackageCmdCode::FromProxyResp as u8, resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    }
+                } else {
+                    let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id);
+                    tunnel_read.get_recv_cache().insert(from.seq, (data.len() - buf.len(), data));
+                    let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(this.inner.cmd_client.clone(), from.tunnel_id, this.inner.local_identity.get_id(), from.from.clone(), false));
+                    this.inner.accept_waiter.set_result_with_cache(Ok((Box::new(tunnel_read), Box::new(tunnel_write))));
                 }
-
-                let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id);
-                let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(this.cmd_client.clone(), from.tunnel_id, this.local_identity.get_id(), from.from.clone(), false));
-                this.accept_waiter.set_result_with_cache(Ok((Box::new(tunnel_read), Box::new(tunnel_write))));
                 Ok(())
             }
         });
 
         let this = self.clone();
-        let weak_cmd_client = Arc::downgrade(&this.cmd_client);
-        self.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        let weak_cmd_client = Arc::downgrade(&this.inner.cmd_client);
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
             let this = this.clone();
             let weak_cmd_client = weak_cmd_client.clone();
             async move {
                 let data = body.read_all().await?;
                 let heart = ProxyHeart::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let tunnel_recv_cache = this.tunnel_recv_cache.lock().unwrap();
-                if let Some(recv_cache_map) = tunnel_recv_cache.get(&heart.from) {
-                    if let Some(recv_cache) = recv_cache_map.get(&heart.tunnel_id) {
-                        if let Some(cmd_client) = weak_cmd_client.upgrade() {
+                let mut has_tunnel = false;
+                {
+                    let tunnel_recv_cache = this.inner.tunnel_recv_cache.lock().unwrap();
+                    if let Some(recv_cache_map) = tunnel_recv_cache.get(&heart.from) {
+                        if let Some(recv_cache) = recv_cache_map.get(&heart.tunnel_id) {
                             recv_cache.update_latest_heart_time();
-                            let cmd_code = PackageCmdCode::ProxyHeartResp as u8;
-                            let resp = ProxyHeartResp {
-                                tunnel_id: heart.tunnel_id,
-                                from: heart.from.clone(),
-                                to: heart.to.clone(),
-                            };
-                            let mut body = resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                            cmd_client.send(cmd_code, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                            has_tunnel = true;
                         }
+                    }
+                }
+                log::debug!("recv heart from: {}, to: {}, tunnel_id: {:?}, has_tunnel: {}", heart.from, heart.to, heart.tunnel_id, has_tunnel);
+                if has_tunnel {
+                    if let Some(cmd_client) = weak_cmd_client.upgrade() {
+                        let cmd_code = PackageCmdCode::ProxyHeartResp as u8;
+                        let resp = ProxyHeartResp {
+                            tunnel_id: heart.tunnel_id,
+                            from: heart.to.clone(),
+                            to: heart.from.clone(),
+                        };
+                        let mut body = resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                        cmd_client.send(cmd_code, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     }
                 }
                 Ok(())
@@ -453,24 +512,27 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
         });
 
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
                 let heart = ProxyHeartResp::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let tunnel_recv_cache = this.tunnel_recv_cache.lock().unwrap();
+                let tunnel_recv_cache = this.inner.tunnel_recv_cache.lock().unwrap();
+                let mut has_tunnel = false;
                 if let Some(recv_cache_map) = tunnel_recv_cache.get(&heart.from) {
                     if let Some(recv_cache) = recv_cache_map.get(&heart.tunnel_id) {
                         recv_cache.update_latest_heart_time();
+                        has_tunnel = true;
                     }
                 }
+                log::debug!("recv heart resp from: {}, to: {}, tunnel_id: {:?}, has_tunnel: {}", heart.from, heart.to, heart.tunnel_id, has_tunnel);
                 Ok(())
             }
         });
     }
 
     fn remove_tunnel_recv_cache(&self, p2p_id: &P2pId, tunnel_id: &TunnelId) {
-        let mut tunnel_recv_cache = self.tunnel_recv_cache.lock().unwrap();
+        let mut tunnel_recv_cache = self.inner.tunnel_recv_cache.lock().unwrap();
         if let Some(recv_cache_map) = tunnel_recv_cache.get_mut(p2p_id) {
             recv_cache_map.remove(&tunnel_id);
             if recv_cache_map.is_empty() {
@@ -480,13 +542,13 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
     }
 
     fn add_tunnel_recv_cache(&self, p2p_id: P2pId, tunnel_id: TunnelId, recv_cache: RecvCache) {
-        let mut tunnel_recv_cache = self.tunnel_recv_cache.lock().unwrap();
+        let mut tunnel_recv_cache = self.inner.tunnel_recv_cache.lock().unwrap();
         let mut recv_cache_map = tunnel_recv_cache.entry(p2p_id).or_insert_with(Default::default);
         recv_cache_map.insert(tunnel_id, recv_cache);
     }
 
     fn close_all_tunnel(&self) {
-        let mut tunnel_recv_cache = self.tunnel_recv_cache.lock().unwrap();
+        let mut tunnel_recv_cache = self.inner.tunnel_recv_cache.lock().unwrap();
         for (p2p_id, recv_cache_map) in tunnel_recv_cache.iter() {
             for (tunnel_id, recv_cache) in recv_cache_map.iter() {
                 recv_cache.insert_err(p2p_err!(P2pErrorCode::ConnectionAborted, "close all tunnel"));
@@ -499,19 +561,25 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
 #[async_trait::async_trait]
 impl<T: CmdClient<u16, u8>> PnClient for DefaultPnClient<T> {
     async fn accept(&self) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
-        self.accept_waiter.create_result_future().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?
+        self.inner.accept_waiter.create_result_future().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?
     }
 
     async fn connect(&self, tunnel_id: TunnelId, to: P2pId) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
         let tunnel_read = DefaultPnTunnelRead::new(Arc::new(self.clone()), to.clone(), tunnel_id);
-        let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(self.cmd_client.clone(), tunnel_id, self.local_identity.get_id(), to, true));
+        let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(self.inner.cmd_client.clone(), tunnel_id, self.inner.local_identity.get_id(), to, true));
         Ok((Box::new(tunnel_read), Box::new(tunnel_write)))
     }
 }
 
-impl<T: CmdClient<u16, u8>> Drop for DefaultPnClient<T> {
+impl<T: CmdClient<u16, u8>> Drop for DefaultPnClientImpl<T> {
     fn drop(&mut self) {
         log::info!("drop DefaultPnClient");
-        self.close_all_tunnel();
+        let mut tunnel_recv_cache = self.tunnel_recv_cache.lock().unwrap();
+        for (p2p_id, recv_cache_map) in tunnel_recv_cache.iter() {
+            for (tunnel_id, recv_cache) in recv_cache_map.iter() {
+                recv_cache.insert_err(p2p_err!(P2pErrorCode::ConnectionAborted, "close all tunnel"));
+            }
+        }
+        tunnel_recv_cache.clear();
     }
 }
