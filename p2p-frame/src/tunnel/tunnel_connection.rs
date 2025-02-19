@@ -347,7 +347,9 @@ impl TunnelStream {
             }
             Err(err) => {
                 let mut tunnel = self.tunnel.lock().unwrap();
-                tunnel.tunnel_state = TunnelState::Error;
+                if tunnel.tunnel_state != TunnelState::Idle {
+                    tunnel.tunnel_state = TunnelState::Error;
+                }
                 Err(err)
             }
         }
@@ -395,7 +397,9 @@ impl TunnelStream {
             }
             Err(err) => {
                 let mut tunnel = self.tunnel.lock().unwrap();
-                tunnel.tunnel_state = TunnelState::Error;
+                if tunnel.tunnel_state != TunnelState::Idle {
+                    tunnel.tunnel_state = TunnelState::Error;
+                }
                 Err(err)
             }
         }
@@ -809,7 +813,9 @@ impl TunnelDatagramSend {
             }
             Err(err) => {
                 let mut tunnel = self.tunnel.lock().unwrap();
-                tunnel.tunnel_state = TunnelState::Error;
+                if tunnel.tunnel_state != TunnelState::Idle {
+                    tunnel.tunnel_state = TunnelState::Error;
+                }
                 Err(err)
             }
         }
@@ -1102,7 +1108,9 @@ impl TunnelDatagramRecv {
             }
             Err(err) => {
                 let mut tunnel = self.tunnel.lock().unwrap();
-                tunnel.tunnel_state = TunnelState::Error;
+                if tunnel.tunnel_state != TunnelState::Idle {
+                    tunnel.tunnel_state = TunnelState::Error;
+                }
                 Err(err)
             }
         }
@@ -1997,6 +2005,7 @@ impl TunnelConnection {
 
     pub fn is_idle(&self) -> bool {
         let inner = self.inner.lock().unwrap();
+        log::info!("tunnel {:?} state {:?}", inner.tunnel_id, inner.tunnel_state);
         inner.tunnel_state == TunnelState::Idle
     }
 

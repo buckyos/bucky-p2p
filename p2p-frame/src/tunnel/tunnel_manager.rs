@@ -228,13 +228,13 @@ impl TunnelManagerEvent {
 
 #[callback_trait::callback_trait]
 pub trait TunnelManagerStreamEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_stream(&self, tunnel: TunnelStream) -> P2pResult<()>;
+    async fn on_new_tunnel_stream(&self, tunnel: TunnelStream) -> ();
 }
 pub type TunnelManagerStreamEventRef = Arc<dyn TunnelManagerStreamEvent>;
 
 #[callback_trait::callback_trait]
 pub trait TunnelManagerDatagramEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_datagram(&self, tunnel: TunnelDatagramRecv) -> P2pResult<()>;
+    async fn on_new_tunnel_datagram(&self, tunnel: TunnelDatagramRecv) -> ();
 }
 pub type TunnelManagerDatagramEventRef = Arc<dyn TunnelManagerDatagramEvent>;
 

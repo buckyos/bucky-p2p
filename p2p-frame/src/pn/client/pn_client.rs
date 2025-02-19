@@ -17,7 +17,7 @@ use tokio::io::{AsyncWrite, BufWriter, ReadBuf};
 use crate::error::{into_p2p_err, p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
-use crate::pn::{FromProxy, FromProxyResp, PnClient, PnCmdHeader, PnTunnelRead, PnTunnelWrite, ProxyHeart, ProxyHeartResp, ToProxy, ToProxyResp};
+use crate::pn::{FromProxy, FromProxyResp, PnClient, PnCmdHeader, PnTunnelRead, PnTunnelWrite, ProxyClosed, ProxyHeart, ProxyHeartResp, ToProxy, ToProxyResp};
 use crate::protocol::PackageCmdCode;
 use crate::runtime;
 use crate::sn::types::{CmdTunnelId};
@@ -31,11 +31,13 @@ struct RecvCacheState {
     pub waiter: Option<NotifyFuture<P2pResult<(usize, Vec<u8>)>>>,
     pub latest_heart: SystemTime,
     pub poll_waiter: Option<NotifyFuture<P2pResult<(usize, Vec<u8>)>>>,
+    pub is_error: bool,
 }
 
-pub trait HeartState {
+pub trait ConnectionState: 'static + Sync + Send {
     fn update_latest_heart_time(&self);
     fn has_timout(&self) -> bool;
+    fn is_error(&self) -> bool;
 }
 
 #[derive(Clone)]
@@ -52,6 +54,7 @@ impl RecvCache {
                 waiter: None,
                 latest_heart: SystemTime::now(),
                 poll_waiter: None,
+                is_error: false,
             })),
         }
     }
@@ -91,6 +94,7 @@ impl RecvCache {
     fn insert_err(&self, err: P2pError) {
         let mut state = self.state.lock().unwrap();
         let expect_seq = state.expect_seq;
+        state.is_error = true;
         if state.waiter.is_some() {
             let waiter = state.waiter.take().unwrap();
             waiter.set_complete(Err(err));
@@ -101,7 +105,7 @@ impl RecvCache {
 
 }
 
-impl HeartState for RecvCache {
+impl ConnectionState for RecvCache {
 
     fn update_latest_heart_time(&self) {
         let mut state = self.state.lock().unwrap();
@@ -111,6 +115,11 @@ impl HeartState for RecvCache {
     fn has_timout(&self) -> bool {
         let state = self.state.lock().unwrap();
         SystemTime::now().duration_since(state.latest_heart).unwrap().as_secs() > 60
+    }
+
+    fn is_error(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.is_error
     }
 }
 
@@ -257,9 +266,11 @@ pub struct PnTunnelWriteImpl<T: CmdClient<u16, u8>> {
     cmd_client: Arc<T>,
     tunnel_id: TunnelId,
     seq: u32,
+    from: P2pId,
     to: P2pId,
     writing_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<()>>>>>,
-    heart_handle: Option<SpawnHandle<()>>
+    heart_handle: Option<SpawnHandle<()>>,
+    connection_state: Box<dyn ConnectionState>,
 }
 
 impl<T: CmdClient<u16, u8>> Drop for PnTunnelWriteImpl<T> {
@@ -267,14 +278,21 @@ impl<T: CmdClient<u16, u8>> Drop for PnTunnelWriteImpl<T> {
         if self.heart_handle.is_some() {
             self.heart_handle.as_ref().unwrap().abort();
         }
+        self.close();
     }
 }
 
 impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
-    pub(crate) fn new(cmd_client: Arc<T>, tunnel_id: TunnelId, from: P2pId, to: P2pId, is_send_heart: bool) -> Self {
+    pub(crate) fn new(cmd_client: Arc<T>,
+                      tunnel_id: TunnelId,
+                      from: P2pId,
+                      to: P2pId,
+                      is_send_heart: bool,
+                      connection_state: Box<dyn ConnectionState>) -> Self {
         let heart_handle = if is_send_heart {
             let client = cmd_client.clone();
             let to_id = to.clone();
+            let from = from.clone();
             let handle = Executor::spawn_with_handle(async move {
                 loop {
                     runtime::sleep(Duration::from_secs(20)).await;
@@ -311,9 +329,11 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
             cmd_client,
             tunnel_id,
             seq: 0,
+            from,
             to,
             writing_future: None,
             heart_handle,
+            connection_state,
         }
     }
 
@@ -329,6 +349,29 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
         let mut body = from_proxy.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         self.cmd_client.send2(cmd_code, vec![body.as_slice(), data].as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
+    }
+
+    fn close(&self) {
+        if self.connection_state.is_error() {
+            let cmd_client = self.cmd_client.clone();
+            let tunnel_id = self.tunnel_id;
+            let from = self.from.clone();
+            let to = self.to.clone();
+            Executor::spawn(async move {
+                log::info!("send proxy closed tunnel_id: {:?} from: {} to: {}", tunnel_id, from, to);
+                let cmd_code = PackageCmdCode::ProxyClosed as u8;
+                let proxy_closed = ProxyClosed {
+                    tunnel_id: Default::default(),
+                    from,
+                    to,
+                };
+                if let Ok(body) = proxy_closed.to_vec() {
+                    if let Err(e) = cmd_client.send(cmd_code, body.as_slice()).await {
+                        log::error!("send proxy closed error: {}", e);
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -469,7 +512,12 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                 } else {
                     let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id);
                     tunnel_read.get_recv_cache().insert(from.seq, (data.len() - buf.len(), data));
-                    let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(this.inner.cmd_client.clone(), from.tunnel_id, this.inner.local_identity.get_id(), from.from.clone(), false));
+                    let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(this.inner.cmd_client.clone(),
+                                                                                        from.tunnel_id,
+                                                                                        this.inner.local_identity.get_id(),
+                                                                                        from.from.clone(),
+                                                                                        false,
+                                                                                        Box::new(tunnel_read.get_recv_cache().clone())));
                     this.inner.accept_waiter.set_result_with_cache(Ok((Box::new(tunnel_read), Box::new(tunnel_write))));
                 }
                 Ok(())
@@ -529,6 +577,24 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                 Ok(())
             }
         });
+
+        let this = self.clone();
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+            let this = this.clone();
+            async move {
+                let data = body.read_all().await?;
+                let heart = ProxyClosed::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                let tunnel_recv_cache = this.inner.tunnel_recv_cache.lock().unwrap();
+                let mut has_tunnel = false;
+                if let Some(recv_cache_map) = tunnel_recv_cache.get(&heart.from) {
+                    if let Some(recv_cache) = recv_cache_map.get(&heart.tunnel_id) {
+                        recv_cache.insert_err(p2p_err!(P2pErrorCode::ConnectionAborted, "proxy closed"));
+                        has_tunnel = true;
+                    }
+                }
+                Ok(())
+            }
+        });
     }
 
     fn remove_tunnel_recv_cache(&self, p2p_id: &P2pId, tunnel_id: &TunnelId) {
@@ -566,7 +632,12 @@ impl<T: CmdClient<u16, u8>> PnClient for DefaultPnClient<T> {
 
     async fn connect(&self, tunnel_id: TunnelId, to: P2pId) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
         let tunnel_read = DefaultPnTunnelRead::new(Arc::new(self.clone()), to.clone(), tunnel_id);
-        let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(self.inner.cmd_client.clone(), tunnel_id, self.inner.local_identity.get_id(), to, true));
+        let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(self.inner.cmd_client.clone(),
+                                                                            tunnel_id,
+                                                                            self.inner.local_identity.get_id(),
+                                                                            to,
+                                                                            true,
+                                                                            Box::new(tunnel_read.get_recv_cache().clone())));
         Ok((Box::new(tunnel_read), Box::new(tunnel_write)))
     }
 }

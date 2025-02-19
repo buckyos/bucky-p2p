@@ -4,7 +4,7 @@ use sfo_cmd_server::{CmdBodyRead, PeerId};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use sfo_cmd_server::server::CmdServer;
 use crate::p2p_identity::P2pId;
-use crate::pn::{FromProxy, FromProxyResp, PnCmdHeader, ProxyHeart, ProxyHeartResp, ToProxy, ToProxyResp};
+use crate::pn::{FromProxy, FromProxyResp, PnCmdHeader, ProxyClosed, ProxyHeart, ProxyHeartResp, ToProxy, ToProxyResp};
 use crate::protocol::PackageCmdCode;
 use crate::sn::types::CmdTunnelId;
 
@@ -92,6 +92,20 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 let proxy_heart= ProxyHeartResp::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
                                      PackageCmdCode::ProxyHeartResp as u8,
+                                     data.as_slice()).await?;
+                Ok(())
+            }
+        });
+
+        let this = self.clone();
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+            let this = this.clone();
+            async move {
+                let from = P2pId::from(peer_id.as_slice());
+                let data = body.read_all().await?;
+                let proxy_heart= ProxyClosed::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
+                                     PackageCmdCode::ProxyClosed as u8,
                                      data.as_slice()).await?;
                 Ok(())
             }

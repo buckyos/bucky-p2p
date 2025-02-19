@@ -44,6 +44,7 @@ pub enum PackageCmdCode {
     ToProxyResp = 0x53,
     ProxyHeart = 0x54,
     ProxyHeartResp = 0x55,
+    ProxyClosed = 0x56,
 
 
     PieceData = 0x60,
@@ -91,6 +92,7 @@ impl TryFrom<u8> for PackageCmdCode {
             0x53u8 => Ok(Self::ToProxyResp),
             0x54u8 => Ok(Self::ProxyHeart),
             0x55u8 => Ok(Self::ProxyHeartResp),
+            0x56u8 => Ok(Self::ProxyClosed),
 
             0x60u8 => Ok(Self::PieceData),
             0x61u8 => Ok(Self::PieceControl),

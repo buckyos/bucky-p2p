@@ -45,3 +45,11 @@ pub struct ProxyHeartResp {
     pub from: P2pId,
     pub to: P2pId,
 }
+
+#[derive(RawDecode, RawEncode)]
+pub struct ProxyClosed {
+    pub tunnel_id: TunnelId,
+    pub from: P2pId,
+    pub to: P2pId,
+}
+
