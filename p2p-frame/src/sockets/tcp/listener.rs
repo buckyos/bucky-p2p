@@ -11,7 +11,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pError, P2pErrorCode, into_p2p_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
+use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
@@ -170,7 +170,7 @@ impl TCPListener {
         Ok(())
     }
 
-    async fn accept(&self, socket: TcpStream) -> Result<TCPConnection, P2pError> {
+    async fn accept(&self, socket: TcpStream) -> Result<P2pConnection, P2pError> {
         let remote = socket.peer_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let remote = Endpoint::from((Protocol::Tcp, remote));
@@ -191,7 +191,12 @@ impl TCPListener {
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
         self.cert_cache.add(&remote_id, &remote_device).await?;
-        Ok(TCPConnection::new(runtime::TlsStream::from(tls_stream), local_identity_id, remote_id, local, remote))
+        let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
+        let read = super::TCPRead::new(read, local_identity_id.clone(), remote_id.clone(), local, remote);
+        let write = super::TCPWrite::new(write, local_identity_id, remote_id, local, remote);
+        let socket = P2pConnection::new(Box::new(read), Box::new(write));
+
+        Ok(socket)
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -207,7 +212,7 @@ impl TCPListener {
                         let _ = Executor::spawn(async move {
                             match this.accept(socket).await {
                                 Ok(socket) => {
-                                    if let Err(e) = tcp_listener.on_new_connection(Arc::new(socket)).await {
+                                    if let Err(e) = tcp_listener.on_new_connection(socket).await {
                                         error!("tcp-listener accept error({}).", e);
                                     }
                                 }

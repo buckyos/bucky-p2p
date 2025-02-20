@@ -1,39 +1,64 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use as_any::AsAny;
 use bucky_raw_codec::{RawDecode, RawEncode};
 use once_cell::sync::OnceCell;
+use sfo_split::{RHalf, Splittable, WHalf};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::p2p_identity::P2pId;
 use crate::runtime;
 
-pub trait P2pRead: runtime::AsyncRead + Send + 'static + Unpin + Any {
-    fn get_any(&self) -> &dyn Any;
-    fn get_any_mut(&mut self) -> &mut dyn Any;
-}
 
-pub trait P2pWrite: runtime::AsyncWrite + Send + 'static + Unpin + Any {
-    fn get_any(&self) -> &dyn Any;
-    fn get_any_mut(&mut self) -> &mut dyn Any;
-}
-
-#[async_trait::async_trait]
-pub trait P2pConnection: Send + Sync + 'static {
-    fn is_stream(&self) -> bool;
+pub trait P2pRead: runtime::AsyncRead + Send + 'static + Unpin + Any + AsAny {
     fn remote(&self) -> Endpoint;
     fn local(&self) -> Endpoint;
     fn remote_id(&self) -> P2pId;
     fn local_id(&self) -> P2pId;
-    fn split(&self) -> P2pResult<(Box<dyn P2pRead>, Box<dyn P2pWrite>)>;
-    fn unsplit(&self, read: Box<dyn P2pRead>, write: Box<dyn P2pWrite>);
 }
 
-pub type P2pConnectionRef = Arc<dyn P2pConnection>;
+pub trait P2pWrite: runtime::AsyncWrite + Send + 'static + Unpin + Any + AsAny {
+    fn remote(&self) -> Endpoint;
+    fn local(&self) -> Endpoint;
+    fn remote_id(&self) -> P2pId;
+    fn local_id(&self) -> P2pId;
+}
+
+
+#[async_trait::async_trait]
+pub trait P2pConnectionMeta: Send + 'static {
+    fn remote(&self) -> Endpoint;
+    fn local(&self) -> Endpoint;
+    fn remote_id(&self) -> P2pId;
+    fn local_id(&self) -> P2pId;
+}
+
+pub type P2pConnection = Splittable<Box<dyn P2pRead>, Box<dyn P2pWrite>>;
+pub type P2pReadHalf = RHalf<Box<dyn P2pRead>, Box<dyn P2pWrite>>;
+pub type P2pWriteHalf = WHalf<Box<dyn P2pRead>, Box<dyn P2pWrite>>;
+
+// impl P2pConnectionMeta for P2pConnection {
+//     fn remote(&self) -> Endpoint {
+//         self.get_r().remote()
+//     }
+//
+//     fn local(&self) -> Endpoint {
+//         self.get_r().local()
+//     }
+//
+//     fn remote_id(&self) -> P2pId {
+//         self.get_r().remote_id()
+//     }
+//
+//     fn local_id(&self) -> P2pId {
+//         self.get_r().local_id()
+//     }
+// }
 
 #[callback_trait::callback_trait]
 pub trait P2pConnectionEventListener: 'static + Send + Sync {
-    async fn on_new_connection(&self, conn: P2pConnectionRef) -> P2pResult<()>;
+    async fn on_new_connection(&self, conn: P2pConnection) -> P2pResult<()>;
 }
 
 pub trait P2pListener: 'static + Send + Sync {

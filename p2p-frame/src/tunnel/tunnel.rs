@@ -7,7 +7,7 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
 use notify_future::NotifyFuture;
 use crate::endpoint::{Endpoint, EndpointArea};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
-use crate::p2p_connection::{ConnectDirection, P2pConnectionInfo};
+use crate::p2p_connection::{ConnectDirection, P2pConnection, P2pConnectionInfo};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::pn::{PnClient, PnClientRef};
 use crate::protocol::v0::SnCallType;
@@ -15,7 +15,7 @@ use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
 use crate::tunnel::{select_successful, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPortsRef, TunnelStatRef, TunnelStream};
-use crate::tunnel::proxy_connection::ProxyConnection;
+use crate::tunnel::proxy_connection::{ProxyConnectionRead, ProxyConnectionWrite};
 use crate::types::{SessionId, TunnelId};
 
 pub enum ReverseResult {
@@ -194,7 +194,9 @@ impl Tunnel {
 
         let (read, write) = runtime::timeout(self.conn_timeout,
                                              pn_client.connect(self.tunnel_id, self.remote_id.clone())).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
-        let proxy_conn = Arc::new(ProxyConnection::new(self.remote_id.clone(), self.local_identity.get_id(), read, write));
+        let read = Box::new(ProxyConnectionRead::new(read, self.local_identity.get_id()));
+        let write = Box::new(ProxyConnectionWrite::new(write, self.local_identity.get_id()));
+        let proxy_conn = P2pConnection::new(read, write);
         let conn = TunnelConnection::new(
             self.tunnel_id,
             self.local_identity.clone(),

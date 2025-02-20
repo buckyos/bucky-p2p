@@ -16,14 +16,14 @@ use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
 use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
-use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnectionRef};
+use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnection};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
 use crate::p2p_network::P2pNetworkRef;
 use crate::pn::PnServer;
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnel};
+use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
 use crate::sockets::{NetListener, NetListenerRef, NetManager, NetManagerRef, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
@@ -38,7 +38,7 @@ use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*};
 
 pub struct SnTunnelListener {
     net_manager: NetManagerRef,
-    waiter: Arc<SingleCallbackWaiter<P2pConnectionRef>>,
+    waiter: Arc<SingleCallbackWaiter<P2pConnection>>,
 }
 
 impl SnTunnelListener {
@@ -46,7 +46,7 @@ impl SnTunnelListener {
                net_manager: NetManagerRef) -> Self {
         let waiter = Arc::new(SingleCallbackWaiter::new());
         let socket_waiter = waiter.clone();
-        net_manager.set_connection_event_listener(local_identity.get_id(), move |socket: P2pConnectionRef| {
+        net_manager.set_connection_event_listener(local_identity.get_id(), move |socket: P2pConnection| {
             let socket_waiter = socket_waiter.clone();
             async move {
                 socket_waiter.set_result_with_cache(socket);
@@ -61,15 +61,16 @@ impl SnTunnelListener {
 }
 
 #[async_trait::async_trait]
-impl CmdTunnelListener<SnTunnel> for SnTunnelListener {
-    async fn accept(&self) -> CmdResult<Arc<SnTunnel>> {
+impl CmdTunnelListener<SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
+    async fn accept(&self) -> CmdResult<CmdTunnel<SnTunnelRead, SnTunnelWrite>> {
         let socket = self.waiter.create_result_future().await.map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))?;
-        Ok(Arc::new(SnTunnel::new(socket)))
+        let (read, write) = socket.split();
+        Ok(CmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)))
     }
 }
 
-type SnCmdServer = DefaultCmdServer<u16, u8, SnTunnel, SnTunnelListener>;
-pub type SnCmdServerRef = Arc<DefaultCmdServer<u16, u8, SnTunnel, SnTunnelListener>>;
+type SnCmdServer = DefaultCmdServer<SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>;
+pub type SnCmdServerRef = Arc<DefaultCmdServer<SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
 
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
@@ -355,7 +356,8 @@ impl SnService {
         let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
-            let remote = tunnel.p2p_connection().remote();
+            let tunnel = tunnel.lock().await;
+            let remote = tunnel.send.remote();
             if !remotes.contains(&remote) {
                 remotes.push(remote);
             }
@@ -385,7 +387,6 @@ impl SnService {
     }
 
     async fn handle_report_sn(&self, peer_id: &PeerId, tunnel_id: CmdTunnelId, report_sn: ReportSn) -> P2pResult<()> {
-        let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_id.to_base58(), report_sn.local_eps, report_sn.map_ports);
         let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
 

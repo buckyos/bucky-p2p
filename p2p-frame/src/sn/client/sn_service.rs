@@ -8,18 +8,18 @@ use notify_future::NotifyFuture;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
-use sfo_cmd_server::client::{ClassifiedCmdClient, ClassifiedCmdSend, ClassifiedCmdTunnelFactory, CmdClient, DefaultClassifiedCmdClient};
+use sfo_cmd_server::client::{ClassifiedCmdClient, ClassifiedCmdSend, ClassifiedCmdTunnel, ClassifiedCmdTunnelFactory, CmdClient, DefaultClassifiedCmdClient};
 use sfo_cmd_server::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
-use sfo_cmd_server::{CmdBodyRead, PeerId};
+use sfo_cmd_server::{CmdBodyRead, CmdTunnel, PeerId};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, into_p2p_err, P2pErrorCode, P2pResult};
 use crate::runtime;
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_connection::P2pConnectionRef;
+use crate::p2p_connection::P2pConnection;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCallType, SnCalled, SnCalledResp};
-use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnel, SnTunnelClassification};
+use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelClassification, SnTunnelRead, SnTunnelWrite};
 use crate::sockets::{NetManager, NetManagerRef, QuicConnection};
 use crate::types::{Sequence, SequenceGenerator, TunnelId, TunnelIdGenerator};
 
@@ -70,8 +70,8 @@ impl SnClientTunnelFactory {
 }
 
 #[async_trait::async_trait]
-impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClientTunnelFactory {
-    async fn create_tunnel(&self, classification: Option<SnTunnelClassification>) -> CmdResult<Arc<SnTunnel>> {
+impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWrite, > for SnClientTunnelFactory {
+    async fn create_tunnel(&self, classification: Option<SnTunnelClassification>) -> CmdResult<ClassifiedCmdTunnel<SnTunnelRead, SnTunnelWrite>> {
         if classification.is_some() {
             let classification = classification.unwrap();
             if classification.local_ep.is_some() {
@@ -85,7 +85,8 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClient
 
                         let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await
                             .map_err(into_cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))?;
-                        return Ok(Arc::new(SnTunnel::new(conn)));
+                        let (read, write) = conn.split();
+                        return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
                     }
                 }
             } else {
@@ -101,7 +102,8 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClient
                             let local_ep = listener.local();
                             let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await
                                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))?;
-                            return Ok(Arc::new(SnTunnel::new(conn)));
+                            let (read, write) = conn.split();
+                            return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
                         }
                     }
                 }
@@ -119,7 +121,8 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClient
 
                             match quic_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await {
                                 Ok(conn) => {
-                                    return Ok(Arc::new(SnTunnel::new(conn)));
+                                    let (read, write) = conn.split();
+                                    return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
                                 }
                                 Err(_) => {
                                     continue;
@@ -146,7 +149,8 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClient
 
                             match p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await {
                                 Ok(conn) => {
-                                    return Ok(Arc::new(SnTunnel::new(conn)));
+                                    let (read, write) = conn.split();
+                                    return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
                                 }
                                 Err(_) => {
                                     continue;
@@ -161,7 +165,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnel, > for SnClient
     }
 }
 
-pub type SnCmdClient = DefaultClassifiedCmdClient<SnTunnelClassification, SnTunnel, SnClientTunnelFactory, u16, u8>;
+pub type SnCmdClient = DefaultClassifiedCmdClient<SnTunnelClassification, SnTunnelRead, SnTunnelWrite, SnClientTunnelFactory, u16, u8>;
 
 pub type SnCmdClientRef = Arc<SnCmdClient>;
 pub struct SNClientService {

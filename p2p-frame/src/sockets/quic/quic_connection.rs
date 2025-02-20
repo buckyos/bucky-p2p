@@ -13,39 +13,35 @@ use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
-use crate::p2p_connection::{P2pConnection, P2pRead, P2pWrite};
+use crate::p2p_connection::{P2pRead, P2pWrite};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
 
 pub struct QuicConnection {
     socket: quinn::Connection,
-    remote_identity_id: P2pId,
-    local_identity_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
-    send: Mutex<Option<quinn::SendStream>>,
-    recv: Mutex<Option<quinn::RecvStream>>,
-    is_stream: bool,
 }
 
 impl QuicConnection {
     pub fn new(
         socket: quinn::Connection,
-        local_identity_id: P2pId,
-        remote_identity_id: P2pId,
         local: Endpoint,
         remote: Endpoint,
     ) -> Self {
         Self {
             socket,
-            local_identity_id,
-            remote_identity_id,
             local,
             remote,
-            send: Mutex::new(None),
-            recv: Mutex::new(None),
-            is_stream: false,
         }
+    }
+
+    pub fn local(&self) -> Endpoint {
+        self.local.clone()
+    }
+
+    pub fn remote(&self) -> Endpoint {
+        self.remote.clone()
     }
 
     pub async fn connect(local_identity_ref: P2pIdentityRef,
@@ -85,8 +81,6 @@ impl QuicConnection {
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
-                     local_identity_ref.get_id(),
-                     remote_identity_id,
                      Endpoint::from((Protocol::Quic, endpoint.local_addr().map_err(into_p2p_err!(P2pErrorCode::TlsError))?)),
                      remote))
     }
@@ -126,8 +120,6 @@ impl QuicConnection {
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
-                     local_identity_ref.get_id(),
-                     remote_identity_id,
                      Endpoint::from((Protocol::Quic, ep.local_addr().map_err(into_p2p_err!(P2pErrorCode::TlsError))?)),
                      remote))
     }
@@ -136,39 +128,19 @@ impl QuicConnection {
         &self.socket
     }
 
-    pub async fn shutdown(&self) -> P2pResult<()> {
-        let mut send = self.send.lock().unwrap();
-        if let Some(send) = send.as_mut() {
-            send.finish()
-                .map_err(into_p2p_err!(P2pErrorCode::IoError, "quic to {} shutdown failed", self.remote))?;
-            send.stopped().await.map_err(into_p2p_err!(P2pErrorCode::IoError, "quic to {} shutdown failed", self.remote))?;
-        }
-        let mut recv = self.recv.lock().unwrap();
-        if let Some(recv) = recv.as_mut() {
-            recv.stop(VarInt::from_u32(0)).map_err(into_p2p_err!(P2pErrorCode::IoError, "quic to {} shutdown failed", self.remote))?;
-        }
-        self.socket.close(VarInt::from_u32(0), &[]);
-        Ok(())
-    }
-
-    pub async fn open_bi_stream(&mut self) -> P2pResult<()> {
+    pub async fn open_bi_stream(&mut self) -> P2pResult<(quinn::RecvStream, quinn::SendStream)> {
         let (send, recv) = self.socket.open_bi().await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} open bi failed", self.remote))?;
-        *self.send.lock().unwrap() = Some(send);
-        *self.recv.lock().unwrap() = Some(recv);
-        self.is_stream = true;
-        Ok(())
+        Ok((recv, send))
     }
 
-    pub async fn open_ui(&mut self) -> P2pResult<()> {
+    pub async fn open_ui(&mut self) -> P2pResult<quinn::SendStream> {
         let send = self.socket.open_uni().await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} open uni failed", self.remote))?;
-        *self.send.lock().unwrap() = Some(send);
-        self.is_stream = false;
-        Ok(())
+        Ok(send)
     }
 
-    pub async fn accept(&mut self) -> P2pResult<()> {
+    pub async fn accept(&mut self) -> P2pResult<(quinn::RecvStream, Option<quinn::SendStream>)> {
         let (bi_accept, uni_accept) = {
             let bi_accept = self.socket.accept_bi();
             let uni_accept = self.socket.accept_uni();
@@ -177,11 +149,8 @@ impl QuicConnection {
         runtime::select! {
             ret = bi_accept => {
                 match ret {
-                    Ok((send, mut recv)) => {
-                        *self.send.lock().unwrap() = Some(send);
-                        *self.recv.lock().unwrap() = Some(recv);
-                        self.is_stream = true;
-                        Ok(())
+                    Ok((send, recv)) => {
+                        Ok((recv, Some(send)))
                     },
                     Err(e) => {
                         return Err(p2p_err!(P2pErrorCode::IoError, "{:?}", e));
@@ -191,9 +160,7 @@ impl QuicConnection {
             ret = uni_accept => {
                 match ret {
                     Ok(mut recv) => {
-                        *self.recv.lock().unwrap() = Some(recv);
-                        self.is_stream = false;
-                        Ok(())
+                        Ok((recv, None))
                     },
                     Err(e) => {
                         return Err(p2p_err!(P2pErrorCode::IoError, "{:?}", e));
@@ -204,23 +171,7 @@ impl QuicConnection {
     }
 }
 
-impl Drop for QuicConnection {
-    fn drop(&mut self) {
-        log::info!("quic to {} drop", self.remote);
-        let _ = Executor::block_on(self.shutdown());
-    }
-}
-struct MockRead;
-
-impl P2pRead for MockRead {
-    fn get_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn get_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+pub(crate) struct MockRead;
 
 impl runtime::AsyncRead for MockRead {
     fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut tokio::io::ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
@@ -228,25 +179,51 @@ impl runtime::AsyncRead for MockRead {
     }
 }
 
-struct QuicRead {
-    recv: Option<quinn::RecvStream>,
+pub(crate) struct MockWrite;
+
+impl runtime::AsyncWrite for MockWrite {
+    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<Result<usize, io::Error>> {
+        Poll::Ready(Ok(0))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+pub(crate) struct QuicRead {
+    socket: quinn::Connection,
+    recv: quinn::RecvStream,
+    remote_identity_id: P2pId,
+    local_identity_id: P2pId,
+    local: Endpoint,
+    remote: Endpoint,
 }
 
 impl QuicRead {
-    pub fn new(recv: quinn::RecvStream) -> Self {
+    pub fn new(
+        socket: quinn::Connection,
+        recv: quinn::RecvStream,
+        remote_identity_id: P2pId,
+        local_identity_id: P2pId,
+        local: Endpoint,
+        remote: Endpoint, ) -> Self {
         Self {
-            recv: Some(recv),
+            socket,
+            recv,
+            remote_identity_id,
+            local_identity_id,
+            local,
+            remote,
         }
-    }
-
-    pub fn take(&mut self) -> quinn::RecvStream {
-        self.recv.take().unwrap()
     }
 
     fn stop(&mut self) {
-        if let Some(mut recv) = self.recv.take() {
-            let _ = recv.stop(VarInt::from_u32(0));
-        }
+        let _ = self.recv.stop(VarInt::from_u32(0));
     }
 }
 
@@ -257,19 +234,26 @@ impl Drop for QuicRead {
 }
 
 impl P2pRead for QuicRead {
-    fn get_any(&self) -> &dyn Any {
-        self
+    fn remote(&self) -> Endpoint {
+        self.remote.clone()
     }
 
-    fn get_any_mut(&mut self) -> &mut dyn Any {
-        self
+    fn local(&self) -> Endpoint {
+        self.local.clone()
+    }
+
+    fn remote_id(&self) -> P2pId {
+        self.remote_identity_id.clone()
+    }
+
+    fn local_id(&self) -> P2pId {
+        self.local_identity_id.clone()
     }
 }
 
 impl runtime::AsyncRead for QuicRead {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
-        let recv = self.recv.as_mut().unwrap();
-        match recv.poll_read(cx, buf.initialize_unfilled()) {
+        match self.recv.poll_read(cx, buf.initialize_unfilled()) {
             Poll::Ready(ret) => {
                 match ret {
                     Ok(size) => {
@@ -289,42 +273,67 @@ impl runtime::AsyncRead for QuicRead {
     }
 }
 
-struct QuicWrite {
+pub(crate) struct QuicWrite {
+    socket: Option<quinn::Connection>,
     send: Option<quinn::SendStream>,
+    remote_identity_id: P2pId,
+    local_identity_id: P2pId,
+    local: Endpoint,
+    remote: Endpoint,
 }
 
 impl QuicWrite {
-    pub fn new(send: quinn::SendStream) -> Self {
+    pub fn new(
+        socket: quinn::Connection,
+        send: quinn::SendStream,
+        remote_identity_id: P2pId,
+        local_identity_id: P2pId,
+        local: Endpoint,
+        remote: Endpoint, ) -> Self {
         Self {
+            socket: Some(socket),
             send: Some(send),
+            remote_identity_id,
+            local_identity_id,
+            local,
+            remote,
         }
     }
 
-    pub fn take(&mut self) -> quinn::SendStream {
-        self.send.take().unwrap()
-    }
-
-    async fn stop(&mut self) {
+    fn stop(&mut self) {
         if let Some(mut send) = self.send.take() {
-            let _ = send.finish();
-            let _ = send.stopped().await;
+            if let Some(socket) = self.socket.take() {
+                Executor::spawn(async move {
+                    let _ = send.finish();
+                    let _ = send.stopped().await;
+                    drop(socket);
+                });
+            }
         }
     }
 }
 
 impl P2pWrite for QuicWrite {
-    fn get_any(&self) -> &dyn Any {
-        self
+    fn remote(&self) -> Endpoint {
+        self.remote.clone()
     }
 
-    fn get_any_mut(&mut self) -> &mut dyn Any {
-        self
+    fn local(&self) -> Endpoint {
+        self.local.clone()
+    }
+
+    fn remote_id(&self) -> P2pId {
+        self.remote_identity_id.clone()
+    }
+
+    fn local_id(&self) -> P2pId {
+        self.local_identity_id.clone()
     }
 }
 
 impl Drop for QuicWrite {
     fn drop(&mut self) {
-        Executor::block_on(self.stop());
+        self.stop();
     }
 }
 
@@ -383,54 +392,6 @@ impl runtime::AsyncWrite for QuicWrite {
             }
             Poll::Pending => {
                 Poll::Pending
-            }
-        }
-    }
-}
-
-impl P2pConnection for QuicConnection {
-    fn is_stream(&self) -> bool {
-        self.is_stream
-    }
-
-    fn remote(&self) -> Endpoint {
-        self.remote.clone()
-    }
-
-    fn local(&self) -> Endpoint {
-        self.local.clone()
-    }
-
-    fn remote_id(&self) -> P2pId {
-        self.remote_identity_id.clone()
-    }
-
-    fn local_id(&self) -> P2pId {
-        self.local_identity_id.clone()
-    }
-
-    fn split(&self) -> P2pResult<(Box<dyn P2pRead>, Box<dyn P2pWrite>)> {
-        if self.is_stream {
-            Ok((Box::new(QuicRead::new(self.recv.lock().unwrap().take().unwrap())), Box::new(QuicWrite::new(self.send.lock().unwrap().take().unwrap()))))
-        } else {
-            Ok((Box::new(MockRead), Box::new(QuicWrite::new(self.send.lock().unwrap().take().unwrap()))))
-        }
-    }
-
-    fn unsplit(&self, mut read: Box<dyn P2pRead>, mut write: Box<dyn P2pWrite>) {
-        if self.is_stream {
-            let mut read = unsafe { std::mem::transmute::<_, &mut dyn Any>(read.get_any_mut())};
-            if let Some(read) = read.downcast_mut::<QuicRead>() {
-                *self.recv.lock().unwrap() = Some(read.take());
-            }
-            let mut write = unsafe { std::mem::transmute::<_, &mut dyn Any>(write.get_any_mut())};
-            if let Some(write) = write.downcast_mut::<QuicWrite>() {
-                *self.send.lock().unwrap() = Some(write.take());
-            }
-        } else {
-            let mut write = unsafe { std::mem::transmute::<_, &mut dyn Any>(write.get_any_mut())};
-            if let Some(write) = write.downcast_mut::<QuicWrite>() {
-                *self.send.lock().unwrap() = Some(write.take());
             }
         }
     }

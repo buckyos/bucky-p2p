@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionInfoCacheRef, P2pConnectionRef, P2pListenerRef};
+use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionInfoCacheRef, P2pConnection, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::p2p_network::P2pNetworkRef;
 use crate::sockets::{NetListener, NetListenerRef, QuicListener, QuicListenerRef};
@@ -105,7 +105,7 @@ impl NetManager {
             };
 
             let this = self.clone();
-            let p2p_listener = match p2p_network.listen(&local, out, mapping_port, Arc::new(move |conn: P2pConnectionRef| {
+            let p2p_listener = match p2p_network.listen(&local, out, mapping_port, Arc::new(move |conn: P2pConnection| {
                 let this = this.clone();
                 async move {
                     let listener = {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pResult;
 use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionRef, P2pListener, P2pListenerRef};
+use crate::p2p_connection::{P2pConnectionEventListener, P2pConnection, P2pListener, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::p2p_network::P2pNetwork;
 use crate::sockets::tcp::{TCPConnection, TCPListener, TCPListenerRef};
@@ -61,21 +61,21 @@ impl P2pNetwork for TcpNetwork {
         self.tcp_listeners.lock().unwrap().iter().map(|v| v.clone() as P2pListenerRef).collect::<Vec<_>>()
     }
 
-    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>> {
+    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>> {
         let conn = TCPConnection::connect(self.cert_factory.clone(), local_identity.clone(), remote.clone(), remote_id.clone(), self.timeout).await?;
-        Ok(vec![Arc::new(conn)])
+        Ok(vec![conn])
     }
 
-    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection> {
         let conn = TCPConnection::connect_with_ep(self.cert_factory.clone(), local_identity.clone(), local_ep.clone(), remote.clone(), remote_id.clone(), self.timeout).await?;
-        Ok(Arc::new(conn))
+        Ok(conn)
     }
 
-    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>> {
+    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>> {
         self.create_stream_connect(local_identity, remote, remote_id).await
     }
 
-    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection> {
         self.create_stream_connect_with_local_ep(local_identity, local_ep, remote, remote_id).await
     }
 }

@@ -37,6 +37,7 @@ if-addrs = { version = "0.13.3" }
 async-named-locker = "0.1.2"
 #sfo-cmd-server = { git = "https://github.com/wugren/sfo-cmd-server.git" }
 sfo-cmd-server = { path = "../../sfo-cmd-server" }
+sfo-split = "0.1.2"
 
 hmac = "0.12.1"
 aes-gcm = "0.10.3"

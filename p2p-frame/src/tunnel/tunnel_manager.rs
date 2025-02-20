@@ -8,7 +8,7 @@ use notify_future::NotifyFuture;
 use tokio::io::AsyncWriteExt;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_connection::P2pConnectionRef;
+use crate::p2p_connection::P2pConnection;
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityCertCacheRef};
 use crate::pn::PnClientRef;
 use crate::protocol::{Package, PackageCmdCode};
@@ -16,7 +16,7 @@ use crate::protocol::v0::{AckDatagram, AckReverseDatagram, AckReverseStream, Ack
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef};
-use crate::tunnel::proxy_connection::ProxyConnection;
+use crate::tunnel::proxy_connection::{ProxyConnectionRead, ProxyConnectionWrite};
 use crate::types::{SessionId, TunnelId, TunnelIdGenerator};
 use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPorts, TunnelStream};
 
@@ -409,7 +409,9 @@ impl TunnelManager {
                 loop {
                     match pn_client.accept().await {
                         Ok((read, write)) => {
-                            let proxy_conn = Arc::new(ProxyConnection::new(read.remote_id().clone(), local_id.clone(), read, write));
+                            let read = Box::new(ProxyConnectionRead::new(read, local_id.clone()));
+                            let write = Box::new(ProxyConnectionWrite::new(write, local_id.clone()));
+                            let proxy_conn = P2pConnection::new(read, write);
                             let manager = tmp_manager.clone();
                             Executor::spawn(async move {
                                 if let Some(manager) = manager.upgrade() {
@@ -470,7 +472,7 @@ impl TunnelManager {
         }
     }
 
-    async fn on_new_tunnel(&self, socket: P2pConnectionRef) -> P2pResult<()> {
+    async fn on_new_tunnel(&self, socket: P2pConnection) -> P2pResult<()> {
         let remote_id = socket.remote_id().clone();
         let remote_ep = socket.remote().clone();
         let local_id = socket.local_id().clone();

@@ -18,7 +18,7 @@ use tokio::time::error::Elapsed;
 use crate::endpoint::Endpoint;
 use crate::error::{into_p2p_err, p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_connection::{P2pConnectionRef, P2pRead, P2pWrite};
+use crate::p2p_connection::{P2pConnection, P2pRead, P2pReadHalf, P2pWrite, P2pWriteHalf};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::protocol::{Package, PackageCmdCode, PackageHeader, MTU_LARGE};
 use crate::protocol::v0::{AckClose, AckDatagram, AckReverseDatagram, AckReverseStream, AckStream, SynClose, SynDatagram, SynReverseDatagram, SynReverseStream, SynStream};
@@ -133,7 +133,7 @@ impl Display for TunnelSession {
     }
 }
 
-async fn accept_pkg(mut read: Box<dyn P2pRead>) -> P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)> {
+async fn accept_pkg(mut read: P2pReadHalf) -> P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)> {
     let mut buf_header = [0u8; 16];
     loop {
         read.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
@@ -158,7 +158,7 @@ async fn accept_pkg(mut read: Box<dyn P2pRead>) -> P2pResult<(Box<dyn P2pRead>, 
     }
 }
 
-fn create_accept_handle(read: Box<dyn P2pRead>,
+fn create_accept_handle(read: P2pReadHalf,
                         accept_future: TunnelFutureHolderRef,
                         recv_future: TunnelFutureHolderRef
 ) -> P2pResult<SpawnHandle<()>> {
@@ -178,8 +178,8 @@ fn create_accept_handle(read: Box<dyn P2pRead>,
     })
 }
 
-type ReadHolder = ObjectHolder<Option<Box<dyn P2pRead>>>;
-type WriteHolder = ObjectHolder<Option<Box<dyn P2pWrite>>>;
+type ReadHolder = ObjectHolder<Option<P2pReadHalf>>;
+type WriteHolder = ObjectHolder<Option<P2pWriteHalf>>;
 
 pub struct TunnelStreamState {
 }
@@ -200,7 +200,7 @@ async fn handle_cmd(cmd_code: PackageCmdCode, cmd_body: &[u8], read: &ReadHolder
         write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let mut tunnel = tunnel.lock().unwrap();
         tunnel.tunnel_stat.decrease_work_instance();
-        tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
+        tunnel.data_socket = Some(read.take().unwrap().unsplit(write.take().unwrap()));
         let _ = tunnel.enter_idle_mode();
         log::info!("close tunnel stream {:?} local_id {} remote_id {}",
                 tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
@@ -233,8 +233,8 @@ pub struct TunnelStream {
 impl TunnelStream {
     pub(crate) fn new(
         tunnel: Arc<Mutex<TunnelConnectionInner>>,
-        read: Box<dyn P2pRead>,
-        write: Box<dyn P2pWrite>,
+        read: P2pReadHalf,
+        write: P2pWriteHalf,
         session_id: SessionId,
         port: u16,) -> P2pResult<Self> {
         {
@@ -260,8 +260,8 @@ impl TunnelStream {
 
     pub(crate) fn first(
         tunnel: Arc<Mutex<TunnelConnectionInner>>,
-        read: Box<dyn P2pRead>,
-        write: Box<dyn P2pWrite>,
+        read: P2pReadHalf,
+        write: P2pWriteHalf,
         session_id: SessionId,
         port: u16,) -> P2pResult<Self> {
         {
@@ -486,7 +486,7 @@ impl TunnelStream {
 
                     let mut tunnel = tunnel.lock().unwrap();
                     tunnel.tunnel_stat.decrease_work_instance();
-                    tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
+                    tunnel.data_socket = Some(read.take().unwrap().unsplit(write.take().unwrap()));
                     tunnel.enter_idle_mode()?;
                     log::info!("close stream {:?} local_id {} remote_id {}",
                 tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
@@ -673,7 +673,7 @@ pub struct TunnelDatagramSend {
     shutdown_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<()>>>>>,
 }
 
-async fn read_pkg(read: &mut Box<dyn P2pRead>) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
+async fn read_pkg(read: &mut P2pReadHalf) -> P2pResult<(PackageCmdCode, Vec<u8>)> {
     let mut buf_header = [0u8; 16];
     read.read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()]).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
     let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
@@ -690,8 +690,8 @@ async fn read_pkg(read: &mut Box<dyn P2pRead>) -> P2pResult<(PackageCmdCode, Vec
 
 impl TunnelDatagramSend {
     pub(crate) fn new(tunnel: Arc<Mutex<TunnelConnectionInner>>,
-                      mut read: Box<dyn P2pRead>,
-                      write: Box<dyn P2pWrite>,
+                      read: P2pReadHalf,
+                      write: P2pWriteHalf,
                       port: u16,
                       session_id: SessionId) -> P2pResult<Self> {
         {
@@ -716,8 +716,8 @@ impl TunnelDatagramSend {
     }
 
     pub(crate) fn first(tunnel: Arc<Mutex<TunnelConnectionInner>>,
-                      mut read: Box<dyn P2pRead>,
-                      write: Box<dyn P2pWrite>,
+                        read: P2pReadHalf,
+                        write: P2pWriteHalf,
                       port: u16,
                       session_id: SessionId) -> P2pResult<Self> {
         {
@@ -867,7 +867,7 @@ impl TunnelDatagramSend {
 
                     let mut tunnel = tunnel.lock().unwrap();
                     tunnel.tunnel_stat.decrease_work_instance();
-                    tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
+                    tunnel.data_socket = Some(read.take().unwrap().unsplit(write.take().unwrap()));
                     tunnel.enter_idle_mode()?;
                     log::info!("close stream {:?} local_id {} remote_id {}",
                 tunnel.tunnel_id, tunnel.local_identity.get_id().to_string(), tunnel.remote_id.to_string());
@@ -1008,8 +1008,8 @@ impl Drop for TunnelDatagramSend {
 
 pub struct TunnelDatagramRecv {
     tunnel: Arc<Mutex<TunnelConnectionInner>>,
-    read: Option<Box<dyn P2pRead>>,
-    write: Option<Box<dyn P2pWrite>>,
+    read: Option<P2pReadHalf>,
+    write: Option<P2pWriteHalf>,
     remainder: u16,
     read_future: Option<Pin<Box<dyn Send + Future<Output=std::io::Result<usize>>>>>,
     port: u16,
@@ -1018,7 +1018,7 @@ pub struct TunnelDatagramRecv {
 }
 
 impl TunnelDatagramRecv {
-    pub(crate) fn new(tunnel: Arc<Mutex<TunnelConnectionInner>>, read: Box<dyn P2pRead>, write: Box<dyn P2pWrite>, port: u16, session_id: SessionId) -> Self {
+    pub(crate) fn new(tunnel: Arc<Mutex<TunnelConnectionInner>>, read: P2pReadHalf, write: P2pWriteHalf, port: u16, session_id: SessionId) -> Self {
         {
             let tunnel = tunnel.lock().unwrap();
             tunnel.tunnel_stat.increase_work_instance();
@@ -1054,7 +1054,7 @@ impl TunnelDatagramRecv {
             self.write.as_mut().unwrap().flush().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
             let mut tunnel = self.tunnel.lock().unwrap();
             tunnel.tunnel_stat.decrease_work_instance();
-            tunnel.data_socket.as_mut().unwrap().unsplit(self.read.take().unwrap(), self.write.take().unwrap());
+            tunnel.data_socket = Some(self.read.take().unwrap().unsplit(self.write.take().unwrap()));
             tunnel.enter_idle_mode()?;
             self.is_closed = true;
             let reason = P2pErrorCode::from_u8(syn_close.reason).unwrap_or(P2pErrorCode::Ok);
@@ -1166,7 +1166,7 @@ impl TunnelDatagramRecv {
 
                 {
                     let mut tunnel = tunnel.lock().unwrap();
-                    tunnel.data_socket.as_mut().unwrap().unsplit(read.take().unwrap(), write.take().unwrap());
+                    tunnel.data_socket = Some(read.take().unwrap().unsplit(write.take().unwrap()));
                     tunnel.enter_idle_mode()?;
                     tunnel.tunnel_stat.decrease_work_instance();
                     log::info!("close datagram {:?} local_id {} remote_id {}",
@@ -1310,8 +1310,8 @@ impl<T> FutureHolder<T> {
     }
 }
 
-pub type TunnelFutureHolder = FutureHolder<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>;
-pub type TunnelFutureHolderRef = Arc<FutureHolder<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>>;
+pub type TunnelFutureHolder = FutureHolder<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>;
+pub type TunnelFutureHolderRef = Arc<FutureHolder<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>>;
 
 pub(crate) struct TunnelConnectionInner {
     tunnel_id: TunnelId,
@@ -1321,10 +1321,10 @@ pub(crate) struct TunnelConnectionInner {
     conn_timeout: Duration,
     protocol_version: u8,
     stack_version: u32,
-    data_socket: Option<P2pConnectionRef>,
+    data_socket: Option<P2pConnection>,
     tunnel_state: TunnelState,
     accept_handle: Option<SpawnHandle<()>>,
-    write: Option<Box<dyn P2pWrite>>,
+    write: Option<P2pWriteHalf>,
     accept_future: TunnelFutureHolderRef,
     recv_future: TunnelFutureHolderRef,
     cert_factory: P2pIdentityCertFactoryRef,
@@ -1347,7 +1347,7 @@ impl TunnelConnectionInner {
         conn_timeout: Duration,
         protocol_version: u8,
         stack_version: u32,
-        data_socket: Option<P2pConnectionRef>,
+        data_socket: Option<P2pConnection>,
         cert_factory: P2pIdentityCertFactoryRef,) -> P2pResult<Self> {
         let accept_future = TunnelFutureHolder::new();
         let recv_future = TunnelFutureHolder::new();
@@ -1379,7 +1379,7 @@ impl TunnelConnectionInner {
             return Ok(());
         }
         if self.data_socket.is_some() {
-            let (read, write) = self.data_socket.as_ref().unwrap().split()?;
+            let (read, write) = self.data_socket.take().unwrap().split();
             let handle = create_accept_handle(read, self.accept_future.clone(), self.recv_future.clone())?;
             self.write = Some(write);
             self.accept_handle = Some(handle);
@@ -1391,10 +1391,10 @@ impl TunnelConnectionInner {
     }
 
     async fn open_stream_inner(tunnel_id: TunnelId,
-                               write: &mut Box<dyn P2pWrite>,
-                               recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
+                               write: &mut P2pWriteHalf,
+                               recv_future: NotifyFuture<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>,
                                vport: u16,
-                               session_id: SessionId) -> P2pResult<Box<dyn P2pRead>> {
+                               session_id: SessionId) -> P2pResult<P2pReadHalf> {
         let syn = SynStream {
             tunnel_id,
             to_vport: vport,
@@ -1420,10 +1420,10 @@ impl TunnelConnectionInner {
     }
 
     async fn open_reverse_stream_inner(tunnel_id: TunnelId,
-                                       write: &mut Box<dyn P2pWrite>,
-                                       recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
+                                       write: &mut P2pWriteHalf,
+                                       recv_future: NotifyFuture<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>,
                                        vport: u16,
-                                       session_id: SessionId) -> P2pResult<Box<dyn P2pRead>> {
+                                       session_id: SessionId) -> P2pResult<P2pReadHalf> {
         let syn = SynReverseStream {
             tunnel_id,
             session_id,
@@ -1449,10 +1449,10 @@ impl TunnelConnectionInner {
     }
 
     async fn open_datagram_inner(tunnel_id: TunnelId,
-                                 write: &mut Box<dyn P2pWrite>,
-                                 recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
+                                 write: &mut P2pWriteHalf,
+                                 recv_future: NotifyFuture<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>,
                                  vport: u16,
-                                 session_id: SessionId) -> P2pResult<Box<dyn P2pRead>> {
+                                 session_id: SessionId) -> P2pResult<P2pReadHalf> {
         let syn = SynDatagram {
             tunnel_id,
             to_vport: vport,
@@ -1478,10 +1478,10 @@ impl TunnelConnectionInner {
     }
 
     async fn open_reverse_datagram_inner(tunnel_id: TunnelId,
-                                         write: &mut Box<dyn P2pWrite>,
-                                         recv_future: NotifyFuture<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>,
+                                         write: &mut P2pWriteHalf,
+                                         recv_future: NotifyFuture<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>,
                                          vport: u16,
-                                         session_id: SessionId,) -> P2pResult<Box<dyn P2pRead>> {
+                                         session_id: SessionId,) -> P2pResult<P2pReadHalf> {
         let syn = SynReverseDatagram {
             tunnel_id,
             to_vport: vport,
@@ -1520,7 +1520,7 @@ impl TunnelConnection {
         conn_timeout: Duration,
         protocol_version: u8,
         stack_version: u32,
-        tcp_socket: Option<P2pConnectionRef>,
+        tcp_socket: Option<P2pConnection>,
         cert_factory: P2pIdentityCertFactoryRef, ) -> P2pResult<Self> {
         Ok(Self {
             inner: Arc::new(Mutex::new(TunnelConnectionInner::new(
@@ -1549,7 +1549,7 @@ impl TunnelConnection {
             }
             inner.tunnel_state = TunnelState::Opening;
 
-            let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
+            let future = NotifyFuture::<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
 
             (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
@@ -1580,7 +1580,7 @@ impl TunnelConnection {
                 return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.tunnel_id, inner.tunnel_state));
             }
             inner.tunnel_state = TunnelState::Opening;
-            let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
+            let future = NotifyFuture::<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
             (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
         };
@@ -1616,7 +1616,7 @@ impl TunnelConnection {
 
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
@@ -1638,7 +1638,7 @@ impl TunnelConnection {
 
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
@@ -1660,7 +1660,7 @@ impl TunnelConnection {
 
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
@@ -1682,7 +1682,7 @@ impl TunnelConnection {
 
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(Arc::new(tcp_socket));
+            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
@@ -1697,7 +1697,7 @@ impl TunnelConnection {
             }
             inner.tunnel_state = TunnelState::Opening;
 
-            let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
+            let future = NotifyFuture::<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
 
             (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
@@ -1731,7 +1731,7 @@ impl TunnelConnection {
                 return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid state {:?}", inner.tunnel_id, inner.tunnel_state));
             }
             inner.tunnel_state = TunnelState::Opening;
-            let future = NotifyFuture::<P2pResult<(Box<dyn P2pRead>, PackageCmdCode, Vec<u8>)>>::new();
+            let future = NotifyFuture::<P2pResult<(P2pReadHalf, PackageCmdCode, Vec<u8>)>>::new();
             inner.recv_future.set_future(future.clone());
             (inner.conn_timeout, inner.tunnel_id, inner.write.take().unwrap(), future)
         };

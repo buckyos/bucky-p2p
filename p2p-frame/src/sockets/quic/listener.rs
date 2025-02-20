@@ -10,7 +10,7 @@ use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pListener};
+use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCache, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
 use crate::sockets::{QuicConnection, UpdateOuterResult};
 use crate::tls::ServerCertResolverRef;
@@ -120,7 +120,7 @@ impl QuicListener {
         Ok(())
     }
 
-    async fn accept(&self, conn: Incoming) -> P2pResult<QuicConnection> {
+    async fn accept(&self, conn: Incoming) -> P2pResult<Option<P2pConnection>> {
         let connection = conn.await.map_err(into_p2p_err!(P2pErrorCode::QuicError, "QuicListener accept error"))?;
         let (local_id, remote_cert) = {
             let handshake_data = connection.handshake_data();
@@ -148,13 +148,27 @@ impl QuicListener {
         let remote_device = self.cert_factory.create(&remote_cert)?;
         self.cert_cache.add(&remote_device.get_id(), &remote_device).await?;
         let remote_addr = connection.remote_address();
-        let mut socket = QuicConnection::new(connection,
-                                         local_id,
-                                         remote_device.get_id(),
+        let mut conn = QuicConnection::new(connection,
                                          self.local(),
                                          Endpoint::from((Protocol::Quic, remote_addr)));
-        socket.accept().await?;
-        Ok(socket)
+        let (read, send) = conn.accept().await?;
+        if send.is_some() {
+            let read = Box::new(super::QuicRead::new(conn.socket().clone(),
+                                                     read,
+                                                     remote_device.get_id(),
+                                                     local_id.clone(),
+                                                     conn.local().clone(),
+                                                     conn.remote().clone()));
+            let write = Box::new(super::QuicWrite::new(conn.socket().clone(),
+                                                       send.unwrap(),
+                                                       remote_device.get_id(),
+                                                       local_id,
+                                                       conn.local().clone(),
+                                                       conn.remote().clone()));
+            Ok(Some(P2pConnection::new(read, write)))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -174,8 +188,10 @@ impl QuicListener {
                         let _ = Executor::spawn(async move {
                             match this.accept(conn).await {
                                 Ok(socket) => {
-                                    if let Err(e) = quic_listener.on_new_connection(Arc::new(socket)).await {
-                                        error!("QuicListener on_new_connection error: {}", e);
+                                    if let Some(socket) = socket {
+                                        if let Err(e) = quic_listener.on_new_connection(socket).await {
+                                            error!("QuicListener on_new_connection error: {}", e);
+                                        }
                                     }
                                 }
                                 Err(e) => {

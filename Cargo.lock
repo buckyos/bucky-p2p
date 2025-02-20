@@ -2627,6 +2627,7 @@ dependencies = [
  "rustls",
  "sfo-cmd-server",
  "sfo-result",
+ "sfo-split",
  "sha2 0.10.8",
  "tokio",
  "tokio-rustls",
@@ -3569,6 +3570,7 @@ dependencies = [
 name = "sfo-cmd-server"
 version = "0.1.0"
 dependencies = [
+ "as-any",
  "async-trait",
  "base-x",
  "base58",
@@ -3580,6 +3582,7 @@ dependencies = [
  "num",
  "sfo-pool",
  "sfo-result",
+ "sfo-split",
  "sha2 0.10.8",
  "tokio",
 ]
@@ -3613,6 +3616,12 @@ checksum = "12256febb90f624bf25a5eeaed19e74b78a1348c5883aaecb5bd418c41b2f729"
 dependencies = [
  "log",
 ]
+
+[[package]]
+name = "sfo-split"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9fc89a2044707286d9adfeb1af07ec49c3568514d6deeae83b8bca1c4032f21"
 
 [[package]]
 name = "sha1"

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionRef, P2pListenerRef};
+use crate::p2p_connection::{P2pConnectionEventListener, P2pConnection, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::p2p_network::P2pNetwork;
 use crate::sockets::{QuicConnection, QuicListener, QuicListenerRef};
@@ -68,8 +68,8 @@ impl P2pNetwork for QuicNetwork {
         self.quic_listener.lock().unwrap().iter().map(|v| v.clone() as P2pListenerRef).collect()
     }
 
-    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>> {
-        let mut conn_list: Vec<P2pConnectionRef> = Vec::new();
+    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>> {
+        let mut conn_list: Vec<P2pConnection> = Vec::new();
         let quic_listener = {
             self.quic_listener.lock().unwrap().clone()
         };
@@ -77,14 +77,32 @@ impl P2pNetwork for QuicNetwork {
             if !listener.local().is_same_ip_version(remote) {
                 continue;
             }
-            let mut conn = QuicConnection::connect_with_ep(listener.quic_ep(), local_identity.clone(), self.cert_factory.clone(), remote_id.clone(), remote.clone(), self.timeout, self.idle_timeout).await?;
-            conn.open_bi_stream().await?;
-            conn_list.push(Arc::new(conn));
+            let mut conn = QuicConnection::connect_with_ep(listener.quic_ep(),
+                                                           local_identity.clone(),
+                                                           self.cert_factory.clone(),
+                                                           remote_id.clone(),
+                                                           remote.clone(),
+                                                           self.timeout,
+                                                           self.idle_timeout).await?;
+            let (read, send) = conn.open_bi_stream().await?;
+            let read = Box::new(super::QuicRead::new(conn.socket().clone(),
+                                                     read,
+                                                     remote_id.clone(),
+                                                     local_identity.get_id(),
+                                                     conn.local().clone(),
+                                                     conn.remote().clone()));
+            let write = Box::new(super::QuicWrite::new(conn.socket().clone(),
+                                                       send,
+                                                       remote_id.clone(),
+                                                       local_identity.get_id(),
+                                                       conn.local().clone(),
+                                                       conn.remote().clone()));
+            conn_list.push(P2pConnection::new(read, write));
         }
         Ok(conn_list)
     }
 
-    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection> {
         let quic_listener = {
             self.quic_listener.lock().unwrap().clone()
         };
@@ -95,17 +113,29 @@ impl P2pNetwork for QuicNetwork {
             }
 
             let mut conn = QuicConnection::connect_with_ep(listener.quic_ep(), local_identity.clone(), self.cert_factory.clone(), remote_id.clone(), remote.clone(), self.timeout, self.idle_timeout).await?;
-            conn.open_bi_stream().await?;
-            return Ok(Arc::new(conn));
+            let (read, send) = conn.open_bi_stream().await?;
+            let read = Box::new(super::QuicRead::new(conn.socket().clone(),
+                                                     read,
+                                                     remote_id.clone(),
+                                                     local_identity.get_id(),
+                                                     conn.local().clone(),
+                                                     conn.remote().clone()));
+            let write = Box::new(super::QuicWrite::new(conn.socket().clone(),
+                                                       send,
+                                                       remote_id.clone(),
+                                                       local_identity.get_id(),
+                                                       conn.local().clone(),
+                                                       conn.remote().clone()));
+            return Ok(P2pConnection::new(read, write));
         }
         Err(p2p_err!(P2pErrorCode::NotFound, "no listener found for local ep: {}", local_ep))
     }
 
-    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnectionRef>> {
+    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>> {
         self.create_stream_connect(local_identity, remote, remote_id).await
     }
 
-    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnectionRef> {
+    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection> {
         self.create_stream_connect_with_local_ep(local_identity, local_ep, remote, remote_id).await
     }
 }
