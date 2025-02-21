@@ -14,6 +14,7 @@ use futures::FutureExt;
 use notify_future::NotifyFuture;
 use num_traits::FromPrimitive;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpSocket;
 use tokio::time::error::Elapsed;
 use crate::endpoint::Endpoint;
 use crate::error::{into_p2p_err, p2p_err, P2pErrorCode, P2pResult};
@@ -220,6 +221,7 @@ pub struct TunnelStream {
     tunnel: Arc<Mutex<TunnelConnectionInner>>,
     session_id: SessionId,
     port: u16,
+    local_ep: Endpoint,
     read: ReadHolder,
     write: WriteHolder,
     remainder: u16,
@@ -245,6 +247,7 @@ impl TunnelStream {
             tunnel,
             session_id,
             port,
+            local_ep: read.local(),
             read: ReadHolder::new(Some(read)),
             write: WriteHolder::new(Some(write)),
             remainder: 0,
@@ -272,6 +275,7 @@ impl TunnelStream {
             tunnel,
             session_id,
             port,
+            local_ep: read.local(),
             read: ReadHolder::new(Some(read)),
             write: WriteHolder::new(Some(write)),
             remainder: 0,
@@ -549,8 +553,7 @@ impl TunnelStream {
     }
 
     pub fn local_endpoint(&self) -> Endpoint {
-        let tunnel = self.tunnel.lock().unwrap();
-        tunnel.data_socket.as_ref().unwrap().local().clone()
+        self.local_ep.clone()
     }
 
     pub(crate) fn close(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
@@ -663,6 +666,7 @@ impl runtime::AsyncWrite for TunnelStream {
 
 pub struct TunnelDatagramSend {
     tunnel: Arc<Mutex<TunnelConnectionInner>>,
+    local_ep: Endpoint,
     read: ReadHolder,
     write: WriteHolder,
     write_future: Option<Pin<Box<dyn Send + Future<Output=std::io::Result<usize>>>>>,
@@ -701,6 +705,7 @@ impl TunnelDatagramSend {
 
         let mut this = Self {
             tunnel,
+            local_ep: write.local(),
             read: ReadHolder::new(Some(read)),
             write: WriteHolder::new(Some(write)),
             write_future: None,
@@ -727,6 +732,7 @@ impl TunnelDatagramSend {
 
         let mut this = Self {
             tunnel,
+            local_ep: write.local(),
             read: ReadHolder::new(Some(read)),
             write: WriteHolder::new(Some(write)),
             write_future: None,
@@ -986,8 +992,7 @@ impl TunnelDatagramSend {
     }
 
     pub fn local_endpoint(&self) -> Endpoint {
-        let tunnel = self.tunnel.lock().unwrap();
-        tunnel.data_socket.as_ref().unwrap().local().clone()
+        self.local_ep.clone()
     }
 
     pub(crate) fn close(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
@@ -1251,8 +1256,7 @@ impl TunnelDatagramRecv {
     }
 
     pub(crate) fn local_endpoint(&self) -> Endpoint {
-        let tunnel = self.tunnel.lock().unwrap();
-        tunnel.data_socket.as_ref().unwrap().local().clone()
+        self.write.as_ref().unwrap().local()
     }
 
     pub(crate) fn close(&mut self, reason: P2pErrorCode) -> P2pResult<()> {
@@ -1520,7 +1524,7 @@ impl TunnelConnection {
         conn_timeout: Duration,
         protocol_version: u8,
         stack_version: u32,
-        tcp_socket: Option<P2pConnection>,
+        tcp_socket: P2pConnection,
         cert_factory: P2pIdentityCertFactoryRef, ) -> P2pResult<Self> {
         Ok(Self {
             inner: Arc::new(Mutex::new(TunnelConnectionInner::new(
@@ -1531,7 +1535,7 @@ impl TunnelConnection {
                 conn_timeout,
                 protocol_version,
                 stack_version,
-                tcp_socket,
+                Some(tcp_socket),
                 cert_factory)?))
         })
     }
@@ -1604,89 +1608,38 @@ impl TunnelConnection {
     }
 
     pub(crate) async fn connect_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
-        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.enter_idle_mode()?;
-            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
-        };
-        if has_socket {
-            return Ok(self.open_stream(vport, session_id).await?);
-        }
-        let tcp_socket = TCPConnection::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
-
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
-
-        Ok(self.open_stream(vport, session_id).await?)
+        self.open_stream(vport, session_id).await
     }
 
     pub(crate) async fn connect_datagram(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
-        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.enter_idle_mode()?;
-            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
-        };
-
-        if has_socket {
-            return Ok(self.open_datagram(vport, session_id).await?);
-        }
-
-        let tcp_socket = TCPConnection::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
-
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
-        Ok(self.open_datagram(vport, session_id).await?)
+        self.open_datagram(vport, session_id).await
     }
 
     pub(crate) async fn connect_reverse_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
-        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.enter_idle_mode()?;
-            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
-        };
-
-        if has_socket {
-            return Ok(self.open_reverse_stream(vport, session_id).await?);
-        }
-
-        let tcp_socket = TCPConnection::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
-
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
-        Ok(self.open_reverse_stream(vport, session_id).await?)
+        self.open_reverse_stream(vport, session_id).await
     }
 
     pub(crate) async fn connect_reverse_datagram(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramRecv> {
-        let (has_socket, local_identity, remote_ep, remote_id, conn_timeout, verifier) = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.enter_idle_mode()?;
-            (inner.data_socket.is_some(), inner.local_identity.clone(), inner.remote_ep.clone(), inner.remote_id.clone(), inner.conn_timeout, inner.cert_factory.clone())
-        };
-
-        if has_socket {
-            return Ok(self.open_reverse_datagram(vport, session_id).await?);
-        }
-
-        let tcp_socket = TCPConnection::connect(verifier, local_identity, remote_ep, remote_id, conn_timeout).await?;
-
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.data_socket = Some(tcp_socket);
             inner.enter_idle_mode()?;
         }
 
-        Ok(self.open_reverse_datagram(vport, session_id).await?)
+        self.open_reverse_datagram(vport, session_id).await
     }
 
     pub(crate) async fn open_stream(&self, vport: u16, session_id: SessionId) -> P2pResult<TunnelStream> {
@@ -1974,26 +1927,24 @@ impl TunnelConnection {
         }
     }
     pub(crate) async fn shutdown(&self) -> P2pResult<()> {
-        {
-            log::info!("tunnel {:?} shutdown.local {}", {self.inner.lock().unwrap().tunnel_id}, {self.inner.lock().unwrap().local_identity.get_id()});
-        }
-        let (accept_handle, recv_future, accept_future) = {
+        let (tunnel_id, local_id, accept_handle, recv_future, accept_future) = {
             let mut inner = self.inner.lock().unwrap();
+            log::info!("tunnel {:?} shutdown.local {}", inner.tunnel_id, inner.local_identity.get_id());
             if inner.tunnel_state != TunnelState::Idle {
                 return Ok(());
             }
-            (inner.accept_handle.take(), inner.recv_future.clone(), inner.accept_future.clone())
+            (inner.tunnel_id, inner.local_identity.get_id(), inner.accept_handle.take(), inner.recv_future.clone(), inner.accept_future.clone())
         };
 
         if accept_handle.is_some() {
             accept_handle.unwrap().abort();
         }
 
-        recv_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id)));
-        accept_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", self.inner.lock().unwrap().tunnel_id)));
+        recv_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", tunnel_id)));
+        accept_future.try_complete(Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel {:?} shutdown", tunnel_id)));
 
         {
-            log::info!("tunnel {:?} shutdowned.local {}", {self.inner.lock().unwrap().tunnel_id}, {self.inner.lock().unwrap().local_identity.get_id()});
+            log::info!("tunnel {:?} shutdowned.local {}", tunnel_id, local_id);
         }
         // inner.data_socket.as_ref().unwrap().shutdown().await?;
         Ok(())
@@ -2017,7 +1968,9 @@ impl TunnelConnection {
 
 impl Drop for TunnelConnection {
     fn drop(&mut self) {
-        log::info!("drop tunnel {:?}", self.inner.lock().unwrap().tunnel_id);
+        {
+            log::info!("drop tunnel connection {:?}", self.inner.lock().unwrap().tunnel_id);
+        }
         let _ = Executor::block_on(self.shutdown());
     }
 

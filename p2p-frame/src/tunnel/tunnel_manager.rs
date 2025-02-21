@@ -496,7 +496,7 @@ impl TunnelManager {
             self.conn_timeout,
             self.protocol_version,
             self.stack_version,
-            Some(socket),
+            socket,
             self.cert_factory.clone())?;
 
         let tunnels = self.get_tunnels(&remote_id);
@@ -513,22 +513,9 @@ impl TunnelManager {
                         local_ep.to_string());
                     match instance {
                         TunnelSession::Stream(mut stream) => {
-                            let mut tunnel = Tunnel::new(
-                                net_manager.clone(),
-                                sn_service.clone(),
-                                tunnel_conn.get_tunnel_id(),
-                                protocol_version,
-                                stack_version,
-                                remote_id.clone(),
-                                vec![],
-                                local_identity.clone(),
-                                conn_timeout,
-                                idle_timeout,
-                                cert_factory.clone(), None);
-                            tunnel.set_tunnel_conn(tunnel_conn);
                             let (ack, mut stream) = {
-                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel.get_tunnel_id())).await;
-                                if tunnels.tunnel_exist(tunnel.get_tunnel_id()) {
+                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel_conn.get_tunnel_id())).await;
+                                if tunnels.tunnel_exist(tunnel_conn.get_tunnel_id()) {
                                     let ack = AckStream {
                                         result: 1
                                     };
@@ -541,16 +528,29 @@ impl TunnelManager {
                                     match stream.send_pkg(pkg).await {
                                         Ok(_) => {
                                             log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                        tunnel.get_tunnel_id(),
-                        remote_id.to_string(),
-                        remote_ep.to_string(),
-                        local_id.to_string(),
-                        local_ep.to_string());
+                                                tunnel_conn.get_tunnel_id(),
+                                                remote_id.to_string(),
+                                                remote_ep.to_string(),
+                                                local_id.to_string(),
+                                                local_ep.to_string());
+                                            let mut tunnel = Tunnel::new(
+                                                net_manager.clone(),
+                                                sn_service.clone(),
+                                                tunnel_conn.get_tunnel_id(),
+                                                protocol_version,
+                                                stack_version,
+                                                remote_id.clone(),
+                                                vec![],
+                                                local_identity.clone(),
+                                                conn_timeout,
+                                                idle_timeout,
+                                                cert_factory.clone(), None);
+                                            tunnel.set_tunnel_conn(tunnel_conn);
                                             tunnels.add_tunnel(tunnel, listener.clone());
                                             (None, Some(stream))
                                         }
                                         Err(e) => {
-                                            log::error!("write tunnel {:?} ack stream error: {:?}", tunnel.get_tunnel_id(), e);
+                                            log::error!("write tunnel {:?} ack stream error: {:?}", tunnel_conn.get_tunnel_id(), e);
                                             (None, None)
                                         }
                                     }

@@ -168,7 +168,7 @@ impl Tunnel {
                     conn_timeout,
                     protocol_version,
                     stack_version,
-                    Some(conn),
+                    conn,
                     cert_factory.clone())?;
                 let future = Box::pin(async move {
                     let stream = tunnel_conn.connect_stream(vport, session_id).await?;
@@ -205,7 +205,7 @@ impl Tunnel {
             self.conn_timeout,
             self.protocol_version,
             self.stack_version,
-            Some(proxy_conn),
+            proxy_conn,
             self.cert_factory.clone())?;
         Ok(Some(conn))
     }
@@ -363,7 +363,7 @@ impl Tunnel {
                     conn_timeout,
                     protocol_version,
                     stack_version,
-                    Some(conn),
+                    conn,
                     cert_factory.clone())?;
                 let future = Box::pin(async move {
                     let stream = tunnel_conn.connect_datagram(vport, session_id).await?;
@@ -532,7 +532,7 @@ impl Tunnel {
                         conn_timeout,
                         protocol_version,
                         stack_version,
-                        Some(conn),
+                        conn,
                         cert_factory.clone())?;
                     let future = Box::pin(async move {
                         let stream = tunnel_conn.connect_reverse_stream(vport, session_id).await?;
@@ -596,7 +596,7 @@ impl Tunnel {
                         conn_timeout,
                         protocol_version,
                         stack_version,
-                        Some(conn),
+                        conn,
                         cert_factory.clone())?;
                     let future = Box::pin(async move {
                         let stream = tunnel_conn.connect_reverse_datagram(vport, session_id).await?;
