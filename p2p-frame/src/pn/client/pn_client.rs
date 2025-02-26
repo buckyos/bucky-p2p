@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawFrom};
 use callback_result::SingleCallbackWaiter;
-use notify_future::NotifyFuture;
+use notify_future::{Notify, NotifyWaiter};
 use sfo_cmd_server::client::CmdClient;
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode};
 use sfo_cmd_server::{CmdBodyRead, PeerId};
@@ -28,9 +28,9 @@ type PnTunnelReadWaiterRef = Arc<SingleCallbackWaiter<P2pResult<(usize, Vec<u8>)
 struct RecvCacheState {
     pub cache: HashMap<u32, P2pResult<(usize, Vec<u8>)>>,
     pub expect_seq: u32,
-    pub waiter: Option<NotifyFuture<P2pResult<(usize, Vec<u8>)>>>,
+    pub notify: Option<Notify<P2pResult<(usize, Vec<u8>)>>>,
     pub latest_heart: SystemTime,
-    pub poll_waiter: Option<NotifyFuture<P2pResult<(usize, Vec<u8>)>>>,
+    pub poll_waiter: Option<NotifyWaiter<P2pResult<(usize, Vec<u8>)>>>,
     pub is_error: bool,
 }
 
@@ -51,7 +51,7 @@ impl RecvCache {
             state: Arc::new(Mutex::new(RecvCacheState {
                 cache: Default::default(),
                 expect_seq: 1,
-                waiter: None,
+                notify: None,
                 latest_heart: SystemTime::now(),
                 poll_waiter: None,
                 is_error: false,
@@ -76,10 +76,10 @@ impl RecvCache {
 
     fn insert(&self, seq: u32, data: (usize, Vec<u8>)) -> bool {
         let mut state = self.state.lock().unwrap();
-        if seq == state.expect_seq && state.waiter.is_some() {
+        if seq == state.expect_seq && state.notify.is_some() {
             state.expect_seq += 1;
-            let waiter = state.waiter.take().unwrap();
-            waiter.set_complete(Ok(data));
+            let waiter = state.notify.take().unwrap();
+            waiter.notify(Ok(data));
             true
         } else {
             if state.cache.len() >= 1024 {
@@ -95,9 +95,9 @@ impl RecvCache {
         let mut state = self.state.lock().unwrap();
         let expect_seq = state.expect_seq;
         state.is_error = true;
-        if state.waiter.is_some() {
-            let waiter = state.waiter.take().unwrap();
-            waiter.set_complete(Err(err));
+        if state.notify.is_some() {
+            let waiter = state.notify.take().unwrap();
+            waiter.notify(Err(err));
         } else {
             state.cache.insert(expect_seq, Err(err));
         }
@@ -135,10 +135,11 @@ impl Future for RecvCache {
                 state.expect_seq += 1;
                 Poll::Ready(data)
             } else {
-                let mut waiter = NotifyFuture::new();
-                state.waiter = Some(waiter.clone());
-                state.poll_waiter = Some(waiter.clone());
-                match Pin::new(&mut waiter).poll(cx) {
+                let (notify, mut waiter) = Notify::new();
+                state.notify = Some(notify);
+                state.poll_waiter = Some(waiter);
+                let mut waiter = state.poll_waiter.as_mut().unwrap();
+                match Pin::new(waiter).poll(cx) {
                     Poll::Ready(ret) => {
                         state.poll_waiter = None;
                         Poll::Ready(ret)
@@ -149,8 +150,8 @@ impl Future for RecvCache {
                 }
             }
         } else {
-            let mut waiter = state.poll_waiter.as_ref().unwrap().clone();
-            match Pin::new(&mut waiter).poll(cx) {
+            let mut waiter = state.poll_waiter.as_mut().unwrap();
+            match Pin::new(waiter).poll(cx) {
                 Poll::Ready(ret) => {
                     state.poll_waiter = None;
                     Poll::Ready(ret)

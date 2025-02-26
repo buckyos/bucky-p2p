@@ -80,19 +80,26 @@ use super::sn::*;
 //     assert_eq!(dst.flags, src.flags);
 // }
 
+#[derive(Copy, Clone, Debug, RawEncode, RawDecode, Eq, PartialEq, Hash)]
+pub enum TunnelType {
+    Datagram,
+    Stream,
+}
+
 #[derive(Clone, Debug, RawEncode, RawDecode)]
-pub struct SynStream {
+pub struct SynSession {
+    pub tunnel_type: TunnelType,
     pub tunnel_id: TunnelId,
     pub to_vport: u16,
     pub session_id: SessionId,
     pub payload: Vec<u8>,
 }
 
-impl std::fmt::Display for SynStream {
+impl std::fmt::Display for SynSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TcpSynConnection:{{session_id:{:?},to_vport:{}}}",
+            "SynSession:{{session_id:{:?},to_vport:{}}}",
             self.session_id, self.to_vport
         )
     }
@@ -102,20 +109,22 @@ pub const TCP_ACK_CONNECTION_RESULT_OK: u8 = 0;
 pub const TCP_ACK_CONNECTION_RESULT_REFUSED: u8 = 1;
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
-pub struct AckStream {
+pub struct AckSession {
     pub result: u8,
 }
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
-pub struct SynReverseStream {
+pub struct SynReverseSession {
+    pub tunnel_type: TunnelType,
     pub tunnel_id: TunnelId,
     pub session_id: SessionId,
     pub vport: u16,
+    pub result: u8,
     pub payload: Vec<u8>,
 }
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
-pub struct AckReverseStream {
+pub struct AckReverseSession {
     pub result: u8,
 }
 
@@ -165,12 +174,6 @@ pub struct SnCallResp {
     pub to_peer_info: Option<EncodedP2pIdentityCert>, //
 }
 
-#[derive(Clone, Debug, RawEncode, RawDecode, Copy)]
-pub enum SnCallType {
-    Datagram,
-    Stream
-}
-
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct SnCalled {
     pub seq: Sequence,
@@ -181,7 +184,7 @@ pub struct SnCalled {
     pub peer_info: EncodedP2pIdentityCert,
     pub tunnel_id: TunnelId,
     pub call_send_time: Timestamp,
-    pub call_type: SnCallType,
+    pub call_type: TunnelType,
     pub payload: Vec<u8>,
 }
 

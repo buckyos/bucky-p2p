@@ -17,7 +17,7 @@ use crate::sockets::{NetManager, NetManagerRef, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::stream::{StreamManager, StreamManagerRef};
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver};
-use crate::tunnel::{DefaultDeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerRef};
+use crate::tunnel::{DefaultDeviceFinder, DeviceFinderRef, TunnelListener, TunnelListenerRef, TunnelManager, TunnelManagerRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
 
 static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
@@ -209,7 +209,6 @@ pub async fn init_p2p(
 pub struct P2pStack {
     local_identity: P2pIdentityRef,
     sn_service: SNClientServiceRef,
-    tunnel_manager: TunnelManagerRef,
     net_manager: NetManagerRef,
     stream_manager: StreamManagerRef,
     datagram_manager: DatagramManagerRef,
@@ -220,7 +219,6 @@ impl P2pStack {
     pub(crate) async fn new(
         local_identity: P2pIdentityRef,
         sn_service: SNClientServiceRef,
-        tunnel_manager: TunnelManagerRef,
         stream_manager: StreamManagerRef,
         datagram_manager: DatagramManagerRef,
         net_manager: NetManagerRef,) -> P2pResult<Self> {
@@ -228,7 +226,6 @@ impl P2pStack {
         Ok(Self {
             local_identity,
             sn_service,
-            tunnel_manager,
             net_manager,
             stream_manager,
             datagram_manager,
@@ -238,10 +235,6 @@ impl P2pStack {
     pub async fn wait_online(&self, timeout: Option<Duration>) -> P2pResult<()> {
         self.sn_service.wait_online(timeout).await?;
         Ok(())
-    }
-
-    pub(crate) fn tunnel_manager(&self) -> &TunnelManagerRef {
-        &self.tunnel_manager
     }
 
     pub fn local_identity(&self) -> &P2pIdentityRef {
@@ -450,40 +443,50 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     } else {
         DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), CERT_CACHE.get().unwrap().clone())
     };
-    let tunnel_manager = TunnelManager::new(
+    let tunnel_listener = TunnelListener::new(
+        local_identity.clone(),
         net_manager.clone(),
         sn_service.clone(),
-        local_identity.clone(),
-        device_finder,
-        cert_factory.clone(),
         proxy_client.clone(),
         0,
-        0,
+        cert_factory.clone(),
         conn_timeout,
-        idle_timeout,
     );
+    tunnel_listener.listen();
 
-    let manager = Arc::downgrade(&tunnel_manager);
-    sn_service.set_listener(move |called: SnCalled| {
-        let manager = manager.clone();
-        async move {
-            if let Some(manager) = manager.upgrade() {
-                manager.on_sn_called(called).await?;
-            }
-            Ok(())
-        }
-    });
 
     let _ = sn_service.start().await;
 
-    let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());
-    let datagram_maanger = DatagramManager::new(local_identity.clone(), tunnel_manager.clone());
+    let tunnel_id_gen = Arc::new(TunnelIdGenerator::new());
+    let stream_manager = StreamManager::new(local_identity.clone(),
+                                            net_manager.clone(),
+                                            sn_service.clone(),
+                                            device_finder.clone(),
+                                            cert_factory.clone(),
+                                            tunnel_id_gen.clone(),
+                                            proxy_client.clone(),
+                                            tunnel_listener.clone(),
+                                            net_manager.get_connection_info_cache().clone(),
+                                            0,
+                                            conn_timeout,
+                                            idle_timeout);
+    let datagram_manager = DatagramManager::new(local_identity.clone(),
+                                                net_manager.clone(),
+                                                sn_service.clone(),
+                                                device_finder.clone(),
+                                                cert_factory.clone(),
+                                                tunnel_id_gen.clone(),
+                                                proxy_client.clone(),
+                                                tunnel_listener.clone(),
+                                                net_manager.get_connection_info_cache().clone(),
+                                                0,
+                                                conn_timeout,
+                                                idle_timeout);
 
     Ok(Arc::new(P2pStack::new(
         local_identity.clone(),
         sn_service,
-        tunnel_manager,
         stream_manager,
-        datagram_maanger,
+        datagram_manager,
         net_manager.clone(),).await?))
 }

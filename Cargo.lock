@@ -354,7 +354,7 @@ checksum = "82f5f291b4ed8da9d20859926e8f13b143628ffafd36e50529f6add843b7862c"
 dependencies = [
  "lazy_static",
  "log",
- "notify-future",
+ "notify-future 0.1.4",
 ]
 
 [[package]]
@@ -835,7 +835,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5f21651b8d127979b29ed2431f885cd565f4abdafa65a0cfc4b2001434ba2b4"
 dependencies = [
  "async-std",
- "notify-future",
+ "notify-future 0.1.4",
 ]
 
 [[package]]
@@ -2418,6 +2418,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6554346f0032fd123eb39eb7b05aa65ee122bc51090bae1291c86e8d077a8a65"
 
 [[package]]
+name = "notify-future"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc8b783586b77267e0ec6f1df2083c3d24b99f7e97d4074d066fcaf3cff7f13b"
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2616,7 +2622,7 @@ dependencies = [
  "log",
  "mini-moka",
  "nix",
- "notify-future",
+ "notify-future 0.2.2",
  "num-derive",
  "num-traits",
  "once_cell",
@@ -3568,7 +3574,8 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.1.0"
+version = "0.1.1"
+source = "git+https://github.com/wugren/sfo-cmd-server.git#2e78b53f65ead2719c6d4afb88333156a9734f27"
 dependencies = [
  "as-any",
  "async-trait",
@@ -3603,7 +3610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaa5196111aae59a97fdb35e73a37de1de1e87d931918a1f66fab1a41e2e8a8a"
 dependencies = [
  "async-trait",
- "notify-future",
+ "notify-future 0.1.4",
  "sfo-result",
  "tokio",
 ]

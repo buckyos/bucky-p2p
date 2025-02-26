@@ -2,6 +2,7 @@ extern crate core;
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
+use std::ptr::read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
@@ -228,17 +229,17 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
 
     loop {
         {
-            let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
-            stream.write_all("test".as_bytes()).await.unwrap();
+            let (mut read, mut write) = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+            write.write_all("test".as_bytes()).await.unwrap();
             let mut buf = [0u8; 1024];
-            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            let len = read.read(buf.as_mut_slice()).await.unwrap();
             log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
         }
         {
-            let mut stream = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
-            stream.write_all("test".as_bytes()).await.unwrap();
+            let (mut read, mut write) = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+            write.write_all("test".as_bytes()).await.unwrap();
             let mut buf = [0u8; 1024];
-            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            let len = read.read(buf.as_mut_slice()).await.unwrap();
             log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -277,12 +278,12 @@ async fn server_instance(data_folder: &Path) {
 
     let listener = stack.stream_manager().listen(80).await.unwrap();
     loop {
-        let mut stream = listener.accept().await.unwrap();
+        let (mut read, mut write) = listener.accept().await.unwrap();
         tokio::task::spawn(async move {
             let mut buf = [0u8; 1024];
-            let len = stream.read(buf.as_mut_slice()).await.unwrap();
+            let len = read.read(buf.as_mut_slice()).await.unwrap();
             println!("read {}", String::from_utf8_lossy(&buf[..len]));
-            stream.write("hello".as_bytes()).await.unwrap();
+            write.write("hello".as_bytes()).await.unwrap();
         });
     }
 }
@@ -359,13 +360,13 @@ async fn all_in_one() {
     tokio::task::spawn(async move {
         let listener = tmp_stack2.stream_manager().listen(1234).await.unwrap();
         loop {
-            let mut stream = listener.accept().await.unwrap();
+            let (mut read, mut write) = listener.accept().await.unwrap();
             tokio::task::spawn(async move {
                 let ret: std::io::Result<()> = async move {
-                    stream.write_all("test".as_bytes()).await?;
-                    stream.flush().await?;
+                    write.write_all("test".as_bytes()).await?;
+                    write.flush().await?;
                     let mut buf = [0u8; 32];
-                    let len = stream.read(buf.as_mut_slice()).await?;
+                    let len = read.read(buf.as_mut_slice()).await?;
                     println!("read len {} content:{}", len, String::from_utf8_lossy(&buf[..len]));
                     Ok(())
                 }.await;
@@ -399,15 +400,15 @@ async fn all_in_one() {
     tokio::task::spawn(async move {
         loop {
             {
-                let mut tunnel = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
+                let (mut read, mut write) = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
                 let mut buf = [0u8; 32];
-                let len = tunnel.read(buf.as_mut_slice()).await.unwrap();
+                let len = read.read(buf.as_mut_slice()).await.unwrap();
                 println!("{}", String::from_utf8_lossy(&buf[..len]));
-                tunnel.write_all("stream hello".as_bytes()).await.unwrap();
-                tunnel.flush().await.unwrap();
+                write.write_all("stream hello".as_bytes()).await.unwrap();
+                write.flush().await.unwrap();
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
-                match tunnel.read(buf.as_mut_slice()).await {
+                match read.read(buf.as_mut_slice()).await {
                     Ok(len) => {
                         println!("{}", String::from_utf8_lossy(&buf[..len]));
                     }
@@ -416,7 +417,7 @@ async fn all_in_one() {
                     }
                 }
 
-                match tunnel.write_all("test2".as_bytes()).await {
+                match write.write_all("test2".as_bytes()).await {
                     Ok(_) => {
                         println!("write ok");
                     }
@@ -424,8 +425,9 @@ async fn all_in_one() {
                         println!("write error: {:?}", e);
                     }
                 }
-                tunnel.flush().await.unwrap();
-                let mut tunnel2 = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1235).await.unwrap();
+                write.flush().await.unwrap();
+                let ret = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1235).await;
+                assert!(ret.is_err());
             }
             {
                 let mut send = stack1.datagram_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();

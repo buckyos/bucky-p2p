@@ -19,15 +19,10 @@ pub const MTU_LARGE: usize = 1024*30;
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
 pub enum PackageCmdCode {
-    SynStream = 1,
-    AckStream = 2,
-    SynReverseStream = 3,
-    AckReverseStream = 4,
-
-    SynDatagram = 0x11,
-    AckDatagram = 0x12,
-    SynReverseDatagram = 0x13,
-    AckReverseDatagram = 0x14,
+    SynSession = 1,
+    AckSession = 2,
+    SynReverseSession = 3,
+    AckReverseSession = 4,
 
     SnCall = 0x20,
     SnCallResp = 0x21,
@@ -52,7 +47,6 @@ pub enum PackageCmdCode {
     ChannelEstimate = 0x62,
 
     SynClose = 0x71,
-    AckClose = 0x72,
 }
 
 impl PackageCmdCode {
@@ -69,14 +63,10 @@ impl TryFrom<u8> for PackageCmdCode {
     type Error = P2pError;
     fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
         match v {
-            1u8 => Ok(Self::SynStream),
-            2u8 => Ok(Self::AckStream),
-            3u8 => Ok(Self::SynReverseStream),
-            4u8 => Ok(Self::AckReverseStream),
-            0x11u8 => Ok(Self::SynDatagram),
-            0x12u8 => Ok(Self::AckDatagram),
-            0x13u8 => Ok(Self::SynReverseDatagram),
-            0x14u8 => Ok(Self::AckReverseDatagram),
+            1u8 => Ok(Self::SynSession),
+            2u8 => Ok(Self::AckSession),
+            3u8 => Ok(Self::SynReverseSession),
+            4u8 => Ok(Self::AckReverseSession),
             0x20u8 => Ok(Self::SnCall),
             0x21u8 => Ok(Self::SnCallResp),
             0x22u8 => Ok(Self::SnCalled),
@@ -98,7 +88,6 @@ impl TryFrom<u8> for PackageCmdCode {
             0x61u8 => Ok(Self::PieceControl),
             0x62u8 => Ok(Self::ChannelEstimate),
             0x71u8 => Ok(Self::SynClose),
-            0x72u8 => Ok(Self::AckClose),
 
             _ => Err(P2pError::new(
                 P2pErrorCode::InvalidParam,
@@ -111,13 +100,15 @@ impl TryFrom<u8> for PackageCmdCode {
 #[derive(RawDecode, RawEncode)]
 pub struct PackageHeader {
     pkg_len: u16,
+    version: u8,
     cmd_code: u8
 }
 
 impl PackageHeader {
-    pub fn new(cmd_code: PackageCmdCode, pkg_len: u16) -> Self {
+    pub fn new(version: u8, cmd_code: PackageCmdCode, pkg_len: u16) -> Self {
         Self {
             pkg_len,
+            version,
             cmd_code: cmd_code as u8
         }
     }
@@ -130,6 +121,10 @@ impl PackageHeader {
         self.pkg_len
     }
 
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
     pub fn set_pkg_len(&mut self, pkg_len: u16) {
         self.pkg_len = pkg_len;
     }
@@ -137,7 +132,7 @@ impl PackageHeader {
 
 impl RawFixedBytes for PackageHeader {
     fn raw_bytes() -> Option<usize> {
-        Some(u16::raw_bytes().unwrap() + u8::raw_bytes().unwrap())
+        Some(u16::raw_bytes().unwrap() + u8::raw_bytes().unwrap() + u8::raw_bytes().unwrap())
     }
 }
 
@@ -148,9 +143,9 @@ pub struct Package<T> {
 }
 
 impl <T: RawEncode> Package<T> {
-    pub fn new(cmd_code: PackageCmdCode, body: T) -> Self {
+    pub fn new(version: u8, cmd_code: PackageCmdCode, body: T) -> Self {
         Self {
-            header: PackageHeader::new(cmd_code, body.raw_measure(&None).unwrap() as u16),
+            header: PackageHeader::new(version, cmd_code, body.raw_measure(&None).unwrap() as u16),
             body
         }
     }

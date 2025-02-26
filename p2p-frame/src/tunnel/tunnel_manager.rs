@@ -1,32 +1,33 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 use async_named_locker::Locker;
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
-use notify_future::NotifyFuture;
+use notify_future::Notify;
 use tokio::io::AsyncWriteExt;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_connection::P2pConnection;
+use crate::p2p_connection::{P2pConnection, P2pConnectionInfoCacheRef};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityCertCacheRef};
 use crate::pn::PnClientRef;
 use crate::protocol::{Package, PackageCmdCode};
-use crate::protocol::v0::{AckDatagram, AckReverseDatagram, AckReverseStream, AckStream, SnCallType, SnCalled};
+use crate::protocol::v0::{AckDatagram, AckReverseDatagram, AckReverseSession, AckSession, SnCalled, SynReverseSession, SynSession, TunnelType};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::{NetManagerRef};
 use crate::tunnel::proxy_connection::{ProxyConnectionRead, ProxyConnectionWrite};
+use crate::tunnel::tunnel_listener::{NewTunnelEvent, TunnelListenerRef};
 use crate::types::{SessionId, TunnelId, TunnelIdGenerator};
-use super::{DatagramSnCall, ReverseFutureCache, ReverseResult, StreamSnCall, Tunnel, TunnelConnection, TunnelDatagramRecv, TunnelDatagramSend, TunnelSession, TunnelListenPorts, TunnelStream};
+use super::{ReverseWaiterCache, ReverseResult, SessionSnCall, Tunnel, TunnelConnection, TunnelSession, TunnelListenPorts, P2pConnectionFactory, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite, TunnelState};
 
-struct TunnelsState {
-    tunnels: HashMap<TunnelId, Arc<Tunnel>>,
-    pending_tunnels: HashMap<TunnelId, NotifyFuture<ReverseResult>>,
+struct TunnelsState<F: P2pConnectionFactory> {
+    tunnels: HashMap<TunnelId, Arc<Tunnel<F>>>,
+    pending_tunnels: HashMap<TunnelId, Notify<ReverseResult>>,
 }
 
-impl TunnelsState {
-    pub fn get_idle_tunnel(&mut self) -> Option<Arc<Tunnel>> {
+impl<F: P2pConnectionFactory> TunnelsState<F> {
+    pub fn get_idle_tunnel(&mut self) -> Option<Arc<Tunnel<F>>> {
         for (_, tunnel) in self.tunnels.iter() {
             if tunnel.is_idle() {
                 return Some(tunnel.clone())
@@ -39,15 +40,19 @@ impl TunnelsState {
         self.tunnels.contains_key(&seq)
     }
 
+    pub fn get_tunnel(&self, tunnel_id: TunnelId) -> Option<Arc<Tunnel<F>>> {
+        self.tunnels.get(&tunnel_id).map(|v| v.clone())
+    }
+
     pub fn remove_tunnel(&mut self, seq: TunnelId) {
         self.tunnels.remove(&seq);
     }
 
-    pub fn add_pending_future(&mut self, seq: TunnelId, future: NotifyFuture<ReverseResult>) {
+    pub fn add_pending_future(&mut self, seq: TunnelId, future: Notify<ReverseResult>) {
         self.pending_tunnels.insert(seq, future);
     }
 
-    pub fn try_pop_pending_future(&mut self, seq: TunnelId) -> Option<NotifyFuture<ReverseResult>> {
+    pub fn try_pop_pending_future(&mut self, seq: TunnelId) -> Option<Notify<ReverseResult>> {
         self.pending_tunnels.remove(&seq)
     }
 
@@ -56,17 +61,24 @@ impl TunnelsState {
     }
 }
 
-struct Tunnels {
-    state: Mutex<TunnelsState>
+#[callback_trait::callback_trait]
+pub trait NewSessionEvent: Send + Sync + 'static {
+    async fn on_new_session(&self, session: SynSession, read: TunnelConnectionRead, write: TunnelConnectionWrite) -> P2pResult<()>;
 }
 
-impl Drop for Tunnels {
+struct Tunnels<F: P2pConnectionFactory> {
+    listener: Arc<dyn NewSessionEvent>,
+    state: Mutex<TunnelsState<F>>
+}
+
+impl<F: P2pConnectionFactory> Drop for Tunnels<F> {
     fn drop(&mut self) {
     }
 }
-impl Tunnels {
-    pub fn new() -> Arc<Self> {
+impl<F: P2pConnectionFactory> Tunnels<F> {
+    pub fn new(listener: impl NewSessionEvent) -> Arc<Self> {
         Arc::new(Self {
+            listener: Arc::new(listener),
             state: Mutex::new(TunnelsState {
                 tunnels: Default::default(),
                 pending_tunnels: Default::default(),
@@ -74,12 +86,12 @@ impl Tunnels {
         })
     }
 
-    pub fn get_idle_tunnel(&self) -> Option<Arc<Tunnel>> {
+    pub fn get_idle_tunnel(&self) -> Option<Arc<Tunnel<F>>> {
         let mut state = self.state.lock().unwrap();
         state.get_idle_tunnel()
     }
 
-    pub fn add_tunnel(self: &Arc<Self>, tunnel: Tunnel, listener: TunnelManagerEventRef) -> bool {
+    pub fn add_tunnel(self: &Arc<Self>, tunnel: Tunnel<F>) -> bool {
         let tunnel = Arc::new(tunnel);
         {
             let mut state = self.state.lock().unwrap();
@@ -91,36 +103,26 @@ impl Tunnels {
         let this = self.clone();
         let _ = Executor::spawn(async move {
             loop {
-                match tunnel.accept_instance().await {
+                match tunnel.accept_session().await {
                     Ok(instance) => {
                         match instance {
-                            TunnelSession::Stream(stream) => {
-                                log::info!("accept stream tunnel {:?} stream_id {} port {} remote_id {} remote_ep {} local_id {} local_ep {}",
-                                    stream.tunnel_id(),
-                                    stream.session_id(),
-                                    stream.port(),
-                                    stream.remote_identity_id().to_string(),
-                                    stream.remote_endpoint().to_string(),
-                                    stream.local_identity_id().to_string(),
-                                    stream.local_endpoint().to_string());
+                            TunnelSession::Forward((session, read, write)) => {
+                                // log::info!("accept stream tunnel {:?} stream_id {} port {} remote_id {} remote_ep {} local_id {} local_ep {}",
+                                //     stream.tunnel_id(),
+                                //     stream.session_id(),
+                                //     stream.port(),
+                                //     stream.remote_identity_id().to_string(),
+                                //     stream.remote_endpoint().to_string(),
+                                //     stream.local_identity_id().to_string(),
+                                //     stream.local_endpoint().to_string());
 
-                                    listener.on_new_tunnel_stream(stream).await;
+                                    if let Err(e) = this.listener.on_new_session(session, read, write).await {
+                                        log::error!("accept tunnel error: {:?}", e);
+                                    }
                             }
-                            TunnelSession::Datagram(datagram) => {
-                                log::info!("accept datagram tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                                    datagram.tunnel_id(),
-                                    datagram.remote_identity_id().to_string(),
-                                    datagram.remote_endpoint().to_string(),
-                                    datagram.local_identity_id().to_string(),
-                                    datagram.local_endpoint().to_string());
-
-                                    listener.on_new_tunnel_datagram(datagram).await;
-                            }
-                            TunnelSession::ReverseStream(_stream) => {
-
-                            }
-                            TunnelSession::ReverseDatagram(_datagram) => {
-
+                            TunnelSession::Reverse(_stream) => {
+                                log::error!("reverse tunnel not support");
+                                break;
                             }
                         }
                     }
@@ -136,6 +138,11 @@ impl Tunnels {
         true
     }
 
+    pub fn get_tunnel(&self, tunnel_id: TunnelId) -> Option<Arc<Tunnel<F>>> {
+        let state = self.state.lock().unwrap();
+        state.get_tunnel(tunnel_id)
+    }
+
     pub fn tunnel_exist(&self, seq: TunnelId) -> bool {
         let mut state = self.state.lock().unwrap();
         state.tunnel_exist(seq)
@@ -146,12 +153,12 @@ impl Tunnels {
         state.remove_tunnel(seq);
     }
 
-    pub fn try_pop_pending_future(&self, seq: TunnelId) -> Option<NotifyFuture<ReverseResult>> {
+    pub fn try_pop_pending_future(&self, seq: TunnelId) -> Option<Notify<ReverseResult>> {
         let mut state = self.state.lock().unwrap();
         state.try_pop_pending_future(seq)
     }
 
-    pub fn add_pending_future(&self, seq: TunnelId, future: NotifyFuture<ReverseResult>) {
+    pub fn add_pending_future(&self, seq: TunnelId, future: Notify<ReverseResult>) {
         let mut state = self.state.lock().unwrap();
         state.add_pending_future(seq, future);
     }
@@ -164,7 +171,7 @@ impl Tunnels {
     pub async fn close_all_tunnel(&self) {
         let tunnels = {
             let state = self.state.lock().unwrap();
-            state.tunnels.iter().map(|v| v.1.clone()).collect::<Vec<Arc<Tunnel>>>()
+            state.tunnels.iter().map(|v| v.1.clone()).collect::<Vec<Arc<Tunnel<F>>>>()
         };
 
         for tunnel in tunnels.into_iter() {
@@ -173,70 +180,15 @@ impl Tunnels {
     }
 }
 
-impl ReverseFutureCache for Tunnels {
-    fn add_reverse_future(&self, sequence: TunnelId, future: NotifyFuture<ReverseResult>) {
+impl<F: P2pConnectionFactory> ReverseWaiterCache for Tunnels<F> {
+    fn add_reverse_waiter(&self, sequence: TunnelId, future: Notify<ReverseResult>) {
         self.add_pending_future(sequence, future);
     }
 
-    fn remove_reverse_future(&self, sequence: TunnelId) {
+    fn remove_reverse_waiter(&self, sequence: TunnelId) {
         self.try_pop_pending_future(sequence);
     }
 }
-
-pub struct TunnelManagerEvent {
-    stream_event: Mutex<Option<TunnelManagerStreamEventRef>>,
-    datagram_event: Mutex<Option<TunnelManagerDatagramEventRef>>,
-}
-pub type TunnelManagerEventRef = Arc<TunnelManagerEvent>;
-
-impl TunnelManagerEvent {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            stream_event: Mutex::new(None),
-            datagram_event: Mutex::new(None),
-        })
-    }
-
-    fn set_stream_event_listener(&self, listener: impl TunnelManagerStreamEvent) {
-        let mut stream_event = self.stream_event.lock().unwrap();
-        *stream_event = Some(Arc::new(listener));
-    }
-
-    fn set_datagram_event_listener(&self, listener: impl TunnelManagerDatagramEvent) {
-        let mut datagram_event = self.datagram_event.lock().unwrap();
-        *datagram_event = Some(Arc::new(listener));
-    }
-
-    async fn on_new_tunnel_stream(&self, tunnel: TunnelStream) {
-        let stream_event = {
-            self.stream_event.lock().unwrap().clone()
-        };
-        if stream_event.is_some() {
-            stream_event.as_ref().unwrap().on_new_tunnel_stream(tunnel).await;
-        }
-    }
-
-    async fn on_new_tunnel_datagram(&self, tunnel: TunnelDatagramRecv) {
-        let datagram_event = {
-            self.datagram_event.lock().unwrap().clone()
-        };
-        if datagram_event.is_some() {
-            datagram_event.as_ref().unwrap().on_new_tunnel_datagram(tunnel).await;
-        }
-    }
-}
-
-#[callback_trait::callback_trait]
-pub trait TunnelManagerStreamEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_stream(&self, tunnel: TunnelStream) -> ();
-}
-pub type TunnelManagerStreamEventRef = Arc<dyn TunnelManagerStreamEvent>;
-
-#[callback_trait::callback_trait]
-pub trait TunnelManagerDatagramEvent: 'static + Send + Sync {
-    async fn on_new_tunnel_datagram(&self, tunnel: TunnelDatagramRecv) -> ();
-}
-pub type TunnelManagerDatagramEventRef = Arc<dyn TunnelManagerDatagramEvent>;
 
 struct ListenPorts {
     listen_ports: Mutex<HashSet<u16>>,
@@ -325,40 +277,84 @@ impl DeviceFinder for DefaultDeviceFinder {
     }
 }
 
-pub struct TunnelManager {
-    tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels>>>>,
-    net_manager: NetManagerRef,
+struct NewTunnelListener<F: P2pConnectionFactory> {
+    manager: Weak<TunnelManager<F>>,
+}
+
+impl<F: P2pConnectionFactory> NewTunnelListener<F> {
+    pub fn new(manager: Arc<TunnelManager<F>>) -> Self {
+        Self {
+            manager: Arc::downgrade(&manager),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<F: P2pConnectionFactory> NewTunnelEvent for NewTunnelListener<F> {
+    async fn on_new_tunnel(&self, session: SynSession, conn: TunnelConnectionRef, read: TunnelConnectionRead, write: TunnelConnectionWrite) -> P2pResult<()> {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.on_new_tunnel(session, Some(conn), read, write).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_new_reverse_tunnel(&self, session: SynReverseSession, conn: TunnelConnectionRef, read: TunnelConnectionRead, write: TunnelConnectionWrite) -> P2pResult<()> {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.on_new_reverse_tunnel(session, conn, read, write).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_sn_called(&self, called: SnCalled) -> P2pResult<()> {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.on_sn_called(called).await?;
+        }
+        Ok(())
+    }
+}
+
+#[callback_trait::callback_trait]
+pub trait TunnelManagerEvent: Send + Sync + 'static {
+    async fn on_new_session(&self, session_id: SessionId, vport: u16, read: TunnelConnectionRead, write: TunnelConnectionWrite) -> P2pResult<()>;
+}
+
+pub struct TunnelManager<F: P2pConnectionFactory> {
+    tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels<F>>>>>,
     sn_service: SNClientServiceRef,
     local_identity: P2pIdentityRef,
     protocol_version: u8,
-    stack_version: u32,
-    listener: TunnelManagerEventRef,
     conn_timeout: Duration,
     idle_timeout: Duration,
     gen_id: Arc<TunnelIdGenerator>,
-    stream_listen_ports: Arc<ListenPorts>,
-    datagram_listen_ports: Arc<ListenPorts>,
+    listen_ports: Arc<ListenPorts>,
     clear_handle: SpawnHandle<()>,
     device_finder: DeviceFinderRef,
     cert_factory: P2pIdentityCertFactoryRef,
     sn_calling: Mutex<HashMap<P2pId, HashSet<TunnelId>>>,
     pn_client: Option<PnClientRef>,
+    p2p_factory: Arc<F>,
+    tunnel_listener: TunnelListenerRef,
+    conn_info_cache: P2pConnectionInfoCacheRef,
+    listener: Mutex<Option<Arc<dyn TunnelManagerEvent>>>,
 }
-pub type TunnelManagerRef = Arc<TunnelManager>;
+pub type TunnelManagerRef<F> = Arc<TunnelManager<F>>;
 
-impl TunnelManager {
-    pub fn new(
-        net_manager: NetManagerRef,
+impl<F: P2pConnectionFactory> TunnelManager<F> {
+    pub(crate) fn new(
         sn_service: SNClientServiceRef,
         local_identity: P2pIdentityRef,
         device_finder: DeviceFinderRef,
         cert_factory: P2pIdentityCertFactoryRef,
         pn_client: Option<PnClientRef>,
+        gen_id: Arc<TunnelIdGenerator>,
+        p2p_factory: F,
+        tunnel_listener: TunnelListenerRef,
+        conn_info_cache: P2pConnectionInfoCacheRef,
         protocol_version: u8,
-        stack_version: u32,
         conn_timeout: Duration,
-        idle_timeout: Duration,) -> Arc<Self> {
-        let tunnels = Arc::new(RwLock::new(HashMap::<P2pId, Arc<Tunnels>>::new()));
+        idle_timeout: Duration,
+    ) -> Arc<Self> {
+        let tunnels = Arc::new(RwLock::new(HashMap::<P2pId, Arc<Tunnels<F>>>::new()));
         let tmp = tunnels.clone();
         let local_id = local_identity.get_id();
         let handle = Executor::spawn_with_handle(async move {
@@ -368,73 +364,49 @@ impl TunnelManager {
                 Self::clear_idle_tunnel(tmp.clone()).await;
             }
         }).unwrap();
-
+        let tunnel_type = p2p_factory.tunnel_type();
         let manager = Arc::new(Self {
             tunnels,
-            net_manager: net_manager.clone(),
             sn_service,
             local_identity,
             protocol_version,
-            stack_version,
-            listener: TunnelManagerEvent::new(),
             conn_timeout,
             idle_timeout,
-            gen_id: Arc::new(TunnelIdGenerator::new()),
-            stream_listen_ports: ListenPorts::new(),
-            datagram_listen_ports: ListenPorts::new(),
+            gen_id,
+            listen_ports: ListenPorts::new(),
             clear_handle: handle,
             device_finder,
             cert_factory,
             sn_calling: Mutex::new(Default::default()),
             pn_client: pn_client.clone(),
+            p2p_factory: Arc::new(p2p_factory),
+            tunnel_listener: tunnel_listener.clone(),
+            conn_info_cache,
+            listener: Mutex::new(None),
         });
 
-        let tmp_manager = Arc::downgrade(&manager);
-        net_manager.set_connection_event_listener(manager.local_identity.get_id(), move |conn| {
-            let tmp_manager = tmp_manager.clone();
-            async move {
-                if let Some(manager) = tmp_manager.upgrade() {
-                    manager.on_new_tunnel(conn).await
-                } else {
-                    Err(p2p_err!(P2pErrorCode::Failed, "tunnel manager has dropped"))
-                }
-            }
-        });
+        tunnel_listener.register_new_tunnel_event(tunnel_type, NewTunnelListener::new(manager.clone()));
 
-        if pn_client.is_some() {
-            let local_id = manager.local_identity.get_id();
-            let pn_client = pn_client.unwrap();
-            let tmp_manager = Arc::downgrade(&manager);
-            Executor::spawn(async move {
-                loop {
-                    match pn_client.accept().await {
-                        Ok((read, write)) => {
-                            let read = Box::new(ProxyConnectionRead::new(read, local_id.clone()));
-                            let write = Box::new(ProxyConnectionWrite::new(write, local_id.clone()));
-                            let proxy_conn = P2pConnection::new(read, write);
-                            let manager = tmp_manager.clone();
-                            Executor::spawn(async move {
-                                if let Some(manager) = manager.upgrade() {
-                                    if let Err(e) = manager.on_new_tunnel(proxy_conn).await {
-                                        log::error!("accept proxy connection error: {:?}", e);
-                                    }
-                                } else {
-                                    log::error!("tunnel manager has dropped");
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            log::error!("accept proxy connection error: {:?}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
         manager
     }
 
-    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels>>>>) {
+    pub fn set_listener(&self, listener: impl TunnelManagerEvent) {
+        let mut l = self.listener.lock().unwrap();
+        *l = Some(Arc::new(listener));
+    }
+    pub fn add_listen_port(&self, port: u16) {
+        self.listen_ports.add_listen_port(port)
+    }
+
+    pub fn is_exist_listen_port(&self, port: u16) -> bool {
+        self.listen_ports.is_listen(port)
+    }
+
+    pub fn remove_listen_port(&self, port: u16) {
+        self.listen_ports.remove_listen_port(port)
+    }
+
+    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels<F>>>>>) {
         let tunnels_map = tunnels.read().unwrap();
         for (_, tunnels) in tunnels_map.iter() {
             let mut remove_list = Vec::new();
@@ -472,280 +444,113 @@ impl TunnelManager {
         }
     }
 
-    async fn on_new_tunnel(&self, socket: P2pConnection) -> P2pResult<()> {
-        let remote_id = socket.remote_id().clone();
-        let remote_ep = socket.remote().clone();
-        let local_id = socket.local_id().clone();
-        let local_ep = socket.local().clone();
-        let net_manager = self.net_manager.clone();
-        let sn_service = self.sn_service.clone();
-        let protocol_version = self.protocol_version;
-        let stack_version = self.stack_version;
-        let local_identity = self.local_identity.clone();
-        let conn_timeout = self.conn_timeout;
-        let idle_timeout = self.idle_timeout;
-
-        let stream_listen_ports = self.stream_listen_ports.clone();
-        let datagram_listen_ports = self.datagram_listen_ports.clone();
-
-        let tunnel_conn = TunnelConnection::new(
-            TunnelId::from(0),
-            self.local_identity.clone(),
-            remote_id.clone(),
-            socket.remote().clone(),
-            self.conn_timeout,
-            self.protocol_version,
-            self.stack_version,
-            socket,
-            self.cert_factory.clone())?;
-
-        let tunnels = self.get_tunnels(&remote_id);
-        let listener = self.listener.clone();
-        let cert_factory = self.cert_factory.clone();
-        let _ = Executor::spawn(async move {
-            match tunnel_conn.accept_first_session().await {
-                Ok(instance) => {
-                    log::info!("new tunnel {} connection remote_id {} remote_ep {} local_id {} local_ep {}",
-                        instance,
-                        remote_id.to_string(),
-                        remote_ep.to_string(),
-                        local_id.to_string(),
-                        local_ep.to_string());
-                    match instance {
-                        TunnelSession::Stream(mut stream) => {
-                            let (ack, mut stream) = {
-                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel_conn.get_tunnel_id())).await;
-                                if tunnels.tunnel_exist(tunnel_conn.get_tunnel_id()) {
-                                    let ack = AckStream {
-                                        result: 1
-                                    };
-                                    (Some(ack), Some(stream))
-                                } else {
-                                    let ack = AckStream {
-                                        result: 0
-                                    };
-                                    let pkg = Package::new(PackageCmdCode::AckStream, ack);
-                                    match stream.send_pkg(pkg).await {
-                                        Ok(_) => {
-                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                                                tunnel_conn.get_tunnel_id(),
-                                                remote_id.to_string(),
-                                                remote_ep.to_string(),
-                                                local_id.to_string(),
-                                                local_ep.to_string());
-                                            let mut tunnel = Tunnel::new(
-                                                net_manager.clone(),
-                                                sn_service.clone(),
-                                                tunnel_conn.get_tunnel_id(),
-                                                protocol_version,
-                                                stack_version,
-                                                remote_id.clone(),
-                                                vec![],
-                                                local_identity.clone(),
-                                                conn_timeout,
-                                                idle_timeout,
-                                                cert_factory.clone(), None);
-                                            tunnel.set_tunnel_conn(tunnel_conn);
-                                            tunnels.add_tunnel(tunnel, listener.clone());
-                                            (None, Some(stream))
-                                        }
-                                        Err(e) => {
-                                            log::error!("write tunnel {:?} ack stream error: {:?}", tunnel_conn.get_tunnel_id(), e);
-                                            (None, None)
-                                        }
-                                    }
-                                }
-                            };
-                            if let Some(ack) = ack {
-                                let pkg = Package::new(PackageCmdCode::AckStream, ack);
-                                let _ = stream.as_mut().unwrap().send_pkg(pkg).await;
-                            } else {
-                                if stream.is_some() {
-                                    let mut stream = stream.unwrap();
-                                    let _ = stream.enter_recv_header();
-                                    listener.on_new_tunnel_stream(stream).await;
-                                }
-                            }
-                        }
-                        TunnelSession::Datagram(mut datagram) => {
-                            let mut tunnel = Tunnel::new(
-                                net_manager.clone(),
-                                sn_service.clone(),
-                                tunnel_conn.get_tunnel_id(),
-                                protocol_version,
-                                stack_version,
-                                remote_id.clone(),
-                                vec![],
-                                local_identity.clone(),
-                                conn_timeout,
-                                idle_timeout,
-                                cert_factory.clone(),
-                                None);
-                            tunnel.set_tunnel_conn(tunnel_conn);
-
-                            let (ack, mut datagram) = {
-                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel.get_tunnel_id())).await;
-                                if tunnels.tunnel_exist(tunnel.get_tunnel_id()) {
-                                    let ack = AckDatagram {
-                                        result: 1
-                                    };
-                                    (Some(ack), Some(datagram))
-                                } else {
-                                    let ack = AckDatagram {
-                                        result: 0
-                                    };
-                                    let pkg = Package::new(PackageCmdCode::AckDatagram, ack);
-                                    match datagram.send_pkg(pkg).await {
-                                        Ok(_) => {
-                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                        tunnel.get_tunnel_id(),
-                        remote_id.to_string(),
-                        remote_ep.to_string(),
-                        local_id.to_string(),
-                        local_ep.to_string());
-                                            tunnels.add_tunnel(tunnel, listener.clone());
-                                            (None, Some(datagram))
-                                        }
-                                        Err(e) => {
-                                            log::error!("write tunnel {:?} ack datagram error: {:?}", tunnel.get_tunnel_id(), e);
-                                            (None, None)
-                                        }
-                                    }
-                                }
-                            };
-                            if let Some(ack) = ack {
-                                let pkg = Package::new(PackageCmdCode::AckDatagram, ack);
-                                let _ = datagram.as_mut().unwrap().send_pkg(pkg).await;
-                            } else {
-                                if datagram.is_some() {
-                                    listener.on_new_tunnel_datagram(datagram.unwrap()).await;
-                                }
-                            }
-                        }
-                        TunnelSession::ReverseStream(mut stream) => {
-                            let (ack, mut stream) = {
-                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel_conn.get_tunnel_id())).await;
-                                if tunnels.is_exist_pending_future(tunnel_conn.get_tunnel_id()) {
-                                    let ack = AckReverseStream {
-                                        result: 0
-                                    };
-                                    let pkg = Package::new(PackageCmdCode::AckReverseStream, ack);
-                                    match stream.send_pkg(pkg).await {
-                                        Ok(_) => {
-                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                        tunnel_conn.get_tunnel_id(),
-                        remote_id.to_string(),
-                        remote_ep.to_string(),
-                        local_id.to_string(),
-                        local_ep.to_string());
-                                            let _ = stream.enter_recv_header();
-                                            let future = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()).unwrap();
-                                            future.set_complete(ReverseResult::Stream(tunnel_conn, stream));
-                                            (None, None)
-                                        }
-                                        Err(e) => {
-                                            log::error!("write tunnel {:?} ack reverse stream error: {:?}", tunnel_conn.get_tunnel_id(), e);
-                                            (None, None)
-                                        }
-                                    }
-                                } else {
-                                    let ack = AckReverseStream {
-                                        result: 1
-                                    };
-                                    (Some(ack), Some(stream))
-                                }
-                            };
-                            if let Some(ack) = ack {
-                                let pkg = Package::new(PackageCmdCode::AckReverseStream, ack);
-                                let _ = stream.as_mut().unwrap().send_pkg(pkg).await;
-                            }
-                        }
-                        TunnelSession::ReverseDatagram(mut datagram) => {
-                            let (ack, mut datagram) = {
-                                let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), tunnel_conn.get_tunnel_id())).await;
-                                if tunnels.is_exist_pending_future(tunnel_conn.get_tunnel_id()) {
-                                    let ack = AckReverseDatagram {
-                                        result: 0
-                                    };
-                                    let pkg = Package::new(PackageCmdCode::AckReverseDatagram, ack);
-                                    match datagram.send_pkg(pkg).await {
-                                        Ok(_) => {
-                                            log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
-                        tunnel_conn.get_tunnel_id(),
-                        remote_id.to_string(),
-                        remote_ep.to_string(),
-                        local_id.to_string(),
-                        local_ep.to_string());
-                                            let future = tunnels.try_pop_pending_future(tunnel_conn.get_tunnel_id()).unwrap();
-                                            let _ = datagram.enter_recv_header();
-                                            future.set_complete(ReverseResult::Datagram(tunnel_conn, datagram));
-                                            (None, None)
-                                        }
-                                        Err(e) => {
-                                            log::error!("write tunnel {:?} ack reverse datagram error: {:?}", tunnel_conn.get_tunnel_id(), e);
-                                            (None, None)
-                                        }
-                                    }
-                                } else {
-                                    let ack = AckReverseDatagram {
-                                        result: 1
-                                    };
-                                    (Some(ack), Some(datagram))
-                                }
-                            };
-                            if let Some(ack) = ack {
-                                let pkg = Package::new(PackageCmdCode::AckReverseDatagram, ack);
-                                let _ = datagram.as_mut().unwrap().send_pkg(pkg).await;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("accept tunnel error: {:?}", e);
-                }
+    async fn on_new_tunnel(self: Arc<Self>,
+                           session: SynSession,
+                           conn: Option<TunnelConnectionRef>,
+                           read: TunnelConnectionRead,
+                           mut write: TunnelConnectionWrite) -> P2pResult<()> {
+        let tunnels = self.get_tunnels(&read.remote_id());
+        if let Some(conn) = conn {
+            if tunnels.tunnel_exist(conn.get_tunnel_id()) {
+                return Ok(());
             }
-        });
 
+            let mut tunnel = Tunnel::new(
+                self.sn_service.clone(),
+                session.tunnel_id,
+                self.protocol_version,
+                read.remote_id(),
+                vec![read.remote()],
+                self.local_identity.clone(),
+                self.conn_timeout,
+                self.idle_timeout,
+                self.cert_factory.clone(),
+                self.pn_client.clone(),
+                self.p2p_factory.clone(),
+                self.conn_info_cache.clone()
+            );
+            tunnel.set_tunnel_conn(conn);
+            tunnels.add_tunnel(tunnel);
+        }
+
+        let mut result = 0;
+        if !self.listen_ports.is_listen(session.to_vport) {
+            result = P2pErrorCode::PortNotListen as u8;
+        }
+
+        let pkg = Package::new(self.protocol_version, PackageCmdCode::AckSession, AckSession {
+            result,
+        });
+        write.send_pkg(pkg).await?;
+
+        if let Some(tunnel) = tunnels.get_tunnel(session.tunnel_id) {
+            tunnel.set_tunnel_state(TunnelState::Worked);
+        }
+        if result == 0 {
+            let listener = {
+                self.listener.lock().unwrap().clone()
+            };
+            if let Some(listener) = listener {
+                listener.on_new_session(session.session_id, session.to_vport, read, write).await?;
+            }
+        } else {
+
+        }
         Ok(())
     }
 
-    pub fn set_stream_listener(&self, listener: impl TunnelManagerStreamEvent) {
-        self.listener.set_stream_event_listener(listener);
+    async fn on_new_reverse_tunnel(self: &Arc<Self>,
+                                   session: SynReverseSession,
+                                   conn: TunnelConnectionRef,
+                                   read: TunnelConnectionRead,
+                                   mut write: TunnelConnectionWrite) -> P2pResult<()> {
+        let remote_id = read.remote_id();
+        let tunnels = self.get_tunnels(&remote_id);
+        let _locker = Locker::get_locker(format!("tunnel_{}_{:?}", remote_id.to_string(), conn.get_tunnel_id())).await;
+        if tunnels.is_exist_pending_future(conn.get_tunnel_id()) {
+            let ack = AckReverseSession {
+                result: 0
+            };
+            let pkg = Package::new(self.protocol_version, PackageCmdCode::AckReverseSession, ack);
+            match write.send_pkg(pkg).await {
+                Ok(_) => {
+                    log::info!("new tunnel {:?} remote_id {} remote_ep {} local_id {} local_ep {}",
+                            conn.get_tunnel_id(),
+                            remote_id.to_string(),
+                            read.remote().to_string(),
+                            read.local_id().to_string(),
+                            read.local().to_string());
+                    let future = tunnels.try_pop_pending_future(conn.get_tunnel_id()).unwrap();
+                    future.notify(ReverseResult::Session(session.result, conn, read, write));
+                    Ok(())
+                }
+                Err(e) => {
+                    log::error!("write tunnel {:?} ack reverse stream error: {:?}", conn.get_tunnel_id(), e);
+                    Ok(())
+                }
+            }
+        } else {
+            let ack = AckReverseSession {
+                result: 1
+            };
+            let pkg = Package::new(self.protocol_version, PackageCmdCode::AckReverseSession, ack);
+            write.send_pkg(pkg).await?;
+            Ok(())
+        }
     }
 
-    pub fn set_datagram_listener(&self, listener: impl TunnelManagerDatagramEvent) {
-        self.listener.set_datagram_event_listener(listener);
-    }
-
-    pub fn add_stream_listen_port(&self, port: u16) {
-        self.stream_listen_ports.add_listen_port(port)
-    }
-
-    pub fn is_exist_stream_listen_port(&self, port: u16) -> bool {
-        self.stream_listen_ports.is_listen(port)
-    }
-
-    pub fn remove_stream_listen_port(&self, port: u16) {
-        self.stream_listen_ports.remove_listen_port(port)
-    }
-
-    pub fn add_datagram_listen_port(&self, port: u16) {
-        self.datagram_listen_ports.add_listen_port(port)
-    }
-
-    pub fn is_exist_datagram_listen_port(&self, port: u16) -> bool {
-        self.datagram_listen_ports.is_listen(port)
-    }
-
-    pub fn remove_datagram_listen_port(&self, port: u16) {
-        self.datagram_listen_ports.remove_listen_port(port)
-    }
-
-    fn get_tunnels(&self, remote_id: &P2pId) -> Arc<Tunnels> {
+    fn get_tunnels(self: &Arc<Self>, remote_id: &P2pId) -> Arc<Tunnels<F>> {
         let mut tunnels = self.tunnels.write().unwrap();
         let device_tunnels = tunnels.get(remote_id);
         if device_tunnels.is_none() {
-            let device_tunnels = Tunnels::new();
+            let this = self.clone();
+            let device_tunnels = Tunnels::new(move |session: SynSession, read: TunnelConnectionRead, write: TunnelConnectionWrite| {
+                let this = this.clone();
+                async move {
+                    this.on_new_tunnel(session, None, read, write).await?;
+                    Ok(())
+                }
+            });
             tunnels.insert(remote_id.clone(), device_tunnels.clone());
             device_tunnels
         } else {
@@ -753,69 +558,12 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_datagram_tunnel(&self, remote: &P2pIdentityCertRef, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
+    pub async fn create_session(self: &Arc<Self>, remote: &P2pIdentityCertRef, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         let remote_id = remote.get_id();
         let tunnels = self.get_tunnels(&remote_id);
 
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
-            return tunnel.open_datagram(vport, session_id).await;
-        } else {
-            let seq = self.gen_id.generate();
-            let mut tunnel = Tunnel::new(
-                self.net_manager.clone(),
-                self.sn_service.clone(),
-                seq,
-                self.protocol_version,
-                self.stack_version,
-                remote.get_id(),
-                remote.endpoints(),
-                self.local_identity.clone(),
-                self.conn_timeout,
-                self.idle_timeout,
-                self.cert_factory.clone(),
-                self.pn_client.clone()
-            );
-            let datagram = tunnel.connect_datagram(vport, session_id, tunnels.clone(),).await?;
-            let listener = self.listener.clone();
-            tunnels.add_tunnel(tunnel, listener);
-            Ok(datagram)
-        }
-    }
-
-    pub async fn create_datagram_tunnel_from_id(&self, remote_id: &P2pId, vport: u16, session_id: SessionId) -> P2pResult<TunnelDatagramSend> {
-        let tunnels = self.get_tunnels(remote_id);
-        if let Some(tunnel) = tunnels.get_idle_tunnel() {
-            return tunnel.open_datagram(vport, session_id).await;
-        } else {
-            let remote = self.device_finder.get_identity_cert(remote_id).await?;
-            let seq = self.gen_id.generate();
-            let mut tunnel = Tunnel::new(
-                self.net_manager.clone(),
-                self.sn_service.clone(),
-                seq,
-                self.protocol_version,
-                self.stack_version,
-                remote_id.clone(),
-                remote.endpoints(),
-                self.local_identity.clone(),
-                self.conn_timeout,
-                self.idle_timeout,
-                self.cert_factory.clone(),
-                self.pn_client.clone()
-            );
-            let datagram = tunnel.connect_datagram(vport, session_id, tunnels.clone()).await?;
-            let listener = self.listener.clone();
-            tunnels.add_tunnel(tunnel, listener);
-            Ok(datagram)
-        }
-    }
-
-    pub async fn create_stream_tunnel(&self, remote: &P2pIdentityCertRef, session_id: SessionId, vport: u16) -> P2pResult<TunnelStream> {
-        let remote_id = remote.get_id();
-        let tunnels = self.get_tunnels(&remote_id);
-
-        if let Some(tunnel) = tunnels.get_idle_tunnel() {
-            return tunnel.open_stream(vport, session_id).await;
+            tunnel.open_session(vport, session_id).await
         } else {
             let seq = self.gen_id.generate();
 
@@ -826,55 +574,57 @@ impl TunnelManager {
                 }
             };
             let mut tunnel = Tunnel::new(
-                self.net_manager.clone(),
                 self.sn_service.clone(),
                 seq,
                 self.protocol_version,
-                self.stack_version,
                 remote.get_id(),
                 remote.endpoints(),
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.cert_factory.clone(),
-                self.pn_client.clone()
+                self.pn_client.clone(),
+                self.p2p_factory.clone(),
+                self.conn_info_cache.clone()
             );
-            let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
-            let listener = self.listener.clone();
-            tunnels.add_tunnel(tunnel, listener);
-            Ok(stream)
+            let ret = tunnel.connect_session(vport, session_id, tunnels.clone()).await;
+            if tunnel.is_work() {
+                tunnels.add_tunnel(tunnel);
+            }
+            ret
         }
     }
 
-    pub async fn create_stream_tunnel_from_id(&self, remote_id: &P2pId, session_id: SessionId, vport: u16) -> P2pResult<TunnelStream> {
+    pub async fn create_session_from_id(self: &Arc<Self>, remote_id: &P2pId, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
-            return tunnel.open_stream(vport, session_id).await;
+            tunnel.open_session(vport, session_id).await
         } else {
             let remote = self.device_finder.get_identity_cert(remote_id).await?;
             let seq = self.gen_id.generate();
             let mut tunnel = Tunnel::new(
-                self.net_manager.clone(),
                 self.sn_service.clone(),
                 seq,
                 self.protocol_version,
-                self.stack_version,
                 remote_id.clone(),
                 remote.endpoints(),
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
                 self.cert_factory.clone(),
-                self.pn_client.clone()
+                self.pn_client.clone(),
+                self.p2p_factory.clone(),
+                self.conn_info_cache.clone()
             );
-            let stream = tunnel.connect_stream(vport, session_id, tunnels.clone()).await?;
-            let listener = self.listener.clone();
-            tunnels.add_tunnel(tunnel, listener);
-            Ok(stream)
+            let ret = tunnel.connect_session(vport, session_id, tunnels.clone()).await;
+            if tunnel.is_work() {
+                tunnels.add_tunnel(tunnel);
+            }
+            ret
         }
     }
 
-    pub async fn on_sn_called(&self, sn_called: SnCalled) -> P2pResult<()> {
+    pub async fn on_sn_called(self: &Arc<Self>, sn_called: SnCalled) -> P2pResult<()> {
         let tunnel_id = sn_called.tunnel_id.clone();
         let cert = self.cert_factory.create(&sn_called.peer_info)?;
         let from_id = cert.get_id();
@@ -907,7 +657,7 @@ impl TunnelManager {
         ret
     }
 
-    async fn on_sn_called_inner(&self, sn_called: SnCalled, cert: P2pIdentityCertRef) -> P2pResult<()> {
+    async fn on_sn_called_inner(self: &Arc<Self>, sn_called: SnCalled, cert: P2pIdentityCertRef) -> P2pResult<()> {
         log::info!("on_sn_called {:?}", sn_called);
 
         let eps = if self.sn_service.is_same_lan(&sn_called.reverse_endpoint_array) {
@@ -929,68 +679,56 @@ impl TunnelManager {
                 return Ok(());
             }
         }
+        assert_eq!(sn_called.call_type, self.p2p_factory.tunnel_type());
 
-        match sn_called.call_type {
-            SnCallType::Datagram => {
-                let mut tunnel = Tunnel::new(
-                    self.net_manager.clone(),
-                    self.sn_service.clone(),
-                    sn_called.tunnel_id,
-                    self.protocol_version,
-                    self.stack_version,
-                    from_device_id.clone(),
-                    eps.clone(),
-                    self.local_identity.clone(),
-                    self.conn_timeout,
-                    self.idle_timeout,
-                    self.cert_factory.clone(),
-                    self.pn_client.clone());
+        let session_info = SessionSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        let mut result = 0;
+        if !self.listen_ports.is_listen(session_info.vport) {
+            result = P2pErrorCode::PortNotListen as u8;
+        }
+        let mut tunnel = Tunnel::new(
+            self.sn_service.clone(),
+            sn_called.tunnel_id,
+            self.protocol_version,
+            self.cert_factory.create(&sn_called.peer_info)?.get_id(),
+            eps.clone(),
+            self.local_identity.clone(),
+            self.conn_timeout,
+            self.idle_timeout,
+            self.cert_factory.clone(),
+            self.pn_client.clone(),
+            self.p2p_factory.clone(),
+            self.conn_info_cache.clone());
 
-                let datagram_call = DatagramSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                let recv = tunnel.connect_reverse_datagram(datagram_call.vport, datagram_call.session_id).await?;
-
-                let listener = self.listener.clone();
-                {
-                    let tunnels = self.get_tunnels(&from_device_id);
-                    tunnels.add_tunnel(tunnel, listener.clone());
+        let session_call = SessionSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        let ret = tunnel.connect_reverse_session(session_call.vport, session_call.session_id, result).await;
+        if tunnel.is_work() {
+            let tunnels = self.get_tunnels(&from_device_id);
+            tunnels.add_tunnel(tunnel);
+        }
+        match ret {
+            Ok((read, write)) => {
+                if result == 0 {
+                    let listener = {
+                        self.listener.lock().unwrap().clone()
+                    };
+                    if let Some(listener) = listener {
+                        listener.on_new_session(session_call.session_id, session_call.vport, read, write).await?;
+                    }
                 }
-                let listener = self.listener.clone();
-                listener.on_new_tunnel_datagram(recv).await;
-            },
-            SnCallType::Stream => {
-                let mut tunnel = Tunnel::new(
-                    self.net_manager.clone(),
-                    self.sn_service.clone(),
-                    sn_called.tunnel_id,
-                    self.protocol_version,
-                    self.stack_version,
-                    self.cert_factory.create(&sn_called.peer_info)?.get_id(),
-                    eps.clone(),
-                    self.local_identity.clone(),
-                    self.conn_timeout,
-                    self.idle_timeout,
-                    self.cert_factory.clone(),
-                    self.pn_client.clone());
-
-                let stream_call = StreamSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                let stream = tunnel.connect_reverse_stream(stream_call.vport, stream_call.session_id).await?;
-                let listener = self.listener.clone();
-                {
-                    let tunnels = self.get_tunnels(&from_device_id);
-                    tunnels.add_tunnel(tunnel, listener.clone());
-                }
-                let listener = self.listener.clone();
-                listener.on_new_tunnel_stream(stream).await;
+                Ok(())
+            }
+            Err(e) => {
+                Err(e)
             }
         }
-        Ok(())
     }
 }
 
-impl Drop for TunnelManager {
+impl<F: P2pConnectionFactory> Drop for TunnelManager<F> {
     fn drop(&mut self) {
         log::info!("tunnel manager drop.device {}", self.local_identity.get_id().to_string());
-        self.net_manager.remove_connection_event_listener(&self.local_identity.get_id());
+        self.tunnel_listener.remove_new_tunnel_event(self.p2p_factory.tunnel_type());
         self.clear_handle.abort();
         Executor::block_on(self.close_all_tunnel());
     }

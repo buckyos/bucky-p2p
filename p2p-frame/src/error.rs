@@ -96,6 +96,8 @@ pub enum P2pErrorCode {
     QuicError,
     TunnelNotConnected,
     ConnectReset,
+    PortNotListen,
+    ConnectAckError,
 }
 
 impl P2pErrorCode {
