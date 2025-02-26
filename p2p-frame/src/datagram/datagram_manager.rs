@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
-use tokio::io::BufWriter;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use crate::endpoint::Endpoint;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
+use crate::executor::Executor;
 use crate::p2p_connection::{P2pConnection, P2pConnectionInfoCacheRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
 use crate::pn::PnClientRef;
@@ -55,7 +56,7 @@ impl DerefMut for DatagramRead {
 }
 
 pub struct DatagramWrite {
-    write: BufWriter<TunnelConnectionWrite>,
+    write: Option<BufWriter<TunnelConnectionWrite>>,
     session_id: SessionId,
     vport: u16,
 }
@@ -63,7 +64,7 @@ pub struct DatagramWrite {
 impl DatagramWrite {
     pub fn new(write: TunnelConnectionWrite, session_id: SessionId, vport: u16) -> Self {
         Self {
-            write: BufWriter::new(write),
+            write: Some(BufWriter::new(write)),
             session_id,
             vport,
         }
@@ -82,13 +83,23 @@ impl Deref for DatagramWrite {
     type Target = BufWriter<TunnelConnectionWrite>;
 
     fn deref(&self) -> &Self::Target {
-        &self.write
+        self.write.as_ref().unwrap()
     }
 }
 
 impl DerefMut for DatagramWrite {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.write
+        self.write.as_mut().unwrap()
+    }
+}
+
+impl Drop for DatagramWrite {
+    fn drop(&mut self) {
+        if let Some(mut write) = self.write.take() {
+            Executor::spawn_ok(async move {
+                write.flush().await;
+            })
+        }
     }
 }
 
