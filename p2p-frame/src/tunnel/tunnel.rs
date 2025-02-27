@@ -336,6 +336,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                  call_data.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?).await?;
             let result = runtime::timeout(self.conn_timeout, waiter).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))?;
             let ReverseResult::Session(result, tunnel_conn, read, write) = result;
+            tunnel_conn.set_tunnel_state(TunnelState::Worked);
             self.tunnel_conn = Some(tunnel_conn);
             self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
                 direct: ConnectDirection::Reverse,
@@ -468,15 +469,6 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             }
         } else {
             Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect has not been established session {} port {}", session_id, vport))
-        }
-    }
-
-    pub async fn shutdown(&self) -> P2pResult<()> {
-        log::info!("shutdown tunnel {:?}", self.tunnel_id);
-        if self.tunnel_conn.is_some() {
-            self.tunnel_conn.as_ref().unwrap().shutdown().await
-        } else {
-            Ok(())
         }
     }
 }

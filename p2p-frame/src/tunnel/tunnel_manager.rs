@@ -173,10 +173,6 @@ impl<F: P2pConnectionFactory> Tunnels<F> {
             let state = self.state.lock().unwrap();
             state.tunnels.iter().map(|v| v.1.clone()).collect::<Vec<Arc<Tunnel<F>>>>()
         };
-
-        for tunnel in tunnels.into_iter() {
-            let _ = tunnel.shutdown().await;
-        }
     }
 }
 
@@ -421,11 +417,6 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
             }
             for tunnel in remove_list.into_iter() {
                 let seq = tunnel.get_tunnel_id();
-                Executor::spawn_ok(async move {
-                    if let Err(e) = tunnel.shutdown().await {
-                        log::error!("shutdown tunnel error: {:?}", e);
-                    }
-                });
                 let mut state = tunnels.state.lock().unwrap();
                 state.tunnels.remove(&seq);
             }
@@ -530,13 +521,10 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
                 }
             }
         } else {
-            let ack = AckReverseSession {
-                result: 1
-            };
-            let pkg = Package::new(self.protocol_version, PackageCmdCode::AckReverseSession, ack);
-            write.send_pkg(pkg).await?;
+            //反连时如果找不到对应的tunnel，说明该连接是错误的，就应该直接关闭连接
             Ok(())
         }
+
     }
 
     fn get_tunnels(self: &Arc<Self>, remote_id: &P2pId) -> Arc<Tunnels<F>> {
@@ -662,11 +650,19 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
 
         let eps = if self.sn_service.is_same_lan(&sn_called.reverse_endpoint_array) {
             let mut eps = cert.endpoints().clone();
-            eps.extend_from_slice(sn_called.reverse_endpoint_array.as_slice());
+            for ep in sn_called.reverse_endpoint_array.iter() {
+                if !eps.contains(ep) {
+                    eps.push(ep.clone());
+                }
+            }
             eps
         } else {
             let mut eps = sn_called.reverse_endpoint_array;
-            eps.extend_from_slice(cert.endpoints().as_slice());
+            for ep in cert.endpoints().iter() {
+                if !eps.contains(ep) {
+                    eps.push(ep.clone());
+                }
+            }
             eps
         };
 

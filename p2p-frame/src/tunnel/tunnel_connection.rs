@@ -377,10 +377,10 @@ impl TunnelConnectionRead {
         let conn = self.conn.clone();
         let session_id = self.session_id.clone();
         {
+            let tunnel_id = self.conn.get_tunnel_id();
             let mut state = self.conn.state.lock().unwrap();
             if state.tunnel_state != TunnelState::Worked && state.tunnel_state != TunnelState::WriteClosed {
                 if state.tunnel_state != TunnelState::Error {
-                    let tunnel_id = self.conn.get_tunnel_id();
                     log::error!("tunnel {:?} invalid state {:?}", tunnel_id, state.tunnel_state);
                     state.tunnel_state = TunnelState::Error;
                 }
@@ -984,7 +984,7 @@ impl TunnelConnection {
                         if inner.tunnel_state != TunnelState::Idle {
                             continue;
                         }
-                        log::info!("tunnel {:?} state from {:?} to Accepting", inner.tunnel_id, inner.tunnel_state);
+                        log::info!("tunnel {:?} state from {:?} to Accepting", syn_stream.tunnel_id, inner.tunnel_state);
                         inner.tunnel_state = TunnelState::Accepting;
                         inner.tunnel_id = syn_stream.tunnel_id;
                         let write = inner.write.take().unwrap();
@@ -1001,7 +1001,7 @@ impl TunnelConnection {
                         if inner.tunnel_state != TunnelState::Idle {
                             continue;
                         }
-                        log::info!("tunnel {:?} state from {:?} to Accepting", inner.tunnel_id, inner.tunnel_state);
+                        log::info!("tunnel {:?} state from {:?} to Accepting", reserve_stream.tunnel_id, inner.tunnel_state);
                         inner.tunnel_state = TunnelState::Accepting;
                         inner.tunnel_id = reserve_stream.tunnel_id;
                         let write = inner.write.take().unwrap();
@@ -1016,7 +1016,7 @@ impl TunnelConnection {
             }
         }
     }
-    pub(crate) async fn shutdown(&self) -> P2pResult<()> {
+    fn shutdown(&self) -> P2pResult<()> {
         let (tunnel_id, accept_handle) = {
             let mut inner = self.state.lock().unwrap();
             log::info!("tunnel {:?} shutdown.local {}", inner.tunnel_id, self.local_identity.get_id());
@@ -1066,7 +1066,7 @@ impl Drop for TunnelConnection {
         {
             log::info!("drop tunnel connection {:?}", self.state.lock().unwrap().tunnel_id);
         }
-        let _ = Executor::block_on(self.shutdown());
+        self.shutdown();
     }
 
 }
