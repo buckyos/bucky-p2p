@@ -10,12 +10,14 @@ use crate::sn::types::CmdTunnelId;
 
 pub struct PnServer<T: CmdServer<u16, u8>> {
     cmd_server: Arc<T>,
+    cmd_version: u8,
 }
 
 impl<T: CmdServer<u16, u8>> PnServer<T> {
     pub fn new(cmd_server: Arc<T>) -> Arc<Self> {
         Arc::new(Self {
-            cmd_server
+            cmd_server,
+            cmd_version: 0,
         })
     }
 
@@ -36,8 +38,9 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 };
 
                 let ret = this.cmd_server.send2(&PeerId::from(to_proxy.to.as_slice()),
-                                         PackageCmdCode::FromProxy as u8,
-                                         vec![from_proxy.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice(), buf].as_slice()).await;
+                                                PackageCmdCode::FromProxy as u8,
+                                                this.cmd_version,
+                                                vec![from_proxy.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice(), buf].as_slice()).await;
 
                 if ret.is_err() {
                     let to_proxy_resp = ToProxyResp {
@@ -45,7 +48,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                         tunnel_id: to_proxy.tunnel_id,
                         result: 1,
                     };
-                    this.cmd_server.send(&peer_id, PackageCmdCode::ToProxyResp as u8, to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
+                    this.cmd_server.send(&peer_id, PackageCmdCode::ToProxyResp as u8, this.cmd_version, to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
                 }
                 Ok(())
             }
@@ -64,6 +67,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 };
                 this.cmd_server.send(&PeerId::from(from_proxy_resp.from.as_slice()),
                                      PackageCmdCode::ToProxyResp as u8,
+                                     this.cmd_version,
                                      to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
                 Ok(())
             }
@@ -78,6 +82,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 let proxy_heart= ProxyHeart::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
                                      PackageCmdCode::ProxyHeart as u8,
+                                     this.cmd_version,
                                      data.as_slice()).await?;
                 Ok(())
             }
@@ -92,6 +97,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 let proxy_heart= ProxyHeartResp::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
                                      PackageCmdCode::ProxyHeartResp as u8,
+                                     this.cmd_version,
                                      data.as_slice()).await?;
                 Ok(())
             }
@@ -106,6 +112,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                 let proxy_heart= ProxyClosed::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
                                      PackageCmdCode::ProxyClosed as u8,
+                                     this.cmd_version,
                                      data.as_slice()).await?;
                 Ok(())
             }

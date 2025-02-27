@@ -181,6 +181,7 @@ pub struct SNClientService {
     listener: Mutex<Option<SNEventRef>>,
     cert_factory: P2pIdentityCertFactoryRef,
     cmd_client: SnCmdClientRef,
+    cmd_version: u8,
 }
 pub type SNClientServiceRef = Arc<SNClientService>;
 
@@ -221,6 +222,7 @@ impl SNClientService {
             listener: Mutex::new(None),
             cert_factory,
             cmd_client,
+            cmd_version: 0,
         })
     }
 
@@ -377,7 +379,7 @@ impl SNClientService {
             }
         };
 
-        self.cmd_client.send(PackageCmdCode::SnCalledResp as u8, resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await
+        self.cmd_client.send(PackageCmdCode::SnCalledResp as u8, self.cmd_version, resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await
             .map_err(into_p2p_err!(P2pErrorCode::IoError, "send SnCalledResp failed"))?;
         Ok(())
     }
@@ -602,7 +604,7 @@ impl SNClientService {
             let mut state = self.state.write().unwrap();
             state.cur_report_future = Some(notify);
         }
-        match self.cmd_client.send_by_specify_tunnel(tunnel_id, PackageCmdCode::ReportSn as u8, report.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
+        match self.cmd_client.send_by_specify_tunnel(tunnel_id, PackageCmdCode::ReportSn as u8, self.cmd_version, report.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
             Ok(_) => {}
             Err(e) => {
                 self.remove_sn_conn(tunnel_id);
@@ -649,7 +651,7 @@ impl SNClientService {
                 let mut recv_future = active.recv_future.lock().unwrap();
                 recv_future.insert(seq, notify);
             }
-            if let Err(e) = self.cmd_client.send_by_specify_tunnel(active.conn_id, PackageCmdCode::SnCall as u8, call.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
+            if let Err(e) = self.cmd_client.send_by_specify_tunnel(active.conn_id, PackageCmdCode::SnCall as u8, self.cmd_version, call.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
                 log::error!("send call to {} failed: {:?}", sn.get_id(), e);
                 self.remove_sn_conn(active.conn_id);
                 continue;
@@ -694,7 +696,7 @@ impl SNClientService {
                 let mut recv_future = active.recv_future.lock().unwrap();
                 recv_future.insert(seq, notify);
             }
-            if let Err(e) = self.cmd_client.send_by_specify_tunnel(active.conn_id, PackageCmdCode::SnQuery as u8, query.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
+            if let Err(e) = self.cmd_client.send_by_specify_tunnel(active.conn_id, PackageCmdCode::SnQuery as u8, self.cmd_version, query.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
                 log::error!("send call to {} failed: {:?}", sn.get_id(), e);
                 self.remove_sn_conn(active.conn_id);
                 continue;

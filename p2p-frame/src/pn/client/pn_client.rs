@@ -272,6 +272,7 @@ pub struct PnTunnelWriteImpl<T: CmdClient<u16, u8>> {
     writing_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<()>>>>>,
     heart_handle: Option<SpawnHandle<()>>,
     connection_state: Box<dyn ConnectionState>,
+    version: u8,
 }
 
 impl<T: CmdClient<u16, u8>> Drop for PnTunnelWriteImpl<T> {
@@ -312,7 +313,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
                             break;
                         }
                     };
-                    match client.send(cmd_code, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError)) {
+                    match client.send(cmd_code, 0, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError)) {
                         Ok(_) => {
                         },
                         Err(e) => {
@@ -335,6 +336,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
             writing_future: None,
             heart_handle,
             connection_state,
+            version: 0,
         }
     }
 
@@ -348,7 +350,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
             to: self.to.clone(),
         };
         let mut body = from_proxy.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-        self.cmd_client.send2(cmd_code, vec![body.as_slice(), data].as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        self.cmd_client.send2(cmd_code, self.version, vec![body.as_slice(), data].as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 
@@ -358,6 +360,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
             let tunnel_id = self.tunnel_id;
             let from = self.from.clone();
             let to = self.to.clone();
+            let version = self.version;
             Executor::spawn(async move {
                 log::info!("send proxy closed tunnel_id: {:?} from: {} to: {}", tunnel_id, from, to);
                 let cmd_code = PackageCmdCode::ProxyClosed as u8;
@@ -367,7 +370,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
                     to,
                 };
                 if let Ok(body) = proxy_closed.to_vec() {
-                    if let Err(e) = cmd_client.send(cmd_code, body.as_slice()).await {
+                    if let Err(e) = cmd_client.send(cmd_code, version, body.as_slice()).await {
                         log::error!("send proxy closed error: {}", e);
                     }
                 }
@@ -431,6 +434,7 @@ struct DefaultPnClientImpl<T: CmdClient<u16, u8>> {
     tunnel_recv_cache: Arc<Mutex<HashMap<P2pId, HashMap<TunnelId, RecvCache>>>>,
     accept_waiter: Arc<SingleCallbackWaiter<P2pResult<(Box<dyn crate::pn::PnTunnelRead>, Box<dyn crate::pn::PnTunnelWrite>)>>>,
     local_identity: P2pIdentityRef,
+    version: u8,
 }
 
 pub struct DefaultPnClient<T: CmdClient<u16, u8>> {
@@ -453,6 +457,7 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                 tunnel_recv_cache: Arc::new(Mutex::new(Default::default())),
                 accept_waiter: Arc::new(SingleCallbackWaiter::new()),
                 local_identity,
+                version: 0,
             })
         });
         this.register_cmd_handler();
@@ -508,7 +513,7 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                             tunnel_id: from.tunnel_id,
                             result: 1,
                         };
-                        this.inner.cmd_client.send(PackageCmdCode::FromProxyResp as u8, resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                        this.inner.cmd_client.send(PackageCmdCode::FromProxyResp as u8, this.inner.version, resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     }
                 } else {
                     let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id);
@@ -553,7 +558,7 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                             to: heart.from.clone(),
                         };
                         let mut body = resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                        cmd_client.send(cmd_code, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                        cmd_client.send(cmd_code, this.inner.version, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     }
                 }
                 Ok(())

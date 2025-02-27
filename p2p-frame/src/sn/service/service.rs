@@ -86,6 +86,7 @@ pub struct SnService {
     net_manager: NetManagerRef,
     cmd_server: SnCmdServerRef,
     proxy_server: Option<Arc<PnServer<SnCmdServer>>>,
+    cmd_version: u8,
 }
 
 pub type SnServiceRef = Arc<SnService>;
@@ -138,6 +139,7 @@ impl SnService {
             net_manager,
             cmd_server: sn_cmd_server,
             proxy_server,
+            cmd_version: 0,
         };
 
         let service_ref = Arc::new(service);
@@ -284,8 +286,9 @@ impl SnService {
                             );
 
                             self.cmd_server.send_by_all_tunnels(&PeerId::from(call_req.to_peer_id.as_slice()),
-                                                         PackageCmdCode::SnCalled as u8,
-                                                         called_req.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                                                                PackageCmdCode::SnCalled as u8,
+                                                                self.cmd_version,
+                                                                called_req.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                         }
                     } else {
                         info!("{} ignore send called req for already exists.", log_key);
@@ -328,9 +331,10 @@ impl SnService {
 
 
         self.cmd_server.send_by_specify_tunnel(peer_id,
-                                                 tunnel_id,
-                                                 PackageCmdCode::SnCallResp as u8,
-                                                 call_resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                                               tunnel_id,
+                                               PackageCmdCode::SnCallResp as u8,
+                                               self.cmd_version,
+                                               call_resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 
@@ -396,14 +400,18 @@ impl SnService {
                                              report_sn.map_ports,
                                              &report_sn.local_eps);
         }
-        if let Err(e) = self.cmd_server.send_by_specify_tunnel(peer_id, tunnel_id, PackageCmdCode::ReportSnResp as u8, ReportSnResp {
-            seq: report_sn.seq,
-            sn_peer_id: self.local_identity_id().clone(),
-            result: P2pErrorCode::Ok.into_u8(),
-            peer_info: None,
-            end_point_array: remote_ep,
-            receipt: None,
-        }.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
+        if let Err(e) = self.cmd_server.send_by_specify_tunnel(peer_id,
+                                                               tunnel_id,
+                                                               PackageCmdCode::ReportSnResp as u8,
+                                                               self.cmd_version,
+                                                               ReportSnResp {
+                                                                   seq: report_sn.seq,
+                                                                   sn_peer_id: self.local_identity_id().clone(),
+                                                                   result: P2pErrorCode::Ok.into_u8(),
+                                                                   peer_info: None,
+                                                                   end_point_array: remote_ep,
+                                                                   receipt: None,
+                                                               }.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
             log::error!("send report-sn-resp failed, peer_id: {:?}, error: {:?}", peer_id, e);
         }
         Ok(())
@@ -429,9 +437,10 @@ impl SnService {
         };
 
         self.cmd_server.send_by_specify_tunnel(peer_id,
-                                                 tunnel_id,
-                                                 PackageCmdCode::SnQueryResp as u8,
-                                                 resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                                               tunnel_id,
+                                               PackageCmdCode::SnQueryResp as u8,
+                                               self.cmd_version,
+                                               resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 }

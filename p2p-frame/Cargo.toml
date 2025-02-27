@@ -1,7 +1,7 @@
 [package]
 name = "p2p-frame"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}

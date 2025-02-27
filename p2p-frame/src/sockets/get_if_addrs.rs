@@ -375,7 +375,7 @@ mod getifaddrs_windows {
         pub first_prefix: *const IpAdapterPrefix,
     }
     #[link(name = "Iphlpapi")]
-    extern "system" {
+    unsafe extern "system" {
         /// get adapter's addresses
         fn GetAdaptersAddresses(
             family: c_ulong,
@@ -425,8 +425,8 @@ mod getifaddrs_windows {
     }
 
     unsafe fn u16_ptr_to_string(ptr: *const u16) -> OsString {
-        let len = (0..).take_while(|&i| *ptr.offset(i) != 0).count();
-        let slice = std::slice::from_raw_parts(ptr, len);
+        let len = (0..).take_while(|&i| unsafe {*ptr.offset(i) != 0}).count();
+        let slice = unsafe {std::slice::from_raw_parts(ptr, len)};
 
         OsString::from_wide(slice)
     }
