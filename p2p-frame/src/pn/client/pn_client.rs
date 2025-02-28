@@ -633,7 +633,7 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
 #[async_trait::async_trait]
 impl<T: CmdClient<u16, u8>> PnClient for DefaultPnClient<T> {
     async fn accept(&self) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
-        self.inner.accept_waiter.create_result_future().await.map_err(into_p2p_err!(P2pErrorCode::IoError))?
+        self.inner.accept_waiter.create_result_future().map_err(into_p2p_err!(P2pErrorCode::Failed))?.await.map_err(into_p2p_err!(P2pErrorCode::IoError))?
     }
 
     async fn connect(&self, tunnel_id: TunnelId, to: P2pId) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {

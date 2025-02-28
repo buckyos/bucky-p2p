@@ -63,7 +63,7 @@ impl SnTunnelListener {
 #[async_trait::async_trait]
 impl CmdTunnelListener<SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
     async fn accept(&self) -> CmdResult<CmdTunnel<SnTunnelRead, SnTunnelWrite>> {
-        let socket = self.waiter.create_result_future().await.map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))?;
+        let socket = self.waiter.create_result_future().map_err(into_cmd_err!(CmdErrorCode::Failed))?.await.map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))?;
         let (read, write) = socket.split();
         Ok(CmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)))
     }

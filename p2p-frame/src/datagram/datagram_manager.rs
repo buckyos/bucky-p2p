@@ -6,7 +6,7 @@ use callback_result::SingleCallbackWaiter;
 use futures::future::{abortable, AbortHandle};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use crate::endpoint::Endpoint;
-use crate::error::{p2p_err, P2pErrorCode, P2pResult};
+use crate::error::{into_p2p_err, p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::p2p_connection::{P2pConnection, P2pConnectionInfoCacheRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
@@ -134,7 +134,7 @@ impl DatagramListener {
     }
 
     pub async fn accept(&self) -> P2pResult<DatagramRead> {
-        let future = self.waiter.create_result_future();
+        let future = self.waiter.create_result_future().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let (abort_future, handle) = abortable(async move {
             future.await
         });
