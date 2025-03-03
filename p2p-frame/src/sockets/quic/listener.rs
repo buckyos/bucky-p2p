@@ -122,7 +122,7 @@ impl QuicListener {
 
     async fn accept(&self, conn: Incoming) -> P2pResult<Option<P2pConnection>> {
         let connection = conn.await.map_err(into_p2p_err!(P2pErrorCode::QuicError, "QuicListener accept error"))?;
-        let (local_id, remote_cert) = {
+        let (server_name, remote_cert) = {
             let handshake_data = connection.handshake_data();
             if handshake_data.is_none() {
                 return Err(p2p_err!(P2pErrorCode::TlsError, "no handshake data"));
@@ -142,8 +142,14 @@ impl QuicListener {
                 return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
             }
 
-            (P2pId::from_str(serve_name.unwrap())?, remote_cert.unwrap()[0].as_ref().to_vec())
+            (serve_name.unwrap().to_string(), remote_cert.unwrap()[0].as_ref().to_vec())
         };
+
+        let local_cert = self.cert_resolver.get_server_identity(server_name.as_str()).await;
+        if local_cert.is_none() {
+            return Err(p2p_err!(P2pErrorCode::CertError, "no local cert"));
+        }
+        let local_id = local_cert.unwrap().get_id();
 
         let remote_device = self.cert_factory.create(&remote_cert)?;
         self.cert_cache.add(&remote_device.get_id(), &remote_device).await?;

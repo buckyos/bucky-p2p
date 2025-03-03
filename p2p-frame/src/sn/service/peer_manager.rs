@@ -12,7 +12,6 @@ use crate::error::{P2pResult};
 use crate::executor::Executor;
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 use crate::runtime;
-use crate::sn::service::statistic::{PeerStatus, StatisticManager};
 use crate::types::{TunnelId, TunnelIdGenerator, Timestamp};
 
 struct Config {
@@ -34,7 +33,6 @@ pub struct FoundPeer {
     pub desc: P2pIdentityCertRef,
     pub conn_id: TunnelId,
     pub is_wan: bool,
-    pub peer_status: PeerStatus,
 }
 
 
@@ -136,7 +134,6 @@ impl Peers {
 
 pub struct PeerManager {
     config: Config,
-    statistic_manager: &'static StatisticManager,
     device_conn_map: Mutex<HashMap<P2pId, CachedPeerInfo>>,
 }
 pub type PeerManagerRef = Arc<PeerManager>;
@@ -151,7 +148,6 @@ impl PeerManager {
     pub fn new() -> PeerManagerRef {
         Arc::new(PeerManager {
             config: Default::default(),
-            statistic_manager: StatisticManager::get_instance(),
             device_conn_map: Mutex::new(Default::default()),
         })
     }

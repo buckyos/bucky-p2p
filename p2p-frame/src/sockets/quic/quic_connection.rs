@@ -58,7 +58,7 @@ impl QuicConnection {
                 .with_protocol_versions(&[&TLS13])
                 .unwrap()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory)))
+                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
                 .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
                 .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;
@@ -100,7 +100,7 @@ impl QuicConnection {
                 .with_protocol_versions(&[&TLS13])
                 .unwrap()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory)))
+                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
                 .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
                 .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;

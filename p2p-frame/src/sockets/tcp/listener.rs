@@ -31,6 +31,7 @@ pub struct TCPListener {
     tcp_listener: RwLock<Option<Arc<dyn P2pConnectionEventListener>>>,
     tls_acceptor: TlsAcceptor,
     cert_factory: P2pIdentityCertFactoryRef,
+    cert_resolver: ServerCertResolverRef,
 }
 pub type TCPListenerRef = Arc<TCPListener>;
 
@@ -51,7 +52,7 @@ impl TCPListener {
                 .with_protocol_versions(&[&TLS13])
                 .unwrap()
                 .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(cert_factory.clone())))
-                .with_cert_resolver(cert_resolver.get_resolves_server_cert());
+                .with_cert_resolver(cert_resolver.clone().get_resolves_server_cert());
 
         server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
@@ -66,6 +67,7 @@ impl TCPListener {
             tcp_listener: RwLock::new(None),
             tls_acceptor: TlsAcceptor::from(Arc::new(server_config)),
             cert_factory,
+            cert_resolver,
         })
     }
 
@@ -187,7 +189,17 @@ impl TCPListener {
             return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
         }
 
-        let local_identity_id = P2pId::from_str(tls_conn.server_name().unwrap()).map_err(into_p2p_err!(P2pErrorCode::TlsError, "decode cert failed."))?;
+        let server_name = tls_conn.server_name();
+        if server_name.is_none() {
+            return Err(p2p_err!(P2pErrorCode::CertError, "no server name"));
+        }
+
+        let local_cert = self.cert_resolver.get_server_identity(server_name.unwrap()).await;
+        if local_cert.is_none() {
+            return Err(p2p_err!(P2pErrorCode::CertError, "no server cert"));
+        }
+
+        let local_identity_id = local_cert.unwrap().get_id();
         let remote_device = self.cert_factory.create(&cert[0].as_ref().to_vec())?;
         let remote_id = remote_device.get_id();
         self.cert_cache.add(&remote_id, &remote_device).await?;

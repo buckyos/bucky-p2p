@@ -155,12 +155,12 @@ impl NetManager {
         self.cert_resolver.add_server_identity(device).await
     }
 
-    pub async fn remove_listen_device(&self, device_id: &P2pId) -> P2pResult<()> {
+    pub async fn remove_listen_device(&self, device_id: &str) -> P2pResult<()> {
         log::info!("remove_listen_device {:?}", device_id);
         self.cert_resolver.remove_server_identity(device_id).await
     }
 
-    pub async fn get_listen_device(&self, device_id: &P2pId) -> Option<P2pIdentityRef> {
+    pub async fn get_listen_device(&self, device_id: &str) -> Option<P2pIdentityRef> {
         self.cert_resolver.get_server_identity(device_id).await
     }
 

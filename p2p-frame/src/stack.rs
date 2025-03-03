@@ -257,7 +257,7 @@ impl P2pStack {
 impl Drop for P2pStack {
     fn drop(&mut self) {
         log::info!("P2pStack drop.device = {}", self.local_identity.get_id());
-        Executor::block_on(self.net_manager.remove_listen_device(&self.local_identity.get_id()));
+        Executor::block_on(self.net_manager.remove_listen_device(&self.local_identity.get_name()));
         Executor::block_on(self.sn_service.stop());
     }
 }

@@ -189,9 +189,9 @@ pub struct SessionIdGenerator {
 
 impl SessionIdGenerator {
     pub fn new() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         Self {
-            cur: AtomicU32::new(rng.gen_range(1, 0x7fffffff)),
+            cur: AtomicU32::new(rng.random_range(1..0x7fffffff)),
         }
     }
 

@@ -17,7 +17,7 @@ use bucky_objects::{Endpoint, EndpointArea, Protocol};
 use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
-use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
+use cyfs_p2p::sn::service::{create_sn_service, IsAcceptClient, ReceiptRequestTime, SnService, SnServiceConfig, SnServiceContractServer};
 use cyfs_p2p::stack::{create_p2p_stack, init_p2p, P2pStackRef};
 use cyfs_p2p::types::SessionIdGenerator;
 
@@ -102,31 +102,6 @@ pub struct Config {
     tcp_list: Vec<EP>,
     udp_list: Vec<EP>,
     sn: EP,
-}
-
-struct SnServiceContractServerImpl {}
-
-impl SnServiceContractServerImpl {
-    fn new() -> SnServiceContractServerImpl {
-        SnServiceContractServerImpl {}
-    }
-}
-
-impl SnServiceContractServer for SnServiceContractServerImpl {
-
-    fn check_receipt(&self,
-                     _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
-                     _local_receipt: &SnServiceReceipt, // 本地(服务端)统计的服务清单
-                     _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
-                     _last_request_time: &ReceiptRequestTime, // 上次要求服务清单的时间
-    ) -> IsAcceptClient
-    {
-        IsAcceptClient::Accept(false)
-    }
-
-    fn verify_auth(&self, _client_device_id: &P2pId) -> IsAcceptClient {
-        IsAcceptClient::Accept(false)
-    }
 }
 
 #[tokio::main]
@@ -299,13 +274,12 @@ async fn all_in_one() {
         eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 3456, 0, 0)))));
     }
 
-    let sn_service = SnService::new(
+    let sn_service = SnServiceConfig::new(
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
-        Box::new(SnServiceContractServerImpl::new()),
-        true
-    ).await;
+    ).set_support_proxy(true);
+    let sn_service = create_sn_service(sn_service).await;
     sn_service.start().await.unwrap();
 
     //

@@ -17,7 +17,7 @@ use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnection};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef, EncodedP2pIdentityCert};
 use crate::p2p_network::P2pNetworkRef;
 use crate::pn::PnServer;
 use crate::protocol::{v0::*, *};
@@ -72,6 +72,33 @@ impl CmdTunnelListener<SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
 type SnCmdServer = DefaultCmdServer<SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>;
 pub type SnCmdServerRef = Arc<DefaultCmdServer<SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
 
+
+struct DefaultSnServiceContractServer {}
+
+impl DefaultSnServiceContractServer {
+    fn new() -> DefaultSnServiceContractServer {
+        DefaultSnServiceContractServer {}
+    }
+}
+
+impl SnServiceContractServer for DefaultSnServiceContractServer {
+
+    fn check_receipt(&self,
+                     _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
+                     _local_receipt: &SnServiceReceipt, // 本地(服务端)统计的服务清单
+                     _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
+                     _last_request_time: &ReceiptRequestTime, // 上次要求服务清单的时间
+    ) -> IsAcceptClient
+    {
+        IsAcceptClient::Accept(false)
+    }
+
+    fn verify_auth(&self, _client_device_id: &P2pId) -> IsAcceptClient {
+        IsAcceptClient::Accept(false)
+    }
+}
+
+
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
     device_cache: P2pIdentityCertCacheRef,
@@ -92,7 +119,7 @@ pub struct SnService {
 pub type SnServiceRef = Arc<SnService>;
 
 impl SnService {
-    pub async fn new(
+    pub(crate) async fn new(
         local_identity: P2pIdentityRef,
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
@@ -145,6 +172,10 @@ impl SnService {
         let service_ref = Arc::new(service);
 
         service_ref
+    }
+
+    pub fn get_cmd_server(&self) -> &SnCmdServerRef {
+        &self.cmd_server
     }
 
     fn register_sn_cmd_handler(self: &Arc<Self>) {
@@ -451,3 +482,48 @@ impl SnService {
 //         self.handle(socket).await
 //     }
 // }
+
+pub struct SnServiceConfig {
+    local_identity: P2pIdentityRef,
+    identity_factory: P2pIdentityFactoryRef,
+    cert_factory: P2pIdentityCertFactoryRef,
+    contract: Box<dyn SnServiceContractServer + Send + Sync>,
+    support_proxy: bool,
+}
+
+impl SnServiceConfig {
+    pub fn new(
+        local_identity: P2pIdentityRef,
+        identity_factory: P2pIdentityFactoryRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+    ) -> Self {
+        Self {
+            local_identity,
+            identity_factory,
+            cert_factory,
+            contract: Box::new(DefaultSnServiceContractServer::new()),
+            support_proxy: false,
+        }
+    }
+
+    pub fn set_contract(mut self, contract: Box<dyn SnServiceContractServer + Send + Sync>) -> Self {
+        self.contract = contract;
+        self
+    }
+
+    pub fn set_support_proxy(mut self, support_proxy: bool) -> Self {
+        self.support_proxy = support_proxy;
+        self
+    }
+}
+
+pub async fn create_sn_service(config: SnServiceConfig) -> SnServiceRef {
+    let service = SnService::new(
+        config.local_identity,
+        config.identity_factory,
+        config.cert_factory,
+        config.contract,
+        config.support_proxy,
+    ).await;
+    service
+}

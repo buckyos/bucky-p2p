@@ -21,5 +21,8 @@ pub mod p2p_network;
 pub mod datagram;
 pub mod pn;
 
+#[cfg(feature = "x509")]
+pub mod x509;
+
 #[macro_use]
 extern crate log;
