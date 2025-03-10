@@ -95,6 +95,7 @@ pub type P2pIdentityFactoryRef = Arc<dyn P2pIdentityFactory>;
 
 pub trait P2pIdentityCert: 'static + Send + Sync {
     fn get_id(&self) -> P2pId;
+    fn get_name(&self) -> String;
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool;
     fn verify_cert(&self, name: &str) -> bool;
     fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert>;

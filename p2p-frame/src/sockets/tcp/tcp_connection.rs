@@ -30,6 +30,7 @@ impl TCPConnection {
         local_identity_ref: P2pIdentityRef,
         remote_ep: Endpoint,
         remote_identity_id: P2pId,
+        remote_name: Option<String>,
         timeout: Duration,) -> P2pResult<P2pConnection> {
         let client_config =
             rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
@@ -47,12 +48,13 @@ impl TCPConnection {
 
         let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let local = Endpoint::from((Protocol::Tcp, local));
+        let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
-        let tls_stream = tls_connector.connect(remote_identity_id.to_string().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
-        let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep);
-        let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep);
+        let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
+        let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep, remote_name.clone());
         let socket = P2pConnection::new(Box::new(read), Box::new(write));
         Ok(socket)
     }
@@ -63,6 +65,7 @@ impl TCPConnection {
         local_ep: Endpoint,
         remote_ep: Endpoint,
         remote_identity_id: P2pId,
+        remote_name: Option<String>,
         timeout: Duration,) -> P2pResult<P2pConnection> {
         let client_config =
             rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
@@ -86,12 +89,13 @@ impl TCPConnection {
 
         let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let local = Endpoint::from((Protocol::Tcp, local));
+        let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
-        let tls_stream = tls_connector.connect(remote_identity_id.to_string().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
-        let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep);
-        let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep);
+        let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
+        let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep,remote_name);
         let socket = P2pConnection::new(Box::new(read), Box::new(write));
         Ok(socket)
     }
@@ -103,6 +107,7 @@ pub(crate) struct TCPRead {
     local_identity_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
+    remote_name: String,
 }
 
 impl TCPRead {
@@ -110,13 +115,15 @@ impl TCPRead {
                remote_identity_id: P2pId,
                local_identity_id: P2pId,
                local: Endpoint,
-               remote: Endpoint,) -> Self {
+               remote: Endpoint,
+               remote_name: String,) -> Self {
         Self {
             read,
             remote_identity_id,
             local_identity_id,
             local,
             remote,
+            remote_name,
         }
     }
 }
@@ -137,6 +144,10 @@ impl P2pRead for TCPRead {
     fn local_id(&self) -> P2pId {
         self.local_identity_id.clone()
     }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
+    }
 }
 
 
@@ -156,6 +167,7 @@ pub(crate) struct TCPWrite {
     local_identity_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
+    remote_name: String,
 }
 
 impl TCPWrite {
@@ -163,13 +175,15 @@ impl TCPWrite {
                remote_identity_id: P2pId,
                local_identity_id: P2pId,
                local: Endpoint,
-               remote: Endpoint,) -> Self {
+               remote: Endpoint,
+               remote_name: String,) -> Self {
         Self {
             write,
             remote_identity_id,
             local_identity_id,
             local,
             remote,
+            remote_name,
         }
     }
 }
@@ -189,6 +203,10 @@ impl P2pWrite for TCPWrite {
 
     fn local_id(&self) -> P2pId {
         self.local_identity_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
     }
 }
 

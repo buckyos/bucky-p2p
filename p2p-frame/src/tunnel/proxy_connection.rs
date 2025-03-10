@@ -42,6 +42,10 @@ impl P2pRead for ProxyConnectionRead {
     fn local_id(&self) -> P2pId {
         self.local_id.clone()
     }
+
+    fn remote_name(&self) -> String {
+        self.read.remote_name()
+    }
 }
 
 impl runtime::AsyncRead for ProxyConnectionRead {
@@ -94,6 +98,10 @@ impl P2pWrite for ProxyConnectionWrite {
 
     fn local_id(&self) -> P2pId {
         self.local_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.write.remote_name()
     }
 }
 

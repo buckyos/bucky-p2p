@@ -452,6 +452,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
                 self.protocol_version,
                 read.remote_id(),
                 vec![read.remote()],
+                Some(read.remote_name()),
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
@@ -567,6 +568,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
                 self.protocol_version,
                 remote.get_id(),
                 remote.endpoints(),
+                Some(remote.get_name()),
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
@@ -596,6 +598,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
                 self.protocol_version,
                 remote_id.clone(),
                 remote.endpoints(),
+                Some(remote.get_name()),
                 self.local_identity.clone(),
                 self.conn_timeout,
                 self.idle_timeout,
@@ -682,12 +685,14 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         if !self.listen_ports.is_listen(session_info.vport) {
             result = P2pErrorCode::PortNotListen as u8;
         }
+        let remote_cert = self.cert_factory.create(&sn_called.peer_info)?;
         let mut tunnel = Tunnel::new(
             self.sn_service.clone(),
             sn_called.tunnel_id,
             self.protocol_version,
-            self.cert_factory.create(&sn_called.peer_info)?.get_id(),
+            remote_cert.get_id(),
             eps.clone(),
+            Some(remote_cert.get_name()),
             self.local_identity.clone(),
             self.conn_timeout,
             self.idle_timeout,

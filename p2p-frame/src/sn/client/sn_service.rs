@@ -83,7 +83,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                             continue;
                         }
 
-                        let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await
+                        let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id(), Some(sn_cert.get_name())).await
                             .map_err(into_cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))?;
                         let (read, write) = conn.split();
                         return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
@@ -100,7 +100,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                         let quic_listener = p2p_network.listeners();
                         for listener in quic_listener.iter() {
                             let local_ep = listener.local();
-                            let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await
+                            let conn =  p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id(), Some(sn_cert.get_name())).await
                                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "create tunnel failed"))?;
                             let (read, write) = conn.split();
                             return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
@@ -119,7 +119,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                                 continue;
                             }
 
-                            match quic_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await {
+                            match quic_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id(), Some(sn_cert.get_name())).await {
                                 Ok(conn) => {
                                     let (read, write) = conn.split();
                                     return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));
@@ -147,7 +147,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                                 continue;
                             }
 
-                            match p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id()).await {
+                            match p2p_network.create_stream_connect_with_local_ep(&self.local_identity, &local_ep, sn_ep, &sn_cert.get_id(), Some(sn_cert.get_name())).await {
                                 Ok(conn) => {
                                     let (read, write) = conn.split();
                                     return Ok(ClassifiedCmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)));

@@ -37,8 +37,8 @@ pub trait ReverseWaiterCache: 'static + Send + Sync {
 #[async_trait::async_trait]
 pub trait P2pConnectionFactory: Send + Sync + 'static {
     fn tunnel_type(&self) -> TunnelType;
-    async fn create_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>>;
-    async fn create_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection>;
+    async fn create_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>>;
+    async fn create_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection>;
 }
 
 pub struct Tunnel<F: P2pConnectionFactory> {
@@ -49,6 +49,7 @@ pub struct Tunnel<F: P2pConnectionFactory> {
     local_identity: P2pIdentityRef,
     remote_id: P2pId,
     remote_eps: Vec<Endpoint>,
+    remote_name: Option<String>,
     conn_timeout: Duration,
     idle_timeout: Duration,
     cert_factory: P2pIdentityCertFactoryRef,
@@ -65,6 +66,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         protocol_version: u8,
         remote_id: P2pId,
         remote_eps: Vec<Endpoint>,
+        remote_name: Option<String>,
         local_identity: P2pIdentityRef,
         conn_timeout: Duration,
         idle_timeout: Duration,
@@ -81,6 +83,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             local_identity,
             remote_id,
             remote_eps,
+            remote_name,
             conn_timeout,
             idle_timeout,
             cert_factory,
@@ -153,8 +156,9 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         let cert_factory = self.cert_factory.clone();
         let p2p_factory = self.p2p_factory.clone();
         let ep = ep.clone();
+        let remote_name = self.remote_name.clone();
         let future = Box::pin(async move {
-            let conns = p2p_factory.create_connect(&local_identity, &ep, &remote_id).await?;
+            let conns = p2p_factory.create_connect(&local_identity, &ep, &remote_id, remote_name).await?;
             let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
             for conn in conns {
                 let tunnel_conn = TunnelConnection::new(
@@ -404,8 +408,9 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             let protocol_version = self.protocol_version;
             let cert_factory = self.cert_factory.clone();
             let p2p_factory = self.p2p_factory.clone();
+            let remote_name = self.remote_name.clone();
             let future = Box::pin(async move {
-                let conns = p2p_factory.create_connect(&local_identity, ep, &remote_id).await?;
+                let conns = p2p_factory.create_connect(&local_identity, ep, &remote_id, remote_name).await?;
                 let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckReverseSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
                 for conn in conns {
                     let tunnel_conn = TunnelConnection::new(

@@ -108,12 +108,24 @@ impl X509IdentityCert {
     fn x509_update_endpoints(&self, eps: Vec<Endpoint>) -> Arc<Self> {
         Arc::new(Self {
             cert: self.cert.clone(),
-            data: self.data.clone(),
+            data: X509IdentityCertData {
+                raw_cert: self.data.raw_cert.clone(),
+                endpoints: eps.clone(),
+                sn_list: self.data.sn_list.clone(),
+            },
             sn_list: self.sn_list.clone(),
         })
     }
+}
 
-    pub fn get_name(&self) -> String {
+impl P2pIdentityCert for X509IdentityCert {
+    fn get_id(&self) -> P2pId {
+        let mut sha256 = sha2::Sha256::new();
+        sha256.update(self.cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes());
+        P2pId::from(sha256.finalize().as_slice())
+    }
+
+    fn get_name(&self) -> String {
         if let Some(ref extends) = self.cert.tbs_certificate.extensions {
             for extend in extends.iter() {
                 if extend.extn_id == ID_CE_SUBJECT_ALT_NAME {
@@ -138,14 +150,6 @@ impl X509IdentityCert {
             }
         }
         "".to_string()
-    }
-}
-
-impl P2pIdentityCert for X509IdentityCert {
-    fn get_id(&self) -> P2pId {
-        let mut sha256 = sha2::Sha256::new();
-        sha256.update(self.cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes());
-        P2pId::from(sha256.finalize().as_slice())
     }
 
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool {
@@ -192,7 +196,11 @@ impl P2pIdentityCert for X509IdentityCert {
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityCertRef {
         Arc::new(Self {
             cert: self.cert.clone(),
-            data: self.data.clone(),
+            data: X509IdentityCertData {
+                raw_cert: self.data.raw_cert.clone(),
+                endpoints: eps.clone(),
+                sn_list: self.data.sn_list.clone(),
+            },
             sn_list: self.sn_list.clone(),
         })
     }

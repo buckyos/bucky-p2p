@@ -16,6 +16,7 @@ pub trait P2pRead: runtime::AsyncRead + Send + 'static + Unpin + Any + AsAny {
     fn local(&self) -> Endpoint;
     fn remote_id(&self) -> P2pId;
     fn local_id(&self) -> P2pId;
+    fn remote_name(&self) -> String;
 }
 
 pub trait P2pWrite: runtime::AsyncWrite + Send + 'static + Unpin + Any + AsAny {
@@ -23,6 +24,7 @@ pub trait P2pWrite: runtime::AsyncWrite + Send + 'static + Unpin + Any + AsAny {
     fn local(&self) -> Endpoint;
     fn remote_id(&self) -> P2pId;
     fn local_id(&self) -> P2pId;
+    fn remote_name(&self) -> String;
 }
 
 
@@ -32,6 +34,7 @@ pub trait P2pConnectionMeta: Send + 'static {
     fn local(&self) -> Endpoint;
     fn remote_id(&self) -> P2pId;
     fn local_id(&self) -> P2pId;
+    fn remote_name(&self) -> String;
 }
 
 pub type P2pConnection = Splittable<Box<dyn P2pRead>, Box<dyn P2pWrite>>;

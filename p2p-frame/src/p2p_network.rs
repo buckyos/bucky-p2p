@@ -11,9 +11,9 @@ pub trait P2pNetwork: Send + Sync + 'static {
     async fn listen(&self, local: &Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>, event: Arc<dyn P2pConnectionEventListener>) -> P2pResult<P2pListenerRef>;
     async fn close_all_listener(&self) -> P2pResult<()>;
     fn listeners(&self) -> Vec<P2pListenerRef>;
-    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>>;
-    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection>;
-    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<Vec<P2pConnection>>;
-    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId) -> P2pResult<P2pConnection>;
+    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>>;
+    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection>;
+    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>>;
+    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection>;
 }
 pub type P2pNetworkRef = Arc<dyn P2pNetwork>;

@@ -47,6 +47,7 @@ impl QuicConnection {
     pub async fn connect(local_identity_ref: P2pIdentityRef,
                          cert_factory: P2pIdentityCertFactoryRef,
                          remote_identity_id: P2pId,
+                         remote_name: Option<String>,
                          remote: Endpoint,
                          timeout: Duration,
                          idle_timeout: Duration) -> P2pResult<Self> {
@@ -77,7 +78,7 @@ impl QuicConnection {
         endpoint.set_default_client_config(client_config);
 
         let conn = runtime::timeout(timeout, endpoint.connect(remote.addr().clone(),
-                                    remote_identity_id.to_string().as_str()).unwrap()).await
+                                    remote_name.unwrap_or(remote_identity_id.to_string()).as_str()).unwrap()).await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
@@ -89,6 +90,7 @@ impl QuicConnection {
                                  local_identity_ref: P2pIdentityRef,
                                  cert_factory: P2pIdentityCertFactoryRef,
                                  remote_identity_id: P2pId,
+                                 remote_name: Option<String>,
                                  remote: Endpoint,
                                  timeout: Duration,
                                  idle_timeout: Duration) -> P2pResult<Self> {
@@ -115,8 +117,8 @@ impl QuicConnection {
         client_config.transport_config(Arc::new(transport_config));
 
         let conn = runtime::timeout(timeout, ep.connect_with(client_config,
-                                   remote.addr().clone(),
-                                   remote_identity_id.to_string().as_str()).unwrap()).await
+                                                             remote.addr().clone(),
+                                                             remote_name.unwrap_or(remote_identity_id.to_string()).as_str()).unwrap()).await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
@@ -202,6 +204,7 @@ pub(crate) struct QuicRead {
     local_identity_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
+    remote_name: String,
 }
 
 impl QuicRead {
@@ -211,7 +214,8 @@ impl QuicRead {
         remote_identity_id: P2pId,
         local_identity_id: P2pId,
         local: Endpoint,
-        remote: Endpoint, ) -> Self {
+        remote: Endpoint,
+        remote_name: String, ) -> Self {
         Self {
             socket,
             recv,
@@ -219,6 +223,7 @@ impl QuicRead {
             local_identity_id,
             local,
             remote,
+            remote_name,
         }
     }
 
@@ -248,6 +253,10 @@ impl P2pRead for QuicRead {
 
     fn local_id(&self) -> P2pId {
         self.local_identity_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
     }
 }
 
@@ -280,6 +289,7 @@ pub(crate) struct QuicWrite {
     local_identity_id: P2pId,
     local: Endpoint,
     remote: Endpoint,
+    remote_name: String,
 }
 
 impl QuicWrite {
@@ -289,7 +299,8 @@ impl QuicWrite {
         remote_identity_id: P2pId,
         local_identity_id: P2pId,
         local: Endpoint,
-        remote: Endpoint, ) -> Self {
+        remote: Endpoint,
+        remote_name: String, ) -> Self {
         Self {
             socket: Some(socket),
             send: Some(send),
@@ -297,6 +308,7 @@ impl QuicWrite {
             local_identity_id,
             local,
             remote,
+            remote_name,
         }
     }
 
@@ -328,6 +340,10 @@ impl P2pWrite for QuicWrite {
 
     fn local_id(&self) -> P2pId {
         self.local_identity_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
     }
 }
 

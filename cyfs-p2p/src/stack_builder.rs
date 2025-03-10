@@ -25,6 +25,10 @@ impl P2pIdentityCert for CyfsIdentityCert {
         P2pId::from_str(self.device.desc().device_id().object_id().to_base36().as_str()).unwrap()
     }
 
+    fn get_name(&self) -> String {
+        self.device.desc().device_id().object_id().to_base36()
+    }
+
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool {
         let sign = match Signature::clone_from_slice(sign.as_slice()) {
             Ok(sign) => {sign}

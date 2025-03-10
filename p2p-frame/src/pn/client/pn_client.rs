@@ -167,6 +167,7 @@ impl Future for RecvCache {
 struct DefaultPnTunnelRead<T: CmdClient<u16, u8>> {
     cmd_client: Arc<DefaultPnClient<T>>,
     p2p_id: P2pId,
+    remote_name: String,
     tunnel_id: TunnelId,
     read_cache: Option<(usize, Vec<u8>)>,
     recv_cache: RecvCache,
@@ -174,7 +175,7 @@ struct DefaultPnTunnelRead<T: CmdClient<u16, u8>> {
 }
 
 impl<T: CmdClient<u16, u8>> DefaultPnTunnelRead<T> {
-    pub(crate) fn new(cmd_client: Arc<DefaultPnClient<T>>, p2p_id: P2pId, tunnel_id: TunnelId) -> Self {
+    pub(crate) fn new(cmd_client: Arc<DefaultPnClient<T>>, p2p_id: P2pId, tunnel_id: TunnelId, remote_name: String) -> Self {
         let recv_cache = RecvCache::new();
         cmd_client.add_tunnel_recv_cache(p2p_id.clone(), tunnel_id, recv_cache.clone());
         let heart_state = recv_cache.clone();
@@ -190,6 +191,7 @@ impl<T: CmdClient<u16, u8>> DefaultPnTunnelRead<T> {
         Self {
             cmd_client,
             p2p_id,
+            remote_name,
             tunnel_id,
             read_cache: None,
             recv_cache,
@@ -209,6 +211,10 @@ impl<T: CmdClient<u16, u8>> PnTunnelRead for DefaultPnTunnelRead<T> {
 
     fn remote_id(&self) -> P2pId {
         self.p2p_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
     }
 }
 
@@ -269,6 +275,7 @@ pub struct PnTunnelWriteImpl<T: CmdClient<u16, u8>> {
     seq: u32,
     from: P2pId,
     to: P2pId,
+    remote_name: String,
     writing_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<()>>>>>,
     heart_handle: Option<SpawnHandle<()>>,
     connection_state: Box<dyn ConnectionState>,
@@ -289,6 +296,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
                       tunnel_id: TunnelId,
                       from: P2pId,
                       to: P2pId,
+                      remote_name: String,
                       is_send_heart: bool,
                       connection_state: Box<dyn ConnectionState>) -> Self {
         let heart_handle = if is_send_heart {
@@ -333,6 +341,7 @@ impl<T: CmdClient<u16, u8>> PnTunnelWriteImpl<T> {
             seq: 0,
             from,
             to,
+            remote_name,
             writing_future: None,
             heart_handle,
             connection_state,
@@ -427,6 +436,10 @@ impl<T: CmdClient<u16, u8>> PnTunnelWrite for DefaultPnTunnelWrite<T> {
     fn remote_id(&self) -> P2pId {
         self.get_ref().to.clone()
     }
+
+    fn remote_name(&self) -> String {
+        todo!()
+    }
 }
 
 struct DefaultPnClientImpl<T: CmdClient<u16, u8>> {
@@ -516,12 +529,13 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                         this.inner.cmd_client.send(PackageCmdCode::FromProxyResp as u8, this.inner.version, resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     }
                 } else {
-                    let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id);
+                    let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id, from.from.to_string());
                     tunnel_read.get_recv_cache().insert(from.seq, (data.len() - buf.len(), data));
                     let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(this.inner.cmd_client.clone(),
                                                                                         from.tunnel_id,
                                                                                         this.inner.local_identity.get_id(),
                                                                                         from.from.clone(),
+                                                                                        from.from.to_string(),
                                                                                         false,
                                                                                         Box::new(tunnel_read.get_recv_cache().clone())));
                     this.inner.accept_waiter.set_result_with_cache(Ok((Box::new(tunnel_read), Box::new(tunnel_write))));
@@ -637,11 +651,12 @@ impl<T: CmdClient<u16, u8>> PnClient for DefaultPnClient<T> {
     }
 
     async fn connect(&self, tunnel_id: TunnelId, to: P2pId) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
-        let tunnel_read = DefaultPnTunnelRead::new(Arc::new(self.clone()), to.clone(), tunnel_id);
+        let tunnel_read = DefaultPnTunnelRead::new(Arc::new(self.clone()), to.clone(), tunnel_id, to.to_string());
         let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(self.inner.cmd_client.clone(),
                                                                             tunnel_id,
                                                                             self.inner.local_identity.get_id(),
-                                                                            to,
+                                                                            to.clone(),
+                                                                            to.to_string(),
                                                                             true,
                                                                             Box::new(tunnel_read.get_recv_cache().clone())));
         Ok((Box::new(tunnel_read), Box::new(tunnel_write)))

@@ -204,8 +204,18 @@ impl TCPListener {
         let remote_id = remote_device.get_id();
         self.cert_cache.add(&remote_id, &remote_device).await?;
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
-        let read = super::TCPRead::new(read, local_identity_id.clone(), remote_id.clone(), local, remote);
-        let write = super::TCPWrite::new(write, local_identity_id, remote_id, local, remote);
+        let read = super::TCPRead::new(read,
+                                       local_identity_id.clone(),
+                                       remote_id.clone(),
+                                       local,
+                                       remote,
+                                       remote_device.get_name());
+        let write = super::TCPWrite::new(write,
+                                         local_identity_id,
+                                         remote_id,
+                                         local,
+                                         remote,
+                                         remote_device.get_name());
         let socket = P2pConnection::new(Box::new(read), Box::new(write));
 
         Ok(socket)

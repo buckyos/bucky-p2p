@@ -164,13 +164,15 @@ impl QuicListener {
                                                      remote_device.get_id(),
                                                      local_id.clone(),
                                                      conn.local().clone(),
-                                                     conn.remote().clone()));
+                                                     conn.remote().clone(),
+                                                     remote_device.get_name()));
             let write = Box::new(super::QuicWrite::new(conn.socket().clone(),
                                                        send.unwrap(),
                                                        remote_device.get_id(),
                                                        local_id,
                                                        conn.local().clone(),
-                                                       conn.remote().clone()));
+                                                       conn.remote().clone(),
+                                                       remote_device.get_name()));
             Ok(Some(P2pConnection::new(read, write)))
         } else {
             Ok(None)

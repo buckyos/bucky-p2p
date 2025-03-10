@@ -226,6 +226,7 @@ pub struct TunnelConnectionRead {
     conn: Arc<TunnelConnection>,
     local: Endpoint,
     remote: Endpoint,
+    remote_name: String,
     local_id: P2pId,
     remote_id: P2pId,
     read: ReadHolder,
@@ -247,6 +248,7 @@ impl TunnelConnectionRead {
             conn,
             local: read.local(),
             remote: read.remote(),
+            remote_name: read.remote_name(),
             local_id: read.local_id(),
             remote_id: read.remote_id(),
             read: ReadHolder::new(Some(read)),
@@ -269,6 +271,10 @@ impl TunnelConnectionRead {
     }
     pub fn remote_id(&self) -> P2pId {
         self.remote_id.clone()
+    }
+
+    pub fn remote_name(&self) -> String {
+        self.remote_name.clone()
     }
     pub fn local_id(&self) -> P2pId {
         self.local_id.clone()
