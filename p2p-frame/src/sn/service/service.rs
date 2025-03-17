@@ -422,7 +422,7 @@ impl SnService {
     }
 
     async fn handle_report_sn(&self, peer_id: &PeerId, tunnel_id: CmdTunnelId, report_sn: ReportSn) -> P2pResult<()> {
-        log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_id.to_base58(), report_sn.local_eps, report_sn.map_ports);
+        log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_id.to_base36(), report_sn.local_eps, report_sn.map_ports);
         let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
 
         if report_sn.from_peer_id.is_some() {

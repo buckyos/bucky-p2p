@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::ops::Add;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
+use chrono::Utc;
 use notify_future::Notify;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -16,7 +18,7 @@ use crate::error::{p2p_err, into_p2p_err, P2pErrorCode, P2pResult};
 use crate::runtime;
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::P2pConnection;
-use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef};
+use crate::p2p_identity::{P2pId, P2pIdentityRef, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pSn};
 use crate::protocol::{Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::protocol::v0::{SnCallResp, SnCalled, SnCalledResp, TunnelType};
 use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelClassification, SnTunnelRead, SnTunnelWrite};
@@ -36,7 +38,6 @@ pub enum SnResp {
 
 #[derive(Clone)]
 pub struct ActiveSN {
-    pub sn: EncodedP2pIdentityCert,
     pub sn_peer_id: P2pId,
     pub latest_time: u64,
     pub conn_id: CmdTunnelId,
@@ -54,13 +55,13 @@ pub struct SNServiceState {
 pub struct SnClientTunnelFactory {
     net_manager: NetManagerRef,
     local_identity: P2pIdentityRef,
-    sn_list: Vec<P2pIdentityCertRef>,
+    sn_list: Vec<P2pSn>,
 }
 
 impl SnClientTunnelFactory {
     pub fn new(net_manager: NetManagerRef,
                local_identity: P2pIdentityRef,
-               sn_list: Vec<P2pIdentityCertRef>,) -> Self {
+               sn_list: Vec<P2pSn>,) -> Self {
         Self {
             net_manager,
             local_identity,
@@ -170,7 +171,7 @@ pub type SnCmdClient = DefaultClassifiedCmdClient<SnTunnelClassification, SnTunn
 pub type SnCmdClientRef = Arc<SnCmdClient>;
 pub struct SNClientService {
     net_manager: NetManagerRef,
-    sn_list: Vec<P2pIdentityCertRef>,
+    sn_list: Vec<P2pSn>,
     local_identity: P2pIdentityRef,
     gen_seq: Arc<SequenceGenerator>,
     gen_id: Arc<TunnelIdGenerator>,
@@ -194,7 +195,7 @@ impl Drop for SNClientService {
 
 impl SNClientService {
     pub fn new(net_manager: NetManagerRef,
-               sn_list: Vec<P2pIdentityCertRef>,
+               sn_list: Vec<P2pSn>,
                local_identity: P2pIdentityRef,
                gen_seq: Arc<SequenceGenerator>,
                gen_id: Arc<TunnelIdGenerator>,
@@ -448,11 +449,7 @@ impl SNClientService {
                         match self.report(active_sn.conn_id, active_sn.sn_peer_id.clone()).await {
                             Ok(_) => {}
                             Err(e) => {
-                                if let Ok(sn) = self.cert_factory.create(&active_sn.sn) {
-                                    log::error!("ping to {} failed: {:?}", sn.get_id(), e);
-                                } else {
-                                    log::error!("ping failed: {:?}", e);
-                                }
+                                log::error!("ping to {} failed: {:?}", active_sn.sn_peer_id, e);
                                 continue;
                             }
                         }
@@ -496,16 +493,7 @@ impl SNClientService {
                                 }
                             };
 
-                            let sn = match sn_cert.get_encoded_cert() {
-                                Ok(resp) => resp,
-                                Err(e) => {
-                                    log::error!("ping to {} failed: {:?}", sn_cert.get_id(), e);
-                                    continue;
-                                }
-                            };
-
                             let active_sn = ActiveSN {
-                                sn,
                                 sn_peer_id: sn_cert.get_id(),
                                 latest_time: bucky_time_now(),
                                 conn_id: tunnel_id,
@@ -526,9 +514,19 @@ impl SNClientService {
         state.active_sn_list.retain(|sn| sn.conn_id != conn_id);
     }
 
-    pub async fn wait_online(&self, _timeout: Option<Duration>) -> P2pResult<()> {
+    pub async fn wait_online(&self, timeout: Option<Duration>) -> P2pResult<()> {
+        let expire = if timeout.is_some() {
+            Some(Utc::now().add(timeout.unwrap()))
+        } else {
+            None
+        };
         loop {
             {
+                if expire.is_some() {
+                    if Utc::now() > expire.unwrap() {
+                        return Err(p2p_err!(P2pErrorCode::Timeout, "wait online timeout"));
+                    }
+                }
                 let state = self.state.read().unwrap();
                 if state.active_sn_list.len() > 0 {
                     break;
@@ -627,14 +625,13 @@ impl SNClientService {
                       payload_pkg: Vec<u8>) -> P2pResult<SnCallResp> {
         let active_list = self.get_active_sn_list();
         for active in active_list.iter() {
-            let sn = self.cert_factory.create(&active.sn)?;
             let seq = self.gen_seq.generate();
             let call = SnCall {
                 protocol_version: 0,
                 stack_version: 0,
                 seq,
                 tunnel_id,
-                sn_peer_id: sn.get_id(),
+                sn_peer_id: active.sn_peer_id.clone(),
                 to_peer_id: remote.clone(),
                 from_peer_id: self.local_identity.get_id().clone(),
                 reverse_endpoint_array: reverse_endpoints.map(|ep_list| Vec::from(ep_list)),
@@ -652,7 +649,7 @@ impl SNClientService {
                 recv_future.insert(seq, notify);
             }
             if let Err(e) = self.cmd_client.send_by_specify_tunnel(active.conn_id, PackageCmdCode::SnCall as u8, self.cmd_version, call.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
-                log::error!("send call to {} failed: {:?}", sn.get_id(), e);
+                log::error!("send call to {} failed: {:?}", active.sn_peer_id, e);
                 self.remove_sn_conn(active.conn_id);
                 continue;
             }
@@ -670,7 +667,7 @@ impl SNClientService {
                 Err(_) => {
                     let mut recv_future = active.recv_future.lock().unwrap();
                     recv_future.remove(&seq);
-                    log::error!("call to {} timeout", sn.get_id());
+                    log::error!("call to {} timeout", active.sn_peer_id);
                     continue;
                 }
             };
@@ -683,7 +680,6 @@ impl SNClientService {
     pub async fn query(&self, device_id: &P2pId) -> P2pResult<SnQueryResp> {
         let active_list = self.get_active_sn_list();
         for active in active_list.iter() {
-            let sn = self.cert_factory.create(&active.sn)?;
             let seq = self.gen_seq.generate();
             let query = SnQuery {
                 protocol_version: 0,
@@ -697,7 +693,7 @@ impl SNClientService {
                 recv_future.insert(seq, notify);
             }
             if let Err(e) = self.cmd_client.send_by_specify_tunnel(active.conn_id, PackageCmdCode::SnQuery as u8, self.cmd_version, query.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
-                log::error!("send call to {} failed: {:?}", sn.get_id(), e);
+                log::error!("send call to {} failed: {:?}", active.sn_peer_id, e);
                 self.remove_sn_conn(active.conn_id);
                 continue;
             }
@@ -715,7 +711,7 @@ impl SNClientService {
                 Err(_) => {
                     let mut recv_future = active.recv_future.lock().unwrap();
                     recv_future.remove(&seq);
-                    log::error!("call to {} timeout", sn.get_id());
+                    log::error!("call to {} timeout", active.sn_peer_id);
                     continue;
                 }
             };

@@ -8,7 +8,7 @@ use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
-use crate::p2p_identity::{P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef};
+use crate::p2p_identity::{P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef, P2pSn};
 use crate::p2p_network::P2pNetworkRef;
 use crate::pn::{DefaultPnClient, PnClientRef};
 use crate::protocol::v0::SnCalled;
@@ -275,7 +275,7 @@ impl TunnelManagerEventListener {
 
 pub struct P2pStackConfig {
     local_identity: P2pIdentityRef,
-    sn_list: Vec<P2pIdentityCertRef>,
+    sn_list: Vec<P2pSn>,
     conn_timeout: Duration,
     idle_timeout: Duration,
     sn_ping_interval: Duration,
@@ -307,16 +307,16 @@ impl P2pStackConfig {
         &self.local_identity
     }
 
-    pub fn sn_list(&self) -> &[P2pIdentityCertRef] {
+    pub fn sn_list(&self) -> &[P2pSn] {
         self.sn_list.as_slice()
     }
 
-    pub fn add_sn_list(mut self, mut sn_list: Vec<P2pIdentityCertRef>) -> Self {
+    pub fn add_sn_list(mut self, mut sn_list: Vec<P2pSn>) -> Self {
         self.sn_list.append(&mut sn_list);
         self
     }
 
-    pub fn add_sn(mut self, sn: P2pIdentityCertRef) -> Self {
+    pub fn add_sn(mut self, sn: P2pSn) -> Self {
         self.sn_list.push(sn);
         self
     }

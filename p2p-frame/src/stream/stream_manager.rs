@@ -40,6 +40,22 @@ impl StreamRead {
     pub fn vport(&self) -> u16 {
         self.vport
     }
+
+    pub fn remote(&self) -> Endpoint {
+        self.read.remote()
+    }
+
+    pub fn local(&self) -> Endpoint {
+        self.read.local()
+    }
+
+    pub fn remote_id(&self) -> P2pId {
+        self.read.remote_id()
+    }
+
+    pub fn local_id(&self) -> P2pId {
+        self.read.local_id()
+    }
 }
 
 impl Deref for StreamRead {
@@ -77,6 +93,22 @@ impl StreamWrite {
 
     pub fn vport(&self) -> u16 {
         self.vport
+    }
+
+    pub fn remote(&self) -> Endpoint {
+        self.write.as_ref().unwrap().get_ref().remote()
+    }
+
+    pub fn local(&self) -> Endpoint {
+        self.write.as_ref().unwrap().get_ref().local()
+    }
+
+    pub fn remote_id(&self) -> P2pId {
+        self.write.as_ref().unwrap().get_ref().remote_id()
+    }
+
+    pub fn local_id(&self) -> P2pId {
+        self.write.as_ref().unwrap().get_ref().local_id()
     }
 }
 

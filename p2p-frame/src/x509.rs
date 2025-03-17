@@ -12,7 +12,7 @@ use x509_verify::{Error, Message, VerifyInfo, VerifyingKey};
 use x509_verify::der::oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION;
 use crate::endpoint::Endpoint;
 use crate::error::{into_p2p_err, p2p_err, P2pError, P2pErrorCode, P2pResult};
-use crate::p2p_identity::{EncodedP2pIdentity, EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pIdentityCert, P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef, P2pSignature};
+use crate::p2p_identity::{EncodedP2pIdentity, EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pIdentityCert, P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef, P2pSignature, P2pSn};
 
 pub fn generate_x509_identity(name: Option<String>) -> P2pResult<X509Identity> {
     let key_pair = KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048).map_err(into_p2p_err!(P2pErrorCode::CertError))?;
@@ -41,13 +41,13 @@ pub fn generate_x509_identity(name: Option<String>) -> P2pResult<X509Identity> {
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 struct X509IdentityCertData {
     raw_cert: Vec<u8>,
-    sn_list: Vec<EncodedP2pIdentityCert>,
+    sn_list: Vec<P2pSn>,
     endpoints: Vec<Endpoint>,
 }
 pub struct X509IdentityCert {
     cert: Certificate,
     data: X509IdentityCertData,
-    sn_list: Vec<P2pIdentityCertRef>,
+    sn_list: Vec<P2pSn>,
 }
 
 impl X509IdentityCert {
@@ -63,12 +63,8 @@ impl X509IdentityCert {
         }
     }
 
-    pub fn set_sn_list(&mut self, sn_list: Vec<P2pIdentityCertRef>) {
-        self.sn_list = sn_list;
-        let mut sn_list = vec![];
-        for sn in self.sn_list.iter() {
-            sn_list.push(sn.get_encoded_cert().unwrap());
-        }
+    pub fn set_sn_list(&mut self, sn_list: Vec<P2pSn>) {
+        self.sn_list = sn_list.clone();
         self.data.sn_list = sn_list;
     }
 
@@ -89,11 +85,7 @@ impl X509IdentityCert {
 
     fn from_data(data: X509IdentityCertData) -> P2pResult<Self> {
         let cert = Certificate::from_der(data.raw_cert.as_slice()).map_err(into_p2p_err!(P2pErrorCode::CertError))?;
-        let mut sn_list = Vec::<Arc<dyn P2pIdentityCert>>::new();
-        for sn in data.sn_list.iter() {
-            let data = X509IdentityCertData::clone_from_slice(sn.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            sn_list.push(Arc::new(Self::from_data(data)?));
-        }
+        let sn_list = data.sn_list.clone();
         Ok(Self {
             cert,
             data,
@@ -189,7 +181,7 @@ impl P2pIdentityCert for X509IdentityCert {
         self.data.endpoints.clone()
     }
 
-    fn sn_list(&self) -> Vec<P2pIdentityCertRef> {
+    fn sn_list(&self) -> Vec<P2pSn> {
         self.sn_list.clone()
     }
 
@@ -228,6 +220,7 @@ impl X509Identity {
         })
     }
 }
+
 impl P2pIdentity for X509Identity {
     fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
         Ok(self.cert.clone())
@@ -299,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_x509_identity() {
-        let id = generate_x509_identity().unwrap();
+        let id = generate_x509_identity(None).unwrap();
         let id_ref = id.get_id();
         let id_name = id.get_name();
         assert_eq!(id_ref.to_string(), id_name);
@@ -314,7 +307,6 @@ mod tests {
         let id_cert_verify_cert = id_cert.verify_cert(id_cert_id.to_string().as_str());
         assert!(id_cert_verify_cert);
         let id_cert_encoded = id_cert.get_encoded_cert().unwrap();
-        let id_cert_endpoints = id_cert.endpoints();
         let id_cert_sn_list = id_cert.sn_list();
         let id_cert_update = id_cert.update_endpoints(vec![]);
 

@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 use bucky_raw_codec::{RawDecode, RawEncode};
+use serde::{Deserialize, Serialize};
 use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult};
 
@@ -86,6 +87,35 @@ pub trait P2pIdentity: 'static + Send + Sync {
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityRef;
 }
 
+#[derive(Debug, Clone, RawEncode, RawDecode)]
+pub struct P2pSn {
+    id: P2pId,
+    name: String,
+    endpoints: Vec<Endpoint>,
+}
+
+impl P2pSn {
+    pub fn new(id: P2pId, name: String, endpoints: Vec<Endpoint>) -> Self {
+        Self {
+            id,
+            name,
+            endpoints,
+        }
+    }
+
+    pub fn get_id(&self) -> P2pId {
+        self.id.clone()
+    }
+
+    pub fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn endpoints(&self) -> Vec<Endpoint> {
+        self.endpoints.clone()
+    }
+}
+
 pub type P2pIdentityRef = Arc<dyn P2pIdentity>;
 
 pub trait P2pIdentityFactory: 'static + Send + Sync {
@@ -100,7 +130,7 @@ pub trait P2pIdentityCert: 'static + Send + Sync {
     fn verify_cert(&self, name: &str) -> bool;
     fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert>;
     fn endpoints(&self) -> Vec<Endpoint>;
-    fn sn_list(&self) -> Vec<P2pIdentityCertRef>;
+    fn sn_list(&self) -> Vec<P2pSn>;
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityCertRef;
 }
 pub type P2pIdentityCertRef = Arc<dyn P2pIdentityCert>;

@@ -356,7 +356,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         let handle = Executor::spawn_with_handle(async move {
             loop {
                 runtime::sleep(Duration::from_secs(120)).await;
-                log::info!("{} start clear idle tunnel", local_id);
+                // log::info!("{} start clear idle tunnel", local_id);
                 Self::clear_idle_tunnel(tmp.clone()).await;
             }
         }).unwrap();

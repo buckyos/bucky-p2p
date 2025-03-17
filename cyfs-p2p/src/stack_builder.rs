@@ -3,11 +3,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use bucky_crypto::{PrivateKey, Signature};
-use bucky_objects::{Device, Endpoint, NamedObject, Protocol, SingleKeyObjectDesc};
+use bucky_objects::{Device, Endpoint, NamedObject, ObjectDesc, Protocol, SingleKeyObjectDesc};
 use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
 use p2p_frame::endpoint::EndpointArea;
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
-use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory};
+use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory, P2pSn};
 use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pConfig, P2pStackConfig, P2pStackRef};
 
 pub struct CyfsIdentityCert {
@@ -51,7 +51,7 @@ impl P2pIdentityCert for CyfsIdentityCert {
         self.device.connect_info().endpoints().iter().filter(|ep| !ep.addr().ip().is_unspecified()).map(|ep| p2p_frame::endpoint::Endpoint::from_str(ep.to_string().as_str()).unwrap()).collect::<Vec<_>>()
     }
 
-    fn sn_list(&self) -> Vec<P2pIdentityCertRef> {
+    fn sn_list(&self) -> Vec<P2pSn> {
         Vec::new()
     }
 
@@ -176,9 +176,10 @@ pub fn create_cyfs_p2p_config(ep: Vec<p2p_frame::endpoint::Endpoint>) -> P2pConf
 }
 
 pub fn create_cyfs_p2p_stack_config(local_identity: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> P2pStackConfig {
-    let mut p2p_sn_list: Vec<Arc<dyn P2pIdentityCert>> = Vec::new();
+    let mut p2p_sn_list: Vec<P2pSn> = Vec::new();
     for sn in sn_list {
-        p2p_sn_list.push(Arc::new(CyfsIdentityCert::new(sn)));
+        let p2p_id = P2pId::from(sn.desc().object_id().as_slice());
+        p2p_sn_list.push(P2pSn::new(p2p_id.clone(), p2p_id.to_string(), sn.connect_info().endpoints().iter().map(|ep| cyfs_to_p2p_endpoint(ep)).collect()));
     }
     P2pStackConfig::new(Arc::new(CyfsIdentity::new(local_identity, local_key))).add_sn_list(p2p_sn_list)
 }
