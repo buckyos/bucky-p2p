@@ -387,7 +387,7 @@ impl SnService {
         // }
     }
 
-    async fn get_peer_wan_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
+    pub async fn get_peer_wan_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
         let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
