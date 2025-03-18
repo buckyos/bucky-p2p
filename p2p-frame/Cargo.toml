@@ -27,7 +27,7 @@ sfo-result = { version = "0.2.6", features = ["backtrace"] }
 as-any = "0.3.1"
 num-traits = "0.2"
 num-derive = "0.4"
-quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "rustls", "ring"] }
+quinn = { git = "https://github.com/quinn-rs/quinn.git", version = "0.11", default-features = false, features = ["platform-verifier", "rustls", "ring"] }
 #quinn-proto = { version = "0.11", default-features = false, features = ["log"] }
 rustls = { version = "0.23.20", default-features = false, features = ["ring", "std"] }
 libc = '0.2'
