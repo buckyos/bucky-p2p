@@ -5,7 +5,7 @@ use std::mem;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 #[cfg(unix)]
-use tokio::net::udp::UdpSocket;
+use tokio::net::UdpSocket;
 #[cfg(unix)]
 use crate::runtime::RawFd;
 #[cfg(unix)]
@@ -154,7 +154,7 @@ pub fn set_socket_keepalive(sock: RawSocket) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(not(windows))]
-pub fn init_udp_socket(_socket: &UdpSocket) -> Result<(), BuckyError> {
+pub fn init_udp_socket(_socket: &UdpSocket) -> Result<(), P2pError> {
     Ok(())
 }
 
