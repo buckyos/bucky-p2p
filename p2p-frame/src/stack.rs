@@ -24,6 +24,7 @@ static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
 static IDENTITY_FACTORY: OnceCell<P2pIdentityFactoryRef> = OnceCell::new();
 static CERT_FACTORY: OnceCell<P2pIdentityCertFactoryRef> = OnceCell::new();
 static CERT_CACHE: OnceCell<P2pIdentityCertCacheRef> = OnceCell::new();
+static SERVER_CERT_RESOLVER: OnceCell<ServerCertResolverRef> = OnceCell::new();
 
 pub struct P2pConfig {
     identity_factory: P2pIdentityFactoryRef,
@@ -202,6 +203,7 @@ pub async fn init_p2p(
     IDENTITY_FACTORY.get_or_init(||identity_factory.clone());
     CERT_FACTORY.get_or_init(||cert_factory.clone());
     CERT_CACHE.get_or_init(||device_cache.clone());
+    SERVER_CERT_RESOLVER.get_or_init(||tsl_server_cert_resolver.clone());
 
     Ok(())
 }
@@ -402,6 +404,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let net_manager = NET_MANAGER.get().unwrap().clone();
 
     let cert_factory = CERT_FACTORY.get().unwrap().clone();
+    let cert_resolver = SERVER_CERT_RESOLVER.get().unwrap().clone();
     let local_identity = config.local_identity();
     let sn_list = config.sn_list().to_vec();
     let conn_timeout = config.conn_timeout();
@@ -430,7 +433,10 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         let proxy_client = if let Some(proxy_client) = proxy_client {
             proxy_client
         } else {
-            let default = DefaultPnClient::new(sn_service.get_cmd_client().clone(), local_identity.clone());
+            let default = DefaultPnClient::new(sn_service.get_cmd_client().clone(),
+                                               local_identity.clone(),
+                                               cert_factory.clone(),
+                                               cert_resolver.clone());
             default
         };
         Some(proxy_client)

@@ -10,17 +10,23 @@ use std::time::{Duration, SystemTime};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawFrom};
 use callback_result::SingleCallbackWaiter;
 use notify_future::{Notify, NotifyWaiter};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::ServerConfig;
+use rustls::version::TLS13;
 use sfo_cmd_server::client::CmdClient;
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode};
 use sfo_cmd_server::{CmdBodyRead, PeerId};
-use tokio::io::{AsyncWrite, BufWriter, ReadBuf};
+use sfo_split::Splittable;
+use tokio::io::{split, AsyncRead, AsyncWrite, BufWriter, ReadBuf};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use crate::error::{into_p2p_err, p2p_err, P2pError, P2pErrorCode, P2pResult};
 use crate::executor::{Executor, SpawnHandle};
-use crate::p2p_identity::{P2pId, P2pIdentityRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{FromProxy, FromProxyResp, PnClient, PnCmdHeader, PnTunnelRead, PnTunnelWrite, ProxyClosed, ProxyHeart, ProxyHeartResp, ToProxy, ToProxyResp};
 use crate::protocol::PackageCmdCode;
 use crate::runtime;
 use crate::sn::types::{CmdTunnelId};
+use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelId};
 
 type PnTunnelReadWaiterRef = Arc<SingleCallbackWaiter<P2pResult<(usize, Vec<u8>)>>>;
@@ -77,11 +83,14 @@ impl RecvCache {
     fn insert(&self, seq: u32, data: (usize, Vec<u8>)) -> bool {
         let mut state = self.state.lock().unwrap();
         if seq == state.expect_seq && state.notify.is_some() {
-            state.expect_seq += 1;
             let waiter = state.notify.take().unwrap();
             waiter.notify(Ok(data));
             true
         } else {
+            if seq < state.expect_seq {
+                return false;
+            }
+
             if state.cache.len() >= 1024 {
                 false
             } else {
@@ -128,8 +137,8 @@ impl Future for RecvCache {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let state = &mut self.state.lock().unwrap();
+        let expect_seq = state.expect_seq;
         if state.poll_waiter.is_none() {
-            let expect_seq = state.expect_seq;
             if state.cache.contains_key(&expect_seq) {
                 let data = state.cache.remove(&expect_seq).unwrap();
                 state.expect_seq += 1;
@@ -142,6 +151,7 @@ impl Future for RecvCache {
                 match Pin::new(waiter).poll(cx) {
                     Poll::Ready(ret) => {
                         state.poll_waiter = None;
+                        state.expect_seq += 1;
                         Poll::Ready(ret)
                     }
                     Poll::Pending => {
@@ -154,6 +164,7 @@ impl Future for RecvCache {
             match Pin::new(waiter).poll(cx) {
                 Poll::Ready(ret) => {
                     state.poll_waiter = None;
+                    state.expect_seq += 1;
                     Poll::Ready(ret)
                 }
                 Poll::Pending => {
@@ -164,17 +175,17 @@ impl Future for RecvCache {
     }
 }
 
-struct DefaultPnTunnelRead<T: CmdClient<u16, u8>> {
+struct PnTunnelReadImpl<T: CmdClient<u16, u8>> {
     cmd_client: Arc<DefaultPnClient<T>>,
-    p2p_id: P2pId,
-    remote_name: String,
-    tunnel_id: TunnelId,
     read_cache: Option<(usize, Vec<u8>)>,
     recv_cache: RecvCache,
     timeout_check_handle: SpawnHandle<()>,
+    p2p_id: P2pId,
+    remote_name: String,
+    tunnel_id: TunnelId,
 }
 
-impl<T: CmdClient<u16, u8>> DefaultPnTunnelRead<T> {
+impl<T: CmdClient<u16, u8>> PnTunnelReadImpl<T> {
     pub(crate) fn new(cmd_client: Arc<DefaultPnClient<T>>, p2p_id: P2pId, tunnel_id: TunnelId, remote_name: String) -> Self {
         let recv_cache = RecvCache::new();
         cmd_client.add_tunnel_recv_cache(p2p_id.clone(), tunnel_id, recv_cache.clone());
@@ -204,34 +215,21 @@ impl<T: CmdClient<u16, u8>> DefaultPnTunnelRead<T> {
     }
 }
 
-impl<T: CmdClient<u16, u8>> PnTunnelRead for DefaultPnTunnelRead<T> {
-    fn tunnel_id(&self) -> TunnelId {
-        self.tunnel_id
-    }
-
-    fn remote_id(&self) -> P2pId {
-        self.p2p_id.clone()
-    }
-
-    fn remote_name(&self) -> String {
-        self.remote_name.clone()
-    }
-}
-
-impl<T: CmdClient<u16, u8>> Drop for DefaultPnTunnelRead<T> {
+impl<T: CmdClient<u16, u8>> Drop for PnTunnelReadImpl<T> {
     fn drop(&mut self) {
         self.cmd_client.remove_tunnel_recv_cache(&self.p2p_id, &self.tunnel_id);
         self.timeout_check_handle.abort();
     }
 }
 
-impl<T: CmdClient<u16, u8>> runtime::AsyncRead for DefaultPnTunnelRead<T> {
+impl<T: CmdClient<u16, u8>> runtime::AsyncRead for PnTunnelReadImpl<T> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
         if self.read_cache.is_none() {
             match Pin::new(&mut self.recv_cache).poll(cx) {
                 Poll::Ready(ret) => {
                     match ret {
                         Ok(data) => {
+                            log::trace!("cache remote {} data offset {} len {}", self.remote_name, data.0, data.1.len());
                             self.read_cache = Some(data);
                         },
                         Err(e) => {
@@ -248,7 +246,6 @@ impl<T: CmdClient<u16, u8>> runtime::AsyncRead for DefaultPnTunnelRead<T> {
         let len = {
             let buf_ref = buf.initialize_unfilled();
             let (size, data) = self.read_cache.as_mut().unwrap();
-            log::trace!("cache data offset {} len {}", *size, data.len());
             let data_slice = &data[*size..];
             if buf_ref.len() > data_slice.len() {
                 buf_ref[..data_slice.len()].copy_from_slice(data_slice);
@@ -266,6 +263,44 @@ impl<T: CmdClient<u16, u8>> runtime::AsyncRead for DefaultPnTunnelRead<T> {
         };
         buf.advance(len);
         Poll::Ready(Ok(()))
+    }
+}
+
+struct DefaultPnTunnelRead<R: AsyncRead + Unpin + Send + 'static> {
+    p2p_id: P2pId,
+    remote_name: String,
+    tunnel_id: TunnelId,
+    read: R,
+}
+
+impl<R: AsyncRead + Unpin + Send + 'static> DefaultPnTunnelRead<R> {
+    pub(crate) fn new(p2p_id: P2pId, remote_name: String, tunnel_id: TunnelId, read: R) -> Self {
+        Self {
+            p2p_id,
+            remote_name,
+            tunnel_id,
+            read,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin + Send + 'static> PnTunnelRead for DefaultPnTunnelRead<R> {
+    fn tunnel_id(&self) -> TunnelId {
+        self.tunnel_id
+    }
+
+    fn remote_id(&self) -> P2pId {
+        self.p2p_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
+    }
+}
+
+impl<R: AsyncRead + Unpin + Send + 'static> AsyncRead for DefaultPnTunnelRead<R> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.read).poll_read(cx, buf)
     }
 }
 
@@ -426,19 +461,50 @@ impl<T: CmdClient<u16, u8>> AsyncWrite for PnTunnelWriteImpl<T> {
     }
 }
 
-pub type DefaultPnTunnelWrite<T> = BufWriter<PnTunnelWriteImpl<T>>;
 
-impl<T: CmdClient<u16, u8>> PnTunnelWrite for DefaultPnTunnelWrite<T> {
+struct  DefaultPnTunnelWrite<W: AsyncWrite + Unpin + Send + 'static> {
+    tunnel_id: TunnelId,
+    remote_id: P2pId,
+    remote_name: String,
+    write: W,
+}
+
+impl<W: AsyncWrite + Unpin + Send + 'static> DefaultPnTunnelWrite<W> {
+    pub(crate) fn new(tunnel_id: TunnelId, remote_id: P2pId, remote_name: String, write: W) -> Self {
+        Self {
+            tunnel_id,
+            remote_id,
+            remote_name,
+            write,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send + 'static> PnTunnelWrite for DefaultPnTunnelWrite<W> {
     fn tunnel_id(&self) -> TunnelId {
-        self.get_ref().tunnel_id
+        self.tunnel_id
     }
 
     fn remote_id(&self) -> P2pId {
-        self.get_ref().to.clone()
+        self.remote_id.clone()
     }
 
     fn remote_name(&self) -> String {
-        todo!()
+        self.remote_name.clone()
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send + 'static> AsyncWrite for DefaultPnTunnelWrite<W> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
+        Pin::new(&mut self.get_mut().write).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.get_mut().write).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.get_mut().write).poll_shutdown(cx)
     }
 }
 
@@ -447,6 +513,8 @@ struct DefaultPnClientImpl<T: CmdClient<u16, u8>> {
     tunnel_recv_cache: Arc<Mutex<HashMap<P2pId, HashMap<TunnelId, RecvCache>>>>,
     accept_waiter: Arc<SingleCallbackWaiter<P2pResult<(Box<dyn crate::pn::PnTunnelRead>, Box<dyn crate::pn::PnTunnelWrite>)>>>,
     local_identity: P2pIdentityRef,
+    cert_factory: P2pIdentityCertFactoryRef,
+    tls_acceptor: TlsAcceptor,
     version: u8,
 }
 
@@ -463,13 +531,28 @@ impl<T: CmdClient<u16, u8>> Clone for DefaultPnClient<T> {
 }
 
 impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
-    pub fn new(cmd_client: Arc<T>, local_identity: P2pIdentityRef) -> Arc<Self> {
+    pub fn new(cmd_client: Arc<T>,
+               local_identity: P2pIdentityRef,
+               cert_factory: P2pIdentityCertFactoryRef,
+               cert_resolver: ServerCertResolverRef,) -> Arc<Self> {
+        let mut server_config =
+            ServerConfig::builder_with_provider(crate::tls::provider().into())
+                .with_protocol_versions(&[&TLS13])
+                .unwrap()
+                .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(cert_factory.clone())))
+                .with_cert_resolver(cert_resolver.clone().get_resolves_server_cert());
+
+        server_config.key_log = Arc::new(rustls::KeyLogFile::new());
+
+
         let this = Arc::new(Self {
             inner: Arc::new(DefaultPnClientImpl {
                 cmd_client,
                 tunnel_recv_cache: Arc::new(Mutex::new(Default::default())),
                 accept_waiter: Arc::new(SingleCallbackWaiter::new()),
                 local_identity,
+                cert_factory,
+                tls_acceptor: TlsAcceptor::from(Arc::new(server_config)),
                 version: 0,
             })
         });
@@ -529,16 +612,30 @@ impl<T: CmdClient<u16, u8>> DefaultPnClient<T> {
                         this.inner.cmd_client.send(PackageCmdCode::FromProxyResp as u8, this.inner.version, resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     }
                 } else {
-                    let tunnel_read = DefaultPnTunnelRead::new(this.clone(), from.from.clone(), from.tunnel_id, from.from.to_string());
+                    let tunnel_read = PnTunnelReadImpl::new(this.clone(), from.from.clone(), from.tunnel_id, from.from.to_string());
                     tunnel_read.get_recv_cache().insert(from.seq, (data.len() - buf.len(), data));
-                    let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(this.inner.cmd_client.clone(),
+                    let tunnel_write = PnTunnelWriteImpl::new(this.inner.cmd_client.clone(),
                                                                                         from.tunnel_id,
                                                                                         this.inner.local_identity.get_id(),
                                                                                         from.from.clone(),
                                                                                         from.from.to_string(),
                                                                                         false,
-                                                                                        Box::new(tunnel_read.get_recv_cache().clone())));
-                    this.inner.accept_waiter.set_result_with_cache(Ok((Box::new(tunnel_read), Box::new(tunnel_write))));
+                                                                                        Box::new(tunnel_read.get_recv_cache().clone()));
+                    let accept_waiter = this.inner.accept_waiter.clone();
+                    let tls_acceptor = this.inner.tls_acceptor.clone();
+                    Executor::spawn(async move {
+                        let conn = Splittable::new(tunnel_read, tunnel_write);
+                        let tls_stream = match tls_acceptor.accept(conn).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                log::error!("accept tls error: {}", e);
+                                return;
+                            }
+                        };
+                        let (tunnel_read, tunnel_write) = split(tls_stream);
+                        accept_waiter.set_result_with_cache(Ok((Box::new(DefaultPnTunnelRead::new(from.from.clone(), from.from.to_string(), from.tunnel_id, tunnel_read)),
+                                                                           Box::new(DefaultPnTunnelWrite::new(from.tunnel_id, from.from.clone(), from.from.to_string(), tunnel_write)))));
+                    });
                 }
                 Ok(())
             }
@@ -650,16 +747,31 @@ impl<T: CmdClient<u16, u8>> PnClient for DefaultPnClient<T> {
         self.inner.accept_waiter.create_result_future().map_err(into_p2p_err!(P2pErrorCode::Failed))?.await.map_err(into_p2p_err!(P2pErrorCode::IoError))?
     }
 
-    async fn connect(&self, tunnel_id: TunnelId, to: P2pId) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
-        let tunnel_read = DefaultPnTunnelRead::new(Arc::new(self.clone()), to.clone(), tunnel_id, to.to_string());
-        let tunnel_write = DefaultPnTunnelWrite::new(PnTunnelWriteImpl::new(self.inner.cmd_client.clone(),
+    async fn connect(&self, tunnel_id: TunnelId, to: P2pId, to_name: Option<String>) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
+        let client_config =
+            rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
+                .with_protocol_versions(&[&TLS13])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(self.inner.cert_factory.clone(), to.clone())))
+                .with_client_auth_cert(vec![CertificateDer::from(self.inner.local_identity.get_identity_cert()?.get_encoded_cert()?)],
+                                       PrivatePkcs8KeyDer::from(self.inner.local_identity.get_encoded_identity()?).into()).unwrap();
+
+        let tls_connector = TlsConnector::from(Arc::new(client_config));
+        let tunnel_read = PnTunnelReadImpl::new(Arc::new(self.clone()), to.clone(), tunnel_id, to.to_string());
+        let tunnel_write =  PnTunnelWriteImpl::new(self.inner.cmd_client.clone(),
                                                                             tunnel_id,
                                                                             self.inner.local_identity.get_id(),
                                                                             to.clone(),
                                                                             to.to_string(),
                                                                             true,
-                                                                            Box::new(tunnel_read.get_recv_cache().clone())));
-        Ok((Box::new(tunnel_read), Box::new(tunnel_write)))
+                                                                            Box::new(tunnel_read.get_recv_cache().clone()));
+        let mut conn = Splittable::new(tunnel_read, tunnel_write);
+        let remote_name = to_name.unwrap_or(to.to_string());
+        let mut tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), conn).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_name))?;
+        let (tunnel_read, tunnel_write) = split(tls_stream);
+        Ok((Box::new(DefaultPnTunnelRead::new(to.clone(), remote_name.clone(), tunnel_id, tunnel_read)),
+            Box::new(DefaultPnTunnelWrite::new(tunnel_id, to.clone(), remote_name, tunnel_write))))
     }
 }
 

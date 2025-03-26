@@ -701,7 +701,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d029956a6fa0abf0ad0fc8647a4dff35d9117631c1d8a8944289d7c2be8929c1"
 dependencies = [
  "async-std",
- "notify-future 0.2.2",
+ "notify-future 0.2.3",
 ]
 
 [[package]]
@@ -2103,9 +2103,9 @@ checksum = "334498b5ebb63e6bb9ea9206a3f4a57c451abd7565a182088738ab01443c195e"
 
 [[package]]
 name = "notify-future"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc8b783586b77267e0ec6f1df2083c3d24b99f7e97d4074d066fcaf3cff7f13b"
+checksum = "33745622d3a2bfdcbbb49c0bab04c59963d86c40670a5fb16ed462a32448b334"
 
 [[package]]
 name = "nu-ansi-term"
@@ -2319,7 +2319,7 @@ dependencies = [
  "log",
  "mini-moka",
  "nix",
- "notify-future 0.2.2",
+ "notify-future 0.2.3",
  "num-derive",
  "num-traits",
  "once_cell",
@@ -2702,7 +2702,8 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.7"
-source = "git+https://github.com/quinn-rs/quinn.git#d8302dfaeb7a137fb29d827837b29a613340a7c6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3bd15a6f2967aef83887dcb9fec0014580467e33720d073560cf015a5683012"
 dependencies = [
  "async-io",
  "async-std",
@@ -2723,7 +2724,8 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.10"
-source = "git+https://github.com/quinn-rs/quinn.git#d8302dfaeb7a137fb29d827837b29a613340a7c6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b820744eb4dc9b57a3398183639c511b5a26d2ed702cedd3febaa1393caa22cc"
 dependencies = [
  "bytes",
  "getrandom 0.3.1",
@@ -2743,14 +2745,15 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.10"
-source = "git+https://github.com/quinn-rs/quinn.git#d8302dfaeb7a137fb29d827837b29a613340a7c6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46f3055866785f6b92bc6164b76be02ca8f2eb4b002c0354b28cf4c119e5944"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3275,9 +3278,12 @@ dependencies = [
 
 [[package]]
 name = "sfo-split"
-version = "0.1.2"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9fc89a2044707286d9adfeb1af07ec49c3568514d6deeae83b8bca1c4032f21"
+checksum = "99e6cf07ba3d2665019dbe86cd500a4b54cc74f687ad16cda3191a966e9a7987"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "sha2"

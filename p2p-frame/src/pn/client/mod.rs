@@ -22,6 +22,6 @@ pub trait PnTunnelWrite: 'static + Send + runtime::AsyncWrite + Unpin {
 #[async_trait::async_trait]
 pub trait PnClient: 'static + Send + Sync {
     async fn accept(&self) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)>;
-    async fn connect(&self, tunnel_id: TunnelId, to: P2pId) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)>;
+    async fn connect(&self, tunnel_id: TunnelId, to: P2pId, to_name: Option<String>) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)>;
 }
 pub type PnClientRef = Arc<dyn PnClient>;

@@ -121,7 +121,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
     }
 
     pub fn is_work(&self) -> bool {
-        self.tunnel_conn.as_ref().unwrap().is_work()
+        self.tunnel_conn.is_some() && self.tunnel_conn.as_ref().unwrap().is_work()
     }
 
     pub fn is_error(&self) -> bool {
@@ -194,7 +194,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         let pn_client = self.pn_client.as_ref().unwrap();
 
         let (read, write) = runtime::timeout(self.conn_timeout,
-                                             pn_client.connect(self.tunnel_id, self.remote_id.clone())).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
+                                                 pn_client.connect(self.tunnel_id, self.remote_id.clone(), self.remote_name.clone())).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
         let read = Box::new(ProxyConnectionRead::new(read, self.local_identity.get_id()));
         let write = Box::new(ProxyConnectionWrite::new(write, self.local_identity.get_id()));
         let proxy_conn = P2pConnection::new(read, write);

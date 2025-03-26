@@ -38,7 +38,7 @@ impl TCPConnection {
                 .unwrap()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
-                .with_client_auth_cert(vec![CertificateDer::from(local_identity_ref.get_name().to_vec().unwrap())],
+                .with_client_auth_cert(vec![CertificateDer::from(local_identity_ref.get_identity_cert()?.get_encoded_cert()?)],
                                        PrivatePkcs8KeyDer::from(local_identity_ref.get_encoded_identity()?).into()).unwrap();
 
         let socket = runtime::timeout(timeout, TcpStream::connect(remote_ep.addr()))

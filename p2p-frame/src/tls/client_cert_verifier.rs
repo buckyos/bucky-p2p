@@ -33,8 +33,12 @@ impl ClientCertVerifier for TlsClientCertVerifier {
 
     fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
         let cert = end_entity.as_ref().to_vec();
-        let _ = self.cert_factory.create(&cert).map_err(|_e| Error::General("Invalid certificate".to_string()))?;
-        return Ok(ClientCertVerified::assertion());
+        let cert = self.cert_factory.create(&cert).map_err(|_e| Error::General("Invalid certificate".to_string()))?;
+        if cert.verify_cert(cert.get_name().as_str()) {
+            Ok(ClientCertVerified::assertion())
+        } else {
+            Err(Error::General("Invalid signature".to_string()))
+        }
     }
 
     fn verify_tls12_signature(&self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
