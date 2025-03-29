@@ -452,7 +452,7 @@ impl SnService {
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();
-            let mut end_point_array = self.get_peer_wan_ep_with_map_port(&peer_id, device_info.map_ports.as_slice()).await;
+            let mut end_point_array = self.get_peer_wan_ep_with_map_port(&PeerId::from(query.query_id.as_slice()), device_info.map_ports.as_slice()).await;
             end_point_array.extend_from_slice(device_info.local_eps.as_slice());
             SnQueryResp {
                 seq: query.seq,
