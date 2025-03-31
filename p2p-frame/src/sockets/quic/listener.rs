@@ -12,7 +12,7 @@ use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCache, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
-use crate::sockets::{QuicConnection, UpdateOuterResult};
+use crate::sockets::{QuicCongestionAlgorithm, QuicConnection, UpdateOuterResult};
 use crate::tls::ServerCertResolverRef;
 
 struct QuicListenerState {
@@ -28,6 +28,7 @@ pub struct QuicListener {
     state: RwLock<QuicListenerState>,
     quic_listener: RwLock<Option<Arc<dyn P2pConnectionEventListener>>>,
     cert_factory: P2pIdentityCertFactoryRef,
+    congestion_algorithm: QuicCongestionAlgorithm,
 }
 pub type QuicListenerRef = Arc<QuicListener>;
 
@@ -36,6 +37,7 @@ impl QuicListener {
         cert_cache: P2pIdentityCertCacheRef,
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
+        congestion_algorithm: QuicCongestionAlgorithm,
     ) -> Arc<Self> {
         Arc::new(Self {
             cert_cache,
@@ -48,6 +50,7 @@ impl QuicListener {
             }),
             quic_listener: RwLock::new(None),
             cert_factory,
+            congestion_algorithm,
         })
     }
 
@@ -108,7 +111,17 @@ impl QuicListener {
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_config).map_err(into_p2p_err!(P2pErrorCode::TlsError, "create quic server config failed"))?));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
-        transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        match self.congestion_algorithm {
+            QuicCongestionAlgorithm::Bbr => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+            }
+            QuicCongestionAlgorithm::Cubic => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+            }
+            QuicCongestionAlgorithm::NewReno => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+            }
+        }
 
         let endpoint = quinn::Endpoint::server(server_config, local.addr().clone()).map_err(into_p2p_err!(P2pErrorCode::QuicError, "Create quic server error"))?;
 

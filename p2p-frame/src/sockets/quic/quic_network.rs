@@ -6,7 +6,7 @@ use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnectionEventListener, P2pConnection, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::p2p_network::P2pNetwork;
-use crate::sockets::{QuicConnection, QuicListener, QuicListenerRef};
+use crate::sockets::{QuicCongestionAlgorithm, QuicConnection, QuicListener, QuicListenerRef};
 use crate::tls::ServerCertResolverRef;
 
 pub struct QuicNetwork {
@@ -15,7 +15,8 @@ pub struct QuicNetwork {
     cert_factory: P2pIdentityCertFactoryRef,
     cert_cache: P2pIdentityCertCacheRef,
     timeout: Duration,
-    idle_timeout: Duration
+    idle_timeout: Duration,
+    congestion_algorithm: QuicCongestionAlgorithm,
 }
 
 impl QuicNetwork {
@@ -23,6 +24,7 @@ impl QuicNetwork {
         cert_cache: P2pIdentityCertCacheRef,
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
+        congestion_algorithm: QuicCongestionAlgorithm,
         timeout: Duration,
         idle_timeout: Duration) -> Self {
         Self {
@@ -32,6 +34,7 @@ impl QuicNetwork {
             cert_cache,
             timeout,
             idle_timeout,
+            congestion_algorithm,
         }
     }
 
@@ -51,7 +54,8 @@ impl P2pNetwork for QuicNetwork {
         let udp_listener = QuicListener::new(
             self.cert_cache.clone(),
             self.cert_resolver.clone(),
-            self.cert_factory.clone(),);
+            self.cert_factory.clone(),
+            self.congestion_algorithm, );
         udp_listener.bind(local.clone(), out, mapping_port).await?;
         udp_listener.set_connection_event_listener(event);
         udp_listener.start();
@@ -83,6 +87,7 @@ impl P2pNetwork for QuicNetwork {
                                                            remote_id.clone(),
                                                            remote_name.clone(),
                                                            remote.clone(),
+                                                           self.congestion_algorithm,
                                                            self.timeout,
                                                            self.idle_timeout).await?;
             let (read, send) = conn.open_bi_stream().await?;
@@ -120,7 +125,10 @@ impl P2pNetwork for QuicNetwork {
                                                            self.cert_factory.clone(),
                                                            remote_id.clone(),
                                                            remote_name.clone(),
-                                                           remote.clone(), self.timeout, self.idle_timeout).await?;
+                                                           remote.clone(),
+                                                           self.congestion_algorithm,
+                                                           self.timeout,
+                                                           self.idle_timeout).await?;
             let (read, send) = conn.open_bi_stream().await?;
             let read = Box::new(super::QuicRead::new(conn.socket().clone(),
                                                      read,

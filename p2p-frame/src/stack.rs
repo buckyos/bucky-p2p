@@ -13,7 +13,7 @@ use crate::p2p_network::P2pNetworkRef;
 use crate::pn::{DefaultPnClient, PnClientRef};
 use crate::protocol::v0::SnCalled;
 use crate::sn::client::{SNClientService, SNClientServiceRef};
-use crate::sockets::{NetManager, NetManagerRef, QuicNetwork};
+use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::stream::{StreamManager, StreamManagerRef};
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver};
@@ -39,6 +39,7 @@ pub struct P2pConfig {
     tcp_connect_timout: Duration,
     quic_connect_timeout: Duration,
     quic_idle_time: Duration,
+    quic_congestion_algorithm: QuicCongestionAlgorithm,
 }
 
 impl P2pConfig {
@@ -62,6 +63,7 @@ impl P2pConfig {
             tcp_connect_timout: Duration::from_secs(30),
             quic_connect_timeout: Duration::from_secs(30),
             quic_idle_time: Duration::from_secs(60),
+            quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
         }
     }
 
@@ -175,6 +177,15 @@ impl P2pConfig {
     pub fn connection_info_cache(&self) -> &P2pConnectionInfoCacheRef {
         &self.connection_info_cache
     }
+
+    pub fn quic_congestion_algorithm(&self) -> QuicCongestionAlgorithm {
+        self.quic_congestion_algorithm
+    }
+
+    pub fn set_quic_congestion_algorithm(mut self, quic_congestion_algorithm: QuicCongestionAlgorithm) -> Self {
+        self.quic_congestion_algorithm = quic_congestion_algorithm;
+        self
+    }
 }
 
 pub async fn init_p2p(
@@ -187,8 +198,16 @@ pub async fn init_p2p(
     let device_cache =  config.identity_cert_cache().clone();
 
     let tsl_server_cert_resolver = config.sever_cert_resolver();
-    let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(), tsl_server_cert_resolver.clone(), cert_factory.clone(), config.tcp_accept_timout));
-    let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(), tsl_server_cert_resolver.clone(), cert_factory.clone(), config.quic_connect_timeout, config.quic_idle_time));
+    let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(),
+                                               tsl_server_cert_resolver.clone(),
+                                               cert_factory.clone(),
+                                               config.tcp_accept_timout));
+    let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(),
+                                                 tsl_server_cert_resolver.clone(),
+                                                 cert_factory.clone(),
+                                                 config.quic_congestion_algorithm,
+                                                 config.quic_connect_timeout,
+                                                 config.quic_idle_time));
 
     let mut networks = config.extra_networks().clone();
     networks.push(tcp_network as P2pNetworkRef);

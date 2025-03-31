@@ -16,6 +16,7 @@ use crate::executor::Executor;
 use crate::p2p_connection::{P2pRead, P2pWrite};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
+use crate::sockets::QuicCongestionAlgorithm;
 
 pub struct QuicConnection {
     socket: quinn::Connection,
@@ -49,6 +50,7 @@ impl QuicConnection {
                          remote_identity_id: P2pId,
                          remote_name: Option<String>,
                          remote: Endpoint,
+                         congestion_algorithm: QuicCongestionAlgorithm,
                          timeout: Duration,
                          idle_timeout: Duration) -> P2pResult<Self> {
         log::info!("quic to {} connect begin", remote);
@@ -71,6 +73,17 @@ impl QuicConnection {
         if idle_timeout > Duration::from_secs(30) {
             transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
         }
+        match congestion_algorithm {
+            QuicCongestionAlgorithm::Bbr => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+            }
+            QuicCongestionAlgorithm::Cubic => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+            }
+            QuicCongestionAlgorithm::NewReno => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+            }
+        }
         // transport_config.max_concurrent_bidi_streams(1_u8.into());
         // transport_config.max_concurrent_uni_streams(1_u8.into());
         client_config.transport_config(Arc::new(transport_config));
@@ -92,6 +105,7 @@ impl QuicConnection {
                                  remote_identity_id: P2pId,
                                  remote_name: Option<String>,
                                  remote: Endpoint,
+                                 congestion_algorithm: QuicCongestionAlgorithm,
                                  timeout: Duration,
                                  idle_timeout: Duration) -> P2pResult<Self> {
         log::info!("connect with ep remote = {}", remote);
@@ -114,7 +128,17 @@ impl QuicConnection {
         if idle_timeout > Duration::from_secs(30) {
             transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
         }
-        transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        match congestion_algorithm {
+            QuicCongestionAlgorithm::Bbr => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+            }
+            QuicCongestionAlgorithm::Cubic => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+            }
+            QuicCongestionAlgorithm::NewReno => {
+                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+            }
+        }
         client_config.transport_config(Arc::new(transport_config));
 
         let conn = runtime::timeout(timeout, ep.connect_with(client_config,

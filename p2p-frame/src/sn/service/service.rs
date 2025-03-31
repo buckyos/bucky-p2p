@@ -24,7 +24,7 @@ use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
-use crate::sockets::{NetManager, NetManagerRef, QuicNetwork};
+use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::types::{TunnelId, TunnelIdGenerator, Timestamp, SessionIdGenerator, SequenceGenerator};
@@ -124,6 +124,7 @@ impl SnService {
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
+        congestion_algorithm: QuicCongestionAlgorithm,
         support_proxy: bool,
     ) -> SnServiceRef {
         Executor::init_new_multi_thread(None);
@@ -135,8 +136,16 @@ impl SnService {
         let cert_resolver = DefaultTlsServerCertResolver::new();
         let _ = cert_resolver.add_server_identity(local_identity.clone()).await;
 
-        let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(), cert_resolver.clone(), cert_factory.clone(), Duration::from_secs(30)));
-        let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(), cert_resolver.clone(), cert_factory.clone(), Duration::from_secs(30), Duration::from_secs(30)));
+        let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(),
+                                                   cert_resolver.clone(),
+                                                   cert_factory.clone(),
+                                                   Duration::from_secs(30)));
+        let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(),
+                                                     cert_resolver.clone(),
+                                                     cert_factory.clone(),
+                                                     congestion_algorithm,
+                                                     Duration::from_secs(30),
+                                                     Duration::from_secs(30)));
 
         let mut networks = Vec::new();
         networks.push(tcp_network as P2pNetworkRef);
@@ -489,6 +498,7 @@ pub struct SnServiceConfig {
     cert_factory: P2pIdentityCertFactoryRef,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
     support_proxy: bool,
+    quic_congestion_algorithm: QuicCongestionAlgorithm,
 }
 
 impl SnServiceConfig {
@@ -503,6 +513,7 @@ impl SnServiceConfig {
             cert_factory,
             contract: Box::new(DefaultSnServiceContractServer::new()),
             support_proxy: false,
+            quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
         }
     }
 
@@ -515,6 +526,11 @@ impl SnServiceConfig {
         self.support_proxy = support_proxy;
         self
     }
+
+    pub fn set_quic_congestion_algorithm(mut self, quic_algorithm: QuicCongestionAlgorithm) -> Self {
+        self.quic_congestion_algorithm = quic_algorithm;
+        self
+    }
 }
 
 pub async fn create_sn_service(config: SnServiceConfig) -> SnServiceRef {
@@ -523,6 +539,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServiceRef {
         config.identity_factory,
         config.cert_factory,
         config.contract,
+        config.quic_congestion_algorithm,
         config.support_proxy,
     ).await;
     service
