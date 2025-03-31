@@ -550,6 +550,7 @@ impl SNClientService {
                 && !addr.name.contains("VirtualBox")
                 && !addr.name.contains("ZeroTier")
                 && !addr.name.contains("Tun")
+                && !addr.name.contains("tun")
                 && !addr.name.contains("utun")
                 && !addr.name.contains("docker")
                 && !addr.name.contains("lo")

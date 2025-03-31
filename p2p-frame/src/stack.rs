@@ -282,6 +282,7 @@ pub struct P2pStackConfig {
     idle_timeout: Duration,
     sn_ping_interval: Duration,
     sn_call_timeout: Duration,
+    sn_query_interval: Duration,
     device_finder: Option<DeviceFinderRef>,
     sn_tunnel_count: u16,
     support_proxy: bool,
@@ -298,6 +299,7 @@ impl P2pStackConfig {
             idle_timeout: Duration::from_secs(30),
             sn_ping_interval: Duration::from_secs(30),
             sn_call_timeout: Duration::from_secs(30),
+            sn_query_interval: Duration::from_secs(300),
             device_finder: None,
             sn_tunnel_count: 5,
             support_proxy: false,
@@ -396,6 +398,15 @@ impl P2pStackConfig {
         self.proxy_client = Some(proxy_client);
         self
     }
+
+    pub fn sn_query_interval(&self) -> Duration {
+        self.sn_query_interval
+    }
+
+    pub fn set_sn_query_interval(mut self, sn_query_interval: Duration) -> Self {
+        self.sn_query_interval = sn_query_interval;
+        self
+    }
 }
 
 pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> {
@@ -413,6 +424,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let device_finder = config.device_finder().clone();
     let idle_timeout = config.idle_timeout();
     let sn_tunnel_count = config.sn_tunnel_count();
+    let sn_query_interval = config.sn_query_interval();
     let support_proxy = config.support_proxy();
     let proxy_client = config.proxy_client().clone();
 
@@ -447,7 +459,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let device_finder = if device_finder.is_some() {
         device_finder.unwrap()
     } else {
-        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), CERT_CACHE.get().unwrap().clone())
+        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), CERT_CACHE.get().unwrap().clone(), sn_query_interval)
     };
     let tunnel_listener = TunnelListener::new(
         local_identity.clone(),

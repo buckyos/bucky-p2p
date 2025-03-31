@@ -225,14 +225,16 @@ pub struct DefaultDeviceFinder {
     cert_cache: P2pIdentityCertCacheRef,
     sn_service: SNClientServiceRef,
     cert_factory: P2pIdentityCertFactoryRef,
+    query_cache: mini_moka::sync::Cache<P2pId, u64>,
 }
 
 impl DefaultDeviceFinder {
-    pub fn new(sn_service: SNClientServiceRef, cert_factory: P2pIdentityCertFactoryRef, cert_cache: P2pIdentityCertCacheRef) -> Arc<Self> {
+    pub fn new(sn_service: SNClientServiceRef, cert_factory: P2pIdentityCertFactoryRef, cert_cache: P2pIdentityCertCacheRef, interval: Duration) -> Arc<Self> {
         Arc::new(Self {
             cert_cache,
             sn_service,
             cert_factory,
+            query_cache: mini_moka::sync::Cache::builder().time_to_live(interval).build(),
         })
     }
 }
@@ -242,6 +244,10 @@ impl DeviceFinder for DefaultDeviceFinder {
     async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
         if let Some(device) = self.cert_cache.get(device_id).await {
             return Ok(device);
+        }
+
+        if self.query_cache.contains_key(device_id) {
+            return Err(p2p_err!(P2pErrorCode::NotFound, "device not found"));
         }
 
         let resp = self.sn_service.query(device_id).await?;
