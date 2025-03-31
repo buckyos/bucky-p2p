@@ -114,6 +114,7 @@ impl QuicConnection {
         if idle_timeout > Duration::from_secs(30) {
             transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
         }
+        transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
         client_config.transport_config(Arc::new(transport_config));
 
         let conn = runtime::timeout(timeout, ep.connect_with(client_config,

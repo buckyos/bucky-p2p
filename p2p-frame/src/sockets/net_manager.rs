@@ -7,7 +7,7 @@ use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionInfoCacheRef, P2pConnection, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::p2p_network::P2pNetworkRef;
-use crate::sockets::{NetListener, NetListenerRef, QuicListener, QuicListenerRef};
+use crate::sockets::{QuicListener, QuicListenerRef};
 use crate::sockets::tcp::{TCPListener, TCPListenerRef};
 use crate::tls::{ServerCertResolverRef};
 

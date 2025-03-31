@@ -45,10 +45,10 @@ impl UDPSocket {
             let _ = socket.set_recv_buffer_size(recv_buffer);
             match socket.bind(&bind_addr.addr().clone().into()) {
                 Ok(_) => {
-                    #[cfg(feature = "runtime-async-std")]
-                    {
-                        Ok(UdpSocket::from(std::net::UdpSocket::from(socket)))
-                    }
+                    // #[cfg(feature = "runtime-async-std")]
+                    // {
+                    //     Ok(UdpSocket::from(std::net::UdpSocket::from(socket)))
+                    // }
                     #[cfg(feature = "runtime-tokio")]
                     {
                         Ok(UdpSocket::try_from(std::net::UdpSocket::from(socket)).unwrap())

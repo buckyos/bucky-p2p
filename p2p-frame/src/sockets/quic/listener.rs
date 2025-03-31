@@ -108,6 +108,7 @@ impl QuicListener {
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_config).map_err(into_p2p_err!(P2pErrorCode::TlsError, "create quic server config failed"))?));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(600).try_into().unwrap()));
+        transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
         let endpoint = quinn::Endpoint::server(server_config, local.addr().clone()).map_err(into_p2p_err!(P2pErrorCode::QuicError, "Create quic server error"))?;
 

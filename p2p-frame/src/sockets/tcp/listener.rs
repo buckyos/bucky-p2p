@@ -147,10 +147,10 @@ impl TCPListener {
                                 Ok(TcpListener::from_std(std::net::TcpListener::from_raw_fd(raw_sock)).unwrap())
                             }
 
-                            #[cfg(feature = "runtime-async-std")]
-                            {
-                                Ok(TcpListener::from_raw_fd(raw_sock))
-                            }
+                            // #[cfg(feature = "runtime-async-std")]
+                            // {
+                            //     Ok(TcpListener::from_raw_fd(raw_sock))
+                            // }
                         }
                     }
                 }
@@ -278,14 +278,14 @@ impl TCPListener {
         }
         #[cfg(not(windows))]
         {
-            #[cfg(feature = "runtime-async-std")]
-            {
-                use std::os::unix::io::AsRawFd;
-                unsafe {
-                    let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_socket();
-                    libc::close(raw);
-                }
-            }
+            // #[cfg(feature = "runtime-async-std")]
+            // {
+            //     use std::os::unix::io::AsRawFd;
+            //     unsafe {
+            //         let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_socket();
+            //         libc::close(raw);
+            //     }
+            // }
             #[cfg(feature = "runtime-tokio")]
             {
                 use std::os::fd::AsRawFd;

@@ -8,10 +8,8 @@ use crate::error::{P2pError, P2pErrorCode};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, RawEncode, RawDecode)]
 pub enum Protocol {
-    Unk(u8),
+    Ext(u8),
     Tcp,
-    Kcp,
-    Bdt,
     Quic,
 }
 
@@ -228,10 +226,8 @@ impl std::fmt::Display for Endpoint {
         };
 
         result += match self.protocol {
-            Protocol::Unk(n) => format!("u{:02}", n),
+            Protocol::Ext(n) => format!("e{:02}", n),
             Protocol::Tcp => "tcp".to_string(),
-            Protocol::Kcp => "kcp".to_string(),
-            Protocol::Bdt => "bdt".to_string(),
             Protocol::Quic => "qic".to_string(),
         }.as_str();
 
@@ -264,20 +260,19 @@ impl FromStr for Endpoint {
                 Ok(Protocol::Tcp)
             } else if protocol_str == "udp" {
                 Ok(Protocol::Quic)
-            } else if protocol_str == "kcp" {
-                Ok(Protocol::Kcp)
-            } else if protocol_str == "bdt" {
-                Ok(Protocol::Bdt)
             } else if protocol_str == "qic" {
                 Ok(Protocol::Quic)
-            } else if protocol_str.starts_with("u") {
+            } else if protocol_str.starts_with("e") {
                 let n = u8::from_str(&protocol_str[1..]).map_err(|_| {
                     P2pError::new(
                         P2pErrorCode::InvalidInput,
                         format!("invalid endpoint string {}", s),
                     )
                 })?;
-                Ok(Protocol::Unk(n))
+                if n < 8 || n >= 16 {
+                    return Err(P2pError::new(P2pErrorCode::InvalidInput, "extend protocol must >= 8 and < 16".to_string()));
+                }
+                Ok(Protocol::Ext(n))
             } else{
                 Err(P2pError::new(
                     P2pErrorCode::InvalidInput,
@@ -354,9 +349,7 @@ impl Endpoint {
         let mut flags = 0u8;
         flags |= match self.protocol {
             Protocol::Tcp => ENDPOINT_PROTOCOL_TCP,
-            Protocol::Unk(p) => p,
-            Protocol::Kcp => ENDPOINT_PROTOCOL_KCP,
-            Protocol::Bdt => ENDPOINT_PROTOCOL_BDT,
+            Protocol::Ext(p) => p,
             Protocol::Quic => ENDPOINT_PROTOCOL_QUIC,
         };
         flags |= match self.area {
@@ -422,10 +415,13 @@ impl Endpoint {
     ) -> Result<(Self, &'de [u8]), CodecError> {
         let protocol = match flags & ENDPOINT_PROTOCOL_MASK {
             ENDPOINT_PROTOCOL_TCP => Protocol::Tcp,
-            ENDPOINT_PROTOCOL_KCP => Protocol::Kcp,
             ENDPOINT_PROTOCOL_QUIC => Protocol::Quic,
-            ENDPOINT_PROTOCOL_BDT => Protocol::Bdt,
-            n => Protocol::Unk(n),
+            n => {
+                if n < 8 || n >= 16 {
+                    return Err(CodecError::new(CodecErrorCode::InvalidInput, "extend protocol must >= 8 and < 16"));
+                }
+                Protocol::Ext(n)
+            },
         };
         let area = match flags & ENDPOINT_AREA_MASK {
             ENDPOINT_AREA_LAN => EndpointArea::Lan,
@@ -492,6 +488,11 @@ impl RawEncode for Endpoint {
         buf: &'a mut [u8],
         _purpose: &Option<RawEncodePurpose>,
     ) -> Result<&'a mut [u8], CodecError> {
+        if let Protocol::Ext(n) = self.protocol {
+            if n < 8 || n >= 16 {
+                return Err(CodecError::new(CodecErrorCode::InvalidInput, "extend protocol must >= 8 and < 16"));
+            }
+        }
         let min_bytes = Self::raw_min_bytes().unwrap();
         if buf.len() < min_bytes {
             let msg = format!(

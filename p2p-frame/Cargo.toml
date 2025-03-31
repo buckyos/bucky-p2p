@@ -57,5 +57,5 @@ nix = '0.24'
 [features]
 default = ["runtime-tokio"]
 runtime-tokio = ["quinn/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/macros", "tokio/io-std", "tokio/io-util", "tokio/rt-multi-thread", "tokio-rustls"]
-runtime-async-std = ["quinn/runtime-async-std", "async-std", "futures-rustls"]
+#runtime-async-std = ["quinn/runtime-async-std", "async-std", "futures-rustls"]
 x509 = ["x509-cert", "x509-verify", "ring", "rcgen"]

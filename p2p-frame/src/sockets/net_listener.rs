@@ -77,30 +77,6 @@ impl NetListener {
             let (local, out) = ep_pair.unwrap();
 
             let r = match ep.protocol() {
-                Protocol::Bdt => {
-                    // let mapping_port = {
-                    //     let mut found_index = None;
-                    //     for (index, (src_ep, _)) in port_mapping.iter().enumerate() {
-                    //         if *src_ep == *ep {
-                    //             found_index = Some(index);
-                    //             break;
-                    //         }
-                    //     }
-                    //     found_index.map(|index| {
-                    //         let (_, dst_port) = port_mapping.remove(index);
-                    //         dst_port
-                    //     })
-                    // };
-                    // let udp_listener = QuicListener::new(
-                    //     device_cache.clone(),
-                    //     cert_resolver.clone(),
-                    //     cert_factory.clone(),
-                    //     tcp_accept_timout);
-                    // let ret= udp_listener.bind(local.clone(), out, mapping_port).await;
-                    // listener.quic.push(udp_listener);
-                    // ret
-                    panic!()
-                },
                 Protocol::Tcp => {
                     let mapping_port = {
                         let mut found_index = None;
@@ -120,7 +96,7 @@ impl NetListener {
                     listener.tcp.push(tcp_listener);
                     ret
                 },
-                Protocol::Unk(_) => {
+                Protocol::Ext(_) => {
                     panic!()
                 },
                 Protocol::Quic => {
@@ -145,9 +121,6 @@ impl NetListener {
                     listener.quic.push(udp_listener);
                     ret
                 },
-                Protocol::Kcp => {
-                    panic!()
-                }
             };
 
             if let Err(e) = r.as_ref() {

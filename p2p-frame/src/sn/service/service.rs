@@ -24,7 +24,7 @@ use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
-use crate::sockets::{NetListener, NetListenerRef, NetManager, NetManagerRef, QuicNetwork};
+use crate::sockets::{NetManager, NetManagerRef, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::types::{TunnelId, TunnelIdGenerator, Timestamp, SessionIdGenerator, SequenceGenerator};

@@ -30,4 +30,4 @@ nix = '0.24'
 [features]
 default = ["runtime-tokio"]
 runtime-tokio = ["p2p-frame/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/macros", "tokio/io-std", "tokio/io-util", "tokio-rustls"]
-runtime-async-std = ["p2p-frame/runtime-async-std", "async-std", "futures-rustls"]
+#runtime-async-std = ["p2p-frame/runtime-async-std", "async-std", "futures-rustls"]
