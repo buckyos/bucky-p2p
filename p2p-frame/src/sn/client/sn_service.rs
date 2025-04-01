@@ -549,6 +549,7 @@ impl SNClientService {
             addrs.iter().filter(|addr| !addr.name.contains("VMware")
                 && !addr.name.contains("VirtualBox")
                 && !addr.name.contains("ZeroTier")
+                && !addr.name.starts_with("zt")
                 && !addr.name.contains("Tun")
                 && !addr.name.contains("tun")
                 && !addr.name.contains("utun")
