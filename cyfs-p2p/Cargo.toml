@@ -6,11 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
-bucky-error = {git = "https://github.com/buckyos/bucky-error.git", features = ["rusqlite"]}
-bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
-bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
-bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
+bucky-raw-codec = {version = "0.1", features = ["derive"]}
+bucky-crypto = {version = "0.1"}
+bucky-objects = {version = "0.1"}
 p2p-frame = { path = "../p2p-frame" }
 
 async-std = { version = "1.13", features = ['unstable', 'attributes'], optional = true }

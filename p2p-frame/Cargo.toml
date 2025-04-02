@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
-bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
+bucky-raw-codec = {version = "0.1", features = ["derive"]}
+bucky-time = "0.1"
 
 async-std = { version = "1.13", features = ['unstable', 'attributes'], optional = true }
 futures-rustls = { version = "0.26", default-features = false, optional = true }
@@ -34,7 +34,7 @@ libc = '0.2'
 c_linked_list = '1.1.1'
 if-addrs = { version = "0.13.3" }
 async-named-locker = "0.1.2"
-sfo-cmd-server = { git = "https://github.com/wugren/sfo-cmd-server.git" }
+sfo-cmd-server = "0.1"
 sfo-split = { version = "0.1.5", features = ["io"] }
 x509-cert = { version = "0.2.5", optional = true }
 x509-verify = { version = "0.4.6", optional = true, features = ["rsa", "sha2", "x509"] }

@@ -65,18 +65,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.8.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e89da841a80418a9b391ebaea17f5c112ffaaa96f621d2c285b5174da76b9011"
-dependencies = [
- "cfg-if 1.0.0",
- "once_cell",
- "version_check",
- "zerocopy 0.7.35",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -84,12 +72,6 @@ checksum = "8e60d3430d3a69478ad0993f19238d2df97c507009a52b3c10addcd7f6bcb916"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android-tzdata"
@@ -545,6 +527,31 @@ dependencies = [
 [[package]]
 name = "bucky-crypto"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d927f51e6e62e0373f8c255f324d8c9b65aa513c3d60cdc1b1cdf8a9aa7a6a5c"
+dependencies = [
+ "aes 0.7.5",
+ "async-std",
+ "async-trait",
+ "base58",
+ "block-modes",
+ "bucky-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-time 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ecies",
+ "generic-array 0.12.4",
+ "hex",
+ "libc",
+ "libsecp256k1",
+ "log",
+ "rand 0.8.5",
+ "rsa",
+ "sha2 0.8.2",
+]
+
+[[package]]
+name = "bucky-crypto"
+version = "0.1.0"
 source = "git+https://github.com/buckyos/bucky-crypto.git#fe3bd3eadf515671afad50c99f7b5023bcaa4d7c"
 dependencies = [
  "aes 0.7.5",
@@ -552,9 +559,9 @@ dependencies = [
  "async-trait",
  "base58",
  "block-modes",
- "bucky-error",
- "bucky-raw-codec",
- "bucky-time",
+ "bucky-error 0.1.0 (git+https://github.com/buckyos/bucky-error.git)",
+ "bucky-raw-codec 0.1.0 (git+https://github.com/buckyos/bucky-raw-codec.git)",
+ "bucky-time 0.1.0 (git+https://github.com/buckyos/bucky-time.git)",
  "ecies",
  "generic-array 0.12.4",
  "hex",
@@ -569,14 +576,57 @@ dependencies = [
 [[package]]
 name = "bucky-error"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66145f6051ce4211a79f770bf770ee6e81de69114afac5d3b7d0dc07a40825"
+dependencies = [
+ "int-enum",
+ "log",
+ "rsa",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bucky-error"
+version = "0.1.0"
 source = "git+https://github.com/buckyos/bucky-error.git#0573f641ef85a15c5d370144dead70b148fec9e7"
 dependencies = [
  "int-enum",
  "log",
  "rsa",
- "rusqlite",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bucky-objects"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18245e585c4b0c9bcec9dcd1868a4c610ffeaf908098995856283c3305d0cdd6"
+dependencies = [
+ "async-recursion",
+ "async-std",
+ "async-trait",
+ "base-x",
+ "base58",
+ "bucky-crypto 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-time 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "chrono",
+ "generic-array 0.12.4",
+ "hex",
+ "intbits",
+ "itertools 0.13.0",
+ "log",
+ "lru_time_cache",
+ "once_cell",
+ "primitive-types",
+ "protobuf",
+ "protoc-bin-vendored",
+ "protoc-rust",
+ "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]
@@ -589,10 +639,10 @@ dependencies = [
  "async-trait",
  "base-x",
  "base58",
- "bucky-crypto",
- "bucky-error",
- "bucky-raw-codec",
- "bucky-time",
+ "bucky-crypto 0.1.0 (git+https://github.com/buckyos/bucky-crypto.git)",
+ "bucky-error 0.1.0 (git+https://github.com/buckyos/bucky-error.git)",
+ "bucky-raw-codec 0.1.0 (git+https://github.com/buckyos/bucky-raw-codec.git)",
+ "bucky-time 0.1.0 (git+https://github.com/buckyos/bucky-time.git)",
  "chrono",
  "generic-array 0.12.4",
  "hex",
@@ -612,10 +662,28 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50665e5a0ab0208acc7d78af4a904a077d27e578f78a0d97ca13a0586ae020e7"
+dependencies = [
+ "bucky-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-raw-codec-derive 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "chrono",
+ "generic-array 0.12.4",
+ "hex",
+ "log",
+ "primitive-types",
+ "protobuf",
+ "protoc-bin-vendored",
+ "protoc-rust",
+]
+
+[[package]]
+name = "bucky-raw-codec"
+version = "0.1.0"
 source = "git+https://github.com/buckyos/bucky-raw-codec.git#7a40427bcc928972746c94598b33a2b5e7b25508"
 dependencies = [
- "bucky-error",
- "bucky-raw-codec-derive",
+ "bucky-error 0.1.0 (git+https://github.com/buckyos/bucky-error.git)",
+ "bucky-raw-codec-derive 0.1.0 (git+https://github.com/buckyos/bucky-raw-codec.git)",
  "chrono",
  "generic-array 0.12.4",
  "hex",
@@ -629,6 +697,18 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec-derive"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27d7f1916a4d1c424b7e8feb1b2b182acf0a64ba47fa1c1a845bd04e2f34e563"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "regex",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "bucky-raw-codec-derive"
+version = "0.1.0"
 source = "git+https://github.com/buckyos/bucky-raw-codec.git#7a40427bcc928972746c94598b33a2b5e7b25508"
 dependencies = [
  "proc-macro2",
@@ -636,6 +716,12 @@ dependencies = [
  "regex",
  "syn 1.0.109",
 ]
+
+[[package]]
+name = "bucky-time"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13ddedb236201888b6d3d0bd7de4b310cf525a798a7df6db2c65b68c5fc545c9"
 
 [[package]]
 name = "bucky-time"
@@ -1040,11 +1126,9 @@ version = "0.1.0"
 dependencies = [
  "async-std",
  "async-trait",
- "bucky-crypto",
- "bucky-error",
- "bucky-objects",
- "bucky-raw-codec",
- "bucky-time",
+ "bucky-crypto 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-objects 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "futures-rustls",
  "log",
@@ -1061,9 +1145,9 @@ dependencies = [
 name = "cyfs-p2p-test"
 version = "0.1.0"
 dependencies = [
- "bucky-crypto",
- "bucky-objects",
- "bucky-raw-codec",
+ "bucky-crypto 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-objects 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap",
  "cyfs-p2p",
  "log",
@@ -1123,11 +1207,11 @@ dependencies = [
 name = "desc-tool"
 version = "0.5.0"
 dependencies = [
- "bucky-crypto",
- "bucky-error",
- "bucky-objects",
- "bucky-raw-codec",
- "bucky-time",
+ "bucky-crypto 0.1.0 (git+https://github.com/buckyos/bucky-crypto.git)",
+ "bucky-error 0.1.0 (git+https://github.com/buckyos/bucky-error.git)",
+ "bucky-objects 0.1.0 (git+https://github.com/buckyos/bucky-objects.git)",
+ "bucky-raw-codec 0.1.0 (git+https://github.com/buckyos/bucky-raw-codec.git)",
+ "bucky-time 0.1.0 (git+https://github.com/buckyos/bucky-time.git)",
  "chrono",
  "clap",
  "hex",
@@ -1308,18 +1392,6 @@ name = "fake-simd"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e88a8acf291dafb59c2d96e8f59828f3838bb1a70398823ade51a84de6a6deed"
-
-[[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fastrand"
@@ -1609,25 +1681,12 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
- "allocator-api2",
-]
 
 [[package]]
 name = "hashbrown"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
-
-[[package]]
-name = "hashlink"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8094feaf31ff591f651a2664fb9cfd92bba7a60ce3197265e9482ebe753c8f7"
-dependencies = [
- "hashbrown 0.14.5",
-]
 
 [[package]]
 name = "hermit-abi"
@@ -1977,16 +2036,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsqlite3-sys"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf4e226dcd58b4be396f7bd3c20da8fdee2911400705297ba7d2d7cc2c30f716"
-dependencies = [
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2304,8 +2353,8 @@ dependencies = [
  "async-trait",
  "base-x",
  "base58",
- "bucky-raw-codec",
- "bucky-time",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-time 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "c_linked_list",
  "callback-result 0.2.3",
  "callback-trait",
@@ -2479,12 +2528,6 @@ dependencies = [
  "der",
  "spki",
 ]
-
-[[package]]
-name = "pkg-config"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
 
 [[package]]
 name = "polling"
@@ -2968,20 +3011,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a78046161564f5e7cd9008aff3b2990b3850dc8e0349119b98e8f251e099f24d"
-dependencies = [
- "bitflags 2.8.0",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "hashlink",
- "libsqlite3-sys",
- "smallvec",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3225,13 +3254,14 @@ dependencies = [
 [[package]]
 name = "sfo-cmd-server"
 version = "0.1.1"
-source = "git+https://github.com/wugren/sfo-cmd-server.git#c55dd58dd97ff333ce189241b9ea5ce76213ad6d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19729474109a0718134f48d9fd8a7d8adf4c87507f13359e834ccc5ee45be335"
 dependencies = [
  "as-any",
  "async-trait",
  "base-x",
  "base58",
- "bucky-raw-codec",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "callback-result 0.1.4",
  "callback-trait",
  "hex",
@@ -3391,9 +3421,9 @@ checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
 name = "sn-miner"
 version = "0.5.0"
 dependencies = [
- "bucky-crypto",
- "bucky-objects",
- "bucky-raw-codec",
+ "bucky-crypto 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-objects 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap",
  "cyfs-p2p",
  "log",
@@ -3782,12 +3812,6 @@ name = "value-bag"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ef4c4aa54d5d05a279399bfa921ec387b7aba77caf7a682ae8d86785b8fdad2"
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vec_map"
