@@ -6,6 +6,7 @@ use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use notify_future::Notify;
 use tokio::io::AsyncWriteExt;
+use crate::endpoint::Endpoint;
 use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::{P2pConnection, P2pConnectionInfoCacheRef};
@@ -619,6 +620,40 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
             }
             ret
         }
+    }
+
+    pub async fn create_session_direct(self: &Arc<Self>, remote_id: &P2pId, remote_eps: Vec<Endpoint>, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+        let remote_name = match self.device_finder.get_identity_cert(remote_id).await {
+            Ok(remote) => {
+                remote.get_name()
+            },
+            Err(_) => {
+                remote_id.to_string()
+            }
+        };
+
+        let seq = self.gen_id.generate();
+        let mut tunnel = Tunnel::new(
+            self.sn_service.clone(),
+            seq,
+            self.protocol_version,
+            remote_id.clone(),
+            remote_eps,
+            Some(remote_name),
+            self.local_identity.clone(),
+            self.conn_timeout,
+            self.idle_timeout,
+            self.cert_factory.clone(),
+            self.pn_client.clone(),
+            self.p2p_factory.clone(),
+            self.conn_info_cache.clone()
+        );
+        let ret = tunnel.connect_session_direct(vport,  session_id).await;
+        if tunnel.is_work() {
+            let tunnels = self.get_tunnels(remote_id);
+            tunnels.add_tunnel(tunnel);
+        }
+        ret
     }
 
     pub async fn on_sn_called(self: &Arc<Self>, sn_called: SnCalled) -> P2pResult<()> {

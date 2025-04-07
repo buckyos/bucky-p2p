@@ -52,16 +52,36 @@ pub struct SNServiceState {
     pub cur_report_future: Option<Notify<ReportSnResp>>,
 }
 
+pub struct SnList {
+    sn_list: Mutex<Vec<P2pSn>>,
+}
+
+impl SnList {
+    pub(crate) fn new(sn_list: Vec<P2pSn>) -> Self {
+        Self {
+            sn_list: Mutex::new(sn_list),
+        }
+    }
+
+    pub fn get_sn_list(&self) -> Vec<P2pSn> {
+        self.sn_list.lock().unwrap().clone()
+    }
+
+    pub fn update_sn_list(&self, sn_list: Vec<P2pSn>) {
+        *self.sn_list.lock().unwrap() = sn_list;
+    }
+}
+
 pub struct SnClientTunnelFactory {
     net_manager: NetManagerRef,
     local_identity: P2pIdentityRef,
-    sn_list: Vec<P2pSn>,
+    sn_list: Arc<SnList>,
 }
 
 impl SnClientTunnelFactory {
-    pub fn new(net_manager: NetManagerRef,
+    pub(crate) fn new(net_manager: NetManagerRef,
                local_identity: P2pIdentityRef,
-               sn_list: Vec<P2pSn>,) -> Self {
+               sn_list: Arc<SnList>,) -> Self {
         Self {
             net_manager,
             local_identity,
@@ -78,7 +98,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
             if classification.local_ep.is_some() {
                 let local_ep = classification.local_ep.unwrap();
                 let p2p_network = self.net_manager.get_network(local_ep.protocol()).map_err(into_cmd_err!(CmdErrorCode::Failed, "get network failed"))?;
-                for sn_cert in self.sn_list.iter() {
+                for sn_cert in self.sn_list.get_sn_list().iter() {
                     for sn_ep in sn_cert.endpoints().iter() {
                         if sn_ep.protocol() != local_ep.protocol() || sn_ep != &classification.remote_ep {
                             continue;
@@ -91,7 +111,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                     }
                 }
             } else {
-                for sn_cert in self.sn_list.iter() {
+                for sn_cert in self.sn_list.get_sn_list().iter() {
                     for sn_ep in sn_cert.endpoints().iter() {
                         if sn_ep.protocol() != classification.remote_ep.protocol() || sn_ep != &classification.remote_ep {
                             continue;
@@ -114,7 +134,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                 let quic_listener = quic_network.listeners();
                 for listener in quic_listener.iter() {
                     let local_ep = listener.local();
-                    for sn_cert in self.sn_list.iter() {
+                    for sn_cert in self.sn_list.get_sn_list().iter() {
                         for sn_ep in sn_cert.endpoints().iter() {
                             if sn_ep.protocol() != Protocol::Quic {
                                 continue;
@@ -142,7 +162,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
                 let quic_listener = p2p_network.listeners();
                 for listener in quic_listener.iter() {
                     let local_ep = listener.local();
-                    for sn_cert in self.sn_list.iter() {
+                    for sn_cert in self.sn_list.get_sn_list().iter() {
                         for sn_ep in sn_cert.endpoints().iter() {
                             if sn_ep.protocol() == Protocol::Quic || sn_ep.protocol() == Protocol::Tcp {
                                 continue;
@@ -171,7 +191,7 @@ pub type SnCmdClient = DefaultClassifiedCmdClient<SnTunnelClassification, SnTunn
 pub type SnCmdClientRef = Arc<SnCmdClient>;
 pub struct SNClientService {
     net_manager: NetManagerRef,
-    sn_list: Vec<P2pSn>,
+    sn_list: Arc<SnList>,
     local_identity: P2pIdentityRef,
     gen_seq: Arc<SequenceGenerator>,
     gen_id: Arc<TunnelIdGenerator>,
@@ -204,8 +224,9 @@ impl SNClientService {
                ping_timeout: Duration,
                call_timeout: Duration,
                conn_timeout: Duration,) -> Arc<Self> {
+        let sn_list = Arc::new(SnList::new(sn_list));
         let cmd_client = DefaultClassifiedCmdClient::new(SnClientTunnelFactory::new(net_manager.clone(), local_identity.clone(), sn_list.clone()), tunnel_count);
-        Arc::new(Self {
+        let this = Arc::new(Self {
             net_manager,
             sn_list,
             local_identity,
@@ -224,7 +245,9 @@ impl SNClientService {
             cert_factory,
             cmd_client,
             cmd_version: 0,
-        })
+        });
+        this.register_cmd_handler();
+        this
     }
 
     pub fn set_listener(&self, listener: impl SNEvent) {
@@ -253,7 +276,7 @@ impl SNClientService {
                 }
             }
         }
-        return false;
+        false
     }
 
     fn register_cmd_handler(self: &Arc<Self>) {
@@ -380,13 +403,12 @@ impl SNClientService {
             }
         };
 
-        self.cmd_client.send(PackageCmdCode::SnCalledResp as u8, self.cmd_version, resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await
+        self.cmd_client.send_by_specify_tunnel(conn_id, PackageCmdCode::SnCalledResp as u8, self.cmd_version, resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await
             .map_err(into_p2p_err!(P2pErrorCode::IoError, "send SnCalledResp failed"))?;
         Ok(())
     }
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
-        self.register_cmd_handler();
         let this = self.clone();
         let handle = Executor::spawn_with_handle(async move {
             this.ping_proc().await;
@@ -400,11 +422,19 @@ impl SNClientService {
 
     pub async fn stop(&self) {
         {
-            let state = self.state.read().unwrap();
-            if state.pinging_handle.is_some() {
-                state.pinging_handle.as_ref().unwrap().abort();
+            let mut state = self.state.write().unwrap();
+            state.active_sn_list.clear();
+            if let Some(handle) = state.pinging_handle.take() {
+                handle.abort();
             }
         }
+    }
+
+    pub async fn reset_sn(self: &Arc<Self>, sn_list: Vec<P2pSn>) {
+        self.sn_list.update_sn_list(sn_list);
+        self.stop().await;
+        self.cmd_client.clear_all_tunnel().await;
+        self.start().await;
     }
 
     async fn ping_proc(self: &Arc<Self>) {
@@ -458,7 +488,7 @@ impl SNClientService {
                 }
             }
             for p2p_network in self.net_manager.get_networks().iter() {
-                for sn_cert in self.sn_list.iter() {
+                for sn_cert in self.sn_list.get_sn_list().iter() {
                     for sn_ep in sn_cert.endpoints().iter() {
                         if sn_ep.protocol() != p2p_network.protocol() {
                             continue;

@@ -476,6 +476,31 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect has not been established session {} port {}", session_id, vport))
         }
     }
+
+    pub async fn connect_session_direct(&mut self, vport: u16, session_id: SessionId) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
+        for ep in self.remote_eps.iter() {
+            let future = self.create_connection(ep, vport, session_id);
+            futures.push(future);
+        }
+        if futures.len() > 0 {
+            match select_successful(futures).await {
+                Ok((ack, conn, read, write)) => {
+                    self.tunnel_conn = Some(conn);
+                    if ack.result == 0 {
+                        Ok((read, write))
+                    } else {
+                        Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                    }
+                }
+                Err(e) => {
+                    Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect session {} {} error: {:?} msg: {}", session_id, vport, e.code(), e.msg()))
+                }
+            }
+        } else {
+            Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint session {} port {}", session_id, vport))
+        }
+    }
 }
 
 impl<F: P2pConnectionFactory> Drop for Tunnel<F> {
