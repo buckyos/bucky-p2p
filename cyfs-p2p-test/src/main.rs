@@ -2,24 +2,20 @@ extern crate core;
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
-use std::ptr::read;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use bucky_crypto::PrivateKey;
-use bucky_objects::{Area, Device, DeviceCategory, DeviceId, UniqueId};
+use bucky_objects::{sign_and_push_named_object, Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner, SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF};
 use bucky_raw_codec::FileDecoder;
 use cyfs_p2p::{CyfsIdentity, cyfs_to_p2p_endpoint, CyfsIdentityCertFactory, CyfsIdentityFactory, create_cyfs_p2p_config, create_cyfs_p2p_stack_config};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bucky_objects::{Endpoint, EndpointArea, Protocol};
 use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
-use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
-use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
+use cyfs_p2p::p2p_identity::{P2pId};
 use cyfs_p2p::sn::service::{create_sn_service, IsAcceptClient, ReceiptRequestTime, SnService, SnServiceConfig, SnServiceContractServer};
 use cyfs_p2p::stack::{create_p2p_stack, init_p2p, P2pStackRef};
-use cyfs_p2p::types::SessionIdGenerator;
 
 const APP_NAME: &str = "cyfs-p2p-test";
 
@@ -266,13 +262,16 @@ async fn server_instance(data_folder: &Path) {
 async fn all_in_one() {
     let sn_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e))).unwrap();
     let sn_public_key = sn_key.public();
-    let mut sn_desc = Device::new(None, UniqueId::default(), vec![], vec![], vec![], sn_public_key, Area::default(), DeviceCategory::OOD).build();
+    let mut sn_desc = Device::new(None, UniqueId::default(), vec![], vec![], vec![], sn_public_key.clone(), Area::default(), DeviceCategory::OOD).build();
 
     let mut eps = sn_desc.mut_connect_info().mut_endpoints();
     if eps.len() == 0 {
         // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
         eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 3456, 0, 0)))));
     }
+
+    let signer = RsaCPUObjectSigner::new(sn_public_key, sn_key.clone());
+    sign_and_push_named_object(&signer, &mut sn_desc, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e))).unwrap();
 
     let sn_service = SnServiceConfig::new(
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
@@ -419,7 +418,10 @@ async fn create_stack(config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_
     } else {
         let private_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
         let public_key = private_key.public();
-        let device = Device::new(None, UniqueId::default(), eps, vec![], vec![], public_key, Area::default(), DeviceCategory::OOD).build();
+        let mut device = Device::new(None, UniqueId::default(), eps, vec![], vec![], public_key.clone(), Area::default(), DeviceCategory::OOD).build();
+
+        let signer = RsaCPUObjectSigner::new(public_key, private_key.clone());
+        sign_and_push_named_object(&signer, &mut device, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
         (private_key, device)
     };
 

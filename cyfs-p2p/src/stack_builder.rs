@@ -3,8 +3,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use bucky_crypto::{PrivateKey, Signature};
-use bucky_objects::{Device, Endpoint, NamedObject, ObjectDesc, Protocol, SingleKeyObjectDesc};
+use bucky_objects::{verify_object_desc_sign, Device, Endpoint, NamedObject, ObjSignature, ObjectDesc, Protocol, RsaCPUObjectVerifier, SignatureSource, SingleKeyObjectDesc, SIGNATURE_SOURCE_REFINDEX_SELF};
 use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
+use futures::executor::block_on;
 use p2p_frame::endpoint::EndpointArea;
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory, P2pSn};
@@ -40,7 +41,30 @@ impl P2pIdentityCert for CyfsIdentityCert {
     }
 
     fn verify_cert(&self, name: &str) -> bool {
-        self.device.desc().device_id().object_id().to_base36() == name
+        if self.device.desc().device_id().object_id().to_base36() != name {
+            return false;
+        }
+
+        if self.device.signs().desc_signs().is_none() {
+            return false;
+        }
+        let signs = self.device.signs().desc_signs().unwrap().iter().find(|item| {
+            if let SignatureSource::RefIndex(index) = item.sign_source() {
+                if *index == SIGNATURE_SOURCE_REFINDEX_SELF {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        });
+        if signs.is_none() {
+            return false;
+        }
+
+        let verifier = RsaCPUObjectVerifier::new(self.device.desc().public_key().clone());
+        block_on(verify_object_desc_sign(&verifier, &self.device, signs.unwrap())).is_ok()
     }
 
     fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {

@@ -273,6 +273,10 @@ impl P2pStack {
     pub fn sn_client(&self) -> &SNClientServiceRef {
         &self.sn_service
     }
+
+    pub fn cert_cache(&self) -> &P2pIdentityCertCacheRef {
+        CERT_CACHE.get().unwrap()
+    }
 }
 
 impl Drop for P2pStack {
