@@ -52,7 +52,7 @@ impl TCPConnection {
         let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
-        let tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let tls_stream = tls_connector.connect(validate_server_name(remote_name.clone()).try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
         let (remote_identity_id, remote_name) = if remote_identity_id.is_default() {
             let (_, tls_conn) = tls_stream.get_ref();
             let cert = tls_conn.peer_certificates();
@@ -66,9 +66,9 @@ impl TCPConnection {
 
             let cert = cert[0].as_ref();
             let remote_device = cert_factory.create(&cert.to_vec())?;
-            (remote_device.get_id(), validate_server_name(remote_device.get_name()))
+            (remote_device.get_id(), remote_device.get_name())
         } else {
-            (remote_identity_id, validate_server_name(remote_name))
+            (remote_identity_id, remote_name)
         };
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
         let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
@@ -110,7 +110,7 @@ impl TCPConnection {
         let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
-        let tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let tls_stream = tls_connector.connect(validate_server_name(remote_name.clone()).try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
         let (remote_identity_id, remote_name) = if remote_identity_id.is_default() {
             let (_, tls_conn) = tls_stream.get_ref();
             let cert = tls_conn.peer_certificates();
@@ -124,9 +124,9 @@ impl TCPConnection {
 
             let cert = cert[0].as_ref();
             let remote_device = cert_factory.create(&cert.to_vec())?;
-            (remote_device.get_id(), validate_server_name(remote_device.get_name()))
+            (remote_device.get_id(), remote_device.get_name())
         } else {
-            (remote_identity_id, validate_server_name(remote_name))
+            (remote_identity_id, remote_name)
         };
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
         let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
