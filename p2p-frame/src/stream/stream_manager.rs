@@ -323,9 +323,9 @@ impl StreamManager {
         Ok((StreamRead::new(read, session_id, port), StreamWrite::new(write, session_id, port)))
     }
 
-    pub async fn connect_direct(&self, remote_id: &P2pId, port: u16, remote_eps: Vec<Endpoint>) -> P2pResult<(StreamRead, StreamWrite)> {
+    pub async fn connect_direct(&self, remote_eps: Vec<Endpoint>, port: u16, remote_id: Option<P2pId>) -> P2pResult<(StreamRead, StreamWrite)> {
         let session_id = self.session_gen.generate();
-        let (read, write) = self.tunnel_manager.create_session_direct(remote_id, remote_eps, session_id, port).await?;
+        let (read, write) = self.tunnel_manager.create_session_direct(remote_eps, session_id, port, remote_id).await?;
         Ok((StreamRead::new(read, session_id, port), StreamWrite::new(write, session_id, port)))
     }
 

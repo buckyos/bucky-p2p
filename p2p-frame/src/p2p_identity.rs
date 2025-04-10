@@ -39,6 +39,10 @@ impl P2pId {
     pub fn as_slice(&self) -> &[u8] {
         self.0.as_slice()
     }
+
+    pub fn is_default(&self) -> bool {
+        self.0.iter().all(|b| *b == 0)
+    }
 }
 
 impl FromStr for P2pId {
@@ -70,6 +74,14 @@ impl Display for P2pId {
 impl Debug for P2pId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.as_slice().to_base36())
+    }
+}
+
+impl Default for P2pId {
+    fn default() -> Self {
+        Self {
+            0: vec![0; 32],
+        }
     }
 }
 

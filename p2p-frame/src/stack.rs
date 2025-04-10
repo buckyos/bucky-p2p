@@ -277,6 +277,10 @@ impl P2pStack {
     pub fn cert_cache(&self) -> &P2pIdentityCertCacheRef {
         CERT_CACHE.get().unwrap()
     }
+
+    pub fn set_as_default(&self) {
+        SERVER_CERT_RESOLVER.get().unwrap().set_default_server_identity(&self.local_identity.get_id());
+    }
 }
 
 impl Drop for P2pStack {

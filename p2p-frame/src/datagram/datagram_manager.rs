@@ -296,9 +296,9 @@ impl DatagramManager {
         Ok(DatagramWrite::new(write, session_id, port))
     }
 
-    pub async fn connect_direct(&self, remote_id: &P2pId, port: u16, remote_pes: Vec<Endpoint>) -> P2pResult<DatagramWrite> {
+    pub async fn connect_direct(&self, remote_pes: Vec<Endpoint>, port: u16, remote_id: Option<P2pId>) -> P2pResult<DatagramWrite> {
         let session_id = self.session_gen.generate();
-        let (_, write) = self.tunnel_manager.create_session_direct(remote_id, remote_pes, session_id, port).await?;
+        let (_, write) = self.tunnel_manager.create_session_direct(remote_pes, session_id, port, remote_id).await?;
         Ok(DatagramWrite::new(write, session_id, port))
     }
 

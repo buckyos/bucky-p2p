@@ -8,7 +8,7 @@ use std::time::Duration;
 use as_any::{AsAny, Downcast};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{VarInt};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::version::TLS13;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
@@ -16,7 +16,7 @@ use crate::executor::Executor;
 use crate::p2p_connection::{P2pRead, P2pWrite};
 use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
-use crate::sockets::QuicCongestionAlgorithm;
+use crate::sockets::{validate_server_name, QuicCongestionAlgorithm};
 
 pub struct QuicConnection {
     socket: quinn::Connection,
@@ -90,8 +90,10 @@ impl QuicConnection {
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
         endpoint.set_default_client_config(client_config);
 
+        let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
+        let remote_name = validate_server_name(remote_name);
         let conn = runtime::timeout(timeout, endpoint.connect(remote.addr().clone(),
-                                    remote_name.unwrap_or(remote_identity_id.to_string()).as_str()).unwrap()).await
+                                    remote_name.as_str()).unwrap()).await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,
@@ -141,9 +143,11 @@ impl QuicConnection {
         }
         client_config.transport_config(Arc::new(transport_config));
 
+        let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
+        let remote_name = validate_server_name(remote_name);
         let conn = runtime::timeout(timeout, ep.connect_with(client_config,
                                                              remote.addr().clone(),
-                                                             remote_name.unwrap_or(remote_identity_id.to_string()).as_str()).unwrap()).await
+                                                             remote_name.as_str()).unwrap()).await
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
             .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
         Ok(Self::new(conn,

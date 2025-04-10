@@ -135,6 +135,7 @@ impl SnService {
         }, None));
         let cert_resolver = DefaultTlsServerCertResolver::new();
         let _ = cert_resolver.add_server_identity(local_identity.clone()).await;
+        cert_resolver.set_default_server_identity(&local_identity.get_id());
 
         let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(),
                                                    cert_resolver.clone(),

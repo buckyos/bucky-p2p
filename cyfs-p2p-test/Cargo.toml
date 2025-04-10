@@ -9,6 +9,7 @@ edition = "2021"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"]}
 clap = "2"
 cyfs-p2p = { path = "../cyfs-p2p" }
+p2p-frame = { path = "../p2p-frame"}
 serde = { version = "1.0.217", features = ["derive"] }
 bucky-objects = {version = "0.1"}
 bucky-crypto = {version = "0.1"}

@@ -14,6 +14,7 @@ use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
+use crate::sockets::parse_server_name;
 use crate::tls::ServerCertResolverRef;
 use super::super::UpdateOuterResult;
 use super::TCPConnection;
@@ -194,7 +195,10 @@ impl TCPListener {
             return Err(p2p_err!(P2pErrorCode::CertError, "no server name"));
         }
 
-        let local_cert = self.cert_resolver.get_server_identity(server_name.unwrap()).await;
+        let server_name = server_name.unwrap();
+        let server_name = parse_server_name(server_name);
+
+        let local_cert = self.cert_resolver.get_server_identity(server_name).await;
         if local_cert.is_none() {
             return Err(p2p_err!(P2pErrorCode::CertError, "no server cert"));
         }

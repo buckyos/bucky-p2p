@@ -29,10 +29,18 @@ impl ServerCertVerifier for TlsServerCertVerifier {
         let device = end_entity.as_ref().to_vec();
         let server_name = server_name.to_str().to_string();
         let cert = self.cert_factory.create(&device).map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        if cert.verify_cert(server_name.as_str()) && cert.get_id() == self.server_id {
-            Ok(ServerCertVerified::assertion())
+        if self.server_id.is_default() {
+            if cert.verify_cert(cert.get_name().as_str()) {
+                Ok(ServerCertVerified::assertion())
+            } else {
+                Err(Error::General("Invalid server name".to_string()))
+            }
         } else {
-            Err(Error::General("Invalid server name".to_string()))
+            if cert.verify_cert(server_name.as_str()) && cert.get_id() == self.server_id {
+                Ok(ServerCertVerified::assertion())
+            } else {
+                Err(Error::General("Invalid server name".to_string()))
+            }
         }
     }
 
@@ -44,10 +52,18 @@ impl ServerCertVerifier for TlsServerCertVerifier {
         let device = cert.as_ref().to_vec();
         let sign = dss.signature().to_vec();
         let cert = self.cert_factory.create(&device).map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        if cert.verify(message, &sign) && cert.get_id() == self.server_id {
-            Ok(HandshakeSignatureValid::assertion())
+        if self.server_id.is_default() {
+            if cert.verify(message, &sign) {
+                Ok(HandshakeSignatureValid::assertion())
+            } else {
+                Err(Error::General("Invalid signature".to_string()))
+            }
         } else {
-            Err(Error::General("Invalid signature".to_string()))
+            if cert.verify(message, &sign) && cert.get_id() == self.server_id {
+                Ok(HandshakeSignatureValid::assertion())
+            } else {
+                Err(Error::General("Invalid signature".to_string()))
+            }
         }
     }
 

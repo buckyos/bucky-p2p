@@ -12,7 +12,7 @@ use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCache, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
-use crate::sockets::{QuicCongestionAlgorithm, QuicConnection, UpdateOuterResult};
+use crate::sockets::{parse_server_name, QuicCongestionAlgorithm, QuicConnection, UpdateOuterResult};
 use crate::tls::ServerCertResolverRef;
 
 struct QuicListenerState {
@@ -146,8 +146,8 @@ impl QuicListener {
                 return Err(p2p_err!(P2pErrorCode::TlsError, "no handshake data"));
             }
 
-            let serve_name = handshake_data.unwrap().server_name.as_ref();
-            if serve_name.is_none() {
+            let server_name = handshake_data.unwrap().server_name.as_ref();
+            if server_name.is_none() {
                 return Err(p2p_err!(P2pErrorCode::TlsError, "no server name"));
             }
             let peer_identity = connection.peer_identity();
@@ -156,7 +156,10 @@ impl QuicListener {
                 return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
             }
 
-            (serve_name.unwrap().to_string(), remote_cert.unwrap()[0].as_ref().to_vec())
+            let server_name = server_name.unwrap();
+            let server_name = parse_server_name(server_name);
+
+            (server_name.to_string(), remote_cert.unwrap()[0].as_ref().to_vec())
         };
 
         let local_cert = self.cert_resolver.get_server_identity(server_name.as_str()).await;

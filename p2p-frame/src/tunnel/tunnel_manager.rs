@@ -622,14 +622,21 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         }
     }
 
-    pub async fn create_session_direct(self: &Arc<Self>, remote_id: &P2pId, remote_eps: Vec<Endpoint>, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
-        let remote_name = match self.device_finder.get_identity_cert(remote_id).await {
-            Ok(remote) => {
-                remote.get_name()
-            },
-            Err(_) => {
-                remote_id.to_string()
-            }
+    pub async fn create_session_direct(self: &Arc<Self>, remote_eps: Vec<Endpoint>, session_id: SessionId, vport: u16, remote_id: Option<P2pId>) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+        let (remote_id, remote_name) = if let Some(remote_id) = remote_id {
+            let remote_name = match self.device_finder.get_identity_cert(&remote_id).await {
+                Ok(remote) => {
+                    remote.get_name()
+                },
+                Err(_) => {
+                    remote_id.to_string()
+                }
+            };
+            (remote_id, remote_name)
+        } else {
+            let remote_id = P2pId::default();
+            let remote_name = remote_id.to_string();
+            (remote_id, remote_name)
         };
 
         let seq = self.gen_id.generate();
@@ -650,7 +657,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         );
         let ret = tunnel.connect_session_direct(vport,  session_id).await;
         if tunnel.is_work() {
-            let tunnels = self.get_tunnels(remote_id);
+            let tunnels = self.get_tunnels(&remote_id);
             tunnels.add_tunnel(tunnel);
         }
         ret

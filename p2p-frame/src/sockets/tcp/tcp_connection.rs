@@ -13,6 +13,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::p2p_connection::{P2pConnection, P2pRead, P2pWrite};
 use crate::runtime;
+use crate::sockets::validate_server_name;
 
 #[derive(Eq, PartialEq)]
 enum BoxType {
@@ -37,7 +38,7 @@ impl TCPConnection {
                 .with_protocol_versions(&[&TLS13])
                 .unwrap()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
+                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory.clone(), remote_identity_id.clone())))
                 .with_client_auth_cert(vec![CertificateDer::from(local_identity_ref.get_identity_cert()?.get_encoded_cert()?)],
                                        PrivatePkcs8KeyDer::from(local_identity_ref.get_encoded_identity()?).into()).unwrap();
 
@@ -52,6 +53,23 @@ impl TCPConnection {
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
         let tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let (remote_identity_id, remote_name) = if remote_identity_id.is_default() {
+            let (_, tls_conn) = tls_stream.get_ref();
+            let cert = tls_conn.peer_certificates();
+            if cert.is_none() {
+                return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
+            }
+            let cert = cert.unwrap();
+            if cert.len() == 0 {
+                return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
+            }
+
+            let cert = cert[0].as_ref();
+            let remote_device = cert_factory.create(&cert.to_vec())?;
+            (remote_device.get_id(), validate_server_name(remote_device.get_name()))
+        } else {
+            (remote_identity_id, validate_server_name(remote_name))
+        };
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
         let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
         let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep, remote_name.clone());
@@ -72,7 +90,7 @@ impl TCPConnection {
                 .with_protocol_versions(&[&TLS13])
                 .unwrap()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
+                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory.clone(), remote_identity_id.clone())))
                 .with_client_auth_cert(vec![CertificateDer::from(local_identity_ref.get_name().to_vec().unwrap())],
                                        PrivatePkcs8KeyDer::from(local_identity_ref.get_encoded_identity()?).into()).unwrap();
 
@@ -93,6 +111,23 @@ impl TCPConnection {
 
         let tls_connector = TlsConnector::from(Arc::new(client_config));
         let tls_stream = tls_connector.connect(remote_name.clone().try_into().unwrap(), socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "tls socket to {} connect failed", remote_ep))?;
+        let (remote_identity_id, remote_name) = if remote_identity_id.is_default() {
+            let (_, tls_conn) = tls_stream.get_ref();
+            let cert = tls_conn.peer_certificates();
+            if cert.is_none() {
+                return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
+            }
+            let cert = cert.unwrap();
+            if cert.len() == 0 {
+                return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
+            }
+
+            let cert = cert[0].as_ref();
+            let remote_device = cert_factory.create(&cert.to_vec())?;
+            (remote_device.get_id(), validate_server_name(remote_device.get_name()))
+        } else {
+            (remote_identity_id, validate_server_name(remote_name))
+        };
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
         let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
         let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep,remote_name);

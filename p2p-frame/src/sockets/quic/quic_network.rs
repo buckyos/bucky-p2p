@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, P2pErrorCode, P2pResult};
 use crate::finder::DeviceCache;
+use rustls::pki_types::{CertificateDer};
 use crate::p2p_connection::{P2pConnectionEventListener, P2pConnection, P2pListenerRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::p2p_network::P2pNetwork;
@@ -91,20 +92,32 @@ impl P2pNetwork for QuicNetwork {
                                                            self.timeout,
                                                            self.idle_timeout).await?;
             let (read, send) = conn.open_bi_stream().await?;
+            let (remote_id, remote_name) = if remote_id.is_default() {
+                let peer_identity = conn.socket().peer_identity();
+                let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
+                if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {
+                    continue;
+                }
+                let cert = remote_cert.unwrap()[0].as_ref();
+                let cert = self.cert_factory.create(&cert.to_vec())?;
+                (cert.get_id(), cert.get_name())
+            } else {
+                (remote_id.clone(), remote_name.clone().unwrap_or(remote_id.to_string()))
+            };
             let read = Box::new(super::QuicRead::new(conn.socket().clone(),
                                                      read,
                                                      remote_id.clone(),
                                                      local_identity.get_id(),
                                                      conn.local().clone(),
                                                      conn.remote().clone(),
-                                                     remote_name.clone().unwrap_or(remote_id.to_string())));
+                                                     remote_name.clone()));
             let write = Box::new(super::QuicWrite::new(conn.socket().clone(),
                                                        send,
                                                        remote_id.clone(),
                                                        local_identity.get_id(),
                                                        conn.local().clone(),
                                                        conn.remote().clone(),
-                                                       remote_name.clone().unwrap_or(remote_id.to_string())));
+                                                       remote_name.clone()));
             conn_list.push(P2pConnection::new(read, write));
         }
         Ok(conn_list)
@@ -130,20 +143,32 @@ impl P2pNetwork for QuicNetwork {
                                                            self.timeout,
                                                            self.idle_timeout).await?;
             let (read, send) = conn.open_bi_stream().await?;
+            let (remote_id, remote_name) = if remote_id.is_default() {
+                let peer_identity = conn.socket().peer_identity();
+                let remote_cert = peer_identity.as_ref().unwrap().as_ref().downcast_ref::<Vec<CertificateDer>>();
+                if remote_cert.is_none() || remote_cert.as_ref().unwrap().len() == 0 {
+                    continue;
+                }
+                let cert = remote_cert.unwrap()[0].as_ref();
+                let cert = self.cert_factory.create(&cert.to_vec())?;
+                (cert.get_id(), cert.get_name())
+            } else {
+                (remote_id.clone(), remote_name.clone().unwrap_or(remote_id.to_string()))
+            };
             let read = Box::new(super::QuicRead::new(conn.socket().clone(),
                                                      read,
                                                      remote_id.clone(),
                                                      local_identity.get_id(),
                                                      conn.local().clone(),
                                                      conn.remote().clone(),
-                                                     remote_name.clone().unwrap_or(remote_id.to_string())));
+                                                     remote_name.clone()));
             let write = Box::new(super::QuicWrite::new(conn.socket().clone(),
                                                        send,
                                                        remote_id.clone(),
                                                        local_identity.get_id(),
                                                        conn.local().clone(),
                                                        conn.remote().clone(),
-                                                       remote_name.clone().unwrap_or(remote_id.to_string())));
+                                                       remote_name.clone()));
             return Ok(P2pConnection::new(read, write));
         }
         Err(p2p_err!(P2pErrorCode::NotFound, "no listener found for local ep: {}", local_ep))

@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bucky_objects::{Endpoint, EndpointArea, Protocol};
 use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::{P2pId};
-use cyfs_p2p::sn::service::{create_sn_service, IsAcceptClient, ReceiptRequestTime, SnService, SnServiceConfig, SnServiceContractServer};
+use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
 use cyfs_p2p::stack::{create_p2p_stack, init_p2p, P2pStackRef};
 
 const APP_NAME: &str = "cyfs-p2p-test";
@@ -264,7 +264,7 @@ async fn all_in_one() {
     let sn_public_key = sn_key.public();
     let mut sn_desc = Device::new(None, UniqueId::default(), vec![], vec![], vec![], sn_public_key.clone(), Area::default(), DeviceCategory::OOD).build();
 
-    let mut eps = sn_desc.mut_connect_info().mut_endpoints();
+    let eps = sn_desc.mut_connect_info().mut_endpoints();
     if eps.len() == 0 {
         // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
         eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 3456, 0, 0)))));
@@ -327,6 +327,7 @@ async fn all_in_one() {
     stack1.wait_online(None).await.unwrap();
     let stack2 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack2.wait_online(None).await.unwrap();
+    stack2.set_as_default();
 
     let stack2_cert = stack2.local_identity().get_identity_cert().unwrap().clone();
     let tmp_stack2 = stack2.clone();
@@ -405,6 +406,13 @@ async fn all_in_one() {
             {
                 let mut send = stack1.datagram_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
                 send.write_all("datagram hello".as_bytes()).await.unwrap();
+            }
+
+            {
+                let (_read, mut send) = stack1.stream_manager().connect_direct(
+                    vec![p2p_frame::endpoint::Endpoint::from((p2p_frame::endpoint::Protocol::Quic, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 4433, 0, 0))))],
+                    1234, None).await.unwrap();
+                send.write_all("direct hello".as_bytes()).await.unwrap();
             }
         }
     });
