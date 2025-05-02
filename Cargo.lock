@@ -3254,9 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b7f7642396c050e852b9af63bd96ec94365d3512d5f88c2fb1ab7db81c362a"
+version = "0.1.4"
 dependencies = [
  "as-any",
  "async-trait",

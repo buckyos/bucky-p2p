@@ -752,6 +752,6 @@ impl SNClientService {
 
             return Ok(resp);
         }
-        Err(p2p_err!(P2pErrorCode::ConnectFailed, "call timeout"))
+        Err(p2p_err!(P2pErrorCode::ConnectFailed, "no active sn"))
     }
 }

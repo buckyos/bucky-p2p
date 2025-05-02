@@ -71,8 +71,8 @@ impl TCPConnection {
             (remote_identity_id, remote_name)
         };
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
-        let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
-        let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep, remote_name.clone());
+        let read = TCPRead::new(read, remote_identity_id.clone(), local_identity_ref.get_id(), local, remote_ep, remote_name.clone());
+        let write = TCPWrite::new(write, remote_identity_id, local_identity_ref.get_id(), local, remote_ep, remote_name.clone());
         let socket = P2pConnection::new(Box::new(read), Box::new(write));
         Ok(socket)
     }
@@ -129,8 +129,8 @@ impl TCPConnection {
             (remote_identity_id, remote_name)
         };
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
-        let read = TCPRead::new(read, local_identity_ref.get_id(), remote_identity_id.clone(), local, remote_ep, remote_name.clone());
-        let write = TCPWrite::new(write, local_identity_ref.get_id(), remote_identity_id, local, remote_ep,remote_name);
+        let read = TCPRead::new(read, remote_identity_id.clone(), local_identity_ref.get_id(), local, remote_ep, remote_name.clone());
+        let write = TCPWrite::new(write, remote_identity_id, local_identity_ref.get_id(), local, remote_ep,remote_name);
         let socket = P2pConnection::new(Box::new(read), Box::new(write));
         Ok(socket)
     }
@@ -193,6 +193,13 @@ impl runtime::AsyncRead for TCPRead {
         buf: &mut tokio::io::ReadBuf,
     ) -> std::task::Poll<std::io::Result<()>> {
         Pin::new(&mut self.read).poll_read(cx, buf)
+    }
+}
+
+impl Drop for TCPRead {
+    fn drop(&mut self) {
+        log::info!("TCPRead drop. local ep {} remote ep {} local {} remote {}",
+            self.local, self.remote, self.local_identity_id.to_string(), self.remote_identity_id.to_string());
     }
 }
 
@@ -266,5 +273,12 @@ impl runtime::AsyncWrite for TCPWrite {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         Pin::new(&mut self.write).poll_shutdown(cx)
+    }
+}
+
+impl Drop for TCPWrite {
+    fn drop(&mut self) {
+        log::info!("TCPWrite drop. local ep {} remote ep {} local {} remote {}",
+            self.local, self.remote, self.local_identity_id.to_string(), self.remote_identity_id.to_string());
     }
 }

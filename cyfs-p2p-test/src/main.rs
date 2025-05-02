@@ -15,7 +15,8 @@ use bucky_objects::{Endpoint, EndpointArea, Protocol};
 use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::{P2pId};
 use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
-use cyfs_p2p::stack::{create_p2p_stack, init_p2p, P2pStackRef};
+use cyfs_p2p::stack::{create_p2p_stack, create_p2p_env, P2pStackRef};
+use p2p_frame::stack::P2pEnvRef;
 
 const APP_NAME: &str = "cyfs-p2p-test";
 
@@ -186,9 +187,9 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         }
     }
 
-    init_p2p(p2p_config).await.unwrap();
+    let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
 
     // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
@@ -242,9 +243,9 @@ async fn server_instance(data_folder: &Path) {
         }
     }
 
-    init_p2p(p2p_config).await.unwrap();
+    let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack = create_stack(data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack.wait_online(None).await.unwrap();
 
     let listener = stack.stream_manager().listen(80).await.unwrap();
@@ -321,11 +322,11 @@ async fn all_in_one() {
     p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(300))
         .set_quic_connect_timeout(Duration::from_secs(300))
         .set_quic_idle_time(Duration::from_secs(300));
-    init_p2p(p2p_config).await.unwrap();
+    let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack1 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack1 = create_stack(env.clone(), Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack1.wait_online(None).await.unwrap();
-    let stack2 = create_stack(Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack2 = create_stack(env.clone(), Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
     stack2.wait_online(None).await.unwrap();
     stack2.set_as_default();
 
@@ -418,7 +419,7 @@ async fn all_in_one() {
     });
 
 }
-async fn create_stack(config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_list: Vec<Device>) -> P2pResult<P2pStackRef> {
+async fn create_stack(env: P2pEnvRef, config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_list: Vec<Device>) -> P2pResult<P2pStackRef> {
     let (private_key, device) = if config_path.join("device.desc").exists() && config_path.join("device.sec").exists() {
         let (device_desc, _) = Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
         let (private_key, _) = PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
@@ -433,7 +434,7 @@ async fn create_stack(config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_
         (private_key, device)
     };
 
-    let config = create_cyfs_p2p_stack_config(device, private_key, sn_list).set_support_proxy(true);
+    let config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list).set_support_proxy(true);
 
     create_p2p_stack(config).await
 }

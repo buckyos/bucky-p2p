@@ -561,7 +561,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             tunnel.open_session(vport, session_id).await
         } else {
-            let seq = self.gen_id.generate();
+            let seq = self.generate_tunnel_id(&remote_id);
 
             let remote = match self.device_finder.get_identity_cert(&remote.get_id()).await {
                 Ok(remote) => remote,
@@ -592,13 +592,27 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         }
     }
 
+    fn generate_tunnel_id(self: &Arc<Self>, remote_id: &P2pId) -> TunnelId {
+        if remote_id.is_default() {
+            self.gen_id.generate()
+        } else {
+            let tunnels = self.get_tunnels(remote_id);
+            loop {
+                let seq = self.gen_id.generate();
+                if !tunnels.tunnel_exist(seq) {
+                    return seq;
+                }
+            }
+        }
+    }
+
     pub async fn create_session_from_id(self: &Arc<Self>, remote_id: &P2pId, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
             tunnel.open_session(vport, session_id).await
         } else {
             let remote = self.device_finder.get_identity_cert(remote_id).await?;
-            let seq = self.gen_id.generate();
+            let seq = self.generate_tunnel_id(remote_id);
             let mut tunnel = Tunnel::new(
                 self.sn_service.clone(),
                 seq,
@@ -639,7 +653,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
             (remote_id, remote_name)
         };
 
-        let seq = self.gen_id.generate();
+        let seq = self.generate_tunnel_id(&remote_id);
         let mut tunnel = Tunnel::new(
             self.sn_service.clone(),
             seq,

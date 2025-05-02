@@ -20,11 +20,31 @@ use crate::tls::{init_tls, DefaultTlsServerCertResolver, ServerCertResolverRef, 
 use crate::tunnel::{DefaultDeviceFinder, DeviceFinderRef, TunnelListener, TunnelListenerRef, TunnelManager, TunnelManagerRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
 
-static NET_MANAGER: OnceCell<NetManagerRef> = OnceCell::new();
-static IDENTITY_FACTORY: OnceCell<P2pIdentityFactoryRef> = OnceCell::new();
-static CERT_FACTORY: OnceCell<P2pIdentityCertFactoryRef> = OnceCell::new();
-static CERT_CACHE: OnceCell<P2pIdentityCertCacheRef> = OnceCell::new();
-static SERVER_CERT_RESOLVER: OnceCell<ServerCertResolverRef> = OnceCell::new();
+pub struct P2pEnv {
+    net_manager: NetManagerRef,
+    identity_factory: P2pIdentityFactoryRef,
+    cert_factory: P2pIdentityCertFactoryRef,
+    identity_cert_cache: P2pIdentityCertCacheRef,
+    sever_cert_resolver: ServerCertResolverRef,
+}
+
+impl P2pEnv {
+    pub fn new(
+        net_manager: NetManagerRef,
+        identity_factory: P2pIdentityFactoryRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        identity_cert_cache: P2pIdentityCertCacheRef,
+        sever_cert_resolver: ServerCertResolverRef,) -> P2pEnvRef {
+        Arc::new(P2pEnv {
+            net_manager,
+            identity_factory,
+            cert_factory,
+            identity_cert_cache,
+            sever_cert_resolver,
+        })
+    }
+}
+pub type P2pEnvRef = Arc<P2pEnv>;
 
 pub struct P2pConfig {
     identity_factory: P2pIdentityFactoryRef,
@@ -188,9 +208,9 @@ impl P2pConfig {
     }
 }
 
-pub async fn init_p2p(
+pub async fn create_p2p_env(
     config: P2pConfig,
-) -> P2pResult<()> {
+) -> P2pResult<P2pEnvRef> {
     Executor::init_new_multi_thread(None);
     let identity_factory = config.identity_factory();
     let cert_factory = config.cert_factory();
@@ -215,19 +235,12 @@ pub async fn init_p2p(
 
     let net_manager = Arc::new(NetManager::new(networks, tsl_server_cert_resolver.clone(), config.connection_info_cache.clone())?);
     net_manager.listen(config.endpoints(), config.port_mapping().clone()).await?;
-    NET_MANAGER.get_or_init(move || {
-        net_manager.clone()
-    });
 
-    IDENTITY_FACTORY.get_or_init(||identity_factory.clone());
-    CERT_FACTORY.get_or_init(||cert_factory.clone());
-    CERT_CACHE.get_or_init(||device_cache.clone());
-    SERVER_CERT_RESOLVER.get_or_init(||tsl_server_cert_resolver.clone());
-
-    Ok(())
+    Ok(P2pEnv::new(net_manager, identity_factory.clone(), cert_factory.clone(), device_cache, tsl_server_cert_resolver.clone()))
 }
 
 pub struct P2pStack {
+    env: P2pEnvRef,
     local_identity: P2pIdentityRef,
     sn_service: SNClientServiceRef,
     net_manager: NetManagerRef,
@@ -238,6 +251,7 @@ pub type P2pStackRef = Arc<P2pStack>;
 
 impl P2pStack {
     pub(crate) async fn new(
+        env: P2pEnvRef,
         local_identity: P2pIdentityRef,
         sn_service: SNClientServiceRef,
         stream_manager: StreamManagerRef,
@@ -245,6 +259,7 @@ impl P2pStack {
         net_manager: NetManagerRef,) -> P2pResult<Self> {
         net_manager.add_listen_device(local_identity.clone()).await?;
         Ok(Self {
+            env,
             local_identity,
             sn_service,
             net_manager,
@@ -275,11 +290,11 @@ impl P2pStack {
     }
 
     pub fn cert_cache(&self) -> &P2pIdentityCertCacheRef {
-        CERT_CACHE.get().unwrap()
+        &self.env.identity_cert_cache
     }
 
     pub fn set_as_default(&self) {
-        SERVER_CERT_RESOLVER.get().unwrap().set_default_server_identity(&self.local_identity.get_id());
+        self.env.sever_cert_resolver.set_default_server_identity(&self.local_identity.get_id());
     }
 }
 
@@ -303,6 +318,7 @@ impl TunnelManagerEventListener {
 }
 
 pub struct P2pStackConfig {
+    env: P2pEnvRef,
     local_identity: P2pIdentityRef,
     sn_list: Vec<P2pSn>,
     conn_timeout: Duration,
@@ -318,8 +334,10 @@ pub struct P2pStackConfig {
 
 impl P2pStackConfig {
     pub fn new(
+        env: P2pEnvRef,
         local_identity: P2pIdentityRef,) -> Self {
         Self {
+            env,
             local_identity,
             sn_list: Vec::new(),
             conn_timeout: Duration::from_secs(30),
@@ -439,10 +457,9 @@ impl P2pStackConfig {
 pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> {
     let gen_id = Arc::new(TunnelIdGenerator::new());
     let gen_seq = Arc::new(SequenceGenerator::new());
-    let net_manager = NET_MANAGER.get().unwrap().clone();
-
-    let cert_factory = CERT_FACTORY.get().unwrap().clone();
-    let cert_resolver = SERVER_CERT_RESOLVER.get().unwrap().clone();
+    let net_manager = config.env.net_manager.clone();
+    let cert_factory = config.env.cert_factory.clone();
+    let cert_resolver = config.env.sever_cert_resolver.clone();
     let local_identity = config.local_identity();
     let sn_list = config.sn_list().to_vec();
     let conn_timeout = config.conn_timeout();
@@ -486,7 +503,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let device_finder = if device_finder.is_some() {
         device_finder.unwrap()
     } else {
-        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), CERT_CACHE.get().unwrap().clone(), sn_query_interval)
+        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), config.env.identity_cert_cache.clone(), sn_query_interval)
     };
     let tunnel_listener = TunnelListener::new(
         local_identity.clone(),
@@ -529,6 +546,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
                                                 idle_timeout);
 
     Ok(Arc::new(P2pStack::new(
+        config.env.clone(),
         local_identity.clone(),
         sn_service,
         stream_manager,

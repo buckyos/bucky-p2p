@@ -15,7 +15,7 @@ pub(crate) use sfo_result::into_err as into_miner_err;
 use cyfs_p2p::executor::Executor;
 use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
 use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
-use cyfs_p2p::sn::service::{IsAcceptClient, ReceiptRequestTime, SnService, SnServiceContractServer};
+use cyfs_p2p::sn::service::{create_sn_service, IsAcceptClient, ReceiptRequestTime, SnService, SnServiceConfig, SnServiceContractServer};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MinerErrorCode {
@@ -80,14 +80,12 @@ async fn main() {
 
             log::info!("sn-miner load device from {}, id {}", matches.value_of("desc").unwrap(), device.desc().object_id());
 
-            let service = SnService::new(
+            let config = SnServiceConfig::new(
                 Arc::new(CyfsIdentity::new(device, private_key)),
                 Arc::new(CyfsIdentityFactory),
                 Arc::new(CyfsIdentityCertFactory),
-                Box::new(SnServiceContractServerImpl::new()),
-                true
-            ).await;
-
+            ).set_support_proxy(true);
+            let _service = create_sn_service(config).await;
             std::future::pending::<u8>().await;
         }
         Err(e) => {

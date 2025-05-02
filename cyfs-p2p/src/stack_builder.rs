@@ -9,7 +9,7 @@ use futures::executor::block_on;
 use p2p_frame::endpoint::EndpointArea;
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
 use p2p_frame::p2p_identity::{P2pId, EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pIdentityFactory, P2pIdentityCertFactory, P2pSn};
-use p2p_frame::stack::{create_p2p_stack, init_p2p, P2pConfig, P2pStackConfig, P2pStackRef};
+use p2p_frame::stack::{create_p2p_stack, create_p2p_env, P2pConfig, P2pEnvRef, P2pStackConfig, P2pStackRef};
 
 pub struct CyfsIdentityCert {
     device: Device,
@@ -199,11 +199,11 @@ pub fn create_cyfs_p2p_config(ep: Vec<p2p_frame::endpoint::Endpoint>) -> P2pConf
     config
 }
 
-pub fn create_cyfs_p2p_stack_config(local_identity: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> P2pStackConfig {
+pub fn create_cyfs_p2p_stack_config(env: P2pEnvRef, local_identity: Device, local_key: PrivateKey, sn_list: Vec<Device>) -> P2pStackConfig {
     let mut p2p_sn_list: Vec<P2pSn> = Vec::new();
     for sn in sn_list {
         let p2p_id = P2pId::from(sn.desc().object_id().as_slice());
         p2p_sn_list.push(P2pSn::new(p2p_id.clone(), p2p_id.to_string(), sn.connect_info().endpoints().iter().map(|ep| cyfs_to_p2p_endpoint(ep)).collect()));
     }
-    P2pStackConfig::new(Arc::new(CyfsIdentity::new(local_identity, local_key))).add_sn_list(p2p_sn_list)
+    P2pStackConfig::new(env, Arc::new(CyfsIdentity::new(local_identity, local_key))).add_sn_list(p2p_sn_list)
 }

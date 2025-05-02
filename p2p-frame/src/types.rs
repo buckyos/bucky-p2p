@@ -78,10 +78,8 @@ impl TunnelId {
     }
 
     fn now(_now: Timestamp) -> u32 {
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as u32;
-        let since_2021 = Duration::from_secs((50 * 365 + 9) * 24 * 3600).as_secs() as u32;
-        // TODO: 用10年？
-        (now - since_2021) * 10
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u32;
+        now
     }
 
     // fn time_bits() -> usize {
@@ -140,7 +138,7 @@ impl From<TunnelId> for TunnelIdGenerator {
 
 impl TunnelIdGenerator {
     pub fn new() -> Self {
-        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
+        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64);
         Self {
             cur: AtomicU32::new(now),
         }
