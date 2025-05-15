@@ -70,13 +70,13 @@ impl SnTunnelRead {
     }
 }
 
-impl CmdTunnelRead for SnTunnelRead {
+impl CmdTunnelRead<()> for SnTunnelRead {
     fn get_remote_peer_id(&self) -> PeerId {
         PeerId::from(self.read.remote_id().as_slice())
     }
 }
 
-impl ClassifiedCmdTunnelRead<SnTunnelClassification> for SnTunnelRead {
+impl ClassifiedCmdTunnelRead<SnTunnelClassification, ()> for SnTunnelRead {
     fn get_classification(&self) -> SnTunnelClassification {
         SnTunnelClassification::new(Some(self.read.local()), self.read.remote())
     }
@@ -117,13 +117,13 @@ impl SnTunnelWrite {
     }
 }
 
-impl CmdTunnelWrite for SnTunnelWrite {
+impl CmdTunnelWrite<()> for SnTunnelWrite {
     fn get_remote_peer_id(&self) -> PeerId {
         PeerId::from(self.write.remote_id().as_slice())
     }
 }
 
-impl ClassifiedCmdTunnelWrite<SnTunnelClassification> for SnTunnelWrite {
+impl ClassifiedCmdTunnelWrite<SnTunnelClassification, ()> for SnTunnelWrite {
     fn get_classification(&self) -> SnTunnelClassification {
         SnTunnelClassification::new(Some(self.write.local()), self.write.remote())
     }

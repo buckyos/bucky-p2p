@@ -3,7 +3,7 @@ use std::time::Duration;
 use once_cell::sync::OnceCell;
 use rustls::server::ResolvesServerCert;
 use crate::datagram::{DatagramManager, DatagramManagerRef};
-use crate::endpoint::Endpoint;
+use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
@@ -295,6 +295,18 @@ impl P2pStack {
 
     pub fn set_as_default(&self) {
         self.env.sever_cert_resolver.set_default_server_identity(&self.local_identity.get_id());
+    }
+
+    pub fn get_listen_eps(&self, protocol: Protocol) -> Option<Vec<(Endpoint, Option<u16>)>> {
+        if let Ok(network) = self.net_manager.get_network(protocol) {
+            Some(network.listeners().iter().map(|l| (l.local(), l.mapping_port())).collect())
+        } else {
+            None
+        }
+    }
+
+    pub fn p2p_env(&self) -> &P2pEnvRef {
+        &self.env
     }
 }
 

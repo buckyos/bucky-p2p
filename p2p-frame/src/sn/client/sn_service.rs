@@ -12,7 +12,7 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
 use sfo_cmd_server::client::{ClassifiedCmdClient, ClassifiedCmdSend, ClassifiedCmdTunnel, ClassifiedCmdTunnelFactory, CmdClient, DefaultClassifiedCmdClient};
 use sfo_cmd_server::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
-use sfo_cmd_server::{CmdBodyRead, CmdTunnel, PeerId};
+use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{p2p_err, into_p2p_err, P2pErrorCode, P2pResult};
 use crate::runtime;
@@ -91,7 +91,7 @@ impl SnClientTunnelFactory {
 }
 
 #[async_trait::async_trait]
-impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWrite, > for SnClientTunnelFactory {
+impl ClassifiedCmdTunnelFactory<SnTunnelClassification, (), SnTunnelRead, SnTunnelWrite, > for SnClientTunnelFactory {
     async fn create_tunnel(&self, classification: Option<SnTunnelClassification>) -> CmdResult<ClassifiedCmdTunnel<SnTunnelRead, SnTunnelWrite>> {
         if classification.is_some() {
             let classification = classification.unwrap();
@@ -186,7 +186,7 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, SnTunnelRead, SnTunnelWr
     }
 }
 
-pub type SnCmdClient = DefaultClassifiedCmdClient<SnTunnelClassification, SnTunnelRead, SnTunnelWrite, SnClientTunnelFactory, u16, u8>;
+pub type SnCmdClient = DefaultClassifiedCmdClient<SnTunnelClassification, (), SnTunnelRead, SnTunnelWrite, SnClientTunnelFactory, u16, u8>;
 
 pub type SnCmdClientRef = Arc<SnCmdClient>;
 pub struct SNClientService {
@@ -225,7 +225,11 @@ impl SNClientService {
                call_timeout: Duration,
                conn_timeout: Duration,) -> Arc<Self> {
         let sn_list = Arc::new(SnList::new(sn_list));
-        let cmd_client = DefaultClassifiedCmdClient::new(SnClientTunnelFactory::new(net_manager.clone(), local_identity.clone(), sn_list.clone()), tunnel_count);
+        let cmd_client = DefaultClassifiedCmdClient::new(
+            SnClientTunnelFactory::new(net_manager.clone(),
+                                       local_identity.clone(),
+                                       sn_list.clone()),
+            tunnel_count);
         let this = Arc::new(Self {
             net_manager,
             sn_list,
@@ -281,42 +285,42 @@ impl SNClientService {
 
     fn register_cmd_handler(self: &Arc<Self>) {
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::SnCallResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_client.register_cmd_handler(PackageCmdCode::SnCallResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let resp = SnCallResp::clone_from_slice(body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.sn_call_resp_handle(tunnel_id, resp).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "sn call resp handle failed"))?;
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::SnQueryResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_client.register_cmd_handler(PackageCmdCode::SnQueryResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let resp = SnQueryResp::clone_from_slice(body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.sn_query_resp_handle(tunnel_id, resp).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "sn query resp handle failed"))?;
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::SnCalled as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_client.register_cmd_handler(PackageCmdCode::SnCalled as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let sn_called = SnCalled::clone_from_slice(body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.on_called(tunnel_id, sn_called).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "sn called handle failed"))?;
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_client.register_cmd_handler(PackageCmdCode::ReportSnResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_client.register_cmd_handler(PackageCmdCode::ReportSnResp as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let resp = ReportSnResp::clone_from_slice(body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 this.report_sn_resp_handle(tunnel_id, resp).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "report sn resp handle failed"))?;
-                Ok(())
+                Ok(None)
             }
         });
     }

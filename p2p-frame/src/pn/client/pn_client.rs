@@ -14,9 +14,9 @@ use notify_future::{Notify, NotifyWaiter};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use rustls::version::TLS13;
-use sfo_cmd_server::client::{CmdClient, SendGuard};
+use sfo_cmd_server::client::{CmdClient, CmdSend, SendGuard};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode};
-use sfo_cmd_server::{CmdBodyRead, PeerId};
+use sfo_cmd_server::{CmdBody, PeerId};
 use sfo_split::Splittable;
 use tokio::io::{split, AsyncRead, AsyncWrite, BufWriter, ReadBuf};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -176,8 +176,8 @@ impl Future for RecvCache {
     }
 }
 
-struct PnTunnelReadImpl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> {
-    cmd_client: Arc<DefaultPnClient<W, S, T>>,
+struct PnTunnelReadImpl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> {
+    cmd_client: Arc<DefaultPnClient<CS, S, T>>,
     read_cache: Option<(usize, Vec<u8>)>,
     recv_cache: RecvCache,
     timeout_check_handle: SpawnHandle<()>,
@@ -186,8 +186,8 @@ struct PnTunnelReadImpl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: C
     tunnel_id: TunnelId,
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> PnTunnelReadImpl<W, S, T> {
-    pub(crate) fn new(cmd_client: Arc<DefaultPnClient<W, S, T>>, p2p_id: P2pId, tunnel_id: TunnelId, remote_name: String) -> Self {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> PnTunnelReadImpl<CS, S, T> {
+    pub(crate) fn new(cmd_client: Arc<DefaultPnClient<CS, S, T>>, p2p_id: P2pId, tunnel_id: TunnelId, remote_name: String) -> Self {
         let recv_cache = RecvCache::new();
         cmd_client.add_tunnel_recv_cache(p2p_id.clone(), tunnel_id, recv_cache.clone());
         let heart_state = recv_cache.clone();
@@ -216,14 +216,14 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
     }
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> Drop for PnTunnelReadImpl<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> Drop for PnTunnelReadImpl<CS, S, T> {
     fn drop(&mut self) {
         self.cmd_client.remove_tunnel_recv_cache(&self.p2p_id, &self.tunnel_id);
         self.timeout_check_handle.abort();
     }
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> runtime::AsyncRead for PnTunnelReadImpl<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> runtime::AsyncRead for PnTunnelReadImpl<CS, S, T> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
         if self.read_cache.is_none() {
             match Pin::new(&mut self.recv_cache).poll(cx) {
@@ -305,7 +305,7 @@ impl<R: AsyncRead + Unpin + Send + 'static> AsyncRead for DefaultPnTunnelRead<R>
     }
 }
 
-pub struct PnTunnelWriteImpl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> {
+pub struct PnTunnelWriteImpl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> {
     cmd_client: Arc<T>,
     tunnel_id: TunnelId,
     seq: u32,
@@ -316,10 +316,10 @@ pub struct PnTunnelWriteImpl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin,
     heart_handle: Option<SpawnHandle<()>>,
     connection_state: Box<dyn ConnectionState>,
     version: u8,
-    _phantom: PhantomData<(W, S)>,
+    _phantom: PhantomData<(CS, S)>,
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> Drop for PnTunnelWriteImpl<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> Drop for PnTunnelWriteImpl<CS, S, T> {
     fn drop(&mut self) {
         if self.heart_handle.is_some() {
             self.heart_handle.as_ref().unwrap().abort();
@@ -328,7 +328,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
     }
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> PnTunnelWriteImpl<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> PnTunnelWriteImpl<CS, S, T> {
     pub(crate) fn new(cmd_client: Arc<T>,
                       tunnel_id: TunnelId,
                       from: P2pId,
@@ -426,7 +426,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
     }
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> AsyncWrite for PnTunnelWriteImpl<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> AsyncWrite for PnTunnelWriteImpl<CS, S, T> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
         unsafe {
             if self.writing_future.is_none() {
@@ -511,7 +511,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AsyncWrite for DefaultPnTunnelWrite
     }
 }
 
-struct DefaultPnClientImpl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> {
+struct DefaultPnClientImpl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> {
     cmd_client: Arc<T>,
     tunnel_recv_cache: Arc<Mutex<HashMap<P2pId, HashMap<TunnelId, RecvCache>>>>,
     accept_waiter: Arc<SingleCallbackWaiter<P2pResult<(Box<dyn crate::pn::PnTunnelRead>, Box<dyn crate::pn::PnTunnelWrite>)>>>,
@@ -519,14 +519,14 @@ struct DefaultPnClientImpl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T
     cert_factory: P2pIdentityCertFactoryRef,
     tls_acceptor: TlsAcceptor,
     version: u8,
-    _p: PhantomData<Arc<tokio::sync::Mutex<(W, S)>>>
+    _p: PhantomData<Arc<tokio::sync::Mutex<(CS, S)>>>
 }
 
-pub struct DefaultPnClient<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> {
-    inner: Arc<DefaultPnClientImpl<W, S, T>>
+pub struct DefaultPnClient<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> {
+    inner: Arc<DefaultPnClientImpl<CS, S, T>>
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> Clone for DefaultPnClient<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> Clone for DefaultPnClient<CS, S, T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone()
@@ -534,7 +534,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
     }
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> DefaultPnClient<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> DefaultPnClient<CS, S, T> {
     pub fn new(cmd_client: Arc<T>,
                local_identity: P2pIdentityRef,
                cert_factory: P2pIdentityCertFactoryRef,
@@ -567,7 +567,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
 
     fn register_cmd_handler(self: &Arc<Self>) {
         let this = self.clone();
-        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ToProxyResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ToProxyResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
@@ -578,12 +578,12 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
                         recv_cache.insert_err(p2p_err!(P2pErrorCode::Failed, "err {}", resp.result));
                     }
                 }
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::FromProxy as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::FromProxy as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
@@ -605,7 +605,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
                 if recv_cache.is_some() {
                     let recv_cache = recv_cache.unwrap();
                     if recv_cache.insert(from.seq, (data.len() - buf.len(), data)) {
-                        return Ok(())
+                        return Ok(None)
                     } else {
                         log::info!("recv cache is full");
                         recv_cache.insert_err(p2p_err!(P2pErrorCode::Failed, "recv cache is full"));
@@ -642,13 +642,13 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
                                                                            Box::new(DefaultPnTunnelWrite::new(from.tunnel_id, from.from.clone(), from.from.to_string(), tunnel_write)))));
                     });
                 }
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
         let weak_cmd_client = Arc::downgrade(&this.inner.cmd_client);
-        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             let weak_cmd_client = weak_cmd_client.clone();
             async move {
@@ -677,12 +677,12 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
                         cmd_client.send(cmd_code, this.inner.version, body.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     }
                 }
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
@@ -696,12 +696,12 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
                     }
                 }
                 log::debug!("recv heart resp from: {}, to: {}, tunnel_id: {:?}, has_tunnel: {}", heart.from, heart.to, heart.tunnel_id, has_tunnel);
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.inner.cmd_client.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
@@ -714,7 +714,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
                         has_tunnel = true;
                     }
                 }
-                Ok(())
+                Ok(None)
             }
         });
     }
@@ -747,7 +747,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
 }
 
 #[async_trait::async_trait]
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> PnClient for DefaultPnClient<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> PnClient for DefaultPnClient<CS, S, T> {
     async fn accept(&self) -> P2pResult<(Box<dyn PnTunnelRead>, Box<dyn PnTunnelWrite>)> {
         self.inner.accept_waiter.create_result_future().map_err(into_p2p_err!(P2pErrorCode::Failed))?.await.map_err(into_p2p_err!(P2pErrorCode::IoError))?
     }
@@ -780,7 +780,7 @@ impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W
     }
 }
 
-impl<W: Send + 'static + Unpin, S: SendGuard<W> + Unpin, T: CmdClient<u16, u8, W, S>> Drop for DefaultPnClientImpl<W, S, T> {
+impl<CS: CmdSend<()> + Unpin, S: SendGuard<(), CS> + Unpin, T: CmdClient<u16, u8, (), CS, S>> Drop for DefaultPnClientImpl<CS, S, T> {
     fn drop(&mut self) {
         log::info!("drop DefaultPnClient");
         let mut tunnel_recv_cache = self.tunnel_recv_cache.lock().unwrap();

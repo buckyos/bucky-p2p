@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawFrom};
-use sfo_cmd_server::{CmdBodyRead, PeerId};
+use sfo_cmd_server::{CmdBody, PeerId};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use sfo_cmd_server::server::CmdServer;
 use crate::p2p_identity::P2pId;
@@ -23,7 +23,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
 
     fn register_cmd_handler(self: &Arc<Self>) {
         let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ToProxy as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ToProxy as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let from = P2pId::from(peer_id.as_slice());
@@ -50,12 +50,12 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                     };
                     this.cmd_server.send(&peer_id, PackageCmdCode::ToProxyResp as u8, this.cmd_version, to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
                 }
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::FromProxyResp as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::FromProxyResp as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let data = body.read_all().await?;
@@ -69,12 +69,12 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                                      PackageCmdCode::ToProxyResp as u8,
                                      this.cmd_version,
                                      to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let from = P2pId::from(peer_id.as_slice());
@@ -84,12 +84,12 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                                      PackageCmdCode::ProxyHeart as u8,
                                      this.cmd_version,
                                      data.as_slice()).await?;
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let from = P2pId::from(peer_id.as_slice());
@@ -99,12 +99,12 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                                      PackageCmdCode::ProxyHeartResp as u8,
                                      this.cmd_version,
                                      data.as_slice()).await?;
-                Ok(())
+                Ok(None)
             }
         });
 
         let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
             let this = this.clone();
             async move {
                 let from = P2pId::from(peer_id.as_slice());
@@ -114,7 +114,7 @@ impl<T: CmdServer<u16, u8>> PnServer<T> {
                                      PackageCmdCode::ProxyClosed as u8,
                                      this.cmd_version,
                                      data.as_slice()).await?;
-                Ok(())
+                Ok(None)
             }
         });
     }

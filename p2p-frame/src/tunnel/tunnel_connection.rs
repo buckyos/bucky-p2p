@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
-use std::io::{Error, ErrorKind};
+use std::io::{Cursor, Error, ErrorKind};
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ use futures::future::abortable;
 use futures::FutureExt;
 use notify_future::{Notify, NotifyWaiter};
 use num_traits::FromPrimitive;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpSocket;
 use tokio::time::error::Elapsed;
 use crate::endpoint::Endpoint;
@@ -234,6 +234,9 @@ pub struct TunnelConnectionRead {
     vport: u16,
     remainder: u16,
     state: ReadState,
+    buf: [u8; 1024],
+    buf_cache_len: usize,
+    buf_read_pos: usize,
     read_future: Option<Pin<Box<dyn Send + Future<Output=P2pResult<usize>>>>>,
     recv_header_handle: Option<SpawnHandle<P2pResult<(PackageCmdCode, PackageHeader)>>>,
 }
@@ -256,6 +259,9 @@ impl TunnelConnectionRead {
             vport,
             remainder: 0,
             state: ReadState::Work,
+            buf: [0u8; 1024],
+            buf_cache_len: 0,
+            buf_read_pos: 0,
             read_future: None,
             recv_header_handle: None,
         };
@@ -564,9 +570,18 @@ impl Drop for TunnelConnectionRead {
 impl runtime::AsyncRead for TunnelConnectionRead {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
         unsafe {
+            if self.buf_cache_len > 0 && self.buf_cache_len > self.buf_read_pos  {
+                let read_len = std::cmp::min(self.buf_cache_len - self.buf_read_pos, buf.remaining());
+                buf.put_slice(&self.buf[self.buf_read_pos..self.buf_read_pos+read_len]);
+                self.buf_read_pos += read_len;
+                if self.buf_cache_len == self.buf_read_pos {
+                    self.buf_cache_len = 0;
+                }
+                return Poll::Ready(Ok(()));
+            }
             if self.read_future.is_none() {
                 let this: &'static mut Self = std::mem::transmute(self.as_mut().deref_mut());
-                let buf: &'static mut [u8] = std::mem::transmute(buf.initialize_unfilled());
+                let buf: &'static mut [u8] = std::mem::transmute(self.buf.as_mut_slice());
                 let future = this.recv(buf);
                 self.as_mut().read_future = Some(Box::pin(future));
             }
@@ -574,7 +589,17 @@ impl runtime::AsyncRead for TunnelConnectionRead {
             match Pin::new(self.as_mut().read_future.as_mut().unwrap()).poll(cx) {
                 Poll::Ready(Ok(n)) => {
                     self.as_mut().read_future = None;
-                    buf.advance(n);
+                    if n > 0 {
+                        self.buf_cache_len = n;
+                        self.buf_read_pos = 0;
+                        let read_len = std::cmp::min(self.buf_cache_len - self.buf_read_pos, buf.remaining());
+                        buf.put_slice(&self.buf[self.buf_read_pos..self.buf_read_pos+read_len]);
+                        self.buf_read_pos += read_len;
+                        if self.buf_cache_len == self.buf_read_pos {
+                            self.buf_cache_len = 0;
+                        }
+                        return Poll::Ready(Ok(()));
+                    }
                     Poll::Ready(Ok(()))
                 }
                 Poll::Ready(Err(e)) => {

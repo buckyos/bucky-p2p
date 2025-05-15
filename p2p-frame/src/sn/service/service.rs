@@ -9,7 +9,7 @@ use std::{
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use callback_result::SingleCallbackWaiter;
-use sfo_cmd_server::{CmdBodyRead, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
 use sfo_cmd_server::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
 use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
@@ -61,7 +61,7 @@ impl SnTunnelListener {
 }
 
 #[async_trait::async_trait]
-impl CmdTunnelListener<SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
+impl CmdTunnelListener<(), SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
     async fn accept(&self) -> CmdResult<CmdTunnel<SnTunnelRead, SnTunnelWrite>> {
         let socket = self.waiter.create_result_future().map_err(into_cmd_err!(CmdErrorCode::Failed))?.await.map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))?;
         let (read, write) = socket.split();
@@ -69,8 +69,8 @@ impl CmdTunnelListener<SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
     }
 }
 
-type SnCmdServer = DefaultCmdServer<SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>;
-pub type SnCmdServerRef = Arc<DefaultCmdServer<SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
+type SnCmdServer = DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>;
+pub type SnCmdServerRef = Arc<DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
 
 
 struct DefaultSnServiceContractServer {}
@@ -190,42 +190,42 @@ impl SnService {
 
     fn register_sn_cmd_handler(self: &Arc<Self>) {
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCall as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCall as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
             let service = service.clone();
             async move {
                 let call_req = SnCall::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 service.handle_call(call_req, &peer_id, tunnel_id, bucky_time_now()).await;
-                Ok(())
+                Ok(None)
             }
         });
 
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCalledResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCalledResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
             let service = service.clone();
             async move {
                 let called_resp = SnCalledResp::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 service.handle_called_resp(called_resp).await;
-                Ok(())
+                Ok(None)
             }
         });
 
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ReportSn as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::ReportSn as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
             let service = service.clone();
             async move {
                 let report_sn = ReportSn::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 service.handle_report_sn(&peer_id, tunnel_id, report_sn).await;
-                Ok(())
+                Ok(None)
             }
         });
 
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::SnQuery as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBodyRead| {
+        self.cmd_server.register_cmd_handler(PackageCmdCode::SnQuery as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
             let service = service.clone();
             async move {
                 let query = SnQuery::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 service.handle_query_sn(&peer_id, tunnel_id, query).await;
-                Ok(())
+                Ok(None)
             }
         });
     }
@@ -401,8 +401,7 @@ impl SnService {
         let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
-            let tunnel = tunnel.lock().await;
-            let remote = tunnel.send.remote();
+            let remote = tunnel.send.get().await.remote();
             if !remotes.contains(&remote) {
                 remotes.push(remote);
             }
