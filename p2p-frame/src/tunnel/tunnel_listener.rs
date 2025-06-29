@@ -120,11 +120,13 @@ impl TunnelListener {
         self.sn_service.set_listener(move |called: SnCalled| {
             let this = this.clone();
             async move {
-                if let Some(listener) = this.upgrade() {
-                    if let Err(e) = listener.on_sn_called(called).await {
-                        error!("on sn called error: {:?}", e);
+                Executor::spawn(async move {
+                    if let Some(listener) = this.upgrade() {
+                        if let Err(e) = listener.on_sn_called(called).await {
+                            error!("on sn called error: {:?}", e);
+                        }
                     }
-                }
+                });
                 Ok(())
             }
         });

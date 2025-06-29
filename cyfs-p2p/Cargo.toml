@@ -20,7 +20,7 @@ async-trait = "0.1.87"
 futures = { version = '0.3', features = ['default', 'thread-pool'] }
 rand = "0.7.3"
 sha2 = "0.8.2"
-sfo-result = { version = "0.2.4", features = ["backtrace", "log"] }
+sfo-result = { version = "0.2.4" }
 
 [target.'cfg(unix)'.dependencies]
 nix = '0.24'
