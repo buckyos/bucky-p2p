@@ -79,9 +79,9 @@ impl P2pConfig {
             extra_networks: Vec::new(),
             endpoints,
             port_mapping: None,
-            tcp_accept_timout: Duration::from_secs(30),
-            tcp_connect_timout: Duration::from_secs(30),
-            quic_connect_timeout: Duration::from_secs(30),
+            tcp_accept_timout: Duration::from_secs(10),
+            tcp_connect_timout: Duration::from_secs(10),
+            quic_connect_timeout: Duration::from_secs(10),
             quic_idle_time: Duration::from_secs(60),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
         }
