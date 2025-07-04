@@ -24,12 +24,6 @@ pub struct QuicConnection {
     remote: Endpoint,
 }
 
-impl Drop for QuicConnection {
-    fn drop(&mut self) {
-        log::info!("quic connection {} drop", self.socket.stable_id())
-    }
-}
-
 impl QuicConnection {
     pub fn new(
         socket: quinn::Connection,
@@ -269,6 +263,7 @@ impl QuicRead {
 
 impl Drop for QuicRead {
     fn drop(&mut self) {
+        log::trace!("quic conn {} read stream {} drop", self.socket.stable_id(), self.recv.id());
         self.stop();
     }
 }
@@ -384,6 +379,7 @@ impl P2pWrite for QuicWrite {
 
 impl Drop for QuicWrite {
     fn drop(&mut self) {
+        log::trace!("quic conn {} write stream {} drop", self.socket.as_ref().unwrap().stable_id(), self.send.as_ref().unwrap().id());
         self.stop();
     }
 }
