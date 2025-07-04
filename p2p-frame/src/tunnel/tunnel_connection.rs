@@ -901,9 +901,11 @@ impl TunnelConnection {
         let future = self.recv();
         match runtime::timeout(self.conn_timeout, self.open_reverse_session_inner(tunnel_id, session_type, self.protocol_version, &mut write, future, vport, result, session_id.clone())).await {
             Ok(Ok((ack, read))) => {
-                let mut inner = self.state.lock().unwrap();
-                log::info!("tunnel {:?} state from {:?} to Worked", tunnel_id, inner.tunnel_state);
-                inner.tunnel_state = TunnelState::Worked;
+                {
+                    let mut inner = self.state.lock().unwrap();
+                    log::info!("tunnel {:?} state from {:?} to Worked", tunnel_id, inner.tunnel_state);
+                    inner.tunnel_state = TunnelState::Worked;
+                }
                 Ok((ack, TunnelConnectionRead::new(self.clone(), read, session_id, vport), TunnelConnectionWrite::new(self.clone(), write, session_id, vport)))
             }
             Ok(Err(err)) => {
