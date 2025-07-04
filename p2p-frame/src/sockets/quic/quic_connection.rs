@@ -70,8 +70,8 @@ impl QuicConnection {
             quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
         let mut transport_config = quinn::TransportConfig::default();
         transport_config.max_idle_timeout(Some(idle_timeout.try_into().unwrap()));
-        if idle_timeout > Duration::from_secs(30) {
-            transport_config.keep_alive_interval(Some(Duration::from_secs(30)));
+        if idle_timeout > Duration::from_secs(15) {
+            transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
         }
         match congestion_algorithm {
             QuicCongestionAlgorithm::Bbr => {
