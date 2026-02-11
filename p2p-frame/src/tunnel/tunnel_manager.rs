@@ -25,6 +25,15 @@ use super::{ReverseWaiterCache, ReverseResult, SessionSnCall, Tunnel, TunnelConn
 struct TunnelsState<F: P2pConnectionFactory> {
     tunnels: HashMap<TunnelId, Arc<Tunnel<F>>>,
     pending_tunnels: HashMap<TunnelId, Notify<ReverseResult>>,
+    endpoint_scores: HashMap<Endpoint, EndpointScore>,
+}
+
+#[derive(Clone)]
+struct EndpointScore {
+    // Last successful direct-connect timestamp (microseconds).
+    last_success_at: u64,
+    // Consecutive failures used for temporary down-ranking.
+    fail_count: u32,
 }
 
 impl<F: P2pConnectionFactory> TunnelsState<F> {
@@ -83,6 +92,7 @@ impl<F: P2pConnectionFactory> Tunnels<F> {
             state: Mutex::new(TunnelsState {
                 tunnels: Default::default(),
                 pending_tunnels: Default::default(),
+                endpoint_scores: Default::default(),
             })
         })
     }
@@ -169,11 +179,50 @@ impl<F: P2pConnectionFactory> Tunnels<F> {
         state.is_exist_pending_future(seq)
     }
 
+    pub fn preferred_direct_endpoints(&self, endpoints: &[Endpoint], preferred_ep: Option<&Endpoint>) -> Vec<Endpoint> {
+        let state = self.state.lock().unwrap();
+        let mut ranked: Vec<(i64, usize, Endpoint)> = endpoints.iter().enumerate().map(|(idx, ep)| {
+            let mut score: i64 = 0;
+            // Strongly prefer the endpoint that succeeded most recently in conn_info_cache.
+            if preferred_ep.map(|preferred| preferred == ep).unwrap_or(false) {
+                score += 10_000;
+            }
+            // Slightly prefer WAN/mapped endpoints outside LAN scenario.
+            if ep.is_static_wan() {
+                score += 500;
+            }
+            if let Some(stat) = state.endpoint_scores.get(ep) {
+                if stat.last_success_at > 0 {
+                    score += 2_000;
+                }
+                // Penalize repeatedly failing endpoints, with an upper bound.
+                score -= (stat.fail_count.min(20) as i64) * 300;
+            }
+            (score, idx, *ep)
+        }).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        ranked.into_iter().map(|(_, _, ep)| ep).collect()
+    }
+
+    pub fn on_direct_connect_result(&self, endpoint: &Endpoint, success: bool) {
+        let mut state = self.state.lock().unwrap();
+        let stat = state.endpoint_scores.entry(*endpoint).or_insert(EndpointScore {
+            last_success_at: 0,
+            fail_count: 0,
+        });
+        if success {
+            // Success immediately resets failure penalty.
+            stat.last_success_at = bucky_time_now();
+            stat.fail_count = 0;
+        } else {
+            stat.fail_count = stat.fail_count.saturating_add(1);
+        }
+    }
+
     pub async fn close_all_tunnel(&self) {
-        let tunnels = {
-            let state = self.state.lock().unwrap();
-            state.tunnels.iter().map(|v| v.1.clone()).collect::<Vec<Arc<Tunnel<F>>>>()
-        };
+        let mut state = self.state.lock().unwrap();
+        state.tunnels.clear();
+        state.pending_tunnels.clear();
     }
 }
 
@@ -184,6 +233,14 @@ impl<F: P2pConnectionFactory> ReverseWaiterCache for Tunnels<F> {
 
     fn remove_reverse_waiter(&self, sequence: TunnelId) {
         self.try_pop_pending_future(sequence);
+    }
+
+    fn preferred_direct_endpoints(&self, endpoints: &[Endpoint], preferred_ep: Option<&Endpoint>) -> Vec<Endpoint> {
+        self.preferred_direct_endpoints(endpoints, preferred_ep)
+    }
+
+    fn on_direct_connect_result(&self, endpoint: &Endpoint, success: bool) {
+        self.on_direct_connect_result(endpoint, success)
     }
 }
 
@@ -359,12 +416,11 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
     ) -> Arc<Self> {
         let tunnels = Arc::new(RwLock::new(HashMap::<P2pId, Arc<Tunnels<F>>>::new()));
         let tmp = tunnels.clone();
-        let local_id = local_identity.get_id();
+        let clear_idle_timeout = idle_timeout;
         let handle = Executor::spawn_with_handle(async move {
             loop {
                 runtime::sleep(Duration::from_secs(120)).await;
-                // log::info!("{} start clear idle tunnel", local_id);
-                Self::clear_idle_tunnel(tmp.clone()).await;
+                Self::clear_idle_tunnel(tmp.clone(), clear_idle_timeout).await;
             }
         }).unwrap();
         let tunnel_type = p2p_factory.tunnel_type();
@@ -409,15 +465,18 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
         self.listen_ports.remove_listen_port(port)
     }
 
-    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels<F>>>>>) {
+    async fn clear_idle_tunnel(tunnels: Arc<RwLock<HashMap<P2pId, Arc<Tunnels<F>>>>>, idle_timeout: Duration) {
+        // bucky_time_now() is in microseconds, keep unit consistent with idle_timeout.
+        let idle_timeout_us = idle_timeout.as_micros() as u64;
         let tunnels_map = tunnels.read().unwrap();
+        let mut removed_count = 0usize;
         for (_, tunnels) in tunnels_map.iter() {
             let mut remove_list = Vec::new();
             {
                 let state = tunnels.state.lock().unwrap();
                 for (_, tunnel) in state.tunnels.iter() {
                     let tunnel_stat = tunnel.tunnel_stat();
-                    if tunnel.is_error() || (tunnel.is_idle() && tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > 250 * 1000 * 1000) {
+                    if tunnel.is_error() || (tunnel.is_idle() && tunnel_stat.get_work_instance_num() == 0 && bucky_time_now() - tunnel_stat.get_latest_active_time() > idle_timeout_us) {
                         remove_list.push(tunnel.clone());
                     }
                 }
@@ -426,7 +485,15 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
                 let seq = tunnel.get_tunnel_id();
                 let mut state = tunnels.state.lock().unwrap();
                 state.tunnels.remove(&seq);
+                removed_count += 1;
             }
+        }
+        if removed_count > 0 {
+            log::info!(
+                "tunnel manager idle cleanup removed {} tunnels timeout_ms {}",
+                removed_count,
+                idle_timeout.as_millis()
+            );
         }
     }
 
@@ -556,12 +623,28 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
 
     pub async fn create_session(self: &Arc<Self>, remote: &P2pIdentityCertRef, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         let remote_id = remote.get_id();
+        // Serialize tunnel creation per remote to avoid connection storms.
+        let _create_guard = Locker::get_locker(format!("create_tunnel_{}", remote_id)).await;
         let tunnels = self.get_tunnels(&remote_id);
 
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
+            log::debug!(
+                "create session remote {} session {} vport {} reuse tunnel {:?}",
+                remote_id,
+                session_id,
+                vport,
+                tunnel.get_tunnel_id()
+            );
             tunnel.open_session(vport, session_id).await
         } else {
             let seq = self.generate_tunnel_id(&remote_id);
+            log::info!(
+                "create session remote {} session {} vport {} new tunnel {:?}",
+                remote_id,
+                session_id,
+                vport,
+                seq
+            );
 
             let remote = match self.device_finder.get_identity_cert(&remote.get_id()).await {
                 Ok(remote) => remote,
@@ -587,6 +670,13 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
             let ret = tunnel.connect_session(vport, session_id, tunnels.clone()).await;
             if tunnel.is_work() {
                 tunnels.add_tunnel(tunnel);
+                log::info!(
+                    "create session remote {} session {} vport {} tunnel {:?} added to pool",
+                    remote_id,
+                    session_id,
+                    vport,
+                    seq
+                );
             }
             ret
         }
@@ -607,12 +697,28 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
     }
 
     pub async fn create_session_from_id(self: &Arc<Self>, remote_id: &P2pId, session_id: SessionId, vport: u16) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+        // Same single-flight guard for callers that only provide remote_id.
+        let _create_guard = Locker::get_locker(format!("create_tunnel_{}", remote_id)).await;
         let tunnels = self.get_tunnels(remote_id);
         if let Some(tunnel) = tunnels.get_idle_tunnel() {
+            log::debug!(
+                "create session by id remote {} session {} vport {} reuse tunnel {:?}",
+                remote_id,
+                session_id,
+                vport,
+                tunnel.get_tunnel_id()
+            );
             tunnel.open_session(vport, session_id).await
         } else {
             let remote = self.device_finder.get_identity_cert(remote_id).await?;
             let seq = self.generate_tunnel_id(remote_id);
+            log::info!(
+                "create session by id remote {} session {} vport {} new tunnel {:?}",
+                remote_id,
+                session_id,
+                vport,
+                seq
+            );
             let mut tunnel = Tunnel::new(
                 self.sn_service.clone(),
                 seq,
@@ -631,6 +737,13 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
             let ret = tunnel.connect_session(vport, session_id, tunnels.clone()).await;
             if tunnel.is_work() {
                 tunnels.add_tunnel(tunnel);
+                log::info!(
+                    "create session by id remote {} session {} vport {} tunnel {:?} added to pool",
+                    remote_id,
+                    session_id,
+                    vport,
+                    seq
+                );
             }
             ret
         }
@@ -740,7 +853,12 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
                 return Ok(());
             }
         }
-        assert_eq!(sn_called.call_type, self.p2p_factory.tunnel_type());
+        if sn_called.call_type != self.p2p_factory.tunnel_type() {
+            return Err(p2p_err!(P2pErrorCode::InvalidParam,
+                                "invalid call type {:?}, expect {:?}",
+                                sn_called.call_type,
+                                self.p2p_factory.tunnel_type()));
+        }
 
         let session_info = SessionSnCall::clone_from_slice(sn_called.payload.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         let mut result = 0;

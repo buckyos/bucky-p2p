@@ -758,7 +758,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bf3c7b9a1ee7c6e55f9f176068eacc3f43cfaeab49d80958cd5d4a0d96d1a5"
 dependencies = [
  "async-std",
- "notify-future 0.2.4",
+ "notify-future 0.2.5",
 ]
 
 [[package]]
@@ -2141,9 +2141,9 @@ checksum = "334498b5ebb63e6bb9ea9206a3f4a57c451abd7565a182088738ab01443c195e"
 
 [[package]]
 name = "notify-future"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaa0ee17c9a1ef38af21088fb063a697d263efb38c6510a68abc4ceef738a062"
+checksum = "de78769dc11e4e675de145df34bbb5bd94955b66d410dc00a9a6dd6c540fc8d0"
 
 [[package]]
 name = "nu-ansi-term"
@@ -2357,7 +2357,7 @@ dependencies = [
  "log",
  "mini-moka",
  "nix",
- "notify-future 0.2.4",
+ "notify-future 0.2.5",
  "num-derive",
  "num-traits",
  "once_cell",
@@ -3311,7 +3311,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "711b3f1543b085d82c3863402d4af9a2656797fbd260161226cd63af1e7ae4b9"
 dependencies = [
  "async-trait",
- "notify-future 0.2.4",
+ "notify-future 0.2.5",
  "sfo-result",
  "tokio",
 ]
