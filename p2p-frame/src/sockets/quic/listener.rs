@@ -246,3 +246,199 @@ impl P2pListener for QuicListener {
     }
 
 }
+
+#[cfg(all(test, feature = "x509"))]
+mod tests {
+    use std::sync::{Arc, Once};
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use crate::endpoint::{Endpoint, Protocol};
+    use crate::executor::Executor;
+    use crate::finder::{DeviceCache, DeviceCacheConfig};
+    use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
+    use crate::p2p_identity::{P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
+    use crate::sockets::{QuicCongestionAlgorithm, QuicConnection, UpdateOuterResult};
+    use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
+    use crate::x509::{generate_x509_identity, X509IdentityCertFactory, X509IdentityFactory};
+
+    use super::QuicListener;
+
+    static TLS_INIT: Once = Once::new();
+
+    struct NoopConnListener;
+
+    #[async_trait::async_trait]
+    impl P2pConnectionEventListener for NoopConnListener {
+        async fn on_new_connection(&self, _conn: P2pConnection) -> crate::error::P2pResult<()> {
+            Ok(())
+        }
+    }
+
+    struct SignalConnListener {
+        tx: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2pConnectionEventListener for SignalConnListener {
+        async fn on_new_connection(&self, _conn: P2pConnection) -> crate::error::P2pResult<()> {
+            if let Some(tx) = self.tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Ok(())
+        }
+    }
+
+    fn init_tls_once() {
+        TLS_INIT.call_once(|| {
+            Executor::init();
+            crate::tls::init_tls(Arc::new(X509IdentityFactory));
+        });
+    }
+
+    fn new_cert_cache() -> P2pIdentityCertCacheRef {
+        Arc::new(DeviceCache::new(
+            &DeviceCacheConfig {
+                expire: Duration::from_secs(60),
+                capacity: 64,
+            },
+            None,
+        ))
+    }
+
+    fn new_identity() -> P2pIdentityRef {
+        Arc::new(generate_x509_identity(None).unwrap())
+    }
+
+    fn new_cert_factory() -> P2pIdentityCertFactoryRef {
+        Arc::new(X509IdentityCertFactory)
+    }
+
+    async fn setup_listener(
+        algo: QuicCongestionAlgorithm,
+        mapping_port: Option<u16>,
+        out: Option<Endpoint>,
+    ) -> (Arc<QuicListener>, Arc<DefaultTlsServerCertResolver>, P2pIdentityRef, Endpoint) {
+        init_tls_once();
+        let cert_factory = new_cert_factory();
+        let cert_cache = new_cert_cache();
+        let server_identity = new_identity();
+        let resolver = DefaultTlsServerCertResolver::new();
+        resolver
+            .add_server_identity(server_identity.clone())
+            .await
+            .unwrap();
+
+        let listener = QuicListener::new(cert_cache, resolver.clone(), cert_factory, algo);
+        listener
+            .bind(
+                Endpoint::from((Protocol::Quic, "127.0.0.1:0".parse().unwrap())),
+                out,
+                mapping_port,
+            )
+            .await
+            .unwrap();
+
+        let ep = Endpoint::from((Protocol::Quic, listener.quic_ep().local_addr().unwrap()));
+        (listener, resolver, server_identity, ep)
+    }
+
+    #[tokio::test]
+    async fn quic_listener_state_getters_and_mapping_port_ok() {
+        let out = Endpoint::from((Protocol::Quic, "127.0.0.1:45678".parse().unwrap()));
+        let (listener, _resolver, _identity, _ep) =
+            setup_listener(QuicCongestionAlgorithm::Bbr, Some(10001), Some(out)).await;
+
+        assert_eq!(listener.outer(), Some(out));
+        assert_eq!(listener.mapping_port(), Some(10001));
+
+        let changed_local = Endpoint::from((Protocol::Quic, "127.0.0.1:12345".parse().unwrap()));
+        listener.set_local(changed_local);
+        assert_eq!(listener.local(), changed_local);
+
+        let as_trait: &dyn P2pListener = listener.as_ref();
+        assert_eq!(as_trait.local(), changed_local);
+        assert_eq!(as_trait.mapping_port(), Some(10001));
+    }
+
+    #[tokio::test]
+    async fn quic_listener_update_outer_states_ok() {
+        let out = Endpoint::from((Protocol::Quic, "127.0.0.1:43001".parse().unwrap()));
+        let (listener, _resolver, _identity, _ep) =
+            setup_listener(QuicCongestionAlgorithm::Bbr, None, Some(out)).await;
+
+        assert!(matches!(listener.update_outer(&out), UpdateOuterResult::None));
+
+        let out2 = Endpoint::from((Protocol::Quic, "127.0.0.1:43002".parse().unwrap()));
+        assert!(matches!(listener.update_outer(&out2), UpdateOuterResult::Reset));
+
+        listener.state.write().unwrap().outer = None;
+        assert!(matches!(listener.update_outer(&out), UpdateOuterResult::Update));
+    }
+
+    #[tokio::test]
+    async fn quic_listener_bind_with_all_congestion_algorithms_ok() {
+        let _ = setup_listener(QuicCongestionAlgorithm::Cubic, None, None).await;
+        let _ = setup_listener(QuicCongestionAlgorithm::NewReno, None, None).await;
+    }
+
+    #[tokio::test]
+    async fn quic_listener_start_accepts_bi_and_dispatches_event() {
+        let (listener, _resolver, server_identity, server_ep) =
+            setup_listener(QuicCongestionAlgorithm::Bbr, None, None).await;
+        let (tx, rx) = oneshot::channel();
+        listener.set_connection_event_listener(Arc::new(SignalConnListener {
+            tx: std::sync::Mutex::new(Some(tx)),
+        }));
+        listener.start();
+
+        let client_identity = new_identity();
+        let client_ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        let mut client_conn = QuicConnection::connect_with_ep(
+            client_ep,
+            client_identity,
+            new_cert_factory(),
+            server_identity.get_id(),
+            Some(server_identity.get_name()),
+            server_ep,
+            QuicCongestionAlgorithm::Bbr,
+            Duration::from_secs(3),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        let _ = client_conn.open_bi_stream().await.unwrap();
+
+        let ret = tokio::time::timeout(Duration::from_secs(2), rx).await;
+        assert!(ret.is_ok());
+    }
+
+    #[tokio::test]
+    async fn quic_listener_start_accepts_uni_without_dispatch() {
+        let (listener, _resolver, server_identity, server_ep) =
+            setup_listener(QuicCongestionAlgorithm::Bbr, None, None).await;
+        listener.set_connection_event_listener(Arc::new(NoopConnListener));
+        listener.start();
+
+        let client_identity = new_identity();
+        let client_ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        let mut client_conn = QuicConnection::connect_with_ep(
+            client_ep,
+            client_identity,
+            new_cert_factory(),
+            server_identity.get_id(),
+            Some(server_identity.get_name()),
+            server_ep,
+            QuicCongestionAlgorithm::Bbr,
+            Duration::from_secs(3),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        let _ = client_conn.open_ui().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
