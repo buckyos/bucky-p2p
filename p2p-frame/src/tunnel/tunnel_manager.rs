@@ -914,3 +914,746 @@ impl<F: P2pConnectionFactory> Drop for TunnelManager<F> {
         Executor::block_on(self.close_all_tunnel());
     }
 }
+
+#[cfg(all(test, feature = "x509"))]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use bucky_raw_codec::RawConvertTo;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::endpoint::Protocol;
+    use crate::finder::{DeviceCache, DeviceCacheConfig};
+    use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnection};
+    use crate::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertFactoryRef, P2pIdentityRef, P2pSn};
+    use crate::p2p_network::P2pNetworkRef;
+    use crate::protocol::v0::{SnCalled, TunnelType};
+    use crate::sn::client::{SNClientService, SNClientServiceRef};
+    use crate::sn::service::{create_sn_service, SnServiceConfig, SnServiceRef};
+    use crate::sockets::tcp::TcpNetwork;
+    use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
+    use crate::tls::DefaultTlsServerCertResolver;
+    use crate::tunnel::TunnelListener;
+    use crate::types::{SequenceGenerator, TunnelIdGenerator};
+    use crate::x509::{generate_x509_identity, X509IdentityCertFactory, X509IdentityFactory};
+
+    const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
+    const CALL_TIMEOUT: Duration = Duration::from_secs(8);
+    const CONN_TIMEOUT: Duration = Duration::from_millis(500);
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(43000);
+
+    fn next_port() -> u16 {
+        NEXT_PORT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn localhost_quic_endpoint(port: u16) -> Endpoint {
+        Endpoint::from((
+            Protocol::Quic,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+        ))
+    }
+
+    fn build_identity(name: &str, endpoint: Endpoint) -> P2pIdentityRef {
+        let identity = generate_x509_identity(Some(name.to_owned())).unwrap();
+        let identity: P2pIdentityRef = Arc::new(identity);
+        identity.update_endpoints(vec![endpoint])
+    }
+
+    fn build_sn_entry(sn_identity: &P2pIdentityRef) -> P2pSn {
+        let sn_cert = sn_identity.get_identity_cert().unwrap();
+        P2pSn::new(sn_cert.get_id(), sn_cert.get_name(), sn_cert.endpoints())
+    }
+
+    async fn create_net_manager(
+        endpoint: Endpoint,
+        cert_factory: P2pIdentityCertFactoryRef,
+    ) -> NetManagerRef {
+        let cert_cache = Arc::new(DeviceCache::new(
+            &DeviceCacheConfig {
+                expire: Duration::from_secs(600),
+                capacity: 1024,
+            },
+            None,
+        ));
+        let cert_resolver = DefaultTlsServerCertResolver::new();
+        let tcp_network = Arc::new(TcpNetwork::new(
+            cert_cache.clone(),
+            cert_resolver.clone(),
+            cert_factory.clone(),
+            Duration::from_secs(3),
+        )) as P2pNetworkRef;
+        let quic_network = Arc::new(QuicNetwork::new(
+            cert_cache,
+            cert_resolver.clone(),
+            cert_factory,
+            QuicCongestionAlgorithm::Bbr,
+            Duration::from_secs(3),
+            Duration::from_secs(10),
+        )) as P2pNetworkRef;
+        let net_manager = Arc::new(
+            NetManager::new(
+                vec![tcp_network, quic_network],
+                cert_resolver,
+                DefaultP2pConnectionInfoCache::new(),
+            )
+            .unwrap(),
+        );
+        net_manager.listen(&[endpoint], None).await.unwrap();
+        net_manager
+    }
+
+    async fn start_sn(
+        sn_identity: P2pIdentityRef,
+        identity_factory: Arc<X509IdentityFactory>,
+        cert_factory: Arc<X509IdentityCertFactory>,
+    ) -> SnServiceRef {
+        let service =
+            create_sn_service(SnServiceConfig::new(sn_identity, identity_factory, cert_factory))
+                .await;
+        service.start().await.unwrap();
+        service
+    }
+
+    async fn start_sn_client(
+        net_manager: NetManagerRef,
+        local_identity: P2pIdentityRef,
+        sn_list: Vec<P2pSn>,
+        cert_factory: P2pIdentityCertFactoryRef,
+    ) -> SNClientServiceRef {
+        let sn_service = SNClientService::new(
+            net_manager,
+            sn_list,
+            local_identity,
+            Arc::new(SequenceGenerator::new()),
+            Arc::new(TunnelIdGenerator::new()),
+            cert_factory,
+            2,
+            Duration::from_millis(200),
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+        );
+        sn_service.start().await.unwrap();
+        sn_service.wait_online(Some(ONLINE_TIMEOUT)).await.unwrap();
+        sn_service
+    }
+
+    struct QueryDeviceFinder {
+        sn_service: SNClientServiceRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        override_target: Option<P2pId>,
+        override_eps: Vec<Endpoint>,
+    }
+
+    impl QueryDeviceFinder {
+        fn new(
+            sn_service: SNClientServiceRef,
+            cert_factory: P2pIdentityCertFactoryRef,
+            override_target: Option<P2pId>,
+            override_eps: Vec<Endpoint>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                sn_service,
+                cert_factory,
+                override_target,
+                override_eps,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DeviceFinder for QueryDeviceFinder {
+        async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
+            let resp = self.sn_service.query(device_id).await?;
+            let peer_info = resp
+                .peer_info
+                .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "device not found"))?;
+            let cert = self.cert_factory.create(&peer_info)?;
+            if self
+                .override_target
+                .as_ref()
+                .map(|id| id == device_id)
+                .unwrap_or(false)
+                && !self.override_eps.is_empty()
+            {
+                Ok(cert.update_endpoints(self.override_eps.clone()))
+            } else {
+                Ok(cert.update_endpoints(resp.end_point_array))
+            }
+        }
+    }
+
+    struct TestStreamFactory {
+        net_manager: NetManagerRef,
+    }
+
+    impl TestStreamFactory {
+        fn new(net_manager: NetManagerRef) -> Self {
+            Self { net_manager }
+        }
+    }
+
+    #[async_trait]
+    impl P2pConnectionFactory for TestStreamFactory {
+        fn tunnel_type(&self) -> TunnelType {
+            TunnelType::Stream
+        }
+
+        async fn create_connect(
+            &self,
+            local_identity: &P2pIdentityRef,
+            remote: &Endpoint,
+            remote_id: &P2pId,
+            remote_name: Option<String>,
+        ) -> P2pResult<Vec<P2pConnection>> {
+            self.net_manager
+                .get_network(remote.protocol())?
+                .create_stream_connect(local_identity, remote, remote_id, remote_name)
+                .await
+        }
+
+        async fn create_connect_with_local_ep(
+            &self,
+            local_identity: &P2pIdentityRef,
+            local_ep: &Endpoint,
+            remote: &Endpoint,
+            remote_id: &P2pId,
+            remote_name: Option<String>,
+        ) -> P2pResult<P2pConnection> {
+            self.net_manager
+                .get_network(remote.protocol())?
+                .create_stream_connect_with_local_ep(
+                    local_identity,
+                    local_ep,
+                    remote,
+                    remote_id,
+                    remote_name,
+                )
+                .await
+        }
+    }
+
+    struct TestDatagramFactory {
+        net_manager: NetManagerRef,
+    }
+
+    impl TestDatagramFactory {
+        fn new(net_manager: NetManagerRef) -> Self {
+            Self { net_manager }
+        }
+    }
+
+    #[async_trait]
+    impl P2pConnectionFactory for TestDatagramFactory {
+        fn tunnel_type(&self) -> TunnelType {
+            TunnelType::Datagram
+        }
+
+        async fn create_connect(
+            &self,
+            local_identity: &P2pIdentityRef,
+            remote: &Endpoint,
+            remote_id: &P2pId,
+            remote_name: Option<String>,
+        ) -> P2pResult<Vec<P2pConnection>> {
+            self.net_manager
+                .get_network(remote.protocol())?
+                .create_datagram_connect(local_identity, remote, remote_id, remote_name)
+                .await
+        }
+
+        async fn create_connect_with_local_ep(
+            &self,
+            local_identity: &P2pIdentityRef,
+            local_ep: &Endpoint,
+            remote: &Endpoint,
+            remote_id: &P2pId,
+            remote_name: Option<String>,
+        ) -> P2pResult<P2pConnection> {
+            self.net_manager
+                .get_network(remote.protocol())?
+                .create_datagram_connect_with_local_ep(
+                    local_identity,
+                    local_ep,
+                    remote,
+                    remote_id,
+                    remote_name,
+                )
+                .await
+        }
+    }
+
+    struct SessionEventCollector {
+        called: Arc<AtomicUsize>,
+        tx: mpsc::UnboundedSender<(SessionId, u16)>,
+    }
+
+    #[async_trait]
+    impl TunnelManagerEvent for SessionEventCollector {
+        async fn on_new_session(
+            &self,
+            session_id: SessionId,
+            vport: u16,
+            _read: TunnelConnectionRead,
+            _write: TunnelConnectionWrite,
+        ) -> P2pResult<()> {
+            self.called.fetch_add(1, Ordering::SeqCst);
+            let _ = self.tx.send((session_id, vport));
+            Ok(())
+        }
+    }
+
+    struct TestNode<F: P2pConnectionFactory> {
+        identity: P2pIdentityRef,
+        net_manager: NetManagerRef,
+        sn_service: SNClientServiceRef,
+        tunnel_listener: TunnelListenerRef,
+        manager: Arc<TunnelManager<F>>,
+    }
+
+    impl<F: P2pConnectionFactory> TestNode<F> {
+        async fn stop(&self) {
+            self.sn_service.stop().await;
+            self.tunnel_listener.stop();
+            let _ = self
+                .net_manager
+                .remove_listen_device(self.identity.get_name().as_str())
+                .await;
+        }
+    }
+
+    async fn setup_real_sn_pair_with_override(
+        caller_override_eps: Option<Vec<Endpoint>>,
+    ) -> (SnServiceRef, TestNode<TestStreamFactory>, TestNode<TestStreamFactory>) {
+        let identity_factory = Arc::new(X509IdentityFactory);
+        let cert_factory = Arc::new(X509IdentityCertFactory);
+        crate::tls::init_tls(identity_factory.clone());
+
+        let sn_identity = build_identity("sn-server", localhost_quic_endpoint(next_port()));
+        let sn_service = start_sn(
+            sn_identity.clone(),
+            identity_factory.clone(),
+            cert_factory.clone(),
+        )
+        .await;
+        let sn_list = vec![build_sn_entry(&sn_identity)];
+
+        let caller_identity = build_identity("tm-caller", localhost_quic_endpoint(next_port()));
+        let callee_identity = build_identity("tm-callee", localhost_quic_endpoint(next_port()));
+
+        let caller_net = create_net_manager(
+            *caller_identity.endpoints().first().unwrap(),
+            cert_factory.clone(),
+        )
+        .await;
+        let callee_net = create_net_manager(
+            *callee_identity.endpoints().first().unwrap(),
+            cert_factory.clone(),
+        )
+        .await;
+
+        caller_net
+            .add_listen_device(caller_identity.clone())
+            .await
+            .unwrap();
+        callee_net
+            .add_listen_device(callee_identity.clone())
+            .await
+            .unwrap();
+
+        let caller_sn = start_sn_client(
+            caller_net.clone(),
+            caller_identity.clone(),
+            sn_list.clone(),
+            cert_factory.clone(),
+        )
+        .await;
+        let callee_sn = start_sn_client(
+            callee_net.clone(),
+            callee_identity.clone(),
+            sn_list,
+            cert_factory.clone(),
+        )
+        .await;
+
+        let caller_override_eps = caller_override_eps.unwrap_or_default();
+        let caller_finder = QueryDeviceFinder::new(
+            caller_sn.clone(),
+            cert_factory.clone(),
+            if caller_override_eps.is_empty() {
+                None
+            } else {
+                Some(callee_identity.get_id())
+            },
+            caller_override_eps,
+        );
+        let callee_finder = QueryDeviceFinder::new(callee_sn.clone(), cert_factory.clone(), None, vec![]);
+
+        let caller_listener = TunnelListener::new(
+            caller_identity.clone(),
+            caller_net.clone(),
+            caller_sn.clone(),
+            None,
+            0,
+            cert_factory.clone(),
+            CONN_TIMEOUT,
+        );
+        caller_listener.listen();
+        let callee_listener = TunnelListener::new(
+            callee_identity.clone(),
+            callee_net.clone(),
+            callee_sn.clone(),
+            None,
+            0,
+            cert_factory.clone(),
+            CONN_TIMEOUT,
+        );
+        callee_listener.listen();
+
+        let caller_manager = TunnelManager::new(
+            caller_sn.clone(),
+            caller_identity.clone(),
+            caller_finder,
+            cert_factory.clone(),
+            None,
+            Arc::new(TunnelIdGenerator::new()),
+            TestStreamFactory::new(caller_net.clone()),
+            caller_listener.clone(),
+            caller_net.get_connection_info_cache().clone(),
+            0,
+            CONN_TIMEOUT,
+            IDLE_TIMEOUT,
+        );
+
+        let callee_manager = TunnelManager::new(
+            callee_sn.clone(),
+            callee_identity.clone(),
+            callee_finder,
+            cert_factory,
+            None,
+            Arc::new(TunnelIdGenerator::new()),
+            TestStreamFactory::new(callee_net.clone()),
+            callee_listener.clone(),
+            callee_net.get_connection_info_cache().clone(),
+            0,
+            CONN_TIMEOUT,
+            IDLE_TIMEOUT,
+        );
+
+        (
+            sn_service,
+            TestNode {
+                identity: caller_identity,
+                net_manager: caller_net,
+                sn_service: caller_sn,
+                tunnel_listener: caller_listener,
+                manager: caller_manager,
+            },
+            TestNode {
+                identity: callee_identity,
+                net_manager: callee_net,
+                sn_service: callee_sn,
+                tunnel_listener: callee_listener,
+                manager: callee_manager,
+            },
+        )
+    }
+
+    async fn setup_real_sn_pair() -> (SnServiceRef, TestNode<TestStreamFactory>, TestNode<TestStreamFactory>) {
+        setup_real_sn_pair_with_override(Some(vec![localhost_quic_endpoint(next_port())])).await
+    }
+
+    async fn setup_real_sn_pair_without_override() -> (
+        SnServiceRef,
+        TestNode<TestStreamFactory>,
+        TestNode<TestStreamFactory>,
+    ) {
+        setup_real_sn_pair_with_override(None).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sn_reverse_session_real_path_triggers_listener() {
+        let (sn_service, caller, callee) = setup_real_sn_pair().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        callee.manager.set_listener(SessionEventCollector {
+            called: called.clone(),
+            tx,
+        });
+
+        let vport = 31001;
+        callee.manager.add_listen_port(vport);
+        let session_id = Default::default();
+
+        let ret = caller
+            .manager
+            .create_session_from_id(&callee.identity.get_id(), session_id, vport)
+            .await;
+        assert!(ret.is_ok());
+
+        let event = tokio::time::timeout(CALL_TIMEOUT, rx.recv()).await.unwrap();
+        assert!(event.is_some());
+        let (event_session, event_vport) = event.unwrap();
+        assert_eq!(event_session, session_id);
+        assert_eq!(event_vport, vport);
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_session_real_path_triggers_listener() {
+        let (sn_service, caller, callee) = setup_real_sn_pair().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        callee.manager.set_listener(SessionEventCollector {
+            called: called.clone(),
+            tx,
+        });
+
+        let vport = 31101;
+        callee.manager.add_listen_port(vport);
+        let session_gen = crate::types::SessionIdGenerator::new();
+        let session_id = session_gen.generate();
+        let callee_cert = callee.identity.get_identity_cert().unwrap();
+
+        let ret = caller
+            .manager
+            .create_session(&callee_cert, session_id, vport)
+            .await;
+        assert!(ret.is_ok());
+
+        let event = tokio::time::timeout(CALL_TIMEOUT, rx.recv()).await.unwrap();
+        assert!(event.is_some());
+        let (event_session, event_vport) = event.unwrap();
+        assert_eq!(event_session, session_id);
+        assert_eq!(event_vport, vport);
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_session_reuses_existing_tunnel_for_second_session() {
+        let (sn_service, caller, callee) = setup_real_sn_pair().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        callee.manager.set_listener(SessionEventCollector {
+            called: called.clone(),
+            tx,
+        });
+
+        let vport = 31102;
+        callee.manager.add_listen_port(vport);
+        let session_gen = crate::types::SessionIdGenerator::new();
+        let first_session = session_gen.generate();
+        let second_session = session_gen.generate();
+        let callee_cert = callee.identity.get_identity_cert().unwrap();
+
+        let first = caller
+            .manager
+            .create_session(&callee_cert, first_session, vport)
+            .await
+            .unwrap();
+        let first_event = tokio::time::timeout(CALL_TIMEOUT, rx.recv()).await.unwrap();
+        assert!(first_event.is_some());
+
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let second = caller
+            .manager
+            .create_session(&callee_cert, second_session, vport)
+            .await;
+        assert!(second.is_ok());
+        let second_event = tokio::time::timeout(CALL_TIMEOUT, rx.recv()).await.unwrap();
+        assert!(second_event.is_some());
+
+        assert_eq!(called.load(Ordering::SeqCst), 2);
+        let caller_tunnels = caller.manager.get_tunnels(&callee.identity.get_id());
+        let tunnel_count = {
+            let state = caller_tunnels.state.lock().unwrap();
+            state.tunnels.len()
+        };
+        assert_eq!(tunnel_count, 1);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_session_refreshes_stale_remote_cert_via_device_finder() {
+        let (sn_service, caller, callee) = setup_real_sn_pair_without_override().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        callee.manager.set_listener(SessionEventCollector {
+            called: called.clone(),
+            tx,
+        });
+
+        let vport = 31103;
+        callee.manager.add_listen_port(vport);
+        let session_id = crate::types::SessionIdGenerator::new().generate();
+        let stale_cert = callee
+            .identity
+            .get_identity_cert()
+            .unwrap()
+            .update_endpoints(vec![localhost_quic_endpoint(next_port())]);
+
+        let ret = caller
+            .manager
+            .create_session(&stale_cert, session_id, vport)
+            .await;
+        assert!(ret.is_ok());
+
+        let event = tokio::time::timeout(CALL_TIMEOUT, rx.recv()).await.unwrap();
+        assert!(event.is_some());
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sn_called_with_invalid_payload_real_path_does_not_fire_listener() {
+        let (sn_service, caller, callee) = setup_real_sn_pair().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        callee.manager.set_listener(SessionEventCollector {
+            called: called.clone(),
+            tx,
+        });
+
+        callee.manager.add_listen_port(32001);
+
+        let call_resp = caller
+            .sn_service
+            .call(
+                0x4001u32.into(),
+                Some(caller.identity.endpoints().as_slice()),
+                &callee.identity.get_id(),
+                TunnelType::Stream,
+                b"invalid-payload".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(call_resp.result, P2pErrorCode::Ok.as_u8());
+
+        let no_event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(no_event.is_err());
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sn_called_to_unlistened_port_real_path_does_not_fire_listener() {
+        let (sn_service, caller, callee) = setup_real_sn_pair().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let called = Arc::new(AtomicUsize::new(0));
+        callee.manager.set_listener(SessionEventCollector {
+            called: called.clone(),
+            tx,
+        });
+
+        let payload = SessionSnCall {
+            vport: 32999,
+            session_id: Default::default(),
+        }
+        .to_vec()
+        .unwrap();
+
+        let call_resp = caller
+            .sn_service
+            .call(
+                0x4002u32.into(),
+                Some(caller.identity.endpoints().as_slice()),
+                &callee.identity.get_id(),
+                TunnelType::Stream,
+                payload,
+            )
+            .await
+            .unwrap();
+        assert_eq!(call_resp.result, P2pErrorCode::Ok.as_u8());
+
+        let no_event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(no_event.is_err());
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_sn_called_invalid_call_type_returns_invalid_param() {
+        let (sn_service, caller, callee) = setup_real_sn_pair().await;
+        let cert_factory: P2pIdentityCertFactoryRef = Arc::new(X509IdentityCertFactory);
+
+        let datagram_finder = QueryDeviceFinder::new(
+            callee.sn_service.clone(),
+            cert_factory.clone(),
+            None,
+            vec![],
+        );
+        let datagram_manager = TunnelManager::new(
+            callee.sn_service.clone(),
+            callee.identity.clone(),
+            datagram_finder,
+            cert_factory,
+            None,
+            Arc::new(TunnelIdGenerator::new()),
+            TestDatagramFactory::new(callee.net_manager.clone()),
+            callee.tunnel_listener.clone(),
+            callee.net_manager.get_connection_info_cache().clone(),
+            0,
+            CONN_TIMEOUT,
+            IDLE_TIMEOUT,
+        );
+
+        let payload = SessionSnCall {
+            vport: 33001,
+            session_id: Default::default(),
+        }
+        .to_vec()
+        .unwrap();
+        let peer_info = caller
+            .identity
+            .get_identity_cert()
+            .unwrap()
+            .get_encoded_cert()
+            .unwrap();
+        let called = SnCalled {
+            seq: 1u32.into(),
+            sn_peer_id: P2pId::default(),
+            to_peer_id: callee.identity.get_id(),
+            reverse_endpoint_array: caller.identity.endpoints(),
+            active_pn_list: vec![],
+            peer_info,
+            tunnel_id: 0x5001u32.into(),
+            call_send_time: bucky_time_now(),
+            call_type: TunnelType::Stream,
+            payload,
+        };
+
+        let err = datagram_manager.on_sn_called(called).await.err().unwrap();
+        assert_eq!(err.code(), P2pErrorCode::InvalidParam);
+
+        caller.stop().await;
+        callee.stop().await;
+        sn_service.stop();
+    }
+}

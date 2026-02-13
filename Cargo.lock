@@ -753,12 +753,12 @@ checksum = "4964518bd3b4a8190e832886cdc0da9794f12e8e6c1613a9e90ff331c4c8724b"
 
 [[package]]
 name = "callback-result"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62bf3c7b9a1ee7c6e55f9f176068eacc3f43cfaeab49d80958cd5d4a0d96d1a5"
+checksum = "e248182ca4a4de072af91eeda23764d1c78f095c57f1138020292aab258a3367"
 dependencies = [
- "async-std",
  "notify-future 0.2.5",
+ "tokio",
 ]
 
 [[package]]
@@ -3269,9 +3269,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.2.2"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ea359b1450275343a146c1c31e5f6858afcb3e314376f52d5a940043cc0b9cb"
+checksum = "f4a687e43605735b1c6d57b00a97cbc7f86e4b9b297d415ef60a17391329b152"
 dependencies = [
  "as-any",
  "async-named-locker",
@@ -3287,6 +3287,7 @@ dependencies = [
  "num",
  "pin-project-lite",
  "rand 0.9.1",
+ "sfo-log",
  "sfo-pool",
  "sfo-result",
  "sfo-split",
@@ -3296,9 +3297,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-log"
-version = "0.1.4"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee1400e4c55d8b475c6cf4dea7390b0404ee1c77f4a061a3747424c7c83da354"
+checksum = "b834578e350d8f5efb00863f288811fde78d782ff073b19a3213513e6d9da682"
 dependencies = [
  "flexi_logger",
  "tracing",
@@ -3318,9 +3319,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-result"
-version = "0.2.8"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5b0aa7085fabe042e3bbe42570c53c6a6a9271c2688dab16585d6508a233473"
+checksum = "2d37e961b6a17c952e2da1b01c36748519ddae1620e47cd3defefb1bbe6ffe91"
 dependencies = [
  "log",
 ]
