@@ -1116,6 +1116,7 @@ dependencies = [
 name = "cyfs-p2p-test"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bucky-crypto 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bucky-objects 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",

@@ -4,7 +4,9 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::future::Future;
 use bucky_crypto::PrivateKey;
 use bucky_objects::{sign_and_push_named_object, Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner, SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF};
 use bucky_raw_codec::FileDecoder;
@@ -16,7 +18,10 @@ use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::{P2pId};
 use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
 use cyfs_p2p::stack::{create_p2p_stack, create_p2p_env, P2pStackRef};
-use p2p_frame::stack::P2pEnvRef;
+use p2p_frame::endpoint::Endpoint as P2pEndpoint;
+use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
+use p2p_frame::sn::client::SNClientServiceRef;
+use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef};
 
 const APP_NAME: &str = "cyfs-p2p-test";
 
@@ -260,8 +265,225 @@ async fn server_instance(data_folder: &Path) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CaseExpectation {
+    Success,
+    Fail,
+}
+
+struct CaseMetric {
+    total: u64,
+    passed: u64,
+    failed: u64,
+    total_latency_ms: u128,
+    max_latency_ms: u128,
+}
+
+struct OverrideDeviceFinder {
+    sn_client: SNClientServiceRef,
+    cert_factory: Arc<CyfsIdentityCertFactory>,
+    override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+}
+
+impl OverrideDeviceFinder {
+    fn new(
+        sn_client: SNClientServiceRef,
+        cert_factory: Arc<CyfsIdentityCertFactory>,
+        override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+    ) -> DeviceFinderRef {
+        Arc::new(Self {
+            sn_client,
+            cert_factory,
+            override_eps,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl DeviceFinder for OverrideDeviceFinder {
+    async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
+        let resp = self.sn_client.query(device_id).await?;
+        let peer_info = match resp.peer_info {
+            Some(peer_info) => peer_info,
+            None => {
+                return Err(P2pError::from((
+                    P2pErrorCode::NotFound,
+                    "device not found".to_string(),
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "device not found"),
+                )));
+            }
+        };
+        let cert = self.cert_factory.create(&peer_info)?;
+        let eps = self
+            .override_eps
+            .get(device_id)
+            .cloned()
+            .unwrap_or(resp.end_point_array);
+        Ok(cert.update_endpoints(eps))
+    }
+}
+
+impl CaseMetric {
+    fn new() -> Self {
+        Self {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            total_latency_ms: 0,
+            max_latency_ms: 0,
+        }
+    }
+
+    fn add(&mut self, passed: bool, latency_ms: u128) {
+        self.total += 1;
+        if passed {
+            self.passed += 1;
+        } else {
+            self.failed += 1;
+        }
+        self.total_latency_ms += latency_ms;
+        if latency_ms > self.max_latency_ms {
+            self.max_latency_ms = latency_ms;
+        }
+    }
+
+    fn avg_latency_ms(&self) -> u128 {
+        if self.total == 0 {
+            0
+        } else {
+            self.total_latency_ms / self.total as u128
+        }
+    }
+}
+
+async fn run_case<F, Fut>(
+    stats: &mut HashMap<&'static str, CaseMetric>,
+    name: &'static str,
+    expect: CaseExpectation,
+    f: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = P2pResult<()>>,
+{
+    let now = Instant::now();
+    let ret = f().await;
+    let latency_ms = now.elapsed().as_millis();
+    let passed = match expect {
+        CaseExpectation::Success => ret.is_ok(),
+        CaseExpectation::Fail => ret.is_err(),
+    };
+
+    let metric = stats.entry(name).or_insert_with(CaseMetric::new);
+    metric.add(passed, latency_ms);
+
+    match ret {
+        Ok(_) => {
+            if passed {
+                log::info!("[case:{}] pass latency={}ms", name, latency_ms);
+            } else {
+                log::warn!("[case:{}] unexpected success latency={}ms", name, latency_ms);
+            }
+        }
+        Err(e) => {
+            if passed {
+                log::info!(
+                    "[case:{}] pass(expected fail) code={:?} msg={} latency={}ms",
+                    name,
+                    e.code(),
+                    e.msg(),
+                    latency_ms
+                );
+            } else {
+                log::error!(
+                    "[case:{}] fail code={:?} msg={} latency={}ms",
+                    name,
+                    e.code(),
+                    e.msg(),
+                    latency_ms
+                );
+            }
+        }
+    }
+
+    passed
+}
+
+fn print_case_stats(round: u64, stats: &HashMap<&'static str, CaseMetric>) {
+    let mut total = 0u64;
+    let mut passed = 0u64;
+    for metric in stats.values() {
+        total += metric.total;
+        passed += metric.passed;
+    }
+    let rate = if total == 0 {
+        0.0
+    } else {
+        (passed as f64) * 100.0 / (total as f64)
+    };
+    log::info!(
+        "[all-in-one] round={} total={} passed={} pass_rate={:.2}%",
+        round,
+        total,
+        passed,
+        rate
+    );
+
+    for (name, metric) in stats.iter() {
+        log::info!(
+            "[all-in-one] case={} total={} pass={} fail={} avg={}ms max={}ms",
+            name,
+            metric.total,
+            metric.passed,
+            metric.failed,
+            metric.avg_latency_ms(),
+            metric.max_latency_ms
+        );
+    }
+}
+
+async fn start_stream_listener(stack: P2pStackRef, port: u16, label: &'static str) {
+    let listener = stack.stream_manager().listen(port).await.unwrap();
+    loop {
+        let (mut read, mut write) = listener.accept().await.unwrap();
+        tokio::task::spawn(async move {
+            let ret: std::io::Result<()> = async {
+                write.write_all(format!("{}-hello", label).as_bytes()).await?;
+                write.flush().await?;
+                let mut buf = [0u8; 128];
+                let len = read.read(buf.as_mut_slice()).await?;
+                log::info!("[listener:{}] recv {}", label, String::from_utf8_lossy(&buf[..len]));
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = ret {
+                log::warn!("[listener:{}] io err {:?}", label, e);
+            }
+        });
+    }
+}
+
+async fn start_datagram_listener(stack: P2pStackRef, port: u16, label: &'static str) {
+    let listener = stack.datagram_manager().listen(port).await.unwrap();
+    loop {
+        let mut recv = listener.accept().await.unwrap();
+        tokio::task::spawn(async move {
+            let mut buf = [0u8; 128];
+            match recv.read(buf.as_mut_slice()).await {
+                Ok(len) => {
+                    log::info!("[datagram:{}] recv {}", label, String::from_utf8_lossy(&buf[..len]));
+                }
+                Err(e) => {
+                    log::warn!("[datagram:{}] read err {:?}", label, e);
+                }
+            }
+        });
+    }
+}
+
 async fn all_in_one() {
-    let sn_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e))).unwrap();
+    let sn_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e))).unwrap();
     let sn_public_key = sn_key.public();
     let mut sn_desc = Device::new(None, UniqueId::default(), vec![], vec![], vec![], sn_public_key.clone(), Area::default(), DeviceCategory::OOD).build();
 
@@ -272,7 +494,7 @@ async fn all_in_one() {
     }
 
     let signer = RsaCPUObjectSigner::new(sn_public_key, sn_key.clone());
-    sign_and_push_named_object(&signer, &mut sn_desc, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e))).unwrap();
+    sign_and_push_named_object(&signer, &mut sn_desc, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e))).unwrap();
 
     let sn_service = SnServiceConfig::new(
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
@@ -299,143 +521,256 @@ async fn all_in_one() {
     //     .build()
     //     .start();
 
-    let mut local_eps = Vec::new();
-    // for ep in config.tcp_list.iter() {
-    //     local_eps.push(Endpoint::from((Protocol::Tcp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port))));
-    // }
-    // for ep in config.udp_list.iter() {
-    //     local_eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port))));
-    // }
-    // let mut ep = Endpoint::from((Protocol::Tcp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 4433))));
-    // ep.set_area(EndpointArea::Wan);
-    // local_eps.push(ep);
+    let mut env_eps = Vec::new();
+    let mut env_ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0))));
+    env_ep.set_area(bucky_objects::EndpointArea::Lan);
+    env_eps.push(env_ep);
 
-    // let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 4433))));
-    // ep.set_area(bucky_objects::EndpointArea::Lan);
-    // local_eps.push(ep);
-
-    let mut ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0))));
-    ep.set_area(bucky_objects::EndpointArea::Lan);
-    local_eps.push(ep);
-
-    let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
-    p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(300))
-        .set_quic_connect_timeout(Duration::from_secs(300))
-        .set_quic_idle_time(Duration::from_secs(300));
+    let mut p2p_config = create_cyfs_p2p_config(env_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
+    p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(5))
+        .set_quic_connect_timeout(Duration::from_secs(5))
+        .set_quic_idle_time(Duration::from_secs(30));
     let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack1 = create_stack(env.clone(), Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
-    stack1.wait_online(None).await.unwrap();
-    let stack2 = create_stack(env.clone(), Path::new("./"), local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
-    stack2.wait_online(None).await.unwrap();
-    stack2.set_as_default();
+    let mut direct_eps = Vec::new();
+    let mut direct_ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 4433, 0, 0))));
+    direct_ep.set_area(bucky_objects::EndpointArea::Lan);
+    direct_eps.push(direct_ep);
 
-    let stack2_cert = stack2.local_identity().get_identity_cert().unwrap().clone();
-    let tmp_stack2 = stack2.clone();
-    tokio::task::spawn(async move {
-        let listener = tmp_stack2.stream_manager().listen(1234).await.unwrap();
-        loop {
-            let (mut read, mut write) = listener.accept().await.unwrap();
-            tokio::task::spawn(async move {
-                let ret: std::io::Result<()> = async move {
-                    write.write_all("test".as_bytes()).await?;
-                    write.flush().await?;
-                    let mut buf = [0u8; 32];
-                    let len = read.read(buf.as_mut_slice()).await?;
-                    println!("read len {} content:{}", len, String::from_utf8_lossy(&buf[..len]));
-                    Ok(())
-                }.await;
+    let mut reverse_eps = Vec::new();
+    let mut reverse_ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0))));
+    reverse_ep.set_area(bucky_objects::EndpointArea::Lan);
+    reverse_eps.push(reverse_ep);
 
-                if let Err(e) = ret {
-                    println!("error: {:?}", e);
-                }
+    let stack_direct_target = create_stack(env.clone(), Path::new("./"), direct_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    stack_direct_target.wait_online(None).await.unwrap();
 
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            });
+    let stack_reverse_target = create_stack(env.clone(), Path::new("./"), reverse_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    stack_reverse_target.wait_online(None).await.unwrap();
 
+    let stack_proxy_target = create_stack(env.clone(), Path::new("./"), reverse_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    stack_proxy_target.wait_online(None).await.unwrap();
+
+    let stack_client = create_stack(env.clone(), Path::new("./"), direct_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    stack_client.wait_online(None).await.unwrap();
+
+    let direct_target_id = stack_direct_target.local_identity().get_identity_cert().unwrap().get_id();
+    let reverse_target_id = stack_reverse_target.local_identity().get_identity_cert().unwrap().get_id();
+    let proxy_target_id = stack_proxy_target.local_identity().get_identity_cert().unwrap().get_id();
+
+    let unreachable_eps = vec![p2p_frame::endpoint::Endpoint::from((
+        p2p_frame::endpoint::Protocol::Quic,
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 6553, 0, 0)),
+    ))];
+
+    let cert_factory = Arc::new(CyfsIdentityCertFactory);
+
+    let mut reverse_override = HashMap::new();
+    reverse_override.insert(reverse_target_id.clone(), unreachable_eps.clone());
+    let reverse_finder = OverrideDeviceFinder::new(
+        stack_client.sn_client().clone(),
+        cert_factory.clone(),
+        reverse_override,
+    );
+
+    let mut proxy_override = HashMap::new();
+    proxy_override.insert(proxy_target_id.clone(), unreachable_eps.clone());
+    let proxy_finder = OverrideDeviceFinder::new(
+        stack_client.sn_client().clone(),
+        cert_factory,
+        proxy_override,
+    );
+
+    let stack_reverse_caller = create_stack_with_device_finder(
+        env.clone(),
+        Path::new("./"),
+        direct_eps.clone(),
+        vec![sn_desc.clone()],
+        Some(reverse_finder),
+    )
+    .await
+    .unwrap();
+    stack_reverse_caller.wait_online(None).await.unwrap();
+
+    let stack_proxy_caller = create_stack_with_device_finder(
+        env.clone(),
+        Path::new("./"),
+        reverse_eps.clone(),
+        vec![sn_desc.clone()],
+        Some(proxy_finder),
+    )
+    .await
+    .unwrap();
+    stack_proxy_caller.wait_online(None).await.unwrap();
+
+    tokio::task::spawn(start_stream_listener(stack_direct_target.clone(), 1234, "direct"));
+    tokio::task::spawn(start_datagram_listener(stack_direct_target.clone(), 1234, "direct"));
+    tokio::task::spawn(start_stream_listener(stack_reverse_target.clone(), 2234, "reverse"));
+    tokio::task::spawn(start_stream_listener(stack_proxy_target.clone(), 3234, "proxy"));
+
+    let mut stats: HashMap<&'static str, CaseMetric> = HashMap::new();
+    let mut round: u64 = 0;
+    let mut stat_tick = tokio::time::interval(Duration::from_secs(10));
+
+    loop {
+        round += 1;
+
+        if !run_case(&mut stats, "stream_direct_success", CaseExpectation::Success, || async {
+            let (mut read, mut write) = stack_client.stream_manager().connect_from_id(&direct_target_id, 1234).await?;
+            let mut buf = [0u8; 64];
+            let _ = read.read(buf.as_mut_slice()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "stream read failed".to_string(), e)))?;
+            write.write_all("stream direct".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "stream write failed".to_string(), e)))?;
+            write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "stream flush failed".to_string(), e)))?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case stream_direct_success failed");
+            return;
         }
-    });
 
-    let tmp_stack2 = stack2.clone();
-    tokio::task::spawn(async move {
-        let listener = tmp_stack2.datagram_manager().listen(1234).await.unwrap();
-        loop {
-            let mut recv = listener.accept().await.unwrap();
-            tokio::task::spawn(async move {
-                let mut buf = [0u8; 32];
-                let len = recv.read(buf.as_mut_slice()).await.unwrap();
-                println!("{}", String::from_utf8_lossy(&buf[..len]));
-
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            });
-
+        if !run_case(&mut stats, "stream_wrong_port_fail_expected", CaseExpectation::Fail, || async {
+            let _ = stack_client.stream_manager().connect_from_id(&direct_target_id, 19999).await?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case stream_wrong_port_fail_expected failed");
+            return;
         }
-    });
 
-    tokio::task::spawn(async move {
-        loop {
-            {
-                let (mut read, mut write) = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
-                let mut buf = [0u8; 32];
-                let len = read.read(buf.as_mut_slice()).await.unwrap();
-                println!("{}", String::from_utf8_lossy(&buf[..len]));
-                write.write_all("stream hello".as_bytes()).await.unwrap();
-                write.flush().await.unwrap();
-                tokio::time::sleep(Duration::from_secs(2)).await;
-
-                match read.read(buf.as_mut_slice()).await {
-                    Ok(len) => {
-                        println!("{}", String::from_utf8_lossy(&buf[..len]));
-                    }
-                    Err(e) => {
-                        println!("read error: {:?}", e);
-                    }
-                }
-
-                match write.write_all("test2".as_bytes()).await {
-                    Ok(_) => {
-                        println!("write ok");
-                    }
-                    Err(e) => {
-                        println!("write error: {:?}", e);
-                    }
-                }
-                write.flush().await.unwrap();
-                let ret = stack1.stream_manager().connect_from_id(&stack2_cert.get_id(), 1235).await;
-                assert!(ret.is_err());
-            }
-            {
-                let mut send = stack1.datagram_manager().connect_from_id(&stack2_cert.get_id(), 1234).await.unwrap();
-                send.write_all("datagram hello".as_bytes()).await.unwrap();
-            }
-
-            {
-                let (_read, mut send) = stack1.stream_manager().connect_direct(
-                    vec![p2p_frame::endpoint::Endpoint::from((p2p_frame::endpoint::Protocol::Quic, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 4433, 0, 0))))],
-                    1234, None).await.unwrap();
-                send.write_all("direct hello".as_bytes()).await.unwrap();
-            }
+        if !run_case(&mut stats, "datagram_direct_success", CaseExpectation::Success, || async {
+            let mut send = stack_client.datagram_manager().connect_from_id(&direct_target_id, 1234).await?;
+            send.write_all("datagram direct".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "datagram write failed".to_string(), e)))?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case datagram_direct_success failed");
+            return;
         }
-    });
+
+        if !run_case(&mut stats, "direct_bad_endpoint_fail_expected", CaseExpectation::Fail, || async {
+            let (_read, _write) = stack_client.stream_manager().connect_direct(
+                vec![p2p_frame::endpoint::Endpoint::from((p2p_frame::endpoint::Protocol::Quic, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 55555, 0, 0))))],
+                1234,
+                None,
+            ).await?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case direct_bad_endpoint_fail_expected failed");
+            return;
+        }
+
+        if !run_case(&mut stats, "reverse_connect_case", CaseExpectation::Success, || async {
+            let (mut read, mut write) = stack_reverse_caller.stream_manager().connect_from_id(&reverse_target_id, 2234).await?;
+            let mut buf = [0u8; 64];
+            let _ = read.read(buf.as_mut_slice()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reverse read failed".to_string(), e)))?;
+            write.write_all("reverse hello".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reverse write failed".to_string(), e)))?;
+            write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reverse flush failed".to_string(), e)))?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case reverse_connect_case failed");
+            return;
+        }
+
+        if !run_case(&mut stats, "reverse_fail_case", CaseExpectation::Fail, || async {
+            let _ = stack_reverse_caller.stream_manager().connect_from_id(&reverse_target_id, 2235).await?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case reverse_fail_case failed");
+            return;
+        }
+
+        if !run_case(&mut stats, "proxy_connect_case", CaseExpectation::Success, || async {
+            let (mut read, mut write) = stack_proxy_caller.stream_manager().connect_from_id(&proxy_target_id, 3234).await?;
+            let mut buf = [0u8; 64];
+            let _ = read.read(buf.as_mut_slice()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy read failed".to_string(), e)))?;
+            write.write_all("proxy hello".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy write failed".to_string(), e)))?;
+            write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy flush failed".to_string(), e)))?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case proxy_connect_case failed");
+            return;
+        }
+
+        if !run_case(&mut stats, "proxy_fail_case", CaseExpectation::Fail, || async {
+            let _ = stack_proxy_caller.stream_manager().connect_from_id(&proxy_target_id, 3235).await?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case proxy_fail_case failed");
+            return;
+        }
+
+        if !run_case(&mut stats, "reconnect_stability", CaseExpectation::Success, || async {
+            for _ in 0..3 {
+                let (_read, mut write) = stack_client.stream_manager().connect_from_id(&direct_target_id, 1234).await?;
+                write.write_all("reconnect".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reconnect write failed".to_string(), e)))?;
+                write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reconnect flush failed".to_string(), e)))?;
+            }
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case reconnect_stability failed");
+            return;
+        }
+
+        if !run_case(&mut stats, "concurrent_stream_burst", CaseExpectation::Success, || async {
+            let mut tasks = Vec::new();
+            for _ in 0..10 {
+                let stack = stack_client.clone();
+                let remote = direct_target_id.clone();
+                let task = tokio::task::spawn(async move {
+                    let (_read, mut write) = stack.stream_manager().connect_from_id(&remote, 1234).await?;
+                    write.write_all("burst".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "burst write failed".to_string(), e)))?;
+                    write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "burst flush failed".to_string(), e)))?;
+                    Ok::<(), P2pError>(())
+                });
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                let ret = task.await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e)))?;
+                ret?;
+            }
+
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case concurrent_stream_burst failed");
+            return;
+        }
+
+        tokio::select! {
+            _ = stat_tick.tick() => {
+                print_case_stats(round, &stats);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+    }
 
 }
 async fn create_stack(env: P2pEnvRef, config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_list: Vec<Device>) -> P2pResult<P2pStackRef> {
+    create_stack_with_device_finder(env, config_path, eps, sn_list, None).await
+}
+
+async fn create_stack_with_device_finder(
+    env: P2pEnvRef,
+    config_path: &Path,
+    eps: Vec<bucky_objects::Endpoint>,
+    sn_list: Vec<Device>,
+    device_finder: Option<DeviceFinderRef>,
+) -> P2pResult<P2pStackRef> {
     let (private_key, device) = if config_path.join("device.desc").exists() && config_path.join("device.sec").exists() {
-        let (device_desc, _) = Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
-        let (private_key, _) = PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
+        let (device_desc, _) = Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
+        let (private_key, _) = PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
         (private_key, device_desc)
     } else {
-        let private_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
+        let private_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
         let public_key = private_key.public();
         let mut device = Device::new(None, UniqueId::default(), eps, vec![], vec![], public_key.clone(), Area::default(), DeviceCategory::OOD).build();
 
         let signer = RsaCPUObjectSigner::new(public_key, private_key.clone());
-        sign_and_push_named_object(&signer, &mut device, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "", e)))?;
+        sign_and_push_named_object(&signer, &mut device, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
         (private_key, device)
     };
 
-    let config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list).set_support_proxy(true);
+    let mut config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list).set_support_proxy(true);
+    if let Some(device_finder) = device_finder {
+        config = config.set_device_finder(device_finder);
+    }
 
     create_p2p_stack(config).await
 }
-

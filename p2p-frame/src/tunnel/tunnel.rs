@@ -23,6 +23,17 @@ use crate::types::{SessionId, TunnelId};
 // to reduce tail latency when NAT conditions make direct path slow.
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
 
+macro_rules! p2p_err_from_result {
+    ($result:expr) => {{
+        let code = P2pErrorCode::from_u8($result).unwrap_or(P2pErrorCode::ConnectFailed);
+        sfo_result::Error::new2(code, "".to_string(), file!(), line!())
+    }};
+    ($result:expr, $($arg:tt)*) => {{
+        let code = P2pErrorCode::from_u8($result).unwrap_or(P2pErrorCode::ConnectFailed);
+        sfo_result::Error::new2(code, format!($($arg)*), file!(), line!())
+    }};
+}
+
 pub enum ReverseResult {
     Session(u8, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite),
 }
@@ -305,7 +316,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             return if ack.result == 0 {
                 Ok((read, write))
             } else {
-                Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                Err(p2p_err_from_result!(
+                    ack.result,
+                    "ack err session {} port {}",
+                    session_id,
+                    vport
+                ))
             };
         }
 
@@ -329,7 +345,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                 return if ack.result == 0 {
                                     Ok((read, write))
                                 } else {
-                                    Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                                    Err(p2p_err_from_result!(
+                                        ack.result,
+                                        "ack err session {} port {}",
+                                        session_id,
+                                        vport
+                                    ))
                                 };
                             }
                             Err(e) => {
@@ -358,7 +379,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                             }).await;
                             Ok((read, write))
                         } else {
-                            Err(p2p_err!(P2pErrorCode::from_u8(result).unwrap_or(P2pErrorCode::ConnectFailed)))
+                            Err(p2p_err_from_result!(result))
                         };
                     }
                     Err(e) => {
@@ -387,7 +408,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     if ack.result == 0 {
                         return Ok((read, write));
                     } else {
-                        return Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport));
+                        return Err(p2p_err_from_result!(
+                            ack.result,
+                            "ack err session {} port {}",
+                            session_id,
+                            vport
+                        ));
                     }
                 }
             }
@@ -469,7 +495,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                 return if ack.result == 0 {
                                     Ok((read, write))
                                 } else {
-                                    Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                                    Err(p2p_err_from_result!(
+                                        ack.result,
+                                        "ack err session {} port {}",
+                                        session_id,
+                                        vport
+                                    ))
                                 };
                             }
                             Err(e) => {
@@ -498,7 +529,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                         return if result == 0 {
                                             Ok((read, write))
                                         } else {
-                                            Err(p2p_err!(P2pErrorCode::from_u8(result).unwrap_or(P2pErrorCode::ConnectFailed)))
+                                            Err(p2p_err_from_result!(result))
                                         };
                                     }
                                     Err(reverse_err) => {
@@ -530,7 +561,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                 return if result == 0 {
                                     Ok((read, write))
                                 } else {
-                                    Err(p2p_err!(P2pErrorCode::from_u8(result).unwrap_or(P2pErrorCode::ConnectFailed)))
+                                    Err(p2p_err_from_result!(result))
                                 };
                             }
                             Err(e) => {
@@ -556,7 +587,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                         return if ack.result == 0 {
                                             Ok((read, write))
                                         } else {
-                                            Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                                            Err(p2p_err_from_result!(
+                                                ack.result,
+                                                "ack err session {} port {}",
+                                                session_id,
+                                                vport
+                                            ))
                                         };
                                     }
                                     Err(direct_err) => {
@@ -589,7 +625,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                         return if ack.result == 0 {
                             Ok((read, write))
                         } else {
-                            Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                            Err(p2p_err_from_result!(
+                                ack.result,
+                                "ack err session {} port {}",
+                                session_id,
+                                vport
+                            ))
                         }
                     }
                     Err(e) => {
@@ -630,7 +671,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     return if result == 0 {
                         Ok((read, write))
                     } else {
-                        Err(p2p_err!(P2pErrorCode::from_u8(result).unwrap_or(P2pErrorCode::ConnectFailed)))
+                        Err(p2p_err_from_result!(result))
                     };
                 }
                 Err(e) => {
@@ -667,7 +708,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             return if ack.result == 0 {
                 Ok((read, write))
             } else {
-                Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                Err(p2p_err_from_result!(
+                    ack.result,
+                    "ack err session {} port {}",
+                    session_id,
+                    vport
+                ))
             }
         }
         log::warn!(
@@ -686,7 +732,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             if ack.result == 0 {
                 Ok((read, write))
             } else {
-                Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                Err(p2p_err_from_result!(
+                    ack.result,
+                    "ack err session {} port {}",
+                    session_id,
+                    vport
+                ))
             }
         } else {
             Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect has not been established"))
@@ -702,7 +753,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             return if ack.result == 0 {
                 Ok((read, write))
             } else {
-                Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                Err(p2p_err_from_result!(
+                    ack.result,
+                    "ack err session {} port {}",
+                    session_id,
+                    vport
+                ))
             }
         }
 
@@ -757,7 +813,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     return if ack.result == 0 {
                         Ok((read, write))
                     } else {
-                        Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                        Err(p2p_err_from_result!(
+                            ack.result,
+                            "ack err session {} port {}",
+                            session_id,
+                            vport
+                        ))
                     }
                 }
                 Err(e) => {
@@ -777,7 +838,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             if ack.result == 0 {
                 Ok((read, write))
             } else {
-                Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                Err(p2p_err_from_result!(
+                    ack.result,
+                    "ack err session {} port {}",
+                    session_id,
+                    vport
+                ))
             }
         } else {
             Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect has not been established session {} port {}", session_id, vport))
@@ -797,7 +863,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     if ack.result == 0 {
                         Ok((read, write))
                     } else {
-                        Err(p2p_err!(P2pErrorCode::from_u8(ack.result).unwrap_or(P2pErrorCode::ConnectFailed), "ack err session {} port {}", session_id, vport))
+                        Err(p2p_err_from_result!(
+                            ack.result,
+                            "ack err session {} port {}",
+                            session_id,
+                            vport
+                        ))
                     }
                 }
                 Err(e) => {

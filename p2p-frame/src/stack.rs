@@ -17,7 +17,8 @@ use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNet
 use crate::sockets::tcp::TcpNetwork;
 use crate::stream::{StreamManager, StreamManagerRef};
 use crate::tls::{init_tls, DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver};
-use crate::tunnel::{DefaultDeviceFinder, DeviceFinderRef, TunnelListener, TunnelListenerRef, TunnelManager, TunnelManagerRef};
+pub use crate::tunnel::{DeviceFinder, DeviceFinderRef};
+use crate::tunnel::{DefaultDeviceFinder, TunnelListener, TunnelListenerRef, TunnelManager, TunnelManagerRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
 
 pub struct P2pEnv {
