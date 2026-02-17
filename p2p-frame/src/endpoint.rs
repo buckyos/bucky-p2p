@@ -2,9 +2,11 @@ pub use std::net::{IpAddr, SocketAddr};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::str::FromStr;
 
-use std::cmp::Ordering;
-use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
 use crate::error::{P2pError, P2pErrorCode};
+use bucky_raw_codec::{
+    CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes,
+};
+use std::cmp::Ordering;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, RawEncode, RawDecode)]
 pub enum Protocol {
@@ -18,7 +20,7 @@ pub enum EndpointArea {
     Lan,
     Default,
     Wan,
-    Mapped
+    Mapped,
 }
 
 #[derive(Copy, Clone, Eq, Hash)]
@@ -54,6 +56,10 @@ impl Endpoint {
         let mut other_ip = other.addr;
         other_ip.set_port(0);
         self_ip == other_ip
+    }
+    
+    pub fn is_loopback(&self) -> bool {
+        self.addr.ip().is_loopback()
     }
 
     pub fn default_of(ep: &Endpoint) -> Self {
@@ -118,8 +124,7 @@ impl Endpoint {
         self.area == EndpointArea::Default
     }
     pub fn is_static_wan(&self) -> bool {
-        self.area == EndpointArea::Wan
-            || self.area == EndpointArea::Mapped
+        self.area == EndpointArea::Wan || self.area == EndpointArea::Mapped
     }
 
     pub fn is_mapped_wan(&self) -> bool {
@@ -208,16 +213,15 @@ impl std::fmt::Debug for Endpoint {
     }
 }
 
-
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut result = String::new();
 
         result += match self.area {
-            EndpointArea::Lan => "L", // LOCAL
+            EndpointArea::Lan => "L",     // LOCAL
             EndpointArea::Default => "D", // DEFAULT,
-            EndpointArea::Wan =>  "W", // WAN,
-            EndpointArea::Mapped => "M" // MAPPED WAN,
+            EndpointArea::Wan => "W",     // WAN,
+            EndpointArea::Mapped => "M",  // MAPPED WAN,
         };
 
         result += match self.addr {
@@ -229,7 +233,8 @@ impl std::fmt::Display for Endpoint {
             Protocol::Ext(n) => format!("e{:02}", n),
             Protocol::Tcp => "tcp".to_string(),
             Protocol::Quic => "qic".to_string(),
-        }.as_str();
+        }
+        .as_str();
 
         result += self.addr.to_string().as_str();
 
@@ -270,10 +275,13 @@ impl FromStr for Endpoint {
                     )
                 })?;
                 if n < 8 || n >= 16 {
-                    return Err(P2pError::new(P2pErrorCode::InvalidInput, "extend protocol must >= 8 and < 16".to_string()));
+                    return Err(P2pError::new(
+                        P2pErrorCode::InvalidInput,
+                        "extend protocol must >= 8 and < 16".to_string(),
+                    ));
                 }
                 Ok(Protocol::Ext(n))
-            } else{
+            } else {
                 Err(P2pError::new(
                     P2pErrorCode::InvalidInput,
                     format!("invalid endpoint string {}", s),
@@ -282,7 +290,10 @@ impl FromStr for Endpoint {
         }?;
 
         let addr = SocketAddr::from_str(&s[5..]).map_err(|_| {
-            P2pError::new(P2pErrorCode::InvalidInput, format!("invalid endpoint string {}", s))
+            P2pError::new(
+                P2pErrorCode::InvalidInput,
+                format!("invalid endpoint string {}", s),
+            )
         })?;
         if !(addr.is_ipv4() && version_str.eq("4") || addr.is_ipv6() && version_str.eq("6")) {
             return Err(P2pError::new(
@@ -418,10 +429,13 @@ impl Endpoint {
             ENDPOINT_PROTOCOL_QUIC => Protocol::Quic,
             n => {
                 if n < 8 || n >= 16 {
-                    return Err(CodecError::new(CodecErrorCode::InvalidInput, "extend protocol must >= 8 and < 16"));
+                    return Err(CodecError::new(
+                        CodecErrorCode::InvalidInput,
+                        "extend protocol must >= 8 and < 16",
+                    ));
                 }
                 Protocol::Ext(n)
-            },
+            }
         };
         let area = match flags & ENDPOINT_AREA_MASK {
             ENDPOINT_AREA_LAN => EndpointArea::Lan,
@@ -430,7 +444,6 @@ impl Endpoint {
             ENDPOINT_AREA_MAPPED => EndpointArea::Mapped,
             _ => EndpointArea::Default,
         };
-
 
         let port = {
             let mut b = [0u8; 2];
@@ -490,7 +503,10 @@ impl RawEncode for Endpoint {
     ) -> Result<&'a mut [u8], CodecError> {
         if let Protocol::Ext(n) = self.protocol {
             if n < 8 || n >= 16 {
-                return Err(CodecError::new(CodecErrorCode::InvalidInput, "extend protocol must >= 8 and < 16"));
+                return Err(CodecError::new(
+                    CodecErrorCode::InvalidInput,
+                    "extend protocol must >= 8 and < 16",
+                ));
             }
         }
         let min_bytes = Self::raw_min_bytes().unwrap();

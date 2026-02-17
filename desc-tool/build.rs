@@ -5,4 +5,3 @@ fn main() {
         std::env::var("VERSION").unwrap_or("1.0.0.0".to_owned())
     );
 }
-

@@ -1,125 +1,251 @@
-use std::sync::Arc;
-use bucky_raw_codec::{RawConvertTo, RawDecode, RawFrom};
-use sfo_cmd_server::{CmdBody, PeerId};
-use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bucky_raw_codec::{RawConvertTo, RawFrom};
+use callback_result::SingleCallbackWaiter;
+use notify_future::Notify;
+use sfo_cmd_server::PeerId;
 use sfo_cmd_server::server::CmdServer;
+use tokio::io::copy_bidirectional;
+
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::p2p_connection::{P2pConnection, P2pReadHalf, P2pWriteHalf};
 use crate::p2p_identity::P2pId;
-use crate::pn::{FromProxy, FromProxyResp, PnCmdHeader, ProxyClosed, ProxyHeart, ProxyHeartResp, ToProxy, ToProxyResp};
+use crate::pn::{
+    PN_DATA_FRAME_PROXY_OPEN_READY, PN_DATA_FRAME_PROXY_OPEN_REQ, PN_DATA_FRAME_PROXY_OPEN_RESP,
+    ProxyOpenNotify, ProxyOpenReady, ProxyOpenReq, ProxyOpenResp,
+};
 use crate::protocol::PackageCmdCode;
-use crate::sn::types::CmdTunnelId;
+use crate::runtime;
+use crate::types::TunnelId;
+
+const PN_CONTROL_MAX_LEN: usize = 64 * 1024;
+const PN_OPEN_TIMEOUT: Duration = Duration::from_millis(1500);
+
+struct PendingOpen {
+    to: P2pId,
+    waiter: Notify<P2pResult<P2pConnection>>,
+}
 
 pub struct PnServer<T: CmdServer<u16, u8>> {
     cmd_server: Arc<T>,
+    data_waiter: Arc<SingleCallbackWaiter<P2pConnection>>,
+    pending_open: Arc<Mutex<HashMap<(P2pId, TunnelId), PendingOpen>>>,
     cmd_version: u8,
 }
 
 impl<T: CmdServer<u16, u8>> PnServer<T> {
-    pub fn new(cmd_server: Arc<T>) -> Arc<Self> {
+    pub fn new(
+        cmd_server: Arc<T>,
+        data_waiter: Arc<SingleCallbackWaiter<P2pConnection>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cmd_server,
+            data_waiter,
+            pending_open: Arc::new(Mutex::new(HashMap::new())),
             cmd_version: 0,
         })
     }
 
-    fn register_cmd_handler(self: &Arc<Self>) {
-        let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ToProxy as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
-            let this = this.clone();
-            async move {
-                let from = P2pId::from(peer_id.as_slice());
-                let data = body.read_all().await?;
-                log::trace!("recv to proxy data from: {} tunnel: {:?} len: {} data: {}", peer_id, _tunnel_id, data.len(), hex::encode(&data));
-                let (to_proxy, buf) = ToProxy::raw_decode(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                log::trace!("proxy from {} to {} seq {} len {}", from, to_proxy.to, to_proxy.seq, buf.len());
-                let from_proxy = FromProxy {
-                    seq: to_proxy.seq,
-                    from,
-                    tunnel_id: to_proxy.tunnel_id,
-                };
+    async fn write_control_frame(
+        write: &mut P2pWriteHalf,
+        frame_type: u8,
+        body: &[u8],
+    ) -> P2pResult<()> {
+        runtime::AsyncWriteExt::write_u8(write.as_mut(), frame_type)
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        runtime::AsyncWriteExt::write_u32_le(write.as_mut(), body.len() as u32)
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        runtime::AsyncWriteExt::write_all(write.as_mut(), body)
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        runtime::AsyncWriteExt::flush(write.as_mut())
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        Ok(())
+    }
 
-                let ret = this.cmd_server.send2(&PeerId::from(to_proxy.to.as_slice()),
-                                                PackageCmdCode::FromProxy as u8,
-                                                this.cmd_version,
-                                                vec![from_proxy.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice(), buf].as_slice()).await;
+    async fn read_control_frame(read: &mut P2pReadHalf) -> P2pResult<(u8, Vec<u8>)> {
+        let frame_type = runtime::AsyncReadExt::read_u8(read.as_mut())
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        let len = runtime::AsyncReadExt::read_u32_le(read.as_mut())
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))? as usize;
+        if len == 0 || len > PN_CONTROL_MAX_LEN {
+            return Err(p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "invalid pn control frame len {}",
+                len
+            ));
+        }
+        let mut body = vec![0u8; len];
+        runtime::AsyncReadExt::read_exact(read.as_mut(), body.as_mut_slice())
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        Ok((frame_type, body))
+    }
 
-                if ret.is_err() {
-                    let to_proxy_resp = ToProxyResp {
-                        to: to_proxy.to.clone(),
-                        tunnel_id: to_proxy.tunnel_id,
-                        result: 1,
-                    };
-                    this.cmd_server.send(&peer_id, PackageCmdCode::ToProxyResp as u8, this.cmd_version, to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
+    async fn handle_proxy_open_req(
+        self: &Arc<Self>,
+        from: P2pId,
+        req: ProxyOpenReq,
+        mut read: P2pReadHalf,
+        mut write: P2pWriteHalf,
+    ) {
+        let (notify, waiter) = Notify::<P2pResult<P2pConnection>>::new();
+        {
+            let mut pending = self.pending_open.lock().unwrap();
+            pending.insert(
+                (from.clone(), req.tunnel_id),
+                PendingOpen {
+                    to: req.to.clone(),
+                    waiter: notify,
+                },
+            );
+        }
+
+        let notify = ProxyOpenNotify {
+            tunnel_id: req.tunnel_id,
+            from: from.clone(),
+        };
+        let notify_result = match notify
+            .to_vec()
+            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))
+        {
+            Ok(body) => self
+                .cmd_server
+                .send(
+                    &PeerId::from(req.to.as_slice()),
+                    PackageCmdCode::ProxyOpenNotify as u8,
+                    self.cmd_version,
+                    body.as_slice(),
+                )
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::IoError)),
+            Err(e) => Err(e),
+        };
+
+        let open_result: P2pResult<P2pConnection> = if notify_result.is_ok() {
+            runtime::timeout(PN_OPEN_TIMEOUT, waiter)
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::Timeout, "pn open timeout"))
+                .and_then(|ret| ret)
+        } else {
+            Err(notify_result.err().unwrap())
+        };
+
+        {
+            let mut pending = self.pending_open.lock().unwrap();
+            pending.remove(&(from.clone(), req.tunnel_id));
+        }
+
+        let resp = ProxyOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: if open_result.is_ok() { 0 } else { 1 },
+        };
+        if let Ok(body) = resp.to_vec() {
+            let _ = Self::write_control_frame(
+                &mut write,
+                PN_DATA_FRAME_PROXY_OPEN_RESP,
+                body.as_slice(),
+            )
+            .await;
+        }
+
+        if let Ok(mut other_conn) = open_result {
+            let mut conn = read.unsplit(write);
+            let _ = copy_bidirectional(&mut conn, &mut other_conn).await;
+        }
+    }
+
+    async fn handle_proxy_open_ready(
+        self: &Arc<Self>,
+        peer: P2pId,
+        ready: ProxyOpenReady,
+        read: P2pReadHalf,
+        write: P2pWriteHalf,
+    ) {
+        let waiter = {
+            let mut pending = self.pending_open.lock().unwrap();
+            if let Some(ctx) = pending.remove(&(ready.from.clone(), ready.tunnel_id)) {
+                if ctx.to == peer && ready.to == peer {
+                    Some(ctx.waiter)
+                } else {
+                    None
                 }
-                Ok(None)
+            } else {
+                None
             }
-        });
+        };
 
+        if let Some(waiter) = waiter {
+            let conn = read.unsplit(write);
+            waiter.notify(Ok(conn));
+        }
+    }
+
+    async fn handle_data_connection(self: &Arc<Self>, conn: P2pConnection) {
+        let (mut read, write) = conn.split();
+        let from = read.remote_id();
+
+        let first = Self::read_control_frame(&mut read).await;
+        let (frame_type, body) = match first {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("read pn control frame failed from {}: {:?}", from, e);
+                return;
+            }
+        };
+
+        match frame_type {
+            PN_DATA_FRAME_PROXY_OPEN_REQ => {
+                if let Ok(req) = ProxyOpenReq::clone_from_slice(body.as_slice()) {
+                    self.handle_proxy_open_req(from, req, read, write).await;
+                }
+            }
+            PN_DATA_FRAME_PROXY_OPEN_READY => {
+                if let Ok(ready) = ProxyOpenReady::clone_from_slice(body.as_slice()) {
+                    self.handle_proxy_open_ready(from, ready, read, write).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn start_data_accept_loop(self: &Arc<Self>) {
         let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::FromProxyResp as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
-            let this = this.clone();
-            async move {
-                let data = body.read_all().await?;
-                let from_proxy_resp = FromProxyResp::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let to_proxy_resp = ToProxyResp {
-                    to: P2pId::from(peer_id.as_slice()),
-                    tunnel_id: from_proxy_resp.tunnel_id,
-                    result: from_proxy_resp.result,
+        crate::executor::Executor::spawn(async move {
+            loop {
+                let conn = match this.data_waiter.create_result_future() {
+                    Ok(f) => f.await,
+                    Err(e) => {
+                        log::error!("pn data waiter error: {:?}", e);
+                        runtime::sleep(std::time::Duration::from_millis(200)).await;
+                        continue;
+                    }
                 };
-                this.cmd_server.send(&PeerId::from(from_proxy_resp.from.as_slice()),
-                                     PackageCmdCode::ToProxyResp as u8,
-                                     this.cmd_version,
-                                     to_proxy_resp.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?.as_slice()).await?;
-                Ok(None)
-            }
-        });
 
-        let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyHeart as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
-            let this = this.clone();
-            async move {
-                let from = P2pId::from(peer_id.as_slice());
-                let data = body.read_all().await?;
-                let proxy_heart= ProxyHeart::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
-                                     PackageCmdCode::ProxyHeart as u8,
-                                     this.cmd_version,
-                                     data.as_slice()).await?;
-                Ok(None)
-            }
-        });
+                let conn = match conn {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("pn data accept error: {:?}", e);
+                        continue;
+                    }
+                };
 
-        let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyHeartResp as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
-            let this = this.clone();
-            async move {
-                let from = P2pId::from(peer_id.as_slice());
-                let data = body.read_all().await?;
-                let proxy_heart= ProxyHeartResp::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
-                                     PackageCmdCode::ProxyHeartResp as u8,
-                                     this.cmd_version,
-                                     data.as_slice()).await?;
-                Ok(None)
-            }
-        });
-
-        let this = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ProxyClosed as u8, move |peer_id: PeerId, _tunnel_id: CmdTunnelId, _header: PnCmdHeader, mut body: CmdBody| {
-            let this = this.clone();
-            async move {
-                let from = P2pId::from(peer_id.as_slice());
-                let data = body.read_all().await?;
-                let proxy_heart= ProxyClosed::clone_from_slice(data.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                this.cmd_server.send(&PeerId::from(proxy_heart.to.as_slice()),
-                                     PackageCmdCode::ProxyClosed as u8,
-                                     this.cmd_version,
-                                     data.as_slice()).await?;
-                Ok(None)
+                let this_for_conn = this.clone();
+                crate::executor::Executor::spawn(async move {
+                    this_for_conn.handle_data_connection(conn).await;
+                });
             }
         });
     }
 
     pub fn start(self: &Arc<Self>) {
-        self.register_cmd_handler();
+        self.start_data_accept_loop();
     }
 }

@@ -1,15 +1,14 @@
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use crate::endpoint::{Endpoint, Protocol};
+use crate::error::{P2pErrorCode, P2pResult, p2p_err};
+use crate::p2p_identity::P2pId;
+use crate::runtime;
 use as_any::AsAny;
 use bucky_raw_codec::{RawDecode, RawEncode};
 use once_cell::sync::OnceCell;
 use sfo_split::{RHalf, Splittable, WHalf};
-use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{p2p_err, P2pErrorCode, P2pResult};
-use crate::p2p_identity::P2pId;
-use crate::runtime;
-
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub trait P2pRead: runtime::AsyncRead + Send + 'static + Unpin + Any + AsAny {
     fn remote(&self) -> Endpoint;
@@ -26,7 +25,6 @@ pub trait P2pWrite: runtime::AsyncWrite + Send + 'static + Unpin + Any + AsAny {
     fn local_id(&self) -> P2pId;
     fn remote_name(&self) -> String;
 }
-
 
 #[async_trait::async_trait]
 pub trait P2pConnectionMeta: Send + 'static {

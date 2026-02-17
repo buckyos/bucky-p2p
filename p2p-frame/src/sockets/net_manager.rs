@@ -1,15 +1,17 @@
+use crate::endpoint::{Endpoint, Protocol};
+use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
+use crate::finder::DeviceCache;
+use crate::p2p_connection::{
+    P2pConnection, P2pConnectionEventListener, P2pConnectionInfoCacheRef, P2pListenerRef,
+};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
+use crate::p2p_network::P2pNetworkRef;
+use crate::sockets::tcp::{TCPListener, TCPListenerRef};
+use crate::sockets::{QuicListener, QuicListenerRef};
+use crate::tls::ServerCertResolverRef;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult};
-use crate::finder::DeviceCache;
-use crate::p2p_connection::{P2pConnectionEventListener, P2pConnectionInfoCacheRef, P2pConnection, P2pListenerRef};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
-use crate::p2p_network::P2pNetworkRef;
-use crate::sockets::{QuicListener, QuicListenerRef};
-use crate::sockets::tcp::{TCPListener, TCPListenerRef};
-use crate::tls::{ServerCertResolverRef};
 
 pub struct NetManager {
     connection_info_cache: P2pConnectionInfoCacheRef,
@@ -21,10 +23,15 @@ pub struct NetManager {
 pub type NetManagerRef = Arc<NetManager>;
 
 impl NetManager {
-    pub fn new(p2p_networks: Vec<P2pNetworkRef>,
-               cert_resolver: ServerCertResolverRef,
-               connection_info_cache: P2pConnectionInfoCacheRef,) -> P2pResult<Self> {
-        let mut p2p_networks = p2p_networks.into_iter().map(|network| (network.protocol(), network)).collect::<HashMap<Protocol, P2pNetworkRef>>();
+    pub fn new(
+        p2p_networks: Vec<P2pNetworkRef>,
+        cert_resolver: ServerCertResolverRef,
+        connection_info_cache: P2pConnectionInfoCacheRef,
+    ) -> P2pResult<Self> {
+        let mut p2p_networks = p2p_networks
+            .into_iter()
+            .map(|network| (network.protocol(), network))
+            .collect::<HashMap<Protocol, P2pNetworkRef>>();
         Ok(Self {
             connection_info_cache,
             cert_resolver,
@@ -34,10 +41,11 @@ impl NetManager {
         })
     }
 
-    pub async fn listen(self: &Arc<Self>,
-                        endpoints: &[Endpoint],
-                        port_mapping: Option<Vec<(Endpoint, u16)>>) -> P2pResult<()> {
-
+    pub async fn listen(
+        self: &Arc<Self>,
+        endpoints: &[Endpoint],
+        port_mapping: Option<Vec<(Endpoint, u16)>>,
+    ) -> P2pResult<()> {
         let ep_len = endpoints.len();
         if ep_len == 0 {
             let err = p2p_err!(P2pErrorCode::InvalidParam, "no endpoint");
@@ -55,13 +63,23 @@ impl NetManager {
             let ep_pair = if ep.is_mapped_wan() {
                 let local_index = ep_index + 1;
                 let ep_pair = if local_index == ep_len {
-                    Err(P2pError::new(P2pErrorCode::InvalidParam, format!("mapped wan endpoint {} has no local endpoint", ep)))
+                    Err(P2pError::new(
+                        P2pErrorCode::InvalidParam,
+                        format!("mapped wan endpoint {} has no local endpoint", ep),
+                    ))
                 } else {
                     let local_ep = &endpoints[local_index];
                     if !(local_ep.is_same_ip_version(ep)
                         && local_ep.protocol() == ep.protocol()
-                        && !local_ep.is_static_wan()) {
-                        Err(P2pError::new(P2pErrorCode::InvalidParam, format!("mapped wan endpoint {} has invalid local endpoint {}", ep, local_ep)))
+                        && !local_ep.is_static_wan())
+                    {
+                        Err(P2pError::new(
+                            P2pErrorCode::InvalidParam,
+                            format!(
+                                "mapped wan endpoint {} has invalid local endpoint {}",
+                                ep, local_ep
+                            ),
+                        ))
                     } else {
                         Ok((*local_ep, Some(*ep)))
                     }
@@ -82,7 +100,11 @@ impl NetManager {
             let p2p_network = match self.p2p_networks.get(&ep.protocol()) {
                 Some(network) => network,
                 None => {
-                    let err = p2p_err!(P2pErrorCode::InvalidParam, "no network for protocol {:?}", ep.protocol());
+                    let err = p2p_err!(
+                        P2pErrorCode::InvalidParam,
+                        "no network for protocol {:?}",
+                        ep.protocol()
+                    );
                     warn!("NetListener bind on {:?} failed for {:?}", ep, err);
                     continue;
                 }
@@ -105,24 +127,30 @@ impl NetManager {
             };
 
             let this = self.clone();
-            let p2p_listener = match p2p_network.listen(&local, out, mapping_port, Arc::new(move |conn: P2pConnection| {
-                let this = this.clone();
-                async move {
-                    let listener = {
-                        let event_listeners = this.listener.lock().unwrap();
-                        if let Some(listener) = event_listeners.get(&conn.local_id()) {
-                            listener.clone()
-                        } else {
-                            return Ok(());
+            let p2p_listener = match p2p_network
+                .listen(
+                    &local,
+                    out,
+                    mapping_port,
+                    Arc::new(move |conn: P2pConnection| {
+                        let this = this.clone();
+                        async move {
+                            let listener = {
+                                let event_listeners = this.listener.lock().unwrap();
+                                if let Some(listener) = event_listeners.get(&conn.local_id()) {
+                                    listener.clone()
+                                } else {
+                                    return Ok(());
+                                }
+                            };
+                            listener.on_new_connection(conn).await?;
+                            Ok(())
                         }
-                    };
-                    listener.on_new_connection(conn).await?;
-                    Ok(())
-                }
-            })).await {
-                Ok(listener) => {
-                    listener
-                }
+                    }),
+                )
+                .await
+            {
+                Ok(listener) => listener,
                 Err(e) => {
                     log::error!("NetListener bind on {:?} failed for {:?}", ep, e);
                     continue;
@@ -133,9 +161,16 @@ impl NetManager {
         Ok(())
     }
 
-    pub fn set_connection_event_listener(&self, local_id: P2pId, listener: impl P2pConnectionEventListener) {
+    pub fn set_connection_event_listener(
+        &self,
+        local_id: P2pId,
+        listener: impl P2pConnectionEventListener,
+    ) {
         let event_listener = Arc::new(listener);
-        self.listener.lock().unwrap().insert(local_id, event_listener);
+        self.listener
+            .lock()
+            .unwrap()
+            .insert(local_id, event_listener);
     }
 
     pub fn remove_connection_event_listener(&self, local_id: &P2pId) {
@@ -165,14 +200,21 @@ impl NetManager {
     }
 
     pub fn get_listener(&self, protocol: Protocol) -> Vec<P2pListenerRef> {
-        self.p2p_networks.get(&protocol).map(|network| network.listeners()).unwrap_or(vec![])
+        self.p2p_networks
+            .get(&protocol)
+            .map(|network| network.listeners())
+            .unwrap_or(vec![])
     }
 
     pub fn get_network(&self, protocol: Protocol) -> P2pResult<P2pNetworkRef> {
         if let Some(network) = self.p2p_networks.get(&protocol) {
             Ok(network.clone())
         } else {
-            Err(p2p_err!(P2pErrorCode::NotFound, "no network for protocol {:?}", protocol))
+            Err(p2p_err!(
+                P2pErrorCode::NotFound,
+                "no network for protocol {:?}",
+                protocol
+            ))
         }
     }
 

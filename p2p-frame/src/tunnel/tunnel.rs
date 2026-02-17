@@ -1,23 +1,28 @@
-use std::future::Future;
-use std::net::{SocketAddr};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
-use notify_future::{Notify};
-use num_traits::FromPrimitive;
 use crate::endpoint::{Endpoint, EndpointArea};
-use crate::error::{p2p_err, P2pErrorCode, P2pResult, into_p2p_err};
-use crate::p2p_connection::{ConnectDirection, P2pConnection, P2pConnectionInfo, P2pConnectionInfoCacheRef};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::p2p_connection::{
+    ConnectDirection, P2pConnection, P2pConnectionInfo, P2pConnectionInfoCacheRef,
+};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{PnClient, PnClientRef};
 use crate::protocol::v0::{AckReverseSession, AckSession, TunnelType};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
-use crate::tunnel::{select_successful, TunnelConnection, TunnelSession, TunnelListenPortsRef, TunnelStatRef, TunnelStat, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite, TunnelState};
 use crate::tunnel::proxy_connection::{ProxyConnectionRead, ProxyConnectionWrite};
+use crate::tunnel::{
+    TunnelConnection, TunnelConnectionRead, TunnelConnectionRef, TunnelConnectionWrite,
+    TunnelListenPortsRef, TunnelSession, TunnelStat, TunnelStatRef, TunnelState, select_successful,
+};
 use crate::types::{SessionId, TunnelId};
+use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode};
+use notify_future::Notify;
+use num_traits::FromPrimitive;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // Direct connect starts first, then reverse connect is fired after a short delay
 // to reduce tail latency when NAT conditions make direct path slow.
@@ -35,7 +40,12 @@ macro_rules! p2p_err_from_result {
 }
 
 pub enum ReverseResult {
-    Session(u8, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite),
+    Session(
+        u8,
+        TunnelConnectionRef,
+        TunnelConnectionRead,
+        TunnelConnectionWrite,
+    ),
 }
 
 #[derive(RawEncode, RawDecode)]
@@ -48,7 +58,11 @@ pub trait ReverseWaiterCache: 'static + Send + Sync {
     fn add_reverse_waiter(&self, sequence: TunnelId, notify: Notify<ReverseResult>);
     fn remove_reverse_waiter(&self, sequence: TunnelId);
     // Reorder direct endpoints by recent outcome and cache preference.
-    fn preferred_direct_endpoints(&self, endpoints: &[Endpoint], preferred_ep: Option<&Endpoint>) -> Vec<Endpoint>;
+    fn preferred_direct_endpoints(
+        &self,
+        endpoints: &[Endpoint],
+        preferred_ep: Option<&Endpoint>,
+    ) -> Vec<Endpoint>;
     // Feed direct connect result back to cache for later ordering.
     fn on_direct_connect_result(&self, endpoint: &Endpoint, success: bool);
 }
@@ -56,8 +70,21 @@ pub trait ReverseWaiterCache: 'static + Send + Sync {
 #[async_trait::async_trait]
 pub trait P2pConnectionFactory: Send + Sync + 'static {
     fn tunnel_type(&self) -> TunnelType;
-    async fn create_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>>;
-    async fn create_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection>;
+    async fn create_connect(
+        &self,
+        local_identity: &P2pIdentityRef,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<Vec<P2pConnection>>;
+    async fn create_connect_with_local_ep(
+        &self,
+        local_identity: &P2pIdentityRef,
+        local_ep: &Endpoint,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<P2pConnection>;
 }
 
 pub struct Tunnel<F: P2pConnectionFactory> {
@@ -131,7 +158,10 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
 
     pub(crate) fn set_tunnel_state(&self, new_state: TunnelState) {
         if (self.tunnel_conn.is_some()) {
-            self.tunnel_conn.as_ref().unwrap().set_tunnel_state(new_state);
+            self.tunnel_conn
+                .as_ref()
+                .unwrap()
+                .set_tunnel_state(new_state);
         }
     }
 
@@ -166,7 +196,23 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
     //     reverse_eps
     // }
 
-    fn create_connection(&self, ep: &Endpoint, vport: u16, session_id: SessionId) -> Pin<Box<dyn Future<Output=P2pResult<(AckSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>> {
+    fn create_connection(
+        &self,
+        ep: &Endpoint,
+        vport: u16,
+        session_id: SessionId,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = P2pResult<(
+                        AckSession,
+                        TunnelConnectionRef,
+                        TunnelConnectionRead,
+                        TunnelConnectionWrite,
+                    )>,
+                > + Send,
+        >,
+    > {
         let sequence = self.tunnel_id;
         let local_identity = self.local_identity.clone();
         let remote_id = self.remote_id.clone();
@@ -177,8 +223,23 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         let ep = ep.clone();
         let remote_name = self.remote_name.clone();
         let future = Box::pin(async move {
-            let conns = p2p_factory.create_connect(&local_identity, &ep, &remote_id, remote_name).await?;
-            let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
+            let conns = p2p_factory
+                .create_connect(&local_identity, &ep, &remote_id, remote_name)
+                .await?;
+            let mut futures: Vec<
+                Pin<
+                    Box<
+                        dyn Future<
+                                Output = P2pResult<(
+                                    AckSession,
+                                    TunnelConnectionRef,
+                                    TunnelConnectionRead,
+                                    TunnelConnectionWrite,
+                                )>,
+                            > + Send,
+                    >,
+                >,
+            > = Vec::new();
             for conn in conns {
                 let tunnel_conn = TunnelConnection::new(
                     sequence,
@@ -188,10 +249,13 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     conn_timeout,
                     protocol_version,
                     conn,
-                    cert_factory.clone());
+                    cert_factory.clone(),
+                );
                 let p2p_factory = p2p_factory.clone();
                 let future = Box::pin(async move {
-                    let (ack, read, write) = tunnel_conn.open_session(p2p_factory.tunnel_type(), vport, session_id).await?;
+                    let (ack, read, write) = tunnel_conn
+                        .open_session(p2p_factory.tunnel_type(), vport, session_id)
+                        .await?;
                     Ok((ack, tunnel_conn, read, write))
                 });
                 futures.push(future);
@@ -199,7 +263,10 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             if futures.len() > 0 {
                 select_successful(futures).await
             } else {
-                Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+                Err(p2p_err!(
+                    P2pErrorCode::ConnectFailed,
+                    "No available endpoint"
+                ))
             }
         });
         future
@@ -212,10 +279,21 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
 
         let pn_client = self.pn_client.as_ref().unwrap();
 
-        let (read, write) = runtime::timeout(self.conn_timeout,
-                                                 pn_client.connect(self.tunnel_id, self.remote_id.clone(), self.remote_name.clone())).await.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
+        let (read, write) = runtime::timeout(
+            self.conn_timeout,
+            pn_client.connect(
+                self.tunnel_id,
+                self.remote_id.clone(),
+                self.remote_name.clone(),
+            ),
+        )
+        .await
+        .map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
         let read = Box::new(ProxyConnectionRead::new(read, self.local_identity.get_id()));
-        let write = Box::new(ProxyConnectionWrite::new(write, self.local_identity.get_id()));
+        let write = Box::new(ProxyConnectionWrite::new(
+            write,
+            self.local_identity.get_id(),
+        ));
         let proxy_conn = P2pConnection::new(read, write);
         let conn = TunnelConnection::new(
             self.tunnel_id,
@@ -225,15 +303,22 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             self.conn_timeout,
             self.protocol_version,
             proxy_conn,
-            self.cert_factory.clone());
+            self.cert_factory.clone(),
+        );
         Ok(Some(conn))
     }
 
-    async fn connect_reverse_by_sn(&self,
-                                   vport: u16,
-                                   session_id: SessionId,
-                                   future_cache: Arc<dyn ReverseWaiterCache>)
-        -> P2pResult<(u8, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)> {
+    async fn connect_reverse_by_sn(
+        &self,
+        vport: u16,
+        session_id: SessionId,
+        future_cache: Arc<dyn ReverseWaiterCache>,
+    ) -> P2pResult<(
+        u8,
+        TunnelConnectionRef,
+        TunnelConnectionRead,
+        TunnelConnectionWrite,
+    )> {
         Self::connect_reverse_by_sn_inner(
             self.sn_service.clone(),
             self.tunnel_id,
@@ -243,26 +328,30 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             vport,
             session_id,
             future_cache,
-        ).await
+        )
+        .await
     }
 
-    async fn connect_reverse_by_sn_inner(sn_service: SNClientServiceRef,
-                                         tunnel_id: TunnelId,
-                                         remote_id: P2pId,
-                                         tunnel_type: TunnelType,
-                                         conn_timeout: Duration,
-                                         vport: u16,
-                                         session_id: SessionId,
-                                         future_cache: Arc<dyn ReverseWaiterCache>)
-        -> P2pResult<(u8, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)> {
+    async fn connect_reverse_by_sn_inner(
+        sn_service: SNClientServiceRef,
+        tunnel_id: TunnelId,
+        remote_id: P2pId,
+        tunnel_type: TunnelType,
+        conn_timeout: Duration,
+        vport: u16,
+        session_id: SessionId,
+        future_cache: Arc<dyn ReverseWaiterCache>,
+    ) -> P2pResult<(
+        u8,
+        TunnelConnectionRef,
+        TunnelConnectionRead,
+        TunnelConnectionWrite,
+    )> {
         // Always pair add/remove for reverse waiter to avoid pending waiter leaks
         // on call error, timeout, or normal completion.
         let (notify, waiter) = Notify::new();
         future_cache.add_reverse_waiter(tunnel_id, notify);
-        let call_data = SessionSnCall {
-            vport,
-            session_id,
-        };
+        let call_data = SessionSnCall { vport, session_id };
         log::debug!(
             "tunnel {:?} remote {} path reverse sn-call start session {} vport {}",
             tunnel_id,
@@ -270,11 +359,17 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             session_id,
             vport
         );
-        let call_result = sn_service.call(tunnel_id,
-                                               None,
-                                               &remote_id,
-                                               tunnel_type,
-                                               call_data.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?).await;
+        let call_result = sn_service
+            .call(
+                tunnel_id,
+                None,
+                &remote_id,
+                tunnel_type,
+                call_data
+                    .to_vec()
+                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?,
+            )
+            .await;
         if let Err(err) = call_result {
             future_cache.remove_reverse_waiter(tunnel_id);
             log::warn!(
@@ -288,7 +383,9 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             return Err(err);
         }
 
-        let result = runtime::timeout(conn_timeout, waiter).await.map_err(into_p2p_err!(P2pErrorCode::Timeout));
+        let result = runtime::timeout(conn_timeout, waiter)
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::Timeout));
         future_cache.remove_reverse_waiter(tunnel_id);
         let result = result?;
         let ReverseResult::Session(result, tunnel_conn, read, write) = result;
@@ -303,7 +400,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         Ok((result, tunnel_conn, read, write))
     }
 
-    pub async fn connect_session(&mut self, vport: u16, session_id: SessionId, future_cache: Arc<dyn ReverseWaiterCache>) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+    pub async fn connect_session(
+        &mut self,
+        vport: u16,
+        session_id: SessionId,
+        future_cache: Arc<dyn ReverseWaiterCache>,
+    ) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         if self.tunnel_conn.is_some() {
             log::debug!(
                 "tunnel {:?} remote {} path reuse session {} vport {}",
@@ -312,7 +414,13 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 session_id,
                 vport
             );
-            let (ack, read, write) = self.tunnel_conn.as_ref().unwrap().open_session(self.p2p_factory.tunnel_type(), vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+            let (ack, read, write) = self
+                .tunnel_conn
+                .as_ref()
+                .unwrap()
+                .open_session(self.p2p_factory.tunnel_type(), vport, session_id)
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return if ack.result == 0 {
                 Ok((read, write))
             } else {
@@ -341,6 +449,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                         match self.create_connection(ep, vport, session_id).await {
                             Ok((ack, conn, read, write)) => {
                                 future_cache.on_direct_connect_result(ep, true);
+                                conn.set_tunnel_state(TunnelState::Worked);
                                 self.tunnel_conn = Some(conn);
                                 return if ack.result == 0 {
                                     Ok((read, write))
@@ -355,7 +464,11 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                             }
                             Err(e) => {
                                 future_cache.on_direct_connect_result(ep, false);
-                                log::warn!("connect stream with cached endpoint failed: {:?} msg: {}", e.code(), e.msg());
+                                log::warn!(
+                                    "connect stream with cached endpoint failed: {:?} msg: {}",
+                                    e.code(),
+                                    e.msg()
+                                );
                             }
                         }
                     }
@@ -368,15 +481,24 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     session_id,
                     vport
                 );
-                match self.connect_reverse_by_sn(vport, session_id, future_cache.clone()).await {
+                match self
+                    .connect_reverse_by_sn(vport, session_id, future_cache.clone())
+                    .await
+                {
                     Ok((result, tunnel_conn, read, write)) => {
+                        tunnel_conn.set_tunnel_state(TunnelState::Worked);
+                        self.tunnel_conn = Some(tunnel_conn);
+                        self.conn_info_cache
+                            .add(
+                                self.remote_id.clone(),
+                                P2pConnectionInfo {
+                                    direct: ConnectDirection::Reverse,
+                                    local_ep: read.local(),
+                                    remote_ep: read.remote(),
+                                },
+                            )
+                            .await;
                         return if result == 0 {
-                            self.tunnel_conn = Some(tunnel_conn);
-                            self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
-                                direct: ConnectDirection::Reverse,
-                                local_ep: read.local(),
-                                remote_ep: read.remote(),
-                            }).await;
                             Ok((read, write))
                         } else {
                             Err(p2p_err_from_result!(result))
@@ -384,7 +506,11 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     }
                     Err(e) => {
                         has_reversed = true;
-                        log::warn!("connect reverse with cache direction failed: {:?} msg: {}", e.code(), e.msg());
+                        log::warn!(
+                            "connect reverse with cache direction failed: {:?} msg: {}",
+                            e.code(),
+                            e.msg()
+                        );
                     }
                 }
             } else if latest_connection_info.direct == ConnectDirection::Proxy {
@@ -398,13 +524,21 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 let proxy_conn = self.create_proxy_connection().await?;
                 if proxy_conn.is_some() {
                     let conn = proxy_conn.unwrap();
-                    let (ack, read, write) = conn.open_session(self.p2p_factory.tunnel_type(), vport, session_id).await?;
+                    let (ack, read, write) = conn
+                        .open_session(self.p2p_factory.tunnel_type(), vport, session_id)
+                        .await?;
+                    conn.set_tunnel_state(TunnelState::Worked);
                     self.tunnel_conn = Some(conn);
-                    self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
-                        direct: ConnectDirection::Proxy,
-                        local_ep: read.local(),
-                        remote_ep: read.remote(),
-                    }).await;
+                    self.conn_info_cache
+                        .add(
+                            self.remote_id.clone(),
+                            P2pConnectionInfo {
+                                direct: ConnectDirection::Proxy,
+                                local_ep: read.local(),
+                                remote_ep: read.remote(),
+                            },
+                        )
+                        .await;
                     if ack.result == 0 {
                         return Ok((read, write));
                     } else {
@@ -419,7 +553,20 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             }
         }
 
-        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
+        let mut futures: Vec<
+            Pin<
+                Box<
+                    dyn Future<
+                            Output = P2pResult<(
+                                AckSession,
+                                TunnelConnectionRef,
+                                TunnelConnectionRead,
+                                TunnelConnectionWrite,
+                            )>,
+                        > + Send,
+                >,
+            >,
+        > = Vec::new();
         let ep_list = &self.remote_eps;
         let is_lan = self.sn_service.is_same_lan(ep_list);
         let mut direct_eps = Vec::new();
@@ -430,8 +577,13 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         }
         // First follow last successful endpoint from connection cache, then apply
         // per-endpoint success/failure scores.
-        let preferred_ep = self.conn_info_cache.get(&self.remote_id).await.map(|v| v.remote_ep);
-        let direct_eps = future_cache.preferred_direct_endpoints(direct_eps.as_slice(), preferred_ep.as_ref());
+        let preferred_ep = self
+            .conn_info_cache
+            .get(&self.remote_id)
+            .await
+            .map(|v| v.remote_ep);
+        let direct_eps =
+            future_cache.preferred_direct_endpoints(direct_eps.as_slice(), preferred_ep.as_ref());
         for ep in direct_eps.iter() {
             let future = self.create_connection(ep, vport, session_id);
             futures.push(future);
@@ -440,12 +592,12 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         if futures.len() > 0 {
             if !has_reversed {
                 log::debug!(
-                    "tunnel {:?} remote {} path hedged start session {} vport {} direct_eps {} delay_ms {}",
+                    "tunnel {:?} remote {} path hedged start session {} vport {} direct_eps {:?} delay_ms {}",
                     self.tunnel_id,
                     self.remote_id,
                     session_id,
                     vport,
-                    direct_eps.len(),
+                    direct_eps,
                     HEDGED_REVERSE_DELAY.as_millis()
                 );
                 let reverse_future_cache = future_cache.clone();
@@ -465,7 +617,8 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                         vport,
                         session_id,
                         reverse_future_cache,
-                    ).await
+                    )
+                    .await
                 };
                 let direct_future = select_successful(futures);
                 tokio::pin!(reverse_future);
@@ -486,6 +639,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                     ack.result
                                 );
                                 future_cache.on_direct_connect_result(&read.remote(), true);
+                                conn.set_tunnel_state(TunnelState::Worked);
                                 self.tunnel_conn = Some(conn);
                                 self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
                                     direct: ConnectDirection::Direct,
@@ -578,6 +732,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                             ack.result
                                         );
                                         future_cache.on_direct_connect_result(&read.remote(), true);
+                                        conn.set_tunnel_state(TunnelState::Worked);
                                         self.tunnel_conn = Some(conn);
                                         self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
                                             direct: ConnectDirection::Direct,
@@ -616,12 +771,18 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                             ack.result
                         );
                         future_cache.on_direct_connect_result(&read.remote(), true);
+                        conn.set_tunnel_state(TunnelState::Worked);
                         self.tunnel_conn = Some(conn);
-                        self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
-                            direct: ConnectDirection::Direct,
-                            local_ep: read.local(),
-                            remote_ep: read.remote(),
-                        }).await;
+                        self.conn_info_cache
+                            .add(
+                                self.remote_id.clone(),
+                                P2pConnectionInfo {
+                                    direct: ConnectDirection::Direct,
+                                    local_ep: read.local(),
+                                    remote_ep: read.remote(),
+                                },
+                            )
+                            .await;
                         return if ack.result == 0 {
                             Ok((read, write))
                         } else {
@@ -631,7 +792,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                 session_id,
                                 vport
                             ))
-                        }
+                        };
                     }
                     Err(e) => {
                         for ep in direct_eps.iter() {
@@ -651,7 +812,10 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 session_id,
                 vport
             );
-            match self.connect_reverse_by_sn(vport, session_id, future_cache.clone()).await {
+            match self
+                .connect_reverse_by_sn(vport, session_id, future_cache.clone())
+                .await
+            {
                 Ok((result, tunnel_conn, read, write)) => {
                     log::info!(
                         "tunnel {:?} remote {} path reverse fallback done session {} vport {} result {}",
@@ -663,11 +827,16 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     );
                     tunnel_conn.set_tunnel_state(TunnelState::Worked);
                     self.tunnel_conn = Some(tunnel_conn);
-                    self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
-                        direct: ConnectDirection::Reverse,
-                        local_ep: read.local(),
-                        remote_ep: read.remote(),
-                    }).await;
+                    self.conn_info_cache
+                        .add(
+                            self.remote_id.clone(),
+                            P2pConnectionInfo {
+                                direct: ConnectDirection::Reverse,
+                                local_ep: read.local(),
+                                remote_ep: read.remote(),
+                            },
+                        )
+                        .await;
                     return if result == 0 {
                         Ok((read, write))
                     } else {
@@ -690,7 +859,9 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         let proxy_conn = self.create_proxy_connection().await?;
         if proxy_conn.is_some() {
             let conn = proxy_conn.unwrap();
-            let (ack, read, write) = conn.open_session(self.p2p_factory.tunnel_type(), vport, session_id).await?;
+            let (ack, read, write) = conn
+                .open_session(self.p2p_factory.tunnel_type(), vport, session_id)
+                .await?;
             log::info!(
                 "tunnel {:?} remote {} path proxy fallback done session {} vport {} ack {}",
                 self.tunnel_id,
@@ -699,12 +870,18 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 vport,
                 ack.result
             );
+            conn.set_tunnel_state(TunnelState::Worked);
             self.tunnel_conn = Some(conn);
-            self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
-                direct: ConnectDirection::Proxy,
-                local_ep: read.local(),
-                remote_ep: read.remote(),
-            }).await;
+            self.conn_info_cache
+                .add(
+                    self.remote_id.clone(),
+                    P2pConnectionInfo {
+                        direct: ConnectDirection::Proxy,
+                        local_ep: read.local(),
+                        remote_ep: read.remote(),
+                    },
+                )
+                .await;
             return if ack.result == 0 {
                 Ok((read, write))
             } else {
@@ -714,7 +891,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     session_id,
                     vport
                 ))
-            }
+            };
         }
         log::warn!(
             "tunnel {:?} remote {} create session failed all paths session {} vport {}",
@@ -723,12 +900,25 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             session_id,
             vport
         );
-        Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+        Err(p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "No available endpoint"
+        ))
     }
 
-    pub async fn open_session(&self, vport: u16, session_id: SessionId) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+    pub async fn open_session(
+        &self,
+        vport: u16,
+        session_id: SessionId,
+    ) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         if self.tunnel_conn.is_some() {
-            let (ack, read, write) = self.tunnel_conn.as_ref().unwrap().open_session(self.p2p_factory.tunnel_type(), vport, session_id).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+            let (ack, read, write) = self
+                .tunnel_conn
+                .as_ref()
+                .unwrap()
+                .open_session(self.p2p_factory.tunnel_type(), vport, session_id)
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             if ack.result == 0 {
                 Ok((read, write))
             } else {
@@ -740,16 +930,27 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 ))
             }
         } else {
-            Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect has not been established"))
+            Err(p2p_err!(
+                P2pErrorCode::ConnectFailed,
+                "connect has not been established"
+            ))
         }
     }
 
-    pub async fn connect_reverse_session(&mut self, vport: u16, session_id: SessionId, result: u8) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+    pub async fn connect_reverse_session(
+        &mut self,
+        vport: u16,
+        session_id: SessionId,
+        result: u8,
+    ) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         if self.tunnel_conn.is_some() {
-            let (ack, read, write) = self.tunnel_conn.as_ref().unwrap().open_reverse_session(self.p2p_factory.tunnel_type(),
-                                                                                   vport,
-                                                                                   session_id,
-                                                                                   result).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+            let (ack, read, write) = self
+                .tunnel_conn
+                .as_ref()
+                .unwrap()
+                .open_reverse_session(self.p2p_factory.tunnel_type(), vport, session_id, result)
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             return if ack.result == 0 {
                 Ok((read, write))
             } else {
@@ -759,10 +960,23 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     session_id,
                     vport
                 ))
-            }
+            };
         }
 
-        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckReverseSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
+        let mut futures: Vec<
+            Pin<
+                Box<
+                    dyn Future<
+                            Output = P2pResult<(
+                                AckReverseSession,
+                                TunnelConnectionRef,
+                                TunnelConnectionRead,
+                                TunnelConnectionWrite,
+                            )>,
+                        > + Send,
+                >,
+            >,
+        > = Vec::new();
         for ep in self.remote_eps.iter() {
             let sequence = self.tunnel_id;
             let local_identity = self.local_identity.clone();
@@ -773,8 +987,23 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             let p2p_factory = self.p2p_factory.clone();
             let remote_name = self.remote_name.clone();
             let future = Box::pin(async move {
-                let conns = p2p_factory.create_connect(&local_identity, ep, &remote_id, remote_name).await?;
-                let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckReverseSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
+                let conns = p2p_factory
+                    .create_connect(&local_identity, ep, &remote_id, remote_name)
+                    .await?;
+                let mut futures: Vec<
+                    Pin<
+                        Box<
+                            dyn Future<
+                                    Output = P2pResult<(
+                                        AckReverseSession,
+                                        TunnelConnectionRef,
+                                        TunnelConnectionRead,
+                                        TunnelConnectionWrite,
+                                    )>,
+                                > + Send,
+                        >,
+                    >,
+                > = Vec::new();
                 for conn in conns {
                     let tunnel_conn = TunnelConnection::new(
                         sequence,
@@ -784,10 +1013,18 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                         conn_timeout,
                         protocol_version,
                         conn,
-                        cert_factory.clone());
+                        cert_factory.clone(),
+                    );
                     let p2p_factory = p2p_factory.clone();
                     let future = Box::pin(async move {
-                        let (ack, read, write) = tunnel_conn.open_reverse_session(p2p_factory.tunnel_type(), vport, session_id, result).await?;
+                        let (ack, read, write) = tunnel_conn
+                            .open_reverse_session(
+                                p2p_factory.tunnel_type(),
+                                vport,
+                                session_id,
+                                result,
+                            )
+                            .await?;
                         Ok((ack, tunnel_conn, read, write))
                     });
                     futures.push(future);
@@ -795,7 +1032,10 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 if futures.len() > 0 {
                     select_successful(futures).await
                 } else {
-                    Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint"))
+                    Err(p2p_err!(
+                        P2pErrorCode::ConnectFailed,
+                        "No available endpoint"
+                    ))
                 }
             });
             futures.push(future);
@@ -805,11 +1045,16 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             match select_successful(futures).await {
                 Ok((ack, conn, read, write)) => {
                     self.tunnel_conn = Some(conn);
-                    self.conn_info_cache.add(self.remote_id.clone(), P2pConnectionInfo {
-                        direct: ConnectDirection::Direct,
-                        local_ep: read.local(),
-                        remote_ep: read.remote(),
-                    }).await;
+                    self.conn_info_cache
+                        .add(
+                            self.remote_id.clone(),
+                            P2pConnectionInfo {
+                                direct: ConnectDirection::Direct,
+                                local_ep: read.local(),
+                                remote_ep: read.remote(),
+                            },
+                        )
+                        .await;
                     return if ack.result == 0 {
                         Ok((read, write))
                     } else {
@@ -819,22 +1064,35 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                             session_id,
                             vport
                         ))
-                    }
+                    };
                 }
                 Err(e) => {
                     log::error!("connect stream error: {:?}", e);
                 }
             }
         }
-        Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint session {} port {}", session_id, vport))
+        Err(p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "No available endpoint session {} port {}",
+            session_id,
+            vport
+        ))
     }
 
-    pub async fn open_reverse_session(&self, vport: u16, session_id: SessionId, result: u8) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+    pub async fn open_reverse_session(
+        &self,
+        vport: u16,
+        session_id: SessionId,
+        result: u8,
+    ) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         if self.tunnel_conn.is_some() {
-            let (ack, read, write) = self.tunnel_conn.as_ref().unwrap().open_reverse_session(self.p2p_factory.tunnel_type(),
-                                                                                        vport,
-                                                                                        session_id,
-                                                                                        result).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+            let (ack, read, write) = self
+                .tunnel_conn
+                .as_ref()
+                .unwrap()
+                .open_reverse_session(self.p2p_factory.tunnel_type(), vport, session_id, result)
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
             if ack.result == 0 {
                 Ok((read, write))
             } else {
@@ -846,12 +1104,34 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                 ))
             }
         } else {
-            Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect has not been established session {} port {}", session_id, vport))
+            Err(p2p_err!(
+                P2pErrorCode::ConnectFailed,
+                "connect has not been established session {} port {}",
+                session_id,
+                vport
+            ))
         }
     }
 
-    pub async fn connect_session_direct(&mut self, vport: u16, session_id: SessionId) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
-        let mut futures: Vec<Pin<Box<dyn Future<Output=P2pResult<(AckSession, TunnelConnectionRef, TunnelConnectionRead, TunnelConnectionWrite)>> + Send>>> = Vec::new();
+    pub async fn connect_session_direct(
+        &mut self,
+        vport: u16,
+        session_id: SessionId,
+    ) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
+        let mut futures: Vec<
+            Pin<
+                Box<
+                    dyn Future<
+                            Output = P2pResult<(
+                                AckSession,
+                                TunnelConnectionRef,
+                                TunnelConnectionRead,
+                                TunnelConnectionWrite,
+                            )>,
+                        > + Send,
+                >,
+            >,
+        > = Vec::new();
         for ep in self.remote_eps.iter() {
             let future = self.create_connection(ep, vport, session_id);
             futures.push(future);
@@ -871,19 +1151,33 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                         ))
                     }
                 }
-                Err(e) => {
-                    Err(p2p_err!(P2pErrorCode::ConnectFailed, "connect session {} {} error: {:?} msg: {}", session_id, vport, e.code(), e.msg()))
-                }
+                Err(e) => Err(p2p_err!(
+                    P2pErrorCode::ConnectFailed,
+                    "connect session {} {} error: {:?} msg: {}",
+                    session_id,
+                    vport,
+                    e.code(),
+                    e.msg()
+                )),
             }
         } else {
-            Err(p2p_err!(P2pErrorCode::ConnectFailed, "No available endpoint session {} port {}", session_id, vport))
+            Err(p2p_err!(
+                P2pErrorCode::ConnectFailed,
+                "No available endpoint session {} port {}",
+                session_id,
+                vport
+            ))
         }
     }
 }
 
 impl<F: P2pConnectionFactory> Drop for Tunnel<F> {
     fn drop(&mut self) {
-        log::info!("drop tunnel {:?} local {}", self.tunnel_id, self.local_identity.get_id());
+        log::info!(
+            "drop tunnel {:?} local {}",
+            self.tunnel_id,
+            self.local_identity.get_id()
+        );
     }
 }
 
@@ -895,21 +1189,24 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use bucky_raw_codec::{RawFixedBytes, RawFrom};
     use super::*;
     use crate::endpoint::Protocol;
     use crate::executor::Executor;
-    use crate::protocol::{Package, PackageCmdCode, PackageHeader};
-    use crate::protocol::v0::{AckSession, SynSession};
-    use crate::p2p_connection::{ConnectDirection, DefaultP2pConnectionInfoCache, P2pConnectionInfo, P2pConnectionInfoCacheRef};
+    use crate::p2p_connection::{
+        ConnectDirection, DefaultP2pConnectionInfoCache, P2pConnectionInfo,
+        P2pConnectionInfoCacheRef,
+    };
     use crate::p2p_identity::{
         EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
         P2pIdentityCertRef, P2pSignature,
     };
+    use crate::protocol::v0::{AckSession, SynSession};
+    use crate::protocol::{Package, PackageCmdCode, PackageHeader};
     use crate::sn::client::SNClientService;
     use crate::sockets::NetManager;
     use crate::tls::DefaultTlsServerCertResolver;
     use crate::types::{SequenceGenerator, TunnelIdGenerator};
+    use bucky_raw_codec::{RawFixedBytes, RawFrom};
 
     struct DummyIdentityCert {
         id: P2pId,
@@ -1136,10 +1433,7 @@ mod tests {
             Pin::new(&mut self.inner).poll_write(cx, buf)
         }
 
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Error>> {
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
             Pin::new(&mut self.inner).poll_flush(cx)
         }
 
@@ -1173,7 +1467,12 @@ mod tests {
         }
     }
 
-    fn mock_p2p_connection(local_id: P2pId, remote_id: P2pId, remote_ep: Endpoint, ack_result: u8) -> P2pConnection {
+    fn mock_p2p_connection(
+        local_id: P2pId,
+        remote_id: P2pId,
+        remote_ep: Endpoint,
+        ack_result: u8,
+    ) -> P2pConnection {
         let local_ep = test_wan_endpoint(39999);
         let (local_stream, mut peer_stream) = tokio::io::duplex(4096);
         let (read_half, write_half) = tokio::io::split(local_stream);
@@ -1203,7 +1502,11 @@ mod tests {
             }
             let _ = SynSession::clone_from_slice(body.as_slice());
 
-            let ack = Package::new(0, PackageCmdCode::AckSession, AckSession { result: ack_result });
+            let ack = Package::new(
+                0,
+                PackageCmdCode::AckSession,
+                AckSession { result: ack_result },
+            );
             let ack_buf = match ack.to_vec() {
                 Ok(v) => v,
                 Err(_) => return,
@@ -1321,7 +1624,11 @@ mod tests {
             self.reverse_remove_calls.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn preferred_direct_endpoints(&self, endpoints: &[Endpoint], _preferred_ep: Option<&Endpoint>) -> Vec<Endpoint> {
+        fn preferred_direct_endpoints(
+            &self,
+            endpoints: &[Endpoint],
+            _preferred_ep: Option<&Endpoint>,
+        ) -> Vec<Endpoint> {
             self.preferred_calls.fetch_add(1, Ordering::SeqCst);
             let mut v = endpoints.to_vec();
             v.reverse();
@@ -1333,7 +1640,10 @@ mod tests {
         }
     }
 
-    fn make_tunnel(factory: Arc<EmptyConnectionFactory>, remote_eps: Vec<Endpoint>) -> (Tunnel<EmptyConnectionFactory>, P2pConnectionInfoCacheRef) {
+    fn make_tunnel(
+        factory: Arc<EmptyConnectionFactory>,
+        remote_eps: Vec<Endpoint>,
+    ) -> (Tunnel<EmptyConnectionFactory>, P2pConnectionInfoCacheRef) {
         Executor::init();
         let local_identity: P2pIdentityRef = Arc::new(DummyIdentity {
             id: P2pId::from(vec![1u8; 32]),
@@ -1343,7 +1653,8 @@ mod tests {
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(DummyIdentityCertFactory);
         let conn_info_cache = DefaultP2pConnectionInfoCache::new();
         let cert_resolver = DefaultTlsServerCertResolver::new();
-        let net_manager = Arc::new(NetManager::new(vec![], cert_resolver, conn_info_cache.clone()).unwrap());
+        let net_manager =
+            Arc::new(NetManager::new(vec![], cert_resolver, conn_info_cache.clone()).unwrap());
         let sn_service = SNClientService::new(
             net_manager,
             vec![],
@@ -1395,7 +1706,11 @@ mod tests {
         let factory = EmptyConnectionFactory::new();
         let (tunnel, _) = make_tunnel(factory, vec![]);
 
-        let err = tunnel.open_session(10001, Default::default()).await.err().unwrap();
+        let err = tunnel
+            .open_session(10001, Default::default())
+            .await
+            .err()
+            .unwrap();
         assert_eq!(err.code(), P2pErrorCode::ConnectFailed);
         assert!(err.msg().contains("connect has not been established"));
     }
@@ -1521,7 +1836,10 @@ mod tests {
         assert_eq!(cache.reverse_remove_calls(), 1);
     }
 
-    fn make_scripted_tunnel(factory: Arc<ScriptedConnectionFactory>, remote_eps: Vec<Endpoint>) -> (Tunnel<ScriptedConnectionFactory>, P2pConnectionInfoCacheRef) {
+    fn make_scripted_tunnel(
+        factory: Arc<ScriptedConnectionFactory>,
+        remote_eps: Vec<Endpoint>,
+    ) -> (Tunnel<ScriptedConnectionFactory>, P2pConnectionInfoCacheRef) {
         Executor::init();
         let local_identity: P2pIdentityRef = Arc::new(DummyIdentity {
             id: P2pId::from(vec![1u8; 32]),
@@ -1531,7 +1849,8 @@ mod tests {
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(DummyIdentityCertFactory);
         let conn_info_cache = DefaultP2pConnectionInfoCache::new();
         let cert_resolver = DefaultTlsServerCertResolver::new();
-        let net_manager = Arc::new(NetManager::new(vec![], cert_resolver, conn_info_cache.clone()).unwrap());
+        let net_manager =
+            Arc::new(NetManager::new(vec![], cert_resolver, conn_info_cache.clone()).unwrap());
         let sn_service = SNClientService::new(
             net_manager,
             vec![],

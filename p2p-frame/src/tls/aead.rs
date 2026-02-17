@@ -1,10 +1,9 @@
-use aes_gcm::{AeadInPlace, Aes128Gcm, KeyInit, KeySizeUser};
 use aes_gcm::aead::Buffer;
+use aes_gcm::{AeadInPlace, Aes128Gcm, KeyInit, KeySizeUser};
 use rustls::crypto::cipher::{
-    make_tls13_aad, AeadKey, BorrowedPayload, InboundOpaqueMessage,
-    InboundPlainMessage, Iv, MessageDecrypter, MessageEncrypter, Nonce,
-    OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
-    Tls13AeadAlgorithm, UnsupportedOperationError,
+    AeadKey, BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage, Iv, MessageDecrypter,
+    MessageEncrypter, Nonce, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
+    Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
 };
 use rustls::{ConnectionTrafficSecrets, ContentType, ProtocolVersion};
 
@@ -55,7 +54,8 @@ impl MessageEncrypter for Tls13Cipher {
         let nonce = aes_gcm::Nonce::from_slice(binding.0.as_slice());
         let aad = make_tls13_aad(total_len);
 
-        self.0.encrypt_in_place(&nonce, &aad, &mut EncryptBufferAdapter(&mut payload))
+        self.0
+            .encrypt_in_place(&nonce, &aad, &mut EncryptBufferAdapter(&mut payload))
             .map_err(|_| rustls::Error::EncryptError)
             .map(|_| {
                 OutboundOpaqueMessage::new(
@@ -82,7 +82,8 @@ impl MessageDecrypter for Tls13Cipher {
         let nonce = aes_gcm::Nonce::from_slice(binding.0.as_slice());
         let aad = make_tls13_aad(payload.len());
 
-        self.0.decrypt_in_place(&nonce, &aad, &mut DecryptBufferAdapter(payload))
+        self.0
+            .decrypt_in_place(&nonce, &aad, &mut DecryptBufferAdapter(payload))
             .map_err(|_| rustls::Error::DecryptError)?;
 
         m.into_tls13_unpadded_message()

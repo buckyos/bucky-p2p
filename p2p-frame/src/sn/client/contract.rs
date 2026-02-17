@@ -1,11 +1,14 @@
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::{atomic::{self, AtomicU32}, Arc, Mutex},
-    time::{SystemTime}
-};
-use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef};
 use crate::protocol::{v0::*, *};
 use crate::types::TunnelId;
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::{
+        Arc, Mutex,
+        atomic::{self, AtomicU32},
+    },
+    time::SystemTime,
+};
 
 pub trait ServiceAppraiser: Send + Sync {
     // 对SN服务进行评分，可以依据本地记录的服务清单和SN提供的服务清单作对比进行评价；
@@ -17,7 +20,7 @@ pub trait ServiceAppraiser: Send + Sync {
         sn: &EncodedP2pIdentityCert,
         local_receipt: &Option<SnServiceReceipt>,
         last_receipt: &Option<SnServiceReceipt>,
-        receipt_from_sn: &Option<SnServiceReceipt>
+        receipt_from_sn: &Option<SnServiceReceipt>,
     ) -> SnServiceGrade;
 }
 
@@ -27,7 +30,7 @@ struct Contract {
     stat: Mutex<ContractStat>,
     wait_seq: AtomicU32,
     appraiser: Arc<Box<dyn ServiceAppraiser>>,
-    cert_factory: P2pIdentityCertFactoryRef
+    cert_factory: P2pIdentityCertFactoryRef,
 }
 
 #[derive(Clone)]
@@ -47,7 +50,12 @@ struct ContractStat {
 
 impl Contract {
     fn on_ping_resp(&self, resp: &SnPingResp, rto: u16) {
-        if let Ok(wait_seq) = self.wait_seq.compare_exchange(resp.seq.value(), 0, atomic::Ordering::SeqCst, atomic::Ordering::SeqCst) {
+        if let Ok(wait_seq) = self.wait_seq.compare_exchange(
+            resp.seq.value(),
+            0,
+            atomic::Ordering::SeqCst,
+            atomic::Ordering::SeqCst,
+        ) {
             if wait_seq != 0 {
                 // 统计并获取当前服务清单
                 let (receipt, last_receipt) = {
@@ -62,17 +70,22 @@ impl Contract {
                         Some(_) => {
                             let last_receipt = &mut stat.last_receipt;
                             let cloned_last_receipt = match last_receipt.version {
-                            SnServiceReceiptVersion::Invalid => None,
-                            SnServiceReceiptVersion::Current => Some((*last_receipt).clone())
+                                SnServiceReceiptVersion::Invalid => None,
+                                SnServiceReceiptVersion::Current => Some((*last_receipt).clone()),
                             };
                             (Some(stat.receipt.clone()), cloned_last_receipt)
                         }
-                        None => (None, None)
+                        None => (None, None),
                     }
                 };
 
                 if let Some(sn_receipt) = resp.receipt.as_ref() {
-                    let grade = self.appraiser.appraise(&self.sn, &receipt, &last_receipt, &Some(sn_receipt.clone()));
+                    let grade = self.appraiser.appraise(
+                        &self.sn,
+                        &receipt,
+                        &last_receipt,
+                        &Some(sn_receipt.clone()),
+                    );
                     let mut stat = self.stat.lock().unwrap();
                     stat.receipt.grade = grade;
                     stat.commit_receipt_start_time = sn_receipt.start_time;
@@ -109,9 +122,13 @@ impl Contract {
             }
             Entry::Vacant(entry) => {
                 let init_stat = CallPeerStat {
-                    peerid: self.cert_factory.create(&called.peer_info).unwrap().get_id(),
+                    peerid: self
+                        .cert_factory
+                        .create(&called.peer_info)
+                        .unwrap()
+                        .get_id(),
                     last_seq: seq,
-                    is_connect_success: false
+                    is_connect_success: false,
                 };
                 entry.insert(init_stat);
                 (1, 1)

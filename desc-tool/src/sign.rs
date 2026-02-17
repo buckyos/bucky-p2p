@@ -1,11 +1,16 @@
 use clap::{App, Arg, ArgMatches, SubCommand};
 
+use bucky_crypto::PrivateKey;
+use bucky_objects::StandardObject;
+use bucky_objects::{
+    sign_and_push_named_object_body, sign_and_push_named_object_desc,
+    sign_and_set_named_object_body, sign_and_set_named_object_desc, AnyNamedObject, ObjectId,
+    ObjectLink, RsaCPUObjectSigner, SignatureSource, SIGNATURE_SOURCE_REFINDEX_OWNER,
+    SIGNATURE_SOURCE_REFINDEX_SELF,
+};
+use bucky_raw_codec::{FileDecoder, FileEncoder};
 use log::*;
 use std::str::FromStr;
-use bucky_crypto::PrivateKey;
-use bucky_objects::{AnyNamedObject, ObjectId, ObjectLink, RsaCPUObjectSigner, SIGNATURE_SOURCE_REFINDEX_OWNER, SIGNATURE_SOURCE_REFINDEX_SELF, SignatureSource, sign_and_push_named_object_desc, sign_and_set_named_object_desc, sign_and_push_named_object_body, sign_and_set_named_object_body};
-use bucky_raw_codec::{FileDecoder, FileEncoder};
-use bucky_objects::StandardObject;
 // .\desc-tool sign ${desc-path} -s=${signer-secret-path} -t=${signer-desc-path} -dba
 
 pub fn sign_subcommand<'a, 'b>() -> App<'a, 'b> {

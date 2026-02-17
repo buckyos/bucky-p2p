@@ -1,16 +1,18 @@
 use crate::desc;
 use crate::desc::create_people_desc;
-use crate::util::{
-    get_deviceids_from_matches, get_group_members_from_matches,
+use crate::util::{get_deviceids_from_matches, get_group_members_from_matches};
+use bucky_error::BuckyResult;
+use bucky_objects::{
+    sign_and_set_named_object_desc, Area, DeviceCategory, NamedObject, ObjectDesc, ObjectId,
+    RsaCPUObjectSigner, SignatureSource, SIGNATURE_SOURCE_REFINDEX_OWNER,
+    SIGNATURE_SOURCE_REFINDEX_SELF,
 };
+use bucky_raw_codec::FileEncoder;
 use clap::{App, Arg, ArgMatches, SubCommand};
 use log::*;
 use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
-use bucky_error::BuckyResult;
-use bucky_objects::{Area, DeviceCategory, NamedObject, ObjectDesc, ObjectId, RsaCPUObjectSigner, sign_and_set_named_object_desc, SIGNATURE_SOURCE_REFINDEX_OWNER, SIGNATURE_SOURCE_REFINDEX_SELF, SignatureSource};
-use bucky_raw_codec::FileEncoder;
 // .\desc-tool.exe create group -F=5r4MYfFfTakY1h6vdEuMurpkawk4MZpB5RmY9CFqSj99 -A=5r4MYfFfTakY1h6vdEuMurpkawk4MZpB5RmY9CFqSj99:;5r4MYfFPPRDNNcJdvve4XVx3FE355PUDpqaA5Mm9UcFh:;5r4MYfFAiXjbEkHZvc1NtHgJkZ4A7LJQcrY7cJeMz5YB:;5r4MYfFKmpMT2u2P13p3bLC6KtGEVsp42X85h5e2onhZ:; -M=5r4MYfF5r9cUfL9JemVXwLWJjufXETYSjfXqEsR3Qwn5:;5r4MYfF8ZaksbXfnZbdjiYJuJv8U4FfvyBgdHq7RiPhY:;5r4MYfFQxUB7okJMvia5yGksrkMBzPrUrwCFgja4Djv3:;5r4MYfFXjPJ9BBYvvdP5QHudAWLNrMzuzZpNpr45pYEc:;5r4MYfFXuCNgbhRPaqtUKsNvNH1RNGF5prFXg7UqiWDS:;5r4MYfFJHxPCYqwLWrHQ24jjv3ZvCbK4dPhBCNn8r3aE:;5r4MYfFXAtLvsW52oCRRAALEt7rEJB7qUdRDEEKAgPJJ:;5r4MYfFdFYt8ytAw9noVjg1aXfeQvHWpaChax73wWKwJ:;5r4MYfFbDWG8jibePJhSoL25mv6tv6ZMDaMZHRzKVEEB:; -l=5aSixgN8tVt1SAM4xBfc1dYvdrU7d5fVeZrzNFpx8FiB;5aSixgMxgNuMQFcG41fW1CN7MTsKMqEuVjW16BnJWrGW;5aSixgN64mtdhmNvKZ681P3iPZbnQPyQsezTFNB2HSdx;5aSixgNS8ij1mkjjNe2UWHVgVYFhr4dJF5BuxxpTb1m8; -n="group" -I="icon" -d="description" -a=0:0:0:0 -O --savepath="./" --idfile="./group.id.txt"
 
 pub fn create_subcommand<'a, 'b>() -> App<'a, 'b> {
@@ -298,15 +300,13 @@ pub async fn create_desc(matches: &ArgMatches<'_>) {
 
 pub async fn create_group_desc(matches: &ArgMatches<'_>) {
     let admins = match get_group_members_from_matches(matches, "admins") {
-        Ok(admins) => {
-            match admins {
-                Some(admins) if admins.len() > 0 => admins,
-                _ => {
-                    log::error!("empty admins.");
-                    return;
-                }
+        Ok(admins) => match admins {
+            Some(admins) if admins.len() > 0 => admins,
+            _ => {
+                log::error!("empty admins.");
+                return;
             }
-        }
+        },
         Err(e) => {
             log::error!("invalid admins: {}", e.msg());
             return;

@@ -1,12 +1,14 @@
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use bucky_raw_codec::{CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes};
-use bucky_time::{bucky_time_to_system_time, system_time_to_bucky_time, MIN_BUCKY_TIME};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode};
-use crate::p2p_identity::{P2pId, P2pIdentity, EncodedP2pIdentityCert, P2pSignature};
-use crate::protocol::v0::{TunnelType};
-use crate::types::{TunnelId, Timestamp, Sequence};
+use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pSignature};
+use crate::protocol::v0::TunnelType;
+use crate::types::{Sequence, Timestamp, TunnelId};
+use bucky_raw_codec::{
+    CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes,
+};
+use bucky_time::{MIN_BUCKY_TIME, bucky_time_to_system_time, system_time_to_bucky_time};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, RawEncode, RawDecode)]
 pub struct SnCall {
@@ -26,7 +28,6 @@ pub struct SnCall {
     pub is_always_call: bool,
 }
 
-
 impl std::fmt::Debug for SnCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -44,7 +45,6 @@ impl std::fmt::Debug for SnCall {
         )
     }
 }
-
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Debug)]
 pub enum SnServiceGrade {
@@ -101,13 +101,14 @@ impl RawEncode for SnServiceGrade {
     ) -> Result<&'a mut [u8], CodecError> {
         let bytes = Self::raw_bytes().unwrap();
         if buf.len() < bytes {
-            let msg = format!("not enough buffer for encode SnServiceGrade, except={}, got={}", bytes, buf.len());
+            let msg = format!(
+                "not enough buffer for encode SnServiceGrade, except={}, got={}",
+                bytes,
+                buf.len()
+            );
             error!("{}", msg);
 
-            return Err(CodecError::new(
-                CodecErrorCode::OutOfLimit,
-                msg,
-            ));
+            return Err(CodecError::new(CodecErrorCode::OutOfLimit, msg));
         }
         buf[0] = (*self) as u8;
         Ok(&mut buf[1..])
@@ -118,16 +119,21 @@ impl<'de> RawDecode<'de> for SnServiceGrade {
     fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), CodecError> {
         let bytes = Self::raw_bytes().unwrap();
         if buf.len() < bytes {
-            let msg = format!("not enough buffer for decode SnServiceGrade, except={}, got={}", bytes, buf.len());
+            let msg = format!(
+                "not enough buffer for decode SnServiceGrade, except={}, got={}",
+                bytes,
+                buf.len()
+            );
             error!("{}", msg);
 
-            return Err(CodecError::new(
-                CodecErrorCode::OutOfLimit,
-                msg,
-            ));
+            return Err(CodecError::new(CodecErrorCode::OutOfLimit, msg));
         }
-        let v = Self::try_from(buf[0]).map_err(|e|
-            CodecError::new(CodecErrorCode::Failed, format!("decode sn service grade failed.{:?}", e)))?;
+        let v = Self::try_from(buf[0]).map_err(|e| {
+            CodecError::new(
+                CodecErrorCode::Failed,
+                format!("decode sn service grade failed.{:?}", e),
+            )
+        })?;
         Ok((v, &buf[Self::raw_bytes().unwrap()..]))
     }
 }
@@ -170,13 +176,14 @@ impl RawEncode for SnServiceReceiptVersion {
     ) -> Result<&'a mut [u8], CodecError> {
         let bytes = Self::raw_bytes().unwrap();
         if buf.len() < bytes {
-            let msg = format!("not enough buffer for encode SnServiceReceiptVersion, except={}, got={}", bytes, buf.len());
+            let msg = format!(
+                "not enough buffer for encode SnServiceReceiptVersion, except={}, got={}",
+                bytes,
+                buf.len()
+            );
             error!("{}", msg);
 
-            return Err(CodecError::new(
-                CodecErrorCode::OutOfLimit,
-                msg,
-            ));
+            return Err(CodecError::new(CodecErrorCode::OutOfLimit, msg));
         }
         buf[0] = (*self) as u8;
         Ok(&mut buf[1..])
@@ -187,16 +194,20 @@ impl<'de> RawDecode<'de> for SnServiceReceiptVersion {
     fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), CodecError> {
         let bytes = Self::raw_bytes().unwrap();
         if buf.len() < bytes {
-            let msg = format!("not enough buffer for decode SnServiceReceiptVersion, except={}, got={}", bytes, buf.len());
+            let msg = format!(
+                "not enough buffer for decode SnServiceReceiptVersion, except={}, got={}",
+                bytes,
+                buf.len()
+            );
             error!("{}", msg);
 
-            return Err(CodecError::new(
-                CodecErrorCode::OutOfLimit,
-                msg,
-            ));
+            return Err(CodecError::new(CodecErrorCode::OutOfLimit, msg));
         }
         let v = Self::try_from(buf[0]).map_err(|e| {
-            CodecError::new(CodecErrorCode::Failed, format!("decode sn service receipt version failed.{:?}", e))
+            CodecError::new(
+                CodecErrorCode::Failed,
+                format!("decode sn service receipt version failed.{:?}", e),
+            )
         })?;
         Ok((v, &buf[Self::raw_bytes().unwrap()..]))
     }
@@ -411,25 +422,25 @@ pub struct ReportSn {
     pub protocol_version: u8,
     pub stack_version: u32,
     //ln与sn的keepalive包
-    pub seq: Sequence,                          //序列号
-    pub sn_peer_id: P2pId,                  //sn的设备id
-    pub from_peer_id: Option<P2pId>,        //发送者设备id
-    pub peer_info: Option<EncodedP2pIdentityCert>,             //发送者设备信息
-    pub send_time: Timestamp,                  //发送时间
-    pub contract_id: Option<P2pId>,         //合约文件对象id
-    pub receipt: Option<ReceiptWithSignature>, //客户端提供的服务清单
+    pub seq: Sequence,                             //序列号
+    pub sn_peer_id: P2pId,                         //sn的设备id
+    pub from_peer_id: Option<P2pId>,               //发送者设备id
+    pub peer_info: Option<EncodedP2pIdentityCert>, //发送者设备信息
+    pub send_time: Timestamp,                      //发送时间
+    pub contract_id: Option<P2pId>,                //合约文件对象id
+    pub receipt: Option<ReceiptWithSignature>,     //客户端提供的服务清单
     pub map_ports: Vec<(Protocol, u16)>,
     pub local_eps: Vec<Endpoint>,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct ReportSnResp {
-    pub seq: Sequence,                      //包序列包
-    pub sn_peer_id: P2pId,              //sn的设备id
-    pub result: u8,                        //是否接受device的接入
-    pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
-    pub end_point_array: Vec<Endpoint>,    //外网地址列表
-    pub receipt: Option<SnServiceReceipt>, //返回sn的一些连接信息，如当前连接的peer数量
+    pub seq: Sequence,                             //包序列包
+    pub sn_peer_id: P2pId,                         //sn的设备id
+    pub result: u8,                                //是否接受device的接入
+    pub peer_info: Option<EncodedP2pIdentityCert>, //sn的设备信息
+    pub end_point_array: Vec<Endpoint>,            //外网地址列表
+    pub receipt: Option<SnServiceReceipt>,         //返回sn的一些连接信息，如当前连接的peer数量
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
@@ -437,13 +448,13 @@ pub struct SnQuery {
     pub protocol_version: u8,
     pub stack_version: u32,
     //ln与sn的keepalive包
-    pub seq: Sequence,                          //序列号
+    pub seq: Sequence, //序列号
     pub query_id: P2pId,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnQueryResp {
-    pub seq: Sequence,                      //包序列包
-    pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
-    pub end_point_array: Vec<Endpoint>,    //外网地址列表
+    pub seq: Sequence,                             //包序列包
+    pub peer_info: Option<EncodedP2pIdentityCert>, //sn的设备信息
+    pub end_point_array: Vec<Endpoint>,            //外网地址列表
 }

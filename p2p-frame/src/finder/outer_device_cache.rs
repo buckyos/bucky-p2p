@@ -18,7 +18,11 @@ pub trait OuterDeviceCache: Sync + Send + 'static {
     async fn search(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef>;
 
     // 校验device的owner签名是否有效
-    async fn verfiy_owner(&self, device_id: &P2pId, device: Option<&P2pIdentityCertRef>) -> P2pResult<()>;
+    async fn verfiy_owner(
+        &self,
+        device_id: &P2pId,
+        device: Option<&P2pIdentityCertRef>,
+    ) -> P2pResult<()>;
 
     fn clone_cache(&self) -> Box<dyn OuterDeviceCache>;
 }

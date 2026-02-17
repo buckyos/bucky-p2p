@@ -1,9 +1,12 @@
+use bucky_crypto::RawObjHash;
+use bucky_objects::{
+    AnyNamedObject, AreaObjectDesc, ChunkList, Dir, DirBodyContent, File, Group, InnerNode,
+    NDNObjectInfo, NamedObject, ObjectDesc, SignatureSource, SingleKeyObjectDesc, StandardObject,
+};
+use bucky_raw_codec::{FileDecoder, RawEncode, RawFrom};
 use clap::{App, Arg, ArgMatches, SubCommand};
 use itertools::Itertools;
 use std::path::Path;
-use bucky_crypto::RawObjHash;
-use bucky_objects::{AnyNamedObject, AreaObjectDesc, ChunkList, Dir, DirBodyContent, File, Group, InnerNode, NamedObject, NDNObjectInfo, ObjectDesc, SignatureSource, SingleKeyObjectDesc, StandardObject};
-use bucky_raw_codec::{FileDecoder, RawEncode, RawFrom};
 
 pub fn show_desc_subcommand<'a, 'b>() -> App<'a, 'b> {
     SubCommand::with_name("show")

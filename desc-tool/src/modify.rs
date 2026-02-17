@@ -2,14 +2,16 @@ use crate::util::{
     get_deviceids_from_matches, get_eps_from_matches, get_group_members_from_matches,
     get_objids_from_matches,
 };
-use clap::{App, Arg, ArgMatches, SubCommand};
-use log::*;
-use std::collections::{HashSet};
-use std::str::FromStr;
 use bucky_error::{BuckyError, BuckyErrorCode, BuckyResult};
-use bucky_objects::{AnyNamedObject, DeviceId, FileId, Group, NamedObject, ObjectDesc, ObjectId, StandardObject};
+use bucky_objects::{
+    AnyNamedObject, DeviceId, FileId, Group, NamedObject, ObjectDesc, ObjectId, StandardObject,
+};
 use bucky_raw_codec::{FileDecoder, FileEncoder, RawEncode};
 use bucky_time::bucky_time_now;
+use clap::{App, Arg, ArgMatches, SubCommand};
+use log::*;
+use std::collections::HashSet;
+use std::str::FromStr;
 
 pub fn modify_subcommand<'a, 'b>() -> App<'a, 'b> {
     SubCommand::with_name("modify")
@@ -148,73 +150,73 @@ pub fn modify_subcommand<'a, 'b>() -> App<'a, 'b> {
 pub fn modify_desc(matches: &ArgMatches) {
     let path = matches.value_of("desc").unwrap();
     match AnyNamedObject::decode_from_file(path.as_ref(), &mut vec![]) {
-        Ok((desc, _)) => {
-            match desc {
-                AnyNamedObject::Standard(mut obj) => {
-                    match obj {
-                        StandardObject::Device(ref mut p) => {
-                            let body = p.body_mut().as_mut().unwrap();
-                            if let Some(sn_list) = get_deviceids_from_matches(matches, "sn") {
-                                body.content_mut().mut_sn_list().clone_from(&sn_list);
+        Ok((desc, _)) => match desc {
+            AnyNamedObject::Standard(mut obj) => match obj {
+                StandardObject::Device(ref mut p) => {
+                    let body = p.body_mut().as_mut().unwrap();
+                    if let Some(sn_list) = get_deviceids_from_matches(matches, "sn") {
+                        body.content_mut().mut_sn_list().clone_from(&sn_list);
+                    }
+
+                    if let Some(ep_list) = get_eps_from_matches(matches, "eps") {
+                        body.content_mut().mut_endpoints().clone_from(&ep_list);
+                    }
+                    body.increase_update_time(bucky_time_now());
+
+                    p.encode_to_file(path.as_ref(), false)
+                        .expect("write desc file err");
+                    info!("modify success");
+                }
+                StandardObject::Group(mut g) => {
+                    if modify_group_desc(&mut g, matches).is_ok() {
+                        g.encode_to_file(path.as_ref(), false)
+                            .expect("write desc file err");
+                        info!("modify success");
+                    }
+                }
+                StandardObject::People(mut p) => {
+                    let content = p.body_mut().as_mut().unwrap().content_mut();
+                    if let Some(oods) = get_deviceids_from_matches(matches, "ood_lists") {
+                        content.ood_list_mut().clone_from(&oods);
+                    }
+
+                    if let Some(oods) = get_deviceids_from_matches(matches, "add_oods") {
+                        for ood in oods {
+                            if !content.ood_list_mut().contains(&ood) {
+                                content.ood_list_mut().push(ood);
+                            } else {
+                                info!("obj {} already exist, skip.", &ood);
                             }
-
-                            if let Some(ep_list) = get_eps_from_matches(matches, "eps") {
-                                body.content_mut().mut_endpoints().clone_from(&ep_list);
-                            }
-                            body.increase_update_time(bucky_time_now());
-
-		                    p.encode_to_file(path.as_ref(), false)
-		                        .expect("write desc file err");
-		                    info!("modify success");
-		                }
-		                StandardObject::Group(mut g) => {
-		                    if modify_group_desc(&mut g, matches).is_ok() {
-		                        g.encode_to_file(path.as_ref(), false)
-		                            .expect("write desc file err");
-		                        info!("modify success");
-		                    }
-		                }
-		                StandardObject::People(mut p) => {
-		                    let content = p.body_mut().as_mut().unwrap().content_mut();
-		                    if let Some(oods) = get_deviceids_from_matches(matches, "ood_lists") {
-		                        content.ood_list_mut().clone_from(&oods);
-		                    }
-
-		                    if let Some(oods) = get_deviceids_from_matches(matches, "add_oods") {
-		                        for ood in oods {
-		                            if !content.ood_list_mut().contains(&ood) {
-		                                content.ood_list_mut().push(ood);
-		                            } else {
-		                                info!("obj {} already exist, skip.", &ood);
-		                            }
-		                        }
-		                    }
-
-		                    if let Some(name) = matches.value_of("name") {
-		                        content.set_name(name.to_owned());
-		                    }
-
-		                    if let Some(icon) = matches.value_of("icon") {
-		                        match FileId::from_str(icon) {
-		                            Ok(icon) => content.set_icon(icon),
-		                            Err(_) => {
-		                                warn!("invalid icon {}", icon);
-		                            }
-								}
-							}
-
-                            p.body_mut().as_mut().unwrap().increase_update_time(bucky_time_now());
-
-                            p.encode_to_file(path.as_ref(), false).expect("write desc file err");
-                        }
-                        _ => {
-                            error!("unsupport desc type");
                         }
                     }
-				}
-	            AnyNamedObject::Core(_) => {}
-	            AnyNamedObject::DECApp(_) => {}
-			}
+
+                    if let Some(name) = matches.value_of("name") {
+                        content.set_name(name.to_owned());
+                    }
+
+                    if let Some(icon) = matches.value_of("icon") {
+                        match FileId::from_str(icon) {
+                            Ok(icon) => content.set_icon(icon),
+                            Err(_) => {
+                                warn!("invalid icon {}", icon);
+                            }
+                        }
+                    }
+
+                    p.body_mut()
+                        .as_mut()
+                        .unwrap()
+                        .increase_update_time(bucky_time_now());
+
+                    p.encode_to_file(path.as_ref(), false)
+                        .expect("write desc file err");
+                }
+                _ => {
+                    error!("unsupport desc type");
+                }
+            },
+            AnyNamedObject::Core(_) => {}
+            AnyNamedObject::DECApp(_) => {}
         },
         Err(e) => {
             error!("read desc from file {} failed, err {}", path, e);
@@ -314,12 +316,7 @@ fn modify_group_desc(group: &mut Group, matches: &ArgMatches) -> BuckyResult<()>
         remove_members.iter().for_each(|m| {
             admins.remove(m);
         });
-        org.set_admins(
-            admins
-                .into_iter()
-                .map(|(_, m)| m)
-                .collect(),
-        );
+        org.set_admins(admins.into_iter().map(|(_, m)| m).collect());
     }
 
     if let Some(oods) = get_deviceids_from_matches(matches, "ood_lists") {

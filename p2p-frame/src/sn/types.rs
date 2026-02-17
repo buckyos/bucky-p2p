@@ -1,20 +1,20 @@
-use std::any::Any;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use sfo_cmd_server::{CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
-use sfo_cmd_server::client::{ClassifiedCmdTunnel, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite};
-use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
-use tokio::io::ReadBuf;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pErrorCode;
-use crate::p2p_connection::{P2pConnection, P2pRead, P2pReadHalf, P2pWrite, P2pWriteHalf};
+use crate::p2p_connection::{P2pConnection, P2pReadHalf, P2pWriteHalf};
 use crate::p2p_identity::P2pId;
+use sfo_cmd_server::client::{
+    ClassifiedCmdTunnel, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite,
+};
+use sfo_cmd_server::{CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::ReadBuf;
 
 #[derive(Clone, Debug)]
 pub struct PingSessionResp {
     pub from: Endpoint,
     pub err: P2pErrorCode,
-    pub endpoints: Vec<Endpoint>
+    pub endpoints: Vec<Endpoint>,
 }
 
 #[derive(Clone, Debug, Hash, Eq)]
@@ -44,29 +44,35 @@ impl PartialEq<Self> for SnTunnelClassification {
 
 pub struct SnTunnelRead {
     read: P2pReadHalf,
+    prefix: Option<(Vec<u8>, usize)>,
 }
 
 impl SnTunnelRead {
     pub fn new(read: P2pReadHalf) -> Self {
+        Self { read, prefix: None }
+    }
+
+    pub fn new_with_prefix(read: P2pReadHalf, prefix: Vec<u8>) -> Self {
         Self {
             read,
+            prefix: Some((prefix, 0)),
         }
     }
 
     pub fn remote(&self) -> Endpoint {
-        self.read.remote()
+        self.read.as_ref().remote()
     }
 
     pub fn local(&self) -> Endpoint {
-        self.read.local()
+        self.read.as_ref().local()
     }
 
     pub fn remote_id(&self) -> P2pId {
-        self.read.remote_id()
+        self.read.as_ref().remote_id()
     }
 
     pub fn local_id(&self) -> P2pId {
-        self.read.local_id()
+        self.read.as_ref().local_id()
     }
 }
 
@@ -83,9 +89,27 @@ impl ClassifiedCmdTunnelRead<SnTunnelClassification, ()> for SnTunnelRead {
 }
 
 impl tokio::io::AsyncRead for SnTunnelRead {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        Pin::new(this.read.as_mut()).poll_read(cx, buf)
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if let Some((prefix, offset)) = self.prefix.as_mut() {
+            if *offset < prefix.len() {
+                let remain = &prefix[*offset..];
+                let n = std::cmp::min(remain.len(), buf.remaining());
+                if n > 0 {
+                    buf.put_slice(&remain[..n]);
+                    *offset += n;
+                }
+                if *offset == prefix.len() {
+                    self.prefix = None;
+                }
+                return Poll::Ready(Ok(()));
+            }
+            self.prefix = None;
+        }
+        Pin::new(self.read.as_mut()).poll_read(cx, buf)
     }
 }
 
@@ -94,10 +118,8 @@ pub struct SnTunnelWrite {
 }
 
 impl SnTunnelWrite {
-    pub fn new(write: P2pWriteHalf, ) -> Self {
-        Self {
-            write,
-        }
+    pub fn new(write: P2pWriteHalf) -> Self {
+        Self { write }
     }
 
     pub fn remote(&self) -> Endpoint {
@@ -129,7 +151,11 @@ impl ClassifiedCmdTunnelWrite<SnTunnelClassification, ()> for SnTunnelWrite {
     }
 }
 impl tokio::io::AsyncWrite for SnTunnelWrite {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
         Pin::new(this.write.as_mut()).poll_write(cx, buf)
     }

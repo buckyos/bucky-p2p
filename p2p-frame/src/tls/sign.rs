@@ -1,8 +1,8 @@
-use std::fmt::{Debug, Formatter};
+use crate::p2p_identity::P2pIdentityRef;
 use bucky_raw_codec::RawConvertTo;
 use rustls::sign::{Signer, SigningKey};
 use rustls::{SignatureAlgorithm, SignatureScheme};
-use crate::p2p_identity::P2pIdentityRef;
+use std::fmt::{Debug, Formatter};
 
 #[derive(Clone)]
 pub struct TlsKey {
@@ -41,9 +41,10 @@ impl SigningKey for TlsKey {
 
 impl Signer for TlsKey {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        let sign = self.key.sign(message).map_err(|e| {
-            rustls::Error::General(format!("sign error: {:?}", e))
-        })?;
+        let sign = self
+            .key
+            .sign(message)
+            .map_err(|e| rustls::Error::General(format!("sign error: {:?}", e)))?;
         Ok(sign)
     }
 

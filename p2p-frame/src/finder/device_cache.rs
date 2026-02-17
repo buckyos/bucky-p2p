@@ -1,30 +1,28 @@
-use std::{
-    sync::{Mutex},
-    time::Duration,
-    collections::{BTreeMap}
-};
-use mini_moka::sync::{Cache, CacheBuilder};
+use super::outer_device_cache::*;
 use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::p2p_identity::{P2pId, P2pIdentityCertCache, P2pIdentityCertRef};
-use super::outer_device_cache::*;
+use mini_moka::sync::{Cache, CacheBuilder};
+use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 
 #[derive(Clone)]
 pub struct DeviceCacheConfig {
     pub expire: Duration,
-    pub capacity: usize
+    pub capacity: usize,
 }
 
 struct MemCaches {
     lru_caches: Cache<P2pId, P2pIdentityCertRef>,
-    static_caches: BTreeMap<P2pId, P2pIdentityCertRef>
+    static_caches: BTreeMap<P2pId, P2pIdentityCertRef>,
 }
 
 impl MemCaches {
     fn new(config: &DeviceCacheConfig) -> Self {
         Self {
             static_caches: BTreeMap::new(),
-            lru_caches: CacheBuilder::new(config.capacity as u64).time_to_idle(config.expire).build()
+            lru_caches: CacheBuilder::new(config.capacity as u64)
+                .time_to_idle(config.expire)
+                .build(),
         }
     }
 
@@ -34,7 +32,9 @@ impl MemCaches {
     }
 
     fn get(&mut self, remote: &P2pId) -> Option<P2pIdentityCertRef> {
-        self.lru_caches.get(remote).or_else(|| self.static_caches.get(remote).map(|v| v.clone()))
+        self.lru_caches
+            .get(remote)
+            .or_else(|| self.static_caches.get(remote).map(|v| v.clone()))
     }
 }
 
@@ -45,10 +45,7 @@ pub struct DeviceCache {
 }
 
 impl DeviceCache {
-    pub fn new(
-        config: &DeviceCacheConfig,
-        outer: Option<Box<dyn OuterDeviceCache>>,
-    ) -> Self {
+    pub fn new(config: &DeviceCacheConfig, outer: Option<Box<dyn OuterDeviceCache>>) -> Self {
         Self {
             cache: Mutex::new(MemCaches::new(config)),
             outer,
@@ -58,7 +55,10 @@ impl DeviceCache {
     pub fn add_static(&self, id: &P2pId, device: &P2pIdentityCertRef) {
         let real_device_id = device.get_id();
         if *id != real_device_id {
-            error!("add device but unmatch device_id! param_id={}, calc_id={}", id, real_device_id);
+            error!(
+                "add device but unmatch device_id! param_id={}, calc_id={}",
+                id, real_device_id
+            );
             // panic!("{}", msg);
             return;
         }
@@ -82,7 +82,10 @@ impl DeviceCache {
     pub fn add(&self, id: &P2pId, device: &P2pIdentityCertRef) {
         let real_device_id = device.get_id();
         if *id != real_device_id {
-            error!("add device but unmatch device_id! param_id={}, calc_id={}", id, real_device_id);
+            error!(
+                "add device but unmatch device_id! param_id={}, calc_id={}",
+                id, real_device_id
+            );
             // panic!("{}", msg);
             return;
         }

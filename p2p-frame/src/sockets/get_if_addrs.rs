@@ -153,12 +153,15 @@ mod getifaddrs_posix {
         if sa_family == AF_INET as u32 {
             #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
             let sa = &unsafe { *(sockaddr as *const posix_sockaddr_in) };
-            Some((IpAddr::V4(Ipv4Addr::new(
-                ((sa.sin_addr.s_addr) & 255) as u8,
-                ((sa.sin_addr.s_addr >> 8) & 255) as u8,
-                ((sa.sin_addr.s_addr >> 16) & 255) as u8,
-                ((sa.sin_addr.s_addr >> 24) & 255) as u8,
-            )), 0))
+            Some((
+                IpAddr::V4(Ipv4Addr::new(
+                    ((sa.sin_addr.s_addr) & 255) as u8,
+                    ((sa.sin_addr.s_addr >> 8) & 255) as u8,
+                    ((sa.sin_addr.s_addr >> 16) & 255) as u8,
+                    ((sa.sin_addr.s_addr >> 24) & 255) as u8,
+                )),
+                0,
+            ))
         } else if sa_family == AF_INET6 as u32 {
             #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
             let sa = &unsafe { *(sockaddr as *const posix_sockaddr_in6) };
@@ -168,7 +171,10 @@ mod getifaddrs_posix {
                 return None;
             }
             */
-            Some((IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr)), sa.sin6_scope_id))
+            Some((
+                IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr)),
+                sa.sin6_scope_id,
+            ))
         } else {
             None
         }
@@ -224,7 +230,6 @@ mod getifaddrs_posix {
                 continue;
             }
 
-
             let (addr, scope_id) = match sockaddr_to_ipaddr(ifaddr.ifa_addr) {
                 None => continue,
                 Some((IpAddr::V4(ipv4_addr), _)) => {
@@ -249,11 +254,14 @@ mod getifaddrs_posix {
                         None
                     };
 
-                    (IfAddr::V4(Ifv4Addr {
-                        ip: ipv4_addr,
-                        netmask,
-                        broadcast,
-                    }), 0)
+                    (
+                        IfAddr::V4(Ifv4Addr {
+                            ip: ipv4_addr,
+                            netmask,
+                            broadcast,
+                        }),
+                        0,
+                    )
                 }
                 Some((IpAddr::V6(ipv6_addr), scope_id)) => {
                     if ipv6_addr.is_loopback() || ipv6_addr.is_unspecified() {
@@ -278,11 +286,14 @@ mod getifaddrs_posix {
                         None
                     };
 
-                    (IfAddr::V6(Ifv6Addr {
-                        ip: ipv6_addr,
-                        netmask,
-                        broadcast,
-                    }), scope_id)
+                    (
+                        IfAddr::V6(Ifv6Addr {
+                            ip: ipv6_addr,
+                            netmask,
+                            broadcast,
+                        }),
+                        scope_id,
+                    )
                 }
             };
 
@@ -291,7 +302,7 @@ mod getifaddrs_posix {
                 addr,
                 description: String::from(""),
                 ifa_flags: ifaddr.ifa_flags as u32,
-                scope_id
+                scope_id,
             });
         }
         unsafe {
@@ -316,7 +327,7 @@ mod getifaddrs_windows {
     use c_linked_list::CLinkedListConst;
     use libc;
     use libc::{c_char, c_int, c_ulong, size_t};
-    use std::ffi::{c_void, CStr, OsString};
+    use std::ffi::{CStr, OsString, c_void};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::os::windows::prelude::*;
     use std::{io, ptr};
@@ -399,12 +410,15 @@ mod getifaddrs_windows {
                 return None;
             }
 
-            Some((IpAddr::V4(Ipv4Addr::new(
-                unsafe { sa.sin_addr.S_un.S_un_b().s_b1 },
-                unsafe { sa.sin_addr.S_un.S_un_b().s_b2 },
-                unsafe { sa.sin_addr.S_un.S_un_b().s_b3 },
-                unsafe { sa.sin_addr.S_un.S_un_b().s_b4 },
-            )), 0))
+            Some((
+                IpAddr::V4(Ipv4Addr::new(
+                    unsafe { sa.sin_addr.S_un.S_un_b().s_b1 },
+                    unsafe { sa.sin_addr.S_un.S_un_b().s_b2 },
+                    unsafe { sa.sin_addr.S_un.S_un_b().s_b3 },
+                    unsafe { sa.sin_addr.S_un.S_un_b().s_b4 },
+                )),
+                0,
+            ))
         } else if unsafe { *sockaddr }.sa_family as u32 == AF_INET6 as u32 {
             let sa = &unsafe { *(sockaddr as *const sockaddr_in6) };
             // Ignore all fe80:: addresses as these are link locals
@@ -418,15 +432,19 @@ mod getifaddrs_windows {
 
             let mut v6byte = [0_u8; 16];
             v6byte.copy_from_slice(unsafe { sa.sin6_addr.u.Byte() });
-            Some((IpAddr::V6(Ipv6Addr::from(v6byte)), *unsafe { sa.u.sin6_scope_id() }))
+            Some((IpAddr::V6(Ipv6Addr::from(v6byte)), *unsafe {
+                sa.u.sin6_scope_id()
+            }))
         } else {
             None
         }
     }
 
     unsafe fn u16_ptr_to_string(ptr: *const u16) -> OsString {
-        let len = (0..).take_while(|&i| unsafe {*ptr.offset(i) != 0}).count();
-        let slice = unsafe {std::slice::from_raw_parts(ptr, len)};
+        let len = (0..)
+            .take_while(|&i| unsafe { *ptr.offset(i) != 0 })
+            .count();
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
 
         OsString::from_wide(slice)
     }
@@ -510,15 +528,17 @@ mod getifaddrs_windows {
                 let (addr, scope_id) = match sockaddr_to_ipaddr(addr.address.lp_socket_address) {
                     None => continue,
                     Some((IpAddr::V4(ipv4_addr), _)) => {
-
                         if ipv4_addr.is_loopback()
                             || ipv4_addr.is_link_local()
                             || ipv4_addr.is_broadcast()
                             || ipv4_addr.is_documentation()
                             || ipv4_addr.is_unspecified()
-                            // || ipv4_addr.is_reserved()
+                        // || ipv4_addr.is_reserved()
                         {
-                            info!("will ignore ip addr: desc={}, addr={}", description, ipv4_addr);
+                            info!(
+                                "will ignore ip addr: desc={}, addr={}",
+                                description, ipv4_addr
+                            );
                             continue;
                         }
 
@@ -570,11 +590,14 @@ mod getifaddrs_windows {
                                 _ => continue,
                             };
                         }
-                        (IfAddr::V4(Ifv4Addr {
-                            ip: ipv4_addr,
-                            netmask: item_netmask,
-                            broadcast: item_broadcast,
-                        }), 0)
+                        (
+                            IfAddr::V4(Ifv4Addr {
+                                ip: ipv4_addr,
+                                netmask: item_netmask,
+                                broadcast: item_broadcast,
+                            }),
+                            0,
+                        )
                     }
                     Some((IpAddr::V6(ipv6_addr), scope_id)) => {
                         let mut item_netmask = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
@@ -617,11 +640,14 @@ mod getifaddrs_windows {
                                 _ => continue,
                             };
                         }
-                        (IfAddr::V6(Ifv6Addr {
-                            ip: ipv6_addr,
-                            netmask: item_netmask,
-                            broadcast: None,
-                        }), scope_id)
+                        (
+                            IfAddr::V6(Ifv6Addr {
+                                ip: ipv6_addr,
+                                netmask: item_netmask,
+                                broadcast: None,
+                            }),
+                            scope_id,
+                        )
                     }
                 };
                 ret.push(Interface {
@@ -629,7 +655,7 @@ mod getifaddrs_windows {
                     addr,
                     description,
                     ifa_flags: ifaddr.flags as u32,
-                    scope_id
+                    scope_id,
                 });
             }
         }
@@ -651,8 +677,8 @@ fn test() {
     let interfaces = get_if_addrs().unwrap();
     for interface in interfaces {
         let addr_str = match interface.addr {
-            IfAddr::V4(ip) => {ip.ip.to_string()}
-            IfAddr::V6(ip) => {ip.ip.to_string()}
+            IfAddr::V4(ip) => ip.ip.to_string(),
+            IfAddr::V6(ip) => ip.ip.to_string(),
         };
         println!("{}: {}", addr_str, interface.scope_id);
     }

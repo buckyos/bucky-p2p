@@ -1,34 +1,37 @@
-use log::*;
-use std::{
-    sync::{
-        atomic::{self, AtomicBool},
-        Arc,
-    },
-    time::Duration,
-};
-use bucky_raw_codec::{RawConvertTo, RawFrom};
-use bucky_time::bucky_time_now;
-use callback_result::SingleCallbackWaiter;
-use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
-use sfo_cmd_server::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
-use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
-use crate::endpoint::{endpoints_to_string, Endpoint, EndpointArea, Protocol};
-use crate::error::{into_p2p_err, P2pErrorCode, P2pResult};
+use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*};
+use crate::endpoint::{Endpoint, EndpointArea, Protocol, endpoints_to_string};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnection};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef, EncodedP2pIdentityCert};
+use crate::p2p_identity::{
+    EncodedP2pIdentityCert, P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef,
+    P2pIdentityFactoryRef, P2pIdentityRef,
+};
 use crate::p2p_network::P2pNetworkRef;
 use crate::pn::PnServer;
 use crate::protocol::{v0::*, *};
 use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
-use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
 use crate::sockets::tcp::TcpNetwork;
-use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
-use crate::types::{TunnelId, TunnelIdGenerator, Timestamp, SessionIdGenerator, SequenceGenerator};
-use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*};
+use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
+use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
+use crate::types::{SequenceGenerator, SessionIdGenerator, Timestamp, TunnelId, TunnelIdGenerator};
+use bucky_raw_codec::{RawConvertTo, RawFrom};
+use bucky_time::bucky_time_now;
+use callback_result::SingleCallbackWaiter;
+use log::*;
+use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
+use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
+use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use std::{
+    sync::{
+        Arc,
+        atomic::{self, AtomicBool},
+    },
+    time::Duration,
+};
 
 // const TRACKER_INTERVAL: Duration = Duration::from_secs(60);
 // struct CallTracker {
@@ -38,40 +41,70 @@ use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*};
 
 pub struct SnTunnelListener {
     net_manager: NetManagerRef,
-    waiter: Arc<SingleCallbackWaiter<P2pConnection>>,
+    waiter: Arc<SingleCallbackWaiter<CmdTunnel<SnTunnelRead, SnTunnelWrite>>>,
+    proxy_waiter: Arc<SingleCallbackWaiter<P2pConnection>>,
 }
 
+const PN_DATA_MAGIC: [u8; 4] = *b"PN2D";
+
 impl SnTunnelListener {
-    pub fn new(local_identity: P2pIdentityRef,
-               net_manager: NetManagerRef) -> Self {
+    pub fn new(local_identity: P2pIdentityRef, net_manager: NetManagerRef) -> Self {
         let waiter = Arc::new(SingleCallbackWaiter::new());
+        let proxy_waiter = Arc::new(SingleCallbackWaiter::new());
         let socket_waiter = waiter.clone();
-        net_manager.set_connection_event_listener(local_identity.get_id(), move |socket: P2pConnection| {
-            let socket_waiter = socket_waiter.clone();
-            async move {
-                socket_waiter.set_result_with_cache(socket);
-                Ok(())
-            }
-        });
+        let proxy_socket_waiter = proxy_waiter.clone();
+        net_manager.set_connection_event_listener(
+            local_identity.get_id(),
+            move |socket: P2pConnection| {
+                let socket_waiter = socket_waiter.clone();
+                let proxy_socket_waiter = proxy_socket_waiter.clone();
+                async move {
+                    let mut socket = socket;
+                    let mut magic = [0u8; PN_DATA_MAGIC.len()];
+                    let ret = tokio::io::AsyncReadExt::read_exact(&mut socket, &mut magic).await;
+                    if ret.is_err() {
+                        return Ok(());
+                    }
+
+                    if magic == PN_DATA_MAGIC {
+                        proxy_socket_waiter.set_result_with_cache(socket);
+                    } else {
+                        let (read, write) = socket.split();
+                        socket_waiter.set_result_with_cache(CmdTunnel::new(
+                            SnTunnelRead::new_with_prefix(read, magic.to_vec()),
+                            SnTunnelWrite::new(write),
+                        ));
+                    }
+                    Ok(())
+                }
+            },
+        );
         Self {
             net_manager,
             waiter,
+            proxy_waiter,
         }
+    }
+
+    pub fn proxy_waiter(&self) -> Arc<SingleCallbackWaiter<P2pConnection>> {
+        self.proxy_waiter.clone()
     }
 }
 
 #[async_trait::async_trait]
 impl CmdTunnelListener<(), SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
     async fn accept(&self) -> CmdResult<CmdTunnel<SnTunnelRead, SnTunnelWrite>> {
-        let socket = self.waiter.create_result_future().map_err(into_cmd_err!(CmdErrorCode::Failed))?.await.map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))?;
-        let (read, write) = socket.split();
-        Ok(CmdTunnel::new(SnTunnelRead::new(read), SnTunnelWrite::new(write)))
+        self.waiter
+            .create_result_future()
+            .map_err(into_cmd_err!(CmdErrorCode::Failed))?
+            .await
+            .map_err(|e| cmd_err!(CmdErrorCode::Failed, "{:?}", e))
     }
 }
 
 type SnCmdServer = DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>;
-pub type SnCmdServerRef = Arc<DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
-
+pub type SnCmdServerRef =
+    Arc<DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
 
 struct DefaultSnServiceContractServer {}
 
@@ -82,14 +115,13 @@ impl DefaultSnServiceContractServer {
 }
 
 impl SnServiceContractServer for DefaultSnServiceContractServer {
-
-    fn check_receipt(&self,
-                     _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
-                     _local_receipt: &SnServiceReceipt, // 本地(服务端)统计的服务清单
-                     _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
-                     _last_request_time: &ReceiptRequestTime, // 上次要求服务清单的时间
-    ) -> IsAcceptClient
-    {
+    fn check_receipt(
+        &self,
+        _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
+        _local_receipt: &SnServiceReceipt,          // 本地(服务端)统计的服务清单
+        _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
+        _last_request_time: &ReceiptRequestTime,    // 上次要求服务清单的时间
+    ) -> IsAcceptClient {
         IsAcceptClient::Accept(false)
     }
 
@@ -97,7 +129,6 @@ impl SnServiceContractServer for DefaultSnServiceContractServer {
         IsAcceptClient::Accept(false)
     }
 }
-
 
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
@@ -129,35 +160,47 @@ impl SnService {
     ) -> SnServiceRef {
         Executor::init_new_multi_thread(None);
         init_tls(identity_factory);
-        let device_cache = Arc::new(DeviceCache::new(&DeviceCacheConfig {
-            expire: Duration::from_secs(240),
-            capacity: 10240,
-        }, None));
+        let device_cache = Arc::new(DeviceCache::new(
+            &DeviceCacheConfig {
+                expire: Duration::from_secs(240),
+                capacity: 10240,
+            },
+            None,
+        ));
         let cert_resolver = DefaultTlsServerCertResolver::new();
-        let _ = cert_resolver.add_server_identity(local_identity.clone()).await;
+        let _ = cert_resolver
+            .add_server_identity(local_identity.clone())
+            .await;
         cert_resolver.set_default_server_identity(&local_identity.get_id());
 
-        let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(),
-                                                   cert_resolver.clone(),
-                                                   cert_factory.clone(),
-                                                   Duration::from_secs(30)));
-        let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(),
-                                                     cert_resolver.clone(),
-                                                     cert_factory.clone(),
-                                                     congestion_algorithm,
-                                                     Duration::from_secs(30),
-                                                     Duration::from_secs(30)));
+        let tcp_network = Arc::new(TcpNetwork::new(
+            device_cache.clone(),
+            cert_resolver.clone(),
+            cert_factory.clone(),
+            Duration::from_secs(30),
+        ));
+        let quic_network = Arc::new(QuicNetwork::new(
+            device_cache.clone(),
+            cert_resolver.clone(),
+            cert_factory.clone(),
+            congestion_algorithm,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        ));
 
         let mut networks = Vec::new();
         networks.push(tcp_network as P2pNetworkRef);
         networks.push(quic_network as P2pNetworkRef);
 
         let connection_info_cache = DefaultP2pConnectionInfoCache::new();
-        let net_manager = Arc::new(NetManager::new(networks, cert_resolver, connection_info_cache).unwrap());
-        let sn_cmd_server  = DefaultCmdServer::new(SnTunnelListener::new(local_identity.clone(), net_manager.clone()));
+        let net_manager =
+            Arc::new(NetManager::new(networks, cert_resolver, connection_info_cache).unwrap());
+        let sn_tunnel_listener = SnTunnelListener::new(local_identity.clone(), net_manager.clone());
+        let proxy_waiter = sn_tunnel_listener.proxy_waiter();
+        let sn_cmd_server = DefaultCmdServer::new(sn_tunnel_listener);
 
         let proxy_server = if support_proxy {
-            let proxy_server = PnServer::new(sn_cmd_server.clone());
+            let proxy_server = PnServer::new(sn_cmd_server.clone(), proxy_waiter);
             proxy_server.start();
             Some(proxy_server)
         } else {
@@ -190,48 +233,84 @@ impl SnService {
 
     fn register_sn_cmd_handler(self: &Arc<Self>) {
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCall as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
-            let service = service.clone();
-            async move {
-                let call_req = SnCall::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                service.handle_call(call_req, &peer_id, tunnel_id, bucky_time_now()).await;
-                Ok(None)
-            }
-        });
+        self.cmd_server.register_cmd_handler(
+            PackageCmdCode::SnCall as u8,
+            move |peer_id: PeerId,
+                  tunnel_id: CmdTunnelId,
+                  header: SnCmdHeader,
+                  mut cmd_body: CmdBody| {
+                let service = service.clone();
+                async move {
+                    let call_req = SnCall::clone_from_slice(cmd_body.read_all().await?.as_slice())
+                        .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    service
+                        .handle_call(call_req, &peer_id, tunnel_id, bucky_time_now())
+                        .await;
+                    Ok(None)
+                }
+            },
+        );
 
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::SnCalledResp as u8, move |_peer_id: PeerId, _tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
-            let service = service.clone();
-            async move {
-                let called_resp = SnCalledResp::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                service.handle_called_resp(called_resp).await;
-                Ok(None)
-            }
-        });
+        self.cmd_server.register_cmd_handler(
+            PackageCmdCode::SnCalledResp as u8,
+            move |_peer_id: PeerId,
+                  _tunnel_id: CmdTunnelId,
+                  header: SnCmdHeader,
+                  mut cmd_body: CmdBody| {
+                let service = service.clone();
+                async move {
+                    let called_resp =
+                        SnCalledResp::clone_from_slice(cmd_body.read_all().await?.as_slice())
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    service.handle_called_resp(called_resp).await;
+                    Ok(None)
+                }
+            },
+        );
 
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::ReportSn as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
-            let service = service.clone();
-            async move {
-                let report_sn = ReportSn::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                service.handle_report_sn(&peer_id, tunnel_id, report_sn).await;
-                Ok(None)
-            }
-        });
+        self.cmd_server.register_cmd_handler(
+            PackageCmdCode::ReportSn as u8,
+            move |peer_id: PeerId,
+                  tunnel_id: CmdTunnelId,
+                  header: SnCmdHeader,
+                  mut cmd_body: CmdBody| {
+                let service = service.clone();
+                async move {
+                    let report_sn =
+                        ReportSn::clone_from_slice(cmd_body.read_all().await?.as_slice())
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    service
+                        .handle_report_sn(&peer_id, tunnel_id, report_sn)
+                        .await;
+                    Ok(None)
+                }
+            },
+        );
 
         let service = self.clone();
-        self.cmd_server.register_cmd_handler(PackageCmdCode::SnQuery as u8, move |peer_id: PeerId, tunnel_id: CmdTunnelId, header: SnCmdHeader, mut cmd_body: CmdBody| {
-            let service = service.clone();
-            async move {
-                let query = SnQuery::clone_from_slice(cmd_body.read_all().await?.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                service.handle_query_sn(&peer_id, tunnel_id, query).await;
-                Ok(None)
-            }
-        });
+        self.cmd_server.register_cmd_handler(
+            PackageCmdCode::SnQuery as u8,
+            move |peer_id: PeerId,
+                  tunnel_id: CmdTunnelId,
+                  header: SnCmdHeader,
+                  mut cmd_body: CmdBody| {
+                let service = service.clone();
+                async move {
+                    let query = SnQuery::clone_from_slice(cmd_body.read_all().await?.as_slice())
+                        .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    service.handle_query_sn(&peer_id, tunnel_id, query).await;
+                    Ok(None)
+                }
+            },
+        );
     }
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
-        self.net_manager.listen(self.local_identity.endpoints().as_slice(), None).await?;
+        self.net_manager
+            .listen(self.local_identity.endpoints().as_slice(), None)
+            .await?;
         self.register_sn_cmd_handler();
         self.cmd_server.start();
 
@@ -270,17 +349,22 @@ impl SnService {
         );
         info!("{}.", log_key);
 
-        let call_resp =
-        if let Some(from_peer_cache) = self.peer_manager().find_peer(&call_req.from_peer_id) {
+        let call_resp = if let Some(from_peer_cache) =
+            self.peer_manager().find_peer(&call_req.from_peer_id)
+        {
             if let Some(to_peer_cache) = self.peer_manager().find_peer(&call_req.to_peer_id) {
                 // Self::call_stat_contract(to_peer_cache, &call_req);
                 let from_peer_desc = if call_req.peer_info.is_none() {
                     self.peer_manager().find_peer(from_peer_id).map(|c| c.desc)
                 } else {
-                    call_req.peer_info.map(|info| self.cert_factory.create(&info).unwrap())
+                    call_req
+                        .peer_info
+                        .map(|info| self.cert_factory.create(&info).unwrap())
                 };
 
-                let mut reverse_eps = self.get_peer_wan_ep_with_map_port(&peer_id, from_peer_cache.map_ports.as_slice()).await;
+                let mut reverse_eps = self
+                    .get_peer_wan_ep_with_map_port(&peer_id, from_peer_cache.map_ports.as_slice())
+                    .await;
                 reverse_eps.extend_from_slice(from_peer_cache.local_eps.as_slice());
 
                 if let Some(from_peer_desc) = from_peer_desc {
@@ -315,7 +399,9 @@ impl SnService {
                             if let Some(pn_list) = call_req.active_pn_list.as_mut() {
                                 std::mem::swap(pn_list, &mut called_req.active_pn_list);
                             }
-                            called_req.reverse_endpoint_array.extend_from_slice(reverse_eps.as_slice());
+                            called_req
+                                .reverse_endpoint_array
+                                .extend_from_slice(reverse_eps.as_slice());
 
                             let called_log =
                                 format!("{} called-req seq({})", log_key, called_seq.value());
@@ -326,10 +412,18 @@ impl SnService {
                                 called_req.active_pn_list
                             );
 
-                            self.cmd_server.send_by_all_tunnels(&PeerId::from(call_req.to_peer_id.as_slice()),
-                                                                PackageCmdCode::SnCalled as u8,
-                                                                self.cmd_version,
-                                                                called_req.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                            self.cmd_server
+                                .send_by_all_tunnels(
+                                    &PeerId::from(call_req.to_peer_id.as_slice()),
+                                    PackageCmdCode::SnCalled as u8,
+                                    self.cmd_version,
+                                    called_req
+                                        .to_vec()
+                                        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
+                                        .as_slice(),
+                                )
+                                .await
+                                .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                         }
                     } else {
                         info!("{} ignore send called req for already exists.", log_key);
@@ -370,12 +464,19 @@ impl SnService {
             }
         };
 
-
-        self.cmd_server.send_by_specify_tunnel(peer_id,
-                                               tunnel_id,
-                                               PackageCmdCode::SnCallResp as u8,
-                                               self.cmd_version,
-                                               call_resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        self.cmd_server
+            .send_by_specify_tunnel(
+                peer_id,
+                tunnel_id,
+                PackageCmdCode::SnCallResp as u8,
+                self.cmd_version,
+                call_resp
+                    .to_vec()
+                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
+                    .as_slice(),
+            )
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 
@@ -406,14 +507,22 @@ impl SnService {
                 remotes.push(remote);
             }
         }
-        let mut remote_ep = remotes.iter_mut().map(|remote| {
-            remote.set_area(EndpointArea::Wan);
-            remote.clone()
-        }).collect();
+        let mut remote_ep = remotes
+            .iter_mut()
+            .filter(|remote| !remote.is_loopback())
+            .map(|remote| {
+                remote.set_area(EndpointArea::Wan);
+                remote.clone()
+            })
+            .collect();
         remote_ep
     }
 
-    async fn get_peer_wan_ep_with_map_port(&self, peer_id: &PeerId, map_ports: &[(Protocol, u16)]) -> Vec<Endpoint> {
+    async fn get_peer_wan_ep_with_map_port(
+        &self,
+        peer_id: &PeerId,
+        map_ports: &[(Protocol, u16)],
+    ) -> Vec<Endpoint> {
         let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
         let mut map_eps = Vec::new();
         for ep in remote_ep.iter() {
@@ -430,38 +539,75 @@ impl SnService {
         remote_ep
     }
 
-    async fn handle_report_sn(&self, peer_id: &PeerId, tunnel_id: CmdTunnelId, report_sn: ReportSn) -> P2pResult<()> {
-        log::info!("report sn from {}.eps: {:?} map_port: {:?}", peer_id.to_base36(), report_sn.local_eps, report_sn.map_ports);
+    async fn handle_report_sn(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
+        report_sn: ReportSn,
+    ) -> P2pResult<()> {
+        log::info!(
+            "report sn from {}.eps: {:?} map_port: {:?}",
+            peer_id.to_base36(),
+            report_sn.local_eps,
+            report_sn.map_ports
+        );
         let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
 
         if report_sn.from_peer_id.is_some() {
-            self.peer_mgr.add_or_update_peer(report_sn.from_peer_id.as_ref().unwrap(),
-                                             &report_sn.peer_info.map(|info| self.cert_factory.create(&info).unwrap()),
-                                             report_sn.map_ports,
-                                             &report_sn.local_eps);
+            self.peer_mgr.add_or_update_peer(
+                report_sn.from_peer_id.as_ref().unwrap(),
+                &report_sn
+                    .peer_info
+                    .map(|info| self.cert_factory.create(&info).unwrap()),
+                report_sn.map_ports,
+                &report_sn.local_eps,
+            );
         }
-        if let Err(e) = self.cmd_server.send_by_specify_tunnel(peer_id,
-                                                               tunnel_id,
-                                                               PackageCmdCode::ReportSnResp as u8,
-                                                               self.cmd_version,
-                                                               ReportSnResp {
-                                                                   seq: report_sn.seq,
-                                                                   sn_peer_id: self.local_identity_id().clone(),
-                                                                   result: P2pErrorCode::Ok.into_u8(),
-                                                                   peer_info: None,
-                                                                   end_point_array: remote_ep,
-                                                                   receipt: None,
-                                                               }.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await {
-            log::error!("send report-sn-resp failed, peer_id: {:?}, error: {:?}", peer_id, e);
+        if let Err(e) = self
+            .cmd_server
+            .send_by_specify_tunnel(
+                peer_id,
+                tunnel_id,
+                PackageCmdCode::ReportSnResp as u8,
+                self.cmd_version,
+                ReportSnResp {
+                    seq: report_sn.seq,
+                    sn_peer_id: self.local_identity_id().clone(),
+                    result: P2pErrorCode::Ok.into_u8(),
+                    peer_info: None,
+                    end_point_array: remote_ep,
+                    receipt: None,
+                }
+                .to_vec()
+                .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
+                .as_slice(),
+            )
+            .await
+        {
+            log::error!(
+                "send report-sn-resp failed, peer_id: {:?}, error: {:?}",
+                peer_id,
+                e
+            );
         }
         Ok(())
     }
 
-    async fn handle_query_sn(&self, peer_id: &PeerId, tunnel_id: CmdTunnelId, query: SnQuery) -> P2pResult<()> {
+    async fn handle_query_sn(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
+        query: SnQuery,
+    ) -> P2pResult<()> {
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();
-            let mut end_point_array = self.get_peer_wan_ep_with_map_port(&PeerId::from(query.query_id.as_slice()), device_info.map_ports.as_slice()).await;
+            let mut end_point_array = self
+                .get_peer_wan_ep_with_map_port(
+                    &PeerId::from(query.query_id.as_slice()),
+                    device_info.map_ports.as_slice(),
+                )
+                .await;
             end_point_array.extend_from_slice(device_info.local_eps.as_slice());
             SnQueryResp {
                 seq: query.seq,
@@ -476,11 +622,18 @@ impl SnService {
             }
         };
 
-        self.cmd_server.send_by_specify_tunnel(peer_id,
-                                               tunnel_id,
-                                               PackageCmdCode::SnQueryResp as u8,
-                                               self.cmd_version,
-                                               resp.to_vec().map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?.as_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        self.cmd_server
+            .send_by_specify_tunnel(
+                peer_id,
+                tunnel_id,
+                PackageCmdCode::SnQueryResp as u8,
+                self.cmd_version,
+                resp.to_vec()
+                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
+                    .as_slice(),
+            )
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         Ok(())
     }
 }
@@ -517,7 +670,10 @@ impl SnServiceConfig {
         }
     }
 
-    pub fn set_contract(mut self, contract: Box<dyn SnServiceContractServer + Send + Sync>) -> Self {
+    pub fn set_contract(
+        mut self,
+        contract: Box<dyn SnServiceContractServer + Send + Sync>,
+    ) -> Self {
         self.contract = contract;
         self
     }
@@ -527,7 +683,10 @@ impl SnServiceConfig {
         self
     }
 
-    pub fn set_quic_congestion_algorithm(mut self, quic_algorithm: QuicCongestionAlgorithm) -> Self {
+    pub fn set_quic_congestion_algorithm(
+        mut self,
+        quic_algorithm: QuicCongestionAlgorithm,
+    ) -> Self {
         self.quic_congestion_algorithm = quic_algorithm;
         self
     }
@@ -541,6 +700,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServiceRef {
         config.contract,
         config.quic_congestion_algorithm,
         config.support_proxy,
-    ).await;
+    )
+    .await;
     service
 }

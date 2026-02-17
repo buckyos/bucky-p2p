@@ -1,15 +1,17 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{p2p_err, P2pError, P2pErrorCode, P2pResult};
+use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::finder::DeviceCache;
-use rustls::pki_types::{CertificateDer};
-use crate::p2p_connection::{P2pConnectionEventListener, P2pConnection, P2pListenerRef};
-use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
+use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListenerRef};
+use crate::p2p_identity::{
+    P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
+};
 use crate::p2p_network::P2pNetwork;
 use crate::sockets::{QuicCongestionAlgorithm, QuicConnection, QuicListener, QuicListenerRef};
 use crate::tls::ServerCertResolverRef;
+use rustls::pki_types::CertificateDer;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct QuicConnKey {
@@ -46,7 +48,8 @@ impl QuicNetwork {
         cert_factory: P2pIdentityCertFactoryRef,
         congestion_algorithm: QuicCongestionAlgorithm,
         timeout: Duration,
-        idle_timeout: Duration) -> Self {
+        idle_timeout: Duration,
+    ) -> Self {
         Self {
             quic_listener: Mutex::new(Vec::new()),
             connection_pool: Mutex::new(HashMap::new()),
@@ -96,7 +99,9 @@ impl QuicNetwork {
             if remote_cert.is_empty() {
                 return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
             }
-            let cert = self.cert_factory.create(&remote_cert[0].as_ref().to_vec())?;
+            let cert = self
+                .cert_factory
+                .create(&remote_cert[0].as_ref().to_vec())?;
             Ok((cert.get_id(), cert.get_name()))
         } else {
             Ok((
@@ -144,18 +149,22 @@ impl QuicNetwork {
     ) -> P2pResult<P2pConnection> {
         let key = self.make_conn_key(listener.local(), local_identity, remote, remote_id);
 
-        let cached = {
-            self.connection_pool.lock().unwrap().get(&key).cloned()
-        };
+        let cached = { self.connection_pool.lock().unwrap().get(&key).cloned() };
         if let Some(entry) = cached {
             if entry.socket.close_reason().is_none() {
                 match entry.socket.open_bi().await {
                     Ok((send, recv)) => {
-                        self.connection_pool.lock().unwrap().insert(key, entry.clone());
+                        self.connection_pool
+                            .lock()
+                            .unwrap()
+                            .insert(key, entry.clone());
                         return Ok(self.build_p2p_connection(&entry, recv, send, local_identity));
                     }
                     Err(e) => {
-                        warn!("quic pooled open_bi failed, reconnect. remote={} err={}", remote, e);
+                        warn!(
+                            "quic pooled open_bi failed, reconnect. remote={} err={}",
+                            remote, e
+                        );
                         self.connection_pool.lock().unwrap().remove(&key);
                     }
                 }
@@ -195,7 +204,6 @@ impl QuicNetwork {
 
         Ok(self.build_p2p_connection(&entry, read, send, local_identity))
     }
-
 }
 
 #[async_trait::async_trait]
@@ -208,16 +216,26 @@ impl P2pNetwork for QuicNetwork {
         true
     }
 
-    async fn listen(&self, local: &Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>, event: Arc<dyn P2pConnectionEventListener>) -> P2pResult<P2pListenerRef> {
+    async fn listen(
+        &self,
+        local: &Endpoint,
+        out: Option<Endpoint>,
+        mapping_port: Option<u16>,
+        event: Arc<dyn P2pConnectionEventListener>,
+    ) -> P2pResult<P2pListenerRef> {
         let udp_listener = QuicListener::new(
             self.cert_cache.clone(),
             self.cert_resolver.clone(),
             self.cert_factory.clone(),
-            self.congestion_algorithm, );
+            self.congestion_algorithm,
+        );
         udp_listener.bind(local.clone(), out, mapping_port).await?;
         udp_listener.set_connection_event_listener(event);
         udp_listener.start();
-        self.quic_listener.lock().unwrap().push(udp_listener.clone());
+        self.quic_listener
+            .lock()
+            .unwrap()
+            .push(udp_listener.clone());
         Ok(udp_listener)
     }
 
@@ -238,21 +256,36 @@ impl P2pNetwork for QuicNetwork {
     }
 
     fn listeners(&self) -> Vec<P2pListenerRef> {
-        self.quic_listener.lock().unwrap().iter().map(|v| v.clone() as P2pListenerRef).collect()
+        self.quic_listener
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|v| v.clone() as P2pListenerRef)
+            .collect()
     }
 
-    async fn create_stream_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>> {
+    async fn create_stream_connect(
+        &self,
+        local_identity: &P2pIdentityRef,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<Vec<P2pConnection>> {
         let mut conn_list: Vec<P2pConnection> = Vec::new();
         let mut last_err: Option<P2pError> = None;
-        let quic_listener = {
-            self.quic_listener.lock().unwrap().clone()
-        };
+        let quic_listener = { self.quic_listener.lock().unwrap().clone() };
         for listener in quic_listener.iter() {
             if !listener.local().is_same_ip_version(remote) {
                 continue;
             }
             match self
-                .open_or_connect(listener, local_identity, remote, remote_id, remote_name.clone())
+                .open_or_connect(
+                    listener,
+                    local_identity,
+                    remote,
+                    remote_id,
+                    remote_name.clone(),
+                )
                 .await
             {
                 Ok(conn) => conn_list.push(conn),
@@ -276,10 +309,15 @@ impl P2pNetwork for QuicNetwork {
         }
     }
 
-    async fn create_stream_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection> {
-        let quic_listener = {
-            self.quic_listener.lock().unwrap().clone()
-        };
+    async fn create_stream_connect_with_local_ep(
+        &self,
+        local_identity: &P2pIdentityRef,
+        local_ep: &Endpoint,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<P2pConnection> {
+        let quic_listener = { self.quic_listener.lock().unwrap().clone() };
         for listener in quic_listener.iter() {
             let listen_ep = listener.local();
             if &listen_ep != local_ep || !listener.local().is_same_ip_version(remote) {
@@ -289,15 +327,40 @@ impl P2pNetwork for QuicNetwork {
                 .open_or_connect(listener, local_identity, remote, remote_id, remote_name)
                 .await;
         }
-        Err(p2p_err!(P2pErrorCode::NotFound, "no listener found for local ep: {}", local_ep))
+        Err(p2p_err!(
+            P2pErrorCode::NotFound,
+            "no listener found for local ep: {}",
+            local_ep
+        ))
     }
 
-    async fn create_datagram_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>> {
-        self.create_stream_connect(local_identity, remote, remote_id, remote_name).await
+    async fn create_datagram_connect(
+        &self,
+        local_identity: &P2pIdentityRef,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<Vec<P2pConnection>> {
+        self.create_stream_connect(local_identity, remote, remote_id, remote_name)
+            .await
     }
 
-    async fn create_datagram_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection> {
-        self.create_stream_connect_with_local_ep(local_identity, local_ep, remote, remote_id,remote_name).await
+    async fn create_datagram_connect_with_local_ep(
+        &self,
+        local_identity: &P2pIdentityRef,
+        local_ep: &Endpoint,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<P2pConnection> {
+        self.create_stream_connect_with_local_ep(
+            local_identity,
+            local_ep,
+            remote,
+            remote_id,
+            remote_name,
+        )
+        .await
     }
 }
 
@@ -311,11 +374,13 @@ mod tests {
     use crate::executor::Executor;
     use crate::finder::{DeviceCache, DeviceCacheConfig};
     use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener};
-    use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
+    use crate::p2p_identity::{
+        P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
+    };
     use crate::p2p_network::P2pNetwork;
     use crate::sockets::QuicCongestionAlgorithm;
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
-    use crate::x509::{generate_x509_identity, X509IdentityCertFactory, X509IdentityFactory};
+    use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
 
     use super::QuicNetwork;
 

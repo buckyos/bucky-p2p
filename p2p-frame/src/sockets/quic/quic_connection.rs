@@ -1,3 +1,15 @@
+use crate::endpoint::{Endpoint, Protocol};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::executor::Executor;
+use crate::p2p_connection::{P2pRead, P2pWrite};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
+use crate::runtime;
+use crate::sockets::{QuicCongestionAlgorithm, validate_server_name};
+use as_any::{AsAny, Downcast};
+use quinn::VarInt;
+use quinn::crypto::rustls::QuicClientConfig;
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::version::TLS13;
 use std::any::Any;
 use std::io;
 use std::io::Error;
@@ -5,18 +17,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use as_any::{AsAny, Downcast};
-use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{VarInt};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::version::TLS13;
-use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
-use crate::executor::Executor;
-use crate::p2p_connection::{P2pRead, P2pWrite};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertFactoryRef};
-use crate::runtime;
-use crate::sockets::{validate_server_name, QuicCongestionAlgorithm};
 
 pub struct QuicConnection {
     socket: quinn::Connection,
@@ -25,11 +25,7 @@ pub struct QuicConnection {
 }
 
 impl QuicConnection {
-    pub fn new(
-        socket: quinn::Connection,
-        local: Endpoint,
-        remote: Endpoint,
-    ) -> Self {
+    pub fn new(socket: quinn::Connection, local: Endpoint, remote: Endpoint) -> Self {
         Self {
             socket,
             local,
@@ -45,25 +41,32 @@ impl QuicConnection {
         self.remote.clone()
     }
 
-    pub async fn connect(local_identity_ref: P2pIdentityRef,
-                         cert_factory: P2pIdentityCertFactoryRef,
-                         remote_identity_id: P2pId,
-                         remote_name: Option<String>,
-                         remote: Endpoint,
-                         congestion_algorithm: QuicCongestionAlgorithm,
-                         timeout: Duration,
-                         idle_timeout: Duration) -> P2pResult<Self> {
+    pub async fn connect(
+        local_identity_ref: P2pIdentityRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        remote_identity_id: P2pId,
+        remote_name: Option<String>,
+        remote: Endpoint,
+        congestion_algorithm: QuicCongestionAlgorithm,
+        timeout: Duration,
+        idle_timeout: Duration,
+    ) -> P2pResult<Self> {
         log::info!("quic to {} connect begin", remote);
         let client_key = local_identity_ref.get_encoded_identity()?;
         let client_cert = local_identity_ref.get_identity_cert()?.get_encoded_cert()?;
-        let mut config =
-            rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
-                .with_protocol_versions(&[&TLS13])
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
-                .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-                .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
+        let mut config = rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(
+                cert_factory,
+                remote_identity_id.clone(),
+            )))
+            .with_client_auth_cert(
+                vec![CertificateDer::from(client_cert)],
+                PrivatePkcs8KeyDer::from(client_key).into(),
+            )
+            .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;
 
         let mut client_config =
@@ -75,13 +78,19 @@ impl QuicConnection {
         }
         match congestion_algorithm {
             QuicCongestionAlgorithm::Bbr => {
-                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::BbrConfig::default(),
+                ));
             }
             QuicCongestionAlgorithm::Cubic => {
-                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::CubicConfig::default(),
+                ));
             }
             QuicCongestionAlgorithm::NewReno => {
-                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::NewRenoConfig::default(),
+                ));
             }
         }
         // transport_config.max_concurrent_bidi_streams(1_u8.into());
@@ -92,35 +101,62 @@ impl QuicConnection {
 
         let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
         let remote_name = validate_server_name(remote_name);
-        let conn = runtime::timeout(timeout, endpoint.connect(remote.addr().clone(),
-                                    remote_name.as_str()).unwrap()).await
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
-        Ok(Self::new(conn,
-                     Endpoint::from((Protocol::Quic, endpoint.local_addr().map_err(into_p2p_err!(P2pErrorCode::TlsError))?)),
-                     remote))
+        let conn = runtime::timeout(
+            timeout,
+            endpoint
+                .connect(remote.addr().clone(), remote_name.as_str())
+                .unwrap(),
+        )
+        .await
+        .map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} connect failed",
+            remote
+        ))?
+        .map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} connect failed",
+            remote
+        ))?;
+        Ok(Self::new(
+            conn,
+            Endpoint::from((
+                Protocol::Quic,
+                endpoint
+                    .local_addr()
+                    .map_err(into_p2p_err!(P2pErrorCode::TlsError))?,
+            )),
+            remote,
+        ))
     }
 
-    pub async fn connect_with_ep(ep: quinn::Endpoint,
-                                 local_identity_ref: P2pIdentityRef,
-                                 cert_factory: P2pIdentityCertFactoryRef,
-                                 remote_identity_id: P2pId,
-                                 remote_name: Option<String>,
-                                 remote: Endpoint,
-                                 congestion_algorithm: QuicCongestionAlgorithm,
-                                 timeout: Duration,
-                                 idle_timeout: Duration) -> P2pResult<Self> {
+    pub async fn connect_with_ep(
+        ep: quinn::Endpoint,
+        local_identity_ref: P2pIdentityRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        remote_identity_id: P2pId,
+        remote_name: Option<String>,
+        remote: Endpoint,
+        congestion_algorithm: QuicCongestionAlgorithm,
+        timeout: Duration,
+        idle_timeout: Duration,
+    ) -> P2pResult<Self> {
         log::info!("connect with ep remote = {}", remote);
         let client_key = local_identity_ref.get_encoded_identity()?;
         let client_cert = local_identity_ref.get_identity_cert()?.get_encoded_cert()?;
-        let mut config =
-            rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
-                .with_protocol_versions(&[&TLS13])
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(cert_factory, remote_identity_id.clone())))
-                .with_client_auth_cert(vec![CertificateDer::from(client_cert)], PrivatePkcs8KeyDer::from(client_key).into())
-                .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
+        let mut config = rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(
+                cert_factory,
+                remote_identity_id.clone(),
+            )))
+            .with_client_auth_cert(
+                vec![CertificateDer::from(client_cert)],
+                PrivatePkcs8KeyDer::from(client_key).into(),
+            )
+            .map_err(into_p2p_err!(P2pErrorCode::TlsError))?;
         config.enable_early_data = true;
 
         let mut client_config =
@@ -132,27 +168,50 @@ impl QuicConnection {
         }
         match congestion_algorithm {
             QuicCongestionAlgorithm::Bbr => {
-                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::BbrConfig::default(),
+                ));
             }
             QuicCongestionAlgorithm::Cubic => {
-                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::CubicConfig::default(),
+                ));
             }
             QuicCongestionAlgorithm::NewReno => {
-                transport_config.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::NewRenoConfig::default(),
+                ));
             }
         }
         client_config.transport_config(Arc::new(transport_config));
 
         let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
         let remote_name = validate_server_name(remote_name);
-        let conn = runtime::timeout(timeout, ep.connect_with(client_config,
-                                                             remote.addr().clone(),
-                                                             remote_name.as_str()).unwrap()).await
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} connect failed", remote))?;
-        Ok(Self::new(conn,
-                     Endpoint::from((Protocol::Quic, ep.local_addr().map_err(into_p2p_err!(P2pErrorCode::TlsError))?)),
-                     remote))
+        let conn = runtime::timeout(
+            timeout,
+            ep.connect_with(client_config, remote.addr().clone(), remote_name.as_str())
+                .unwrap(),
+        )
+        .await
+        .map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} connect failed",
+            remote
+        ))?
+        .map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} connect failed",
+            remote
+        ))?;
+        Ok(Self::new(
+            conn,
+            Endpoint::from((
+                Protocol::Quic,
+                ep.local_addr()
+                    .map_err(into_p2p_err!(P2pErrorCode::TlsError))?,
+            )),
+            remote,
+        ))
     }
 
     pub fn socket(&self) -> &quinn::Connection {
@@ -160,14 +219,20 @@ impl QuicConnection {
     }
 
     pub async fn open_bi_stream(&mut self) -> P2pResult<(quinn::RecvStream, quinn::SendStream)> {
-        let (send, recv) = self.socket.open_bi().await
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} open bi failed", self.remote))?;
+        let (send, recv) = self.socket.open_bi().await.map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} open bi failed",
+            self.remote
+        ))?;
         Ok((recv, send))
     }
 
     pub async fn open_ui(&mut self) -> P2pResult<quinn::SendStream> {
-        let send = self.socket.open_uni().await
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "quic to {} open uni failed", self.remote))?;
+        let send = self.socket.open_uni().await.map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} open uni failed",
+            self.remote
+        ))?;
         Ok(send)
     }
 
@@ -205,7 +270,11 @@ impl QuicConnection {
 pub(crate) struct MockRead;
 
 impl runtime::AsyncRead for MockRead {
-    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut tokio::io::ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -213,7 +282,11 @@ impl runtime::AsyncRead for MockRead {
 pub(crate) struct MockWrite;
 
 impl runtime::AsyncWrite for MockWrite {
-    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<Result<usize, io::Error>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
         Poll::Ready(Ok(0))
     }
 
@@ -244,7 +317,8 @@ impl QuicRead {
         local_identity_id: P2pId,
         local: Endpoint,
         remote: Endpoint,
-        remote_name: String, ) -> Self {
+        remote_name: String,
+    ) -> Self {
         Self {
             socket,
             recv,
@@ -263,7 +337,11 @@ impl QuicRead {
 
 impl Drop for QuicRead {
     fn drop(&mut self) {
-        log::trace!("quic conn {} read stream {} drop", self.socket.stable_id(), self.recv.id());
+        log::trace!(
+            "quic conn {} read stream {} drop",
+            self.socket.stable_id(),
+            self.recv.id()
+        );
         self.stop();
     }
 }
@@ -291,23 +369,27 @@ impl P2pRead for QuicRead {
 }
 
 impl runtime::AsyncRead for QuicRead {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<Result<(), io::Error>> {
         match self.recv.poll_read(cx, buf.initialize_unfilled()) {
-            Poll::Ready(ret) => {
-                match ret {
-                    Ok(size) => {
-                        buf.advance(size);
-                        log::trace!("quic conn {} stream {} read size {} data {}", self.socket.stable_id(), self.recv.id(), size, hex::encode(buf.filled()));
-                        Poll::Ready(Ok(()))
-                    },
-                    Err(e) => {
-                        Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-                    }
+            Poll::Ready(ret) => match ret {
+                Ok(size) => {
+                    buf.advance(size);
+                    log::trace!(
+                        "quic conn {} stream {} read size {} data {}",
+                        self.socket.stable_id(),
+                        self.recv.id(),
+                        size,
+                        hex::encode(buf.filled())
+                    );
+                    Poll::Ready(Ok(()))
                 }
-            }
-            Poll::Pending => {
-                Poll::Pending
-            }
+                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            },
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -330,7 +412,8 @@ impl QuicWrite {
         local_identity_id: P2pId,
         local: Endpoint,
         remote: Endpoint,
-        remote_name: String, ) -> Self {
+        remote_name: String,
+    ) -> Self {
         Self {
             socket: Some(socket),
             send: Some(send),
@@ -377,71 +460,143 @@ impl P2pWrite for QuicWrite {
     }
 }
 
+pub(crate) struct QuicUniWrite {
+    socket: quinn::Connection,
+    remote_identity_id: P2pId,
+    local_identity_id: P2pId,
+    local: Endpoint,
+    remote: Endpoint,
+    remote_name: String,
+}
+
+impl QuicUniWrite {
+    pub fn new(
+        socket: quinn::Connection,
+        remote_identity_id: P2pId,
+        local_identity_id: P2pId,
+        local: Endpoint,
+        remote: Endpoint,
+        remote_name: String,
+    ) -> Self {
+        Self {
+            socket,
+            remote_identity_id,
+            local_identity_id,
+            local,
+            remote,
+            remote_name,
+        }
+    }
+}
+
+impl P2pWrite for QuicUniWrite {
+    fn remote(&self) -> Endpoint {
+        self.remote.clone()
+    }
+
+    fn local(&self) -> Endpoint {
+        self.local.clone()
+    }
+
+    fn remote_id(&self) -> P2pId {
+        self.remote_identity_id.clone()
+    }
+
+    fn local_id(&self) -> P2pId {
+        self.local_identity_id.clone()
+    }
+
+    fn remote_name(&self) -> String {
+        self.remote_name.clone()
+    }
+}
+
+impl runtime::AsyncWrite for QuicUniWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "quic uni stream does not support write",
+        )))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for QuicUniWrite {
+    fn drop(&mut self) {
+        log::trace!(
+            "quic conn {} uni write side drop",
+            self.socket.stable_id(),
+        );
+    }
+}
+
 impl Drop for QuicWrite {
     fn drop(&mut self) {
-        log::trace!("quic conn {} write stream {} drop", self.socket.as_ref().unwrap().stable_id(), self.send.as_ref().unwrap().id());
+        log::trace!(
+            "quic conn {} write stream {} drop",
+            self.socket.as_ref().unwrap().stable_id(),
+            self.send.as_ref().unwrap().id()
+        );
         self.stop();
     }
 }
 
 impl runtime::AsyncWrite for QuicWrite {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
         let conn_id = self.socket.as_ref().unwrap().stable_id();
         let send = self.send.as_mut().unwrap();
         let stream_id = send.id();
         match Pin::new(send).poll_write(cx, buf) {
-            Poll::Ready(ret) => {
-                match ret {
-                    Ok(size) => {
-                        log::trace!("quic connection {} stream {} send data {}", conn_id, stream_id, hex::encode(buf));
-                        Poll::Ready(Ok(size))
-                    },
-                    Err(e) => {
-                        Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-                    }
+            Poll::Ready(ret) => match ret {
+                Ok(size) => {
+                    log::trace!(
+                        "quic connection {} stream {} send data {}",
+                        conn_id,
+                        stream_id,
+                        hex::encode(buf)
+                    );
+                    Poll::Ready(Ok(size))
                 }
-            }
-            Poll::Pending => {
-                Poll::Pending
-            }
+                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            },
+            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         let send = self.send.as_mut().unwrap();
         match Pin::new(send).poll_flush(cx) {
-            Poll::Ready(ret) => {
-                match ret {
-                    Ok(()) => {
-                        Poll::Ready(Ok(()))
-                    },
-                    Err(e) => {
-                        Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-                    }
-                }
-            }
-            Poll::Pending => {
-                Poll::Pending
-            }
+            Poll::Ready(ret) => match ret {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            },
+            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         let send = self.send.as_mut().unwrap();
         match Pin::new(send).poll_shutdown(cx) {
-            Poll::Ready(ret) => {
-                match ret {
-                    Ok(()) => {
-                        Poll::Ready(Ok(()))
-                    },
-                    Err(e) => {
-                        Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
-                    }
-                }
-            }
-            Poll::Pending => {
-                Poll::Pending
-            }
+            Poll::Ready(ret) => match ret {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
+            },
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -455,12 +610,14 @@ mod tests {
     use crate::endpoint::{Endpoint, Protocol};
     use crate::executor::Executor;
     use crate::finder::{DeviceCache, DeviceCacheConfig};
-    use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener};
-    use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef};
+    use crate::p2p_identity::{
+        P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
+    };
+    use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::sockets::{QuicCongestionAlgorithm, QuicListener};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
-    use crate::x509::{generate_x509_identity, X509IdentityCertFactory, X509IdentityFactory};
+    use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
 
     use super::QuicConnection;
 
@@ -519,7 +676,12 @@ mod tests {
         Endpoint::from((Protocol::Quic, addr))
     }
 
-    async fn setup_server_listener() -> (Arc<crate::tls::DefaultTlsServerCertResolver>, P2pIdentityRef, Arc<QuicListener>, Endpoint) {
+    async fn setup_server_listener() -> (
+        Arc<crate::tls::DefaultTlsServerCertResolver>,
+        P2pIdentityRef,
+        Arc<QuicListener>,
+        Endpoint,
+    ) {
         init_tls_once();
         let cert_factory = new_cert_factory();
         let cert_cache = new_cert_cache();
@@ -542,10 +704,20 @@ mod tests {
         listener.start();
 
         let local_addr = listener.quic_ep().local_addr().unwrap();
-        (resolver, server_identity, listener, Endpoint::from((Protocol::Quic, local_addr)))
+        (
+            resolver,
+            server_identity,
+            listener,
+            Endpoint::from((Protocol::Quic, local_addr)),
+        )
     }
 
-    async fn setup_server_listener_no_start() -> (Arc<crate::tls::DefaultTlsServerCertResolver>, P2pIdentityRef, Arc<QuicListener>, Endpoint) {
+    async fn setup_server_listener_no_start() -> (
+        Arc<crate::tls::DefaultTlsServerCertResolver>,
+        P2pIdentityRef,
+        Arc<QuicListener>,
+        Endpoint,
+    ) {
         init_tls_once();
         let cert_factory = new_cert_factory();
         let cert_cache = new_cert_cache();
@@ -566,7 +738,12 @@ mod tests {
         listener.bind(loopback_ep(0), None, None).await.unwrap();
 
         let local_addr = listener.quic_ep().local_addr().unwrap();
-        (resolver, server_identity, listener, Endpoint::from((Protocol::Quic, local_addr)))
+        (
+            resolver,
+            server_identity,
+            listener,
+            Endpoint::from((Protocol::Quic, local_addr)),
+        )
     }
 
     #[tokio::test]
@@ -743,8 +920,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quic_connection_accept_bi_and_uni_ok() {
-        let (_resolver, server_identity, listener, remote_ep) = setup_server_listener_no_start().await;
+    async fn quic_connection_accept_bi_and_uni_dispatch_ok() {
+        let (_resolver, server_identity, listener, remote_ep) =
+            setup_server_listener_no_start().await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         listener.set_connection_event_listener(Arc::new(CaptureConnListener {
             tx: Mutex::new(Some(tx)),
@@ -775,7 +953,8 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        let (_resolver2, server_identity2, listener2, remote_ep2) = setup_server_listener_no_start().await;
+        let (_resolver2, server_identity2, listener2, remote_ep2) =
+            setup_server_listener_no_start().await;
         let (tx2, rx2) = tokio::sync::oneshot::channel();
         listener2.set_connection_event_listener(Arc::new(CaptureConnListener {
             tx: Mutex::new(Some(tx2)),
@@ -799,12 +978,13 @@ mod tests {
         .unwrap();
         let _ = client_conn2.open_ui().await.unwrap();
         let uni_ret = tokio::time::timeout(Duration::from_millis(300), rx2).await;
-        assert!(uni_ret.is_err());
+        assert!(uni_ret.is_ok());
     }
 
     #[tokio::test]
     async fn quic_connection_read_write_wrappers_io_ok() {
-        let (_resolver, server_identity, listener, remote_ep) = setup_server_listener_no_start().await;
+        let (_resolver, server_identity, listener, remote_ep) =
+            setup_server_listener_no_start().await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         listener.set_connection_event_listener(Arc::new(CaptureConnListener {
             tx: Mutex::new(Some(tx)),
@@ -853,9 +1033,9 @@ mod tests {
 
     #[test]
     fn mock_read_write_poll_basic() {
+        use crate::runtime::{AsyncRead, AsyncWrite};
         use std::pin::Pin;
         use std::task::{Context, Poll, Waker};
-        use crate::runtime::{AsyncRead, AsyncWrite};
         use tokio::io::ReadBuf;
 
         let waker = Waker::noop();

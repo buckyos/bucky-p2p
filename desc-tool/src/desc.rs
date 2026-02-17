@@ -1,9 +1,12 @@
+use bucky_crypto::PrivateKey;
+use bucky_objects::{
+    Area, Device, DeviceCategory, DeviceId, Endpoint, Group, GroupMember, NamedObject, ObjectDesc,
+    ObjectId, People, UniqueId,
+};
+use bucky_raw_codec::FileEncoder;
 use log::*;
 use std::path::Path;
 use std::str::FromStr;
-use bucky_crypto::PrivateKey;
-use bucky_objects::{Area, Device, DeviceCategory, DeviceId, Endpoint, Group, GroupMember, NamedObject, ObjectDesc, ObjectId, People, UniqueId};
-use bucky_raw_codec::FileEncoder;
 
 pub fn create_group_desc(
     founder_id: Option<ObjectId>,

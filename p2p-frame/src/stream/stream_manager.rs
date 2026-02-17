@@ -1,22 +1,25 @@
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use callback_result::SingleCallbackWaiter;
-use futures::future::{abortable, AbortHandle};
-use futures::TryFutureExt;
-use tokio::io::{AsyncWriteExt, BufWriter};
 use crate::endpoint::Endpoint;
-use crate::error::{into_p2p_err, p2p_err, P2pErrorCode, P2pResult};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::p2p_connection::{P2pConnection, P2pConnectionInfoCacheRef};
-use crate::p2p_identity::{P2pId, P2pIdentityRef, P2pIdentityCertRef, P2pIdentityCertFactoryRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
 use crate::pn::PnClientRef;
 use crate::protocol::v0::TunnelType;
 use crate::sn::client::SNClientServiceRef;
 use crate::sockets::NetManagerRef;
-use crate::tunnel::{DeviceFinderRef, P2pConnectionFactory, TunnelConnectionRead, TunnelConnectionWrite, TunnelListenerRef, TunnelManager, TunnelManagerRef};
+use crate::tunnel::{
+    DeviceFinderRef, P2pConnectionFactory, TunnelConnectionRead, TunnelConnectionWrite,
+    TunnelListenerRef, TunnelManager, TunnelManagerRef,
+};
 use crate::types::{SessionId, SessionIdGenerator, TunnelIdGenerator};
+use callback_result::SingleCallbackWaiter;
+use futures::TryFutureExt;
+use futures::future::{AbortHandle, abortable};
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
 pub struct StreamRead {
     read: TunnelConnectionRead,
@@ -143,7 +146,7 @@ struct StreamListenerState {
 pub struct StreamListener {
     listener_port: u16,
     waiter: SingleCallbackWaiter<(StreamRead, StreamWrite)>,
-    state: Mutex<StreamListenerState>
+    state: Mutex<StreamListenerState>,
 }
 
 impl StreamListener {
@@ -159,10 +162,11 @@ impl StreamListener {
     }
 
     pub async fn accept(&self) -> P2pResult<(StreamRead, StreamWrite)> {
-        let future = self.waiter.create_result_future().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
-        let (abort_future, handle) = abortable(async move {
-            future.await
-        });
+        let future = self
+            .waiter
+            .create_result_future()
+            .map_err(into_p2p_err!(P2pErrorCode::Failed))?;
+        let (abort_future, handle) = abortable(async move { future.await });
         {
             let mut state = self.state.lock().unwrap();
             if !state.is_stop {
@@ -193,14 +197,14 @@ pub type StreamListenerRef = Arc<StreamListener>;
 
 pub struct StreamListenerGuard {
     stream_manager: StreamManagerRef,
-    listener: StreamListenerRef
+    listener: StreamListenerRef,
 }
 
 impl StreamListenerGuard {
     fn new(listener: StreamListenerRef, stream_manager: StreamManagerRef) -> Self {
         Self {
             stream_manager,
-            listener
+            listener,
         }
     }
 }
@@ -226,24 +230,47 @@ struct P2pStreamConnectionFactory {
 
 impl P2pStreamConnectionFactory {
     fn new(net_manager: NetManagerRef) -> Self {
-        Self {
-            net_manager
-        }
+        Self { net_manager }
     }
 }
 
 #[async_trait::async_trait]
-impl P2pConnectionFactory for  P2pStreamConnectionFactory {
+impl P2pConnectionFactory for P2pStreamConnectionFactory {
     fn tunnel_type(&self) -> TunnelType {
         TunnelType::Stream
     }
 
-    async fn create_connect(&self, local_identity: &P2pIdentityRef, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<Vec<P2pConnection>> {
-        self.net_manager.get_network(remote.protocol())?.create_stream_connect(local_identity, remote, remote_id,remote_name).await
+    async fn create_connect(
+        &self,
+        local_identity: &P2pIdentityRef,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<Vec<P2pConnection>> {
+        self.net_manager
+            .get_network(remote.protocol())?
+            .create_stream_connect(local_identity, remote, remote_id, remote_name)
+            .await
     }
 
-    async fn create_connect_with_local_ep(&self, local_identity: &P2pIdentityRef, local_ep: &Endpoint, remote: &Endpoint, remote_id: &P2pId, remote_name: Option<String>) -> P2pResult<P2pConnection> {
-        self.net_manager.get_network(remote.protocol())?.create_stream_connect_with_local_ep(local_identity, local_ep, remote, remote_id, remote_name).await
+    async fn create_connect_with_local_ep(
+        &self,
+        local_identity: &P2pIdentityRef,
+        local_ep: &Endpoint,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+    ) -> P2pResult<P2pConnection> {
+        self.net_manager
+            .get_network(remote.protocol())?
+            .create_stream_connect_with_local_ep(
+                local_identity,
+                local_ep,
+                remote,
+                remote_id,
+                remote_name,
+            )
+            .await
     }
 }
 
@@ -258,23 +285,28 @@ pub type StreamManagerRef = Arc<StreamManager>;
 
 impl Drop for StreamManager {
     fn drop(&mut self) {
-        log::info!("StreamManager drop.device = {}", self.local_identity.get_id());
+        log::info!(
+            "StreamManager drop.device = {}",
+            self.local_identity.get_id()
+        );
     }
 }
 
 impl StreamManager {
-    pub fn new(local_identity: P2pIdentityRef,
-               net_manager: NetManagerRef,
-               sn_service: SNClientServiceRef,
-               device_finder: DeviceFinderRef,
-               cert_factory: P2pIdentityCertFactoryRef,
-               gen_id: Arc<TunnelIdGenerator>,
-               pn_client: Option<PnClientRef>,
-               tunnel_listener: TunnelListenerRef,
-               conn_info_cache: P2pConnectionInfoCacheRef,
-               protocol_version: u8,
-               conn_timeout: Duration,
-               idle_timeout: Duration,) -> Arc<Self> {
+    pub fn new(
+        local_identity: P2pIdentityRef,
+        net_manager: NetManagerRef,
+        sn_service: SNClientServiceRef,
+        device_finder: DeviceFinderRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        gen_id: Arc<TunnelIdGenerator>,
+        pn_client: Option<PnClientRef>,
+        tunnel_listener: TunnelListenerRef,
+        conn_info_cache: P2pConnectionInfoCacheRef,
+        protocol_version: u8,
+        conn_timeout: Duration,
+        idle_timeout: Duration,
+    ) -> Arc<Self> {
         let tunnel_manager = TunnelManager::new(
             sn_service,
             local_identity.clone(),
@@ -287,7 +319,8 @@ impl StreamManager {
             conn_info_cache,
             protocol_version,
             conn_timeout,
-            idle_timeout);
+            idle_timeout,
+        );
         let stream = Arc::new(Self {
             local_identity,
             tunnel_manager: tunnel_manager.clone(),
@@ -296,43 +329,86 @@ impl StreamManager {
         });
 
         let weak = Arc::downgrade(&stream);
-        tunnel_manager.set_listener(move |session_id: SessionId, vport: u16, read: TunnelConnectionRead, write: TunnelConnectionWrite| {
-            let weak = weak.clone();
-            async move {
-                if let Some(stream_manager) = weak.upgrade() {
-                    let listeners = stream_manager.listeners.lock().unwrap();
-                    if let Some(listener) = listeners.get(&vport) {
-                        listener.waiter.set_result_with_cache((StreamRead::new(read, session_id, vport), StreamWrite::new(write, session_id, vport)));
+        tunnel_manager.set_listener(
+            move |session_id: SessionId,
+                  vport: u16,
+                  read: TunnelConnectionRead,
+                  write: TunnelConnectionWrite| {
+                let weak = weak.clone();
+                async move {
+                    if let Some(stream_manager) = weak.upgrade() {
+                        let listeners = stream_manager.listeners.lock().unwrap();
+                        if let Some(listener) = listeners.get(&vport) {
+                            listener.waiter.set_result_with_cache((
+                                StreamRead::new(read, session_id, vport),
+                                StreamWrite::new(write, session_id, vport),
+                            ));
+                        }
                     }
+                    Ok(())
                 }
-                Ok(())
-            }
-        });
+            },
+        );
         stream
     }
 
-    pub async fn connect(&self, remote: &P2pIdentityCertRef, port: u16, ) -> P2pResult<(StreamRead, StreamWrite)> {
+    pub async fn connect(
+        &self,
+        remote: &P2pIdentityCertRef,
+        port: u16,
+    ) -> P2pResult<(StreamRead, StreamWrite)> {
         let session_id = self.session_gen.generate();
-        let (read, write) = self.tunnel_manager.create_session(remote, session_id, port).await?;
-        Ok((StreamRead::new(read, session_id, port), StreamWrite::new(write, session_id, port)))
+        let (read, write) = self
+            .tunnel_manager
+            .create_session(remote, session_id, port)
+            .await?;
+        Ok((
+            StreamRead::new(read, session_id, port),
+            StreamWrite::new(write, session_id, port),
+        ))
     }
 
-    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> P2pResult<(StreamRead, StreamWrite)> {
+    pub async fn connect_from_id(
+        &self,
+        remote_id: &P2pId,
+        port: u16,
+    ) -> P2pResult<(StreamRead, StreamWrite)> {
         let session_id = self.session_gen.generate();
-        let (read, write) = self.tunnel_manager.create_session_from_id(remote_id, session_id, port).await?;
-        Ok((StreamRead::new(read, session_id, port), StreamWrite::new(write, session_id, port)))
+        let (read, write) = self
+            .tunnel_manager
+            .create_session_from_id(remote_id, session_id, port)
+            .await?;
+        Ok((
+            StreamRead::new(read, session_id, port),
+            StreamWrite::new(write, session_id, port),
+        ))
     }
 
-    pub async fn connect_direct(&self, remote_eps: Vec<Endpoint>, port: u16, remote_id: Option<P2pId>) -> P2pResult<(StreamRead, StreamWrite)> {
+    pub async fn connect_direct(
+        &self,
+        remote_eps: Vec<Endpoint>,
+        port: u16,
+        remote_id: Option<P2pId>,
+    ) -> P2pResult<(StreamRead, StreamWrite)> {
         let session_id = self.session_gen.generate();
-        let (read, write) = self.tunnel_manager.create_session_direct(remote_eps, session_id, port, remote_id).await?;
-        Ok((StreamRead::new(read, session_id, port), StreamWrite::new(write, session_id, port)))
+        let (read, write) = self
+            .tunnel_manager
+            .create_session_direct(remote_eps, session_id, port, remote_id)
+            .await?;
+        Ok((
+            StreamRead::new(read, session_id, port),
+            StreamWrite::new(write, session_id, port),
+        ))
     }
 
     pub async fn listen(self: &StreamManagerRef, port: u16) -> P2pResult<StreamListenerGuard> {
         let mut listeners = self.listeners.lock().unwrap();
         if listeners.contains_key(&port) {
-            return Err(p2p_err!(P2pErrorCode::StreamPortAlreadyListen, "stream port {} already listen", port));
+            return Err(p2p_err!(
+                P2pErrorCode::StreamPortAlreadyListen,
+                "stream port {} already listen",
+                port
+            ));
         }
         let listener = Arc::new(StreamListener::new(port));
         listeners.insert(port, listener.clone());

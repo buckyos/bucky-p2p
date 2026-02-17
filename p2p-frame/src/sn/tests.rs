@@ -50,8 +50,12 @@ async fn start_sn_service(
     identity_factory: Arc<X509IdentityFactory>,
     cert_factory: Arc<X509IdentityCertFactory>,
 ) -> P2pResult<SnServiceRef> {
-    let service =
-        create_sn_service(SnServiceConfig::new(sn_identity, identity_factory, cert_factory)).await;
+    let service = create_sn_service(SnServiceConfig::new(
+        sn_identity,
+        identity_factory,
+        cert_factory,
+    ))
+    .await;
     service.start().await?;
     Ok(service)
 }
@@ -253,12 +257,16 @@ async fn sn_client_query_registered_peer_returns_full_info() {
     assert!(query_resp.peer_info.is_some());
     assert!(!query_resp.end_point_array.is_empty());
 
-    let peer_cert = cert_factory.create(query_resp.peer_info.as_ref().unwrap()).unwrap();
+    let peer_cert = cert_factory
+        .create(query_resp.peer_info.as_ref().unwrap())
+        .unwrap();
     assert_eq!(peer_cert.get_id(), client_id);
-    assert!(query_resp
-        .end_point_array
-        .iter()
-        .any(|ep| ep.protocol() == Protocol::Quic && ep.addr().port() > 0));
+    assert!(
+        query_resp
+            .end_point_array
+            .iter()
+            .any(|ep| ep.protocol() == Protocol::Quic && ep.addr().port() > 0)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -278,13 +286,15 @@ async fn sn_call_stream_path_field_level_assertions() {
         setup_sn_and_two_clients().await;
 
     let (tx, mut rx) = mpsc::channel::<SnCalled>(1);
-    callee_stack.sn_client().set_listener(move |called: SnCalled| {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(called).await;
-            Ok(())
-        }
-    });
+    callee_stack
+        .sn_client()
+        .set_listener(move |called: SnCalled| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(called).await;
+                Ok(())
+            }
+        });
 
     let reverse_eps = vec![
         localhost_quic_endpoint(next_port()),
@@ -322,7 +332,10 @@ async fn sn_call_stream_path_field_level_assertions() {
     assert_eq!(called.tunnel_id, tunnel_id);
     assert_eq!(called.payload, payload);
     assert!(called.reverse_endpoint_array.len() >= reverse_eps.len());
-    assert_eq!(&called.reverse_endpoint_array[..reverse_eps.len()], reverse_eps.as_slice());
+    assert_eq!(
+        &called.reverse_endpoint_array[..reverse_eps.len()],
+        reverse_eps.as_slice()
+    );
     assert!(called.active_pn_list.is_empty());
 
     let from_peer_cert = cert_factory.create(&called.peer_info).unwrap();
@@ -335,13 +348,15 @@ async fn sn_call_datagram_path_field_level_assertions() {
         setup_sn_and_two_clients().await;
 
     let (tx, mut rx) = mpsc::channel::<SnCalled>(1);
-    callee_stack.sn_client().set_listener(move |called: SnCalled| {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(called).await;
-            Ok(())
-        }
-    });
+    callee_stack
+        .sn_client()
+        .set_listener(move |called: SnCalled| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(called).await;
+                Ok(())
+            }
+        });
 
     let reverse_eps = vec![localhost_quic_endpoint(next_port())];
     let tunnel_id: TunnelId = 0x1002u32.into();
@@ -376,7 +391,10 @@ async fn sn_call_datagram_path_field_level_assertions() {
     assert_eq!(called.tunnel_id, tunnel_id);
     assert_eq!(called.payload, payload);
     assert!(called.reverse_endpoint_array.len() >= reverse_eps.len());
-    assert_eq!(&called.reverse_endpoint_array[..reverse_eps.len()], reverse_eps.as_slice());
+    assert_eq!(
+        &called.reverse_endpoint_array[..reverse_eps.len()],
+        reverse_eps.as_slice()
+    );
     assert!(called.active_pn_list.is_empty());
 
     let from_peer_cert = cert_factory.create(&called.peer_info).unwrap();

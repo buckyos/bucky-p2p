@@ -1,23 +1,23 @@
-use std::io::ErrorKind;
-use std::str::FromStr;
-use log::*;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
-use rustls::server::ResolvesServerCert;
-use rustls::ServerConfig;
-use rustls::version::TLS13;
-use crate::runtime::{TcpListener, TcpStream, TlsAcceptor};
+use super::super::UpdateOuterResult;
+use super::TCPConnection;
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::{p2p_err, P2pError, P2pErrorCode, into_p2p_err};
+use crate::error::{P2pError, P2pErrorCode, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::p2p_connection::{P2pConnection, P2pConnectionEventListener, P2pListener};
 use crate::p2p_identity::{P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef};
 use crate::runtime;
+use crate::runtime::{TcpListener, TcpStream, TlsAcceptor};
 use crate::sockets::parse_server_name;
 use crate::tls::ServerCertResolverRef;
-use super::super::UpdateOuterResult;
-use super::TCPConnection;
+use log::*;
+use rustls::ServerConfig;
+use rustls::server::ResolvesServerCert;
+use rustls::version::TLS13;
+use std::io::ErrorKind;
+use std::str::FromStr;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 struct TCPListenerState {
     local: Option<Endpoint>,
@@ -48,12 +48,13 @@ impl TCPListener {
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
     ) -> Arc<Self> {
-        let mut server_config =
-            ServerConfig::builder_with_provider(crate::tls::provider().into())
-                .with_protocol_versions(&[&TLS13])
-                .unwrap()
-                .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(cert_factory.clone())))
-                .with_cert_resolver(cert_resolver.clone().get_resolves_server_cert());
+        let mut server_config = ServerConfig::builder_with_provider(crate::tls::provider().into())
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(
+                cert_factory.clone(),
+            )))
+            .with_cert_resolver(cert_resolver.clone().get_resolves_server_cert());
 
         server_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
@@ -98,15 +99,24 @@ impl TCPListener {
         }
     }
 
-    pub async fn bind(&self, local: Endpoint, out: Option<Endpoint>, mapping_port: Option<u16>) -> Result<(), P2pError> {
+    pub async fn bind(
+        &self,
+        local: Endpoint,
+        out: Option<Endpoint>,
+        mapping_port: Option<u16>,
+    ) -> Result<(), P2pError> {
         let socket = {
             if local.addr().is_ipv6() {
                 #[cfg(windows)]
                 {
                     let mut default_local = Endpoint::default_tcp(&local);
                     default_local.mut_addr().set_port(local.addr().port());
-                    TcpListener::bind(default_local.addr()).await
-                        .map_err(into_p2p_err!(P2pErrorCode::AlreadyExists, "bind port failed"))
+                    TcpListener::bind(default_local.addr())
+                        .await
+                        .map_err(into_p2p_err!(
+                            P2pErrorCode::AlreadyExists,
+                            "bind port failed"
+                        ))
                 }
                 #[cfg(not(windows))]
                 {
@@ -145,7 +155,10 @@ impl TCPListener {
                         } else {
                             #[cfg(feature = "runtime-tokio")]
                             {
-                                Ok(TcpListener::from_std(std::net::TcpListener::from_raw_fd(raw_sock)).unwrap())
+                                Ok(TcpListener::from_std(std::net::TcpListener::from_raw_fd(
+                                    raw_sock,
+                                ))
+                                .unwrap())
                             }
 
                             // #[cfg(feature = "runtime-async-std")]
@@ -158,9 +171,17 @@ impl TCPListener {
             } else if local.is_sys_default() {
                 let mut default_local = Endpoint::default_tcp(&local);
                 default_local.mut_addr().set_port(local.addr().port());
-                TcpListener::bind(default_local.addr()).await.map_err(into_p2p_err!(P2pErrorCode::AlreadyExists, "bind port failed"))
+                TcpListener::bind(default_local.addr())
+                    .await
+                    .map_err(into_p2p_err!(
+                        P2pErrorCode::AlreadyExists,
+                        "bind port failed"
+                    ))
             } else {
-                TcpListener::bind(local.addr()).await.map_err(into_p2p_err!(P2pErrorCode::AlreadyExists, "bind port failed"))
+                TcpListener::bind(local.addr()).await.map_err(into_p2p_err!(
+                    P2pErrorCode::AlreadyExists,
+                    "bind port failed"
+                ))
             }
         }?;
 
@@ -174,12 +195,20 @@ impl TCPListener {
     }
 
     async fn accept(&self, socket: TcpStream) -> Result<P2pConnection, P2pError> {
-        let remote = socket.peer_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
-        let local = socket.local_addr().map_err(into_p2p_err!(P2pErrorCode::Failed))?;
+        let remote = socket
+            .peer_addr()
+            .map_err(into_p2p_err!(P2pErrorCode::Failed))?;
+        let local = socket
+            .local_addr()
+            .map_err(into_p2p_err!(P2pErrorCode::Failed))?;
         let remote = Endpoint::from((Protocol::Tcp, remote));
         let local = Endpoint::from((Protocol::Tcp, local));
 
-        let tls_stream = self.tls_acceptor.accept(socket).await.map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
+        let tls_stream = self
+            .tls_acceptor
+            .accept(socket)
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
         let (_, tls_conn) = tls_stream.get_ref();
         let cert = tls_conn.peer_certificates();
         if cert.is_none() {
@@ -208,18 +237,22 @@ impl TCPListener {
         let remote_id = remote_device.get_id();
         self.cert_cache.add(&remote_id, &remote_device).await?;
         let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
-        let read = super::TCPRead::new(read,
-                                       remote_id.clone(),
-                                       local_identity_id.clone(),
-                                       local,
-                                       remote,
-                                       remote_device.get_name());
-        let write = super::TCPWrite::new(write,
-                                         remote_id,
-                                         local_identity_id,
-                                         local,
-                                         remote,
-                                         remote_device.get_name());
+        let read = super::TCPRead::new(
+            read,
+            remote_id.clone(),
+            local_identity_id.clone(),
+            local,
+            remote,
+            remote_device.get_name(),
+        );
+        let write = super::TCPWrite::new(
+            write,
+            remote_id,
+            local_identity_id,
+            local,
+            remote,
+            remote_device.get_name(),
+        );
         let socket = P2pConnection::new(Box::new(read), Box::new(write));
 
         Ok(socket)
@@ -243,7 +276,10 @@ impl TCPListener {
                                     }
                                 }
                                 Err(e) => {
-                                    warn!("tcp-listener accept a stream, but the first package read failed. err: {}", e);
+                                    warn!(
+                                        "tcp-listener accept a stream, but the first package read failed. err: {}",
+                                        e
+                                    );
                                 }
                             }
                         });
@@ -276,7 +312,14 @@ impl TCPListener {
             use std::os::windows::io::AsRawSocket;
             use winapi::um::winsock2::closesocket;
             unsafe {
-                let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_socket();
+                let raw = self
+                    .state
+                    .read()
+                    .unwrap()
+                    .socket
+                    .as_ref()
+                    .unwrap()
+                    .as_raw_socket();
                 closesocket(raw.try_into().unwrap());
             }
         }
@@ -294,7 +337,14 @@ impl TCPListener {
             {
                 use std::os::fd::AsRawFd;
                 unsafe {
-                    let raw = self.state.read().unwrap().socket.as_ref().unwrap().as_raw_fd();
+                    let raw = self
+                        .state
+                        .read()
+                        .unwrap()
+                        .socket
+                        .as_ref()
+                        .unwrap()
+                        .as_raw_fd();
                     libc::close(raw.try_into().unwrap());
                 }
             }
@@ -307,7 +357,6 @@ impl TCPListener {
 }
 
 impl P2pListener for TCPListener {
-
     fn mapping_port(&self) -> Option<u16> {
         self.state.read().unwrap().mapping_port
     }

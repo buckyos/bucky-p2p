@@ -1,15 +1,15 @@
+use crate::endpoint::Endpoint;
+use crate::error::{P2pErrorCode, P2pResult, p2p_err};
+use crate::p2p_connection::{P2pConnection, P2pRead, P2pWrite};
+use crate::p2p_identity::P2pId;
+use crate::pn::{PnTunnelRead, PnTunnelWrite};
+use crate::runtime;
 use std::any::Any;
 use std::cell::UnsafeCell;
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 use tokio::io::ReadBuf;
-use crate::endpoint::Endpoint;
-use crate::error::{p2p_err, P2pErrorCode, P2pResult};
-use crate::p2p_connection::{P2pConnection, P2pRead, P2pWrite};
-use crate::p2p_identity::P2pId;
-use crate::pn::{PnTunnelRead, PnTunnelWrite};
-use crate::runtime;
 
 pub struct ProxyConnectionRead {
     read: Box<dyn PnTunnelRead>,
@@ -17,12 +17,8 @@ pub struct ProxyConnectionRead {
 }
 
 impl ProxyConnectionRead {
-    pub fn new(read: Box<dyn PnTunnelRead>,
-               local_id: P2pId,) -> Self {
-        Self {
-            read,
-            local_id,
-        }
+    pub fn new(read: Box<dyn PnTunnelRead>, local_id: P2pId) -> Self {
+        Self { read, local_id }
     }
 }
 
@@ -49,7 +45,11 @@ impl P2pRead for ProxyConnectionRead {
 }
 
 impl runtime::AsyncRead for ProxyConnectionRead {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.read).poll_read(cx, buf)
     }
 }
@@ -60,17 +60,17 @@ pub struct ProxyConnectionWrite {
 }
 
 impl ProxyConnectionWrite {
-    pub fn new(write: Box<dyn PnTunnelWrite>,
-               local_id: P2pId,) -> Self {
-        Self {
-            write,
-            local_id,
-        }
+    pub fn new(write: Box<dyn PnTunnelWrite>, local_id: P2pId) -> Self {
+        Self { write, local_id }
     }
 }
 
 impl runtime::AsyncWrite for ProxyConnectionWrite {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.write).poll_write(cx, buf)
     }
 
@@ -104,4 +104,3 @@ impl P2pWrite for ProxyConnectionWrite {
         self.write.remote_name()
     }
 }
-

@@ -1,25 +1,32 @@
-use std::sync::Arc;
-use std::time::Duration;
-use once_cell::sync::OnceCell;
-use rustls::server::ResolvesServerCert;
 use crate::datagram::{DatagramManager, DatagramManagerRef};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::p2p_connection::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
-use crate::p2p_identity::{P2pIdentityRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef, P2pIdentityCertCacheRef, P2pSn};
+use crate::p2p_identity::{
+    P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef,
+    P2pIdentityRef, P2pSn,
+};
 use crate::p2p_network::P2pNetworkRef;
 use crate::pn::{DefaultPnClient, PnClientRef};
 use crate::protocol::v0::SnCalled;
-use crate::sn::client::{SNClientService, SNClientServiceRef};
-use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
+use crate::sn::client::{SNClientService, SNClientServiceRef, SnLocalIpProviderRef};
 use crate::sockets::tcp::TcpNetwork;
+use crate::sockets::{NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicNetwork};
 use crate::stream::{StreamManager, StreamManagerRef};
-use crate::tls::{init_tls, DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver};
+use crate::tls::{
+    DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver, init_tls,
+};
+use crate::tunnel::{
+    DefaultDeviceFinder, TunnelListener, TunnelListenerRef, TunnelManager, TunnelManagerRef,
+};
 pub use crate::tunnel::{DeviceFinder, DeviceFinderRef};
-use crate::tunnel::{DefaultDeviceFinder, TunnelListener, TunnelListenerRef, TunnelManager, TunnelManagerRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
+use once_cell::sync::OnceCell;
+use rustls::server::ResolvesServerCert;
+use std::sync::Arc;
+use std::time::Duration;
 
 pub struct P2pEnv {
     net_manager: NetManagerRef,
@@ -35,7 +42,8 @@ impl P2pEnv {
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
         identity_cert_cache: P2pIdentityCertCacheRef,
-        sever_cert_resolver: ServerCertResolverRef,) -> P2pEnvRef {
+        sever_cert_resolver: ServerCertResolverRef,
+    ) -> P2pEnvRef {
         Arc::new(P2pEnv {
             net_manager,
             identity_factory,
@@ -67,14 +75,18 @@ impl P2pConfig {
     pub fn new(
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
-        endpoints: Vec<Endpoint>,) -> Self {
+        endpoints: Vec<Endpoint>,
+    ) -> Self {
         Self {
             identity_factory,
             cert_factory,
-            identity_cert_cache: Arc::new(DeviceCache::new(&DeviceCacheConfig {
-                expire: Duration::from_secs(600),
-                capacity: 1024,
-            }, None)),
+            identity_cert_cache: Arc::new(DeviceCache::new(
+                &DeviceCacheConfig {
+                    expire: Duration::from_secs(600),
+                    capacity: 1024,
+                },
+                None,
+            )),
             sever_cert_resolver: DefaultTlsServerCertResolver::new(),
             connection_info_cache: DefaultP2pConnectionInfoCache::new(),
             extra_networks: Vec::new(),
@@ -190,7 +202,10 @@ impl P2pConfig {
         self
     }
 
-    pub fn set_connection_info_cache(mut self, connection_info_cache: P2pConnectionInfoCacheRef) -> Self {
+    pub fn set_connection_info_cache(
+        mut self,
+        connection_info_cache: P2pConnectionInfoCacheRef,
+    ) -> Self {
         self.connection_info_cache = connection_info_cache;
         self
     }
@@ -203,41 +218,58 @@ impl P2pConfig {
         self.quic_congestion_algorithm
     }
 
-    pub fn set_quic_congestion_algorithm(mut self, quic_congestion_algorithm: QuicCongestionAlgorithm) -> Self {
+    pub fn set_quic_congestion_algorithm(
+        mut self,
+        quic_congestion_algorithm: QuicCongestionAlgorithm,
+    ) -> Self {
         self.quic_congestion_algorithm = quic_congestion_algorithm;
         self
     }
 }
 
-pub async fn create_p2p_env(
-    config: P2pConfig,
-) -> P2pResult<P2pEnvRef> {
+pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
     Executor::init_new_multi_thread(None);
     let identity_factory = config.identity_factory();
     let cert_factory = config.cert_factory();
     init_tls(config.identity_factory().clone());
-    let device_cache =  config.identity_cert_cache().clone();
+    let device_cache = config.identity_cert_cache().clone();
 
     let tsl_server_cert_resolver = config.sever_cert_resolver();
-    let tcp_network = Arc::new(TcpNetwork::new(device_cache.clone(),
-                                               tsl_server_cert_resolver.clone(),
-                                               cert_factory.clone(),
-                                               config.tcp_accept_timout));
-    let quic_network = Arc::new(QuicNetwork::new(device_cache.clone(),
-                                                 tsl_server_cert_resolver.clone(),
-                                                 cert_factory.clone(),
-                                                 config.quic_congestion_algorithm,
-                                                 config.quic_connect_timeout,
-                                                 config.quic_idle_time));
+    let tcp_network = Arc::new(TcpNetwork::new(
+        device_cache.clone(),
+        tsl_server_cert_resolver.clone(),
+        cert_factory.clone(),
+        config.tcp_accept_timout,
+    ));
+    let quic_network = Arc::new(QuicNetwork::new(
+        device_cache.clone(),
+        tsl_server_cert_resolver.clone(),
+        cert_factory.clone(),
+        config.quic_congestion_algorithm,
+        config.quic_connect_timeout,
+        config.quic_idle_time,
+    ));
 
     let mut networks = config.extra_networks().clone();
     networks.push(tcp_network as P2pNetworkRef);
     networks.push(quic_network as P2pNetworkRef);
 
-    let net_manager = Arc::new(NetManager::new(networks, tsl_server_cert_resolver.clone(), config.connection_info_cache.clone())?);
-    net_manager.listen(config.endpoints(), config.port_mapping().clone()).await?;
+    let net_manager = Arc::new(NetManager::new(
+        networks,
+        tsl_server_cert_resolver.clone(),
+        config.connection_info_cache.clone(),
+    )?);
+    net_manager
+        .listen(config.endpoints(), config.port_mapping().clone())
+        .await?;
 
-    Ok(P2pEnv::new(net_manager, identity_factory.clone(), cert_factory.clone(), device_cache, tsl_server_cert_resolver.clone()))
+    Ok(P2pEnv::new(
+        net_manager,
+        identity_factory.clone(),
+        cert_factory.clone(),
+        device_cache,
+        tsl_server_cert_resolver.clone(),
+    ))
 }
 
 pub struct P2pStack {
@@ -257,8 +289,11 @@ impl P2pStack {
         sn_service: SNClientServiceRef,
         stream_manager: StreamManagerRef,
         datagram_manager: DatagramManagerRef,
-        net_manager: NetManagerRef,) -> P2pResult<Self> {
-        net_manager.add_listen_device(local_identity.clone()).await?;
+        net_manager: NetManagerRef,
+    ) -> P2pResult<Self> {
+        net_manager
+            .add_listen_device(local_identity.clone())
+            .await?;
         Ok(Self {
             env,
             local_identity,
@@ -295,12 +330,20 @@ impl P2pStack {
     }
 
     pub fn set_as_default(&self) {
-        self.env.sever_cert_resolver.set_default_server_identity(&self.local_identity.get_id());
+        self.env
+            .sever_cert_resolver
+            .set_default_server_identity(&self.local_identity.get_id());
     }
 
     pub fn get_listen_eps(&self, protocol: Protocol) -> Option<Vec<(Endpoint, Option<u16>)>> {
         if let Ok(network) = self.net_manager.get_network(protocol) {
-            Some(network.listeners().iter().map(|l| (l.local(), l.mapping_port())).collect())
+            Some(
+                network
+                    .listeners()
+                    .iter()
+                    .map(|l| (l.local(), l.mapping_port()))
+                    .collect(),
+            )
         } else {
             None
         }
@@ -314,20 +357,20 @@ impl P2pStack {
 impl Drop for P2pStack {
     fn drop(&mut self) {
         log::info!("P2pStack drop.device = {}", self.local_identity.get_id());
-        Executor::block_on(self.net_manager.remove_listen_device(&self.local_identity.get_name()));
+        Executor::block_on(
+            self.net_manager
+                .remove_listen_device(&self.local_identity.get_name()),
+        );
         Executor::block_on(self.sn_service.stop());
     }
 }
 
-pub struct TunnelManagerEventListener {
-
-}
+pub struct TunnelManagerEventListener {}
 
 impl TunnelManagerEventListener {
     pub fn new() -> Self {
         Self {}
     }
-
 }
 
 pub struct P2pStackConfig {
@@ -343,25 +386,25 @@ pub struct P2pStackConfig {
     sn_tunnel_count: u16,
     support_proxy: bool,
     proxy_client: Option<PnClientRef>,
+    local_ip_provider: Option<SnLocalIpProviderRef>,
 }
 
 impl P2pStackConfig {
-    pub fn new(
-        env: P2pEnvRef,
-        local_identity: P2pIdentityRef,) -> Self {
+    pub fn new(env: P2pEnvRef, local_identity: P2pIdentityRef) -> Self {
         Self {
             env,
             local_identity,
             sn_list: Vec::new(),
-            conn_timeout: Duration::from_secs(30),
+            conn_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(30),
             sn_ping_interval: Duration::from_secs(30),
-            sn_call_timeout: Duration::from_secs(30),
+            sn_call_timeout: Duration::from_secs(10),
             sn_query_interval: Duration::from_secs(300),
             device_finder: None,
             sn_tunnel_count: 5,
             support_proxy: false,
             proxy_client: None,
+            local_ip_provider: None,
         }
     }
 
@@ -427,6 +470,11 @@ impl P2pStackConfig {
         self.device_finder = Some(device_finder);
         self
     }
+    
+    pub fn set_local_ip_provider(mut self, local_ip_provider: SnLocalIpProviderRef) -> Self {
+        self.local_ip_provider = Some(local_ip_provider);
+        self
+    }
 
     pub fn sn_tunnel_count(&self) -> u16 {
         self.sn_tunnel_count
@@ -485,27 +533,45 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let support_proxy = config.support_proxy();
     let proxy_client = config.proxy_client().clone();
 
-    let sn_service = SNClientService::new(
-        net_manager.clone(),
-        sn_list,
-        local_identity.clone(),
-        gen_seq.clone(),
-        gen_id.clone(),
-        cert_factory.clone(),
-        sn_tunnel_count,
-        sn_ping_interval,
-        sn_call_timeout,
-        conn_timeout,
-    );
+    let sn_service = if let Some(local_ip_provider) = config.local_ip_provider.clone() {
+        SNClientService::new_with_local_ip_provider(
+            net_manager.clone(),
+            sn_list,
+            local_identity.clone(),
+            gen_seq.clone(),
+            gen_id.clone(),
+            cert_factory.clone(),
+            sn_tunnel_count,
+            sn_ping_interval,
+            sn_call_timeout,
+            conn_timeout,
+            local_ip_provider
+        )
+    } else {
+        SNClientService::new(
+            net_manager.clone(),
+            sn_list,
+            local_identity.clone(),
+            gen_seq.clone(),
+            gen_id.clone(),
+            cert_factory.clone(),
+            sn_tunnel_count,
+            sn_ping_interval,
+            sn_call_timeout,
+            conn_timeout,
+        )
+    };
 
     let proxy_client = if support_proxy {
         let proxy_client = if let Some(proxy_client) = proxy_client {
             proxy_client
         } else {
-            let default = DefaultPnClient::new(sn_service.get_cmd_client().clone(),
-                                               local_identity.clone(),
-                                               cert_factory.clone(),
-                                               cert_resolver.clone());
+            let default = DefaultPnClient::new(
+                sn_service.get_cmd_client().clone(),
+                local_identity.clone(),
+                net_manager.clone(),
+                sn_service.clone(),
+            );
             default
         };
         Some(proxy_client)
@@ -516,7 +582,12 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let device_finder = if device_finder.is_some() {
         device_finder.unwrap()
     } else {
-        DefaultDeviceFinder::new(sn_service.clone(), cert_factory.clone(), config.env.identity_cert_cache.clone(), sn_query_interval)
+        DefaultDeviceFinder::new(
+            sn_service.clone(),
+            cert_factory.clone(),
+            config.env.identity_cert_cache.clone(),
+            sn_query_interval,
+        )
     };
     let tunnel_listener = TunnelListener::new(
         local_identity.clone(),
@@ -529,40 +600,47 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     );
     tunnel_listener.listen();
 
-
     let _ = sn_service.start().await;
 
     let tunnel_id_gen = Arc::new(TunnelIdGenerator::new());
-    let stream_manager = StreamManager::new(local_identity.clone(),
-                                            net_manager.clone(),
-                                            sn_service.clone(),
-                                            device_finder.clone(),
-                                            cert_factory.clone(),
-                                            tunnel_id_gen.clone(),
-                                            proxy_client.clone(),
-                                            tunnel_listener.clone(),
-                                            net_manager.get_connection_info_cache().clone(),
-                                            0,
-                                            conn_timeout,
-                                            idle_timeout);
-    let datagram_manager = DatagramManager::new(local_identity.clone(),
-                                                net_manager.clone(),
-                                                sn_service.clone(),
-                                                device_finder.clone(),
-                                                cert_factory.clone(),
-                                                tunnel_id_gen.clone(),
-                                                proxy_client.clone(),
-                                                tunnel_listener.clone(),
-                                                net_manager.get_connection_info_cache().clone(),
-                                                0,
-                                                conn_timeout,
-                                                idle_timeout);
-
-    Ok(Arc::new(P2pStack::new(
-        config.env.clone(),
+    let stream_manager = StreamManager::new(
         local_identity.clone(),
-        sn_service,
-        stream_manager,
-        datagram_manager,
-        net_manager.clone(),).await?))
+        net_manager.clone(),
+        sn_service.clone(),
+        device_finder.clone(),
+        cert_factory.clone(),
+        tunnel_id_gen.clone(),
+        proxy_client.clone(),
+        tunnel_listener.clone(),
+        net_manager.get_connection_info_cache().clone(),
+        0,
+        conn_timeout,
+        idle_timeout,
+    );
+    let datagram_manager = DatagramManager::new(
+        local_identity.clone(),
+        net_manager.clone(),
+        sn_service.clone(),
+        device_finder.clone(),
+        cert_factory.clone(),
+        tunnel_id_gen.clone(),
+        proxy_client.clone(),
+        tunnel_listener.clone(),
+        net_manager.get_connection_info_cache().clone(),
+        0,
+        conn_timeout,
+        idle_timeout,
+    );
+
+    Ok(Arc::new(
+        P2pStack::new(
+            config.env.clone(),
+            local_identity.clone(),
+            sn_service,
+            stream_manager,
+            datagram_manager,
+            net_manager.clone(),
+        )
+        .await?,
+    ))
 }

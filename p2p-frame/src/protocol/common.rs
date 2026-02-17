@@ -7,14 +7,13 @@ mod dep {
     pub use std::str::FromStr;
 }
 
+use crate::error::{P2pError, P2pErrorCode, P2pResult};
+use crate::types::Timestamp;
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 pub use dep::*;
-use crate::error::{P2pError, P2pErrorCode, P2pResult};
-use crate::types::{Timestamp};
 
 pub const MTU: usize = 1472;
-pub const MTU_LARGE: usize = 1024*30;
-
+pub const MTU_LARGE: usize = 1024 * 30;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
@@ -33,14 +32,10 @@ pub enum PackageCmdCode {
     SnQuery = 0x26,
     SnQueryResp = 0x27,
 
-    FromProxy = 0x50,
-    FromProxyResp = 0x51,
-    ToProxy = 0x52,
-    ToProxyResp = 0x53,
-    ProxyHeart = 0x54,
-    ProxyHeartResp = 0x55,
-    ProxyClosed = 0x56,
-
+    ProxyClosed = 0x50,
+    ProxyOpenReq = 0x51,
+    ProxyOpenResp = 0x52,
+    ProxyOpenNotify = 0x53,
 
     PieceData = 0x60,
     PieceControl = 0x61,
@@ -55,7 +50,7 @@ impl PackageCmdCode {
     }
 
     pub fn is_proxy(&self) -> bool {
-        (*self >= Self::FromProxy) && (*self <= Self::ToProxyResp)
+        (*self >= Self::ProxyClosed) && (*self <= Self::ProxyOpenNotify)
     }
 }
 
@@ -76,13 +71,10 @@ impl TryFrom<u8> for PackageCmdCode {
             0x26u8 => Ok(Self::SnQuery),
             0x27u8 => Ok(Self::SnQueryResp),
 
-            0x50u8 => Ok(Self::FromProxy),
-            0x51u8 => Ok(Self::FromProxyResp),
-            0x52u8 => Ok(Self::ToProxy),
-            0x53u8 => Ok(Self::ToProxyResp),
-            0x54u8 => Ok(Self::ProxyHeart),
-            0x55u8 => Ok(Self::ProxyHeartResp),
-            0x56u8 => Ok(Self::ProxyClosed),
+            0x50u8 => Ok(Self::ProxyClosed),
+            0x51u8 => Ok(Self::ProxyOpenReq),
+            0x52u8 => Ok(Self::ProxyOpenResp),
+            0x53u8 => Ok(Self::ProxyOpenNotify),
 
             0x60u8 => Ok(Self::PieceData),
             0x61u8 => Ok(Self::PieceControl),
@@ -101,7 +93,7 @@ impl TryFrom<u8> for PackageCmdCode {
 pub struct PackageHeader {
     pkg_len: u16,
     version: u8,
-    cmd_code: u8
+    cmd_code: u8,
 }
 
 impl PackageHeader {
@@ -109,7 +101,7 @@ impl PackageHeader {
         Self {
             pkg_len,
             version,
-            cmd_code: cmd_code as u8
+            cmd_code: cmd_code as u8,
         }
     }
 
@@ -142,11 +134,11 @@ pub struct Package<T> {
     body: T,
 }
 
-impl <T: RawEncode> Package<T> {
+impl<T: RawEncode> Package<T> {
     pub fn new(version: u8, cmd_code: PackageCmdCode, body: T) -> Self {
         Self {
             header: PackageHeader::new(version, cmd_code, body.raw_measure(&None).unwrap() as u16),
-            body
+            body,
         }
     }
 

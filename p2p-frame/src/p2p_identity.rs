@@ -1,10 +1,10 @@
+use crate::endpoint::Endpoint;
+use crate::error::{P2pError, P2pErrorCode, P2pResult};
+use bucky_raw_codec::{RawDecode, RawEncode};
+use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use bucky_raw_codec::{RawDecode, RawEncode};
-use serde::{Deserialize, Serialize};
-use crate::endpoint::Endpoint;
-use crate::error::{P2pError, P2pErrorCode, P2pResult};
 
 pub trait ToBase36 {
     fn to_base36(&self) -> String;
@@ -79,9 +79,7 @@ impl Debug for P2pId {
 
 impl Default for P2pId {
     fn default() -> Self {
-        Self {
-            0: vec![0; 32],
-        }
+        Self { 0: vec![0; 32] }
     }
 }
 

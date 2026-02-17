@@ -1,12 +1,12 @@
-use std::time::SystemTime;
-use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert};
+use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId};
 use crate::protocol::{ReceiptWithSignature, SnServiceReceipt};
+use std::time::SystemTime;
 
 pub type IsRequestReceipt = bool;
 #[derive(Copy, Clone, Debug)]
 pub enum IsAcceptClient {
     Refuse,
-    Accept(IsRequestReceipt)
+    Accept(IsRequestReceipt),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -18,10 +18,12 @@ pub enum ReceiptRequestTime {
 
 pub trait SnServiceContractServer {
     // 客户端提交服务清单，检查是否合规，并决定是否继续为其服务
-    fn check_receipt(&self, client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
-                     local_receipt: &SnServiceReceipt, // 本地(服务端)统计的服务清单
-                     client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
-                     last_request_time: &ReceiptRequestTime, // 上次要求服务清单的时间
+    fn check_receipt(
+        &self,
+        client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
+        local_receipt: &SnServiceReceipt,          // 本地(服务端)统计的服务清单
+        client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
+        last_request_time: &ReceiptRequestTime,    // 上次要求服务清单的时间
     ) -> IsAcceptClient; // 是否同意为客户端提供服务
 
     // 检查指定peer是否获得授权

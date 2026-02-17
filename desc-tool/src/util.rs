@@ -1,9 +1,9 @@
+use bucky_error::BuckyResult;
+use bucky_objects::{DeviceId, Endpoint, GroupMember, ObjectId};
 use clap::ArgMatches;
 use log::*;
 use std::convert::TryFrom;
 use std::str::FromStr;
-use bucky_error::BuckyResult;
-use bucky_objects::{DeviceId, Endpoint, GroupMember, ObjectId};
 
 pub fn get_objids_from_matches(matches: &ArgMatches, name: &str) -> Option<Vec<ObjectId>> {
     if let Some(strs) = matches.values_of_lossy(name) {

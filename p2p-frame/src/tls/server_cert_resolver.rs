@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use rustls::pki_types::CertificateDer;
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
 use crate::error::P2pResult;
 use crate::p2p_identity::{P2pId, P2pIdentity};
 use crate::sockets::parse_server_name;
 use crate::tls::sign::TlsKey;
+use rustls::pki_types::CertificateDer;
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 #[async_trait::async_trait]
 pub trait TlsServerCertResolver: ResolvesServerCert + Send + Sync + 'static {
@@ -25,7 +25,7 @@ struct DefaultTlsServerCertResolverState {
 }
 pub struct DefaultTlsServerCertResolver {
     default_id: String,
-    device_cache: Mutex<DefaultTlsServerCertResolverState>
+    device_cache: Mutex<DefaultTlsServerCertResolverState>,
 }
 
 impl Debug for DefaultTlsServerCertResolver {
@@ -66,9 +66,12 @@ impl TlsServerCertResolver for DefaultTlsServerCertResolver {
         let device_cache = self.device_cache.lock().unwrap();
         if device_id == self.default_id.as_str() {
             if device_cache.default_device.is_some() {
-                match device_cache.device_cache.get(device_cache.default_device.as_ref().unwrap()) {
+                match device_cache
+                    .device_cache
+                    .get(device_cache.default_device.as_ref().unwrap())
+                {
                     Some(device_info) => Some(device_info.clone()),
-                    None => None
+                    None => None,
                 }
             } else {
                 None
@@ -76,7 +79,7 @@ impl TlsServerCertResolver for DefaultTlsServerCertResolver {
         } else {
             match device_cache.device_cache.get(device_id) {
                 Some(device_info) => Some(device_info.clone()),
-                None => None
+                None => None,
             }
         }
     }
@@ -99,7 +102,7 @@ impl ResolvesServerCert for DefaultTlsServerCertResolver {
 
         let server_name = match client_hello.server_name() {
             Some(server_name) => server_name,
-            None => return None
+            None => return None,
         };
 
         let server_name = parse_server_name(server_name);
@@ -107,22 +110,31 @@ impl ResolvesServerCert for DefaultTlsServerCertResolver {
         let device_cache = self.device_cache.lock().unwrap();
         let device_info = if server_name == self.default_id.as_str() {
             if device_cache.default_device.is_some() {
-                match device_cache.device_cache.get(device_cache.default_device.as_ref().unwrap()) {
+                match device_cache
+                    .device_cache
+                    .get(device_cache.default_device.as_ref().unwrap())
+                {
                     Some(device_info) => device_info,
-                    None => return None
+                    None => return None,
                 }
             } else {
-                return None
+                return None;
             }
         } else {
             match device_cache.device_cache.get(server_name) {
                 Some(device_info) => device_info,
-                None => return None
+                None => return None,
             }
         };
 
         Some(Arc::new(CertifiedKey::new(
-            vec![CertificateDer::from(device_info.get_identity_cert().unwrap().get_encoded_cert().unwrap())],
+            vec![CertificateDer::from(
+                device_info
+                    .get_identity_cert()
+                    .unwrap()
+                    .get_encoded_cert()
+                    .unwrap(),
+            )],
             Arc::new(TlsKey::new(device_info.clone())),
         )))
     }

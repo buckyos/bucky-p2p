@@ -1,35 +1,31 @@
-use std::fmt::{Debug, Formatter};
-use std::sync::{Arc};
 use aes::cipher::crypto_common::rand_core;
 use once_cell::sync::OnceCell;
-use rustls::crypto::{CryptoProvider, GetRandomFailed, WebPkiSupportedAlgorithms};
-use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
 use rustls::Error;
+use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
+use rustls::crypto::{CryptoProvider, GetRandomFailed, WebPkiSupportedAlgorithms};
 use rustls::pki_types::PrivateKeyDer;
 use rustls::sign::SigningKey;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
-pub mod kx;
-mod hmac;
-mod hash;
 mod aead;
-pub mod sign;
-mod server_cert_verifier;
 mod client_cert_verifier;
+mod hash;
+mod hmac;
+pub mod kx;
 mod server_cert_resolver;
+mod server_cert_verifier;
+pub mod sign;
 
-pub use server_cert_resolver::*;
-pub use server_cert_verifier::*;
-pub use client_cert_verifier::*;
 use crate::p2p_identity::P2pIdentityFactoryRef;
 use crate::tls::sign::TlsKey;
+pub use client_cert_verifier::*;
+pub use server_cert_resolver::*;
+pub use server_cert_verifier::*;
 
 static KEY_PROVIDER: OnceCell<KeyProvider> = OnceCell::new();
 pub(crate) fn init_tls(factory: P2pIdentityFactoryRef) {
-    KEY_PROVIDER.get_or_init(|| {
-        KeyProvider {
-            factory
-        }
-    });
+    KEY_PROVIDER.get_or_init(|| KeyProvider { factory });
 }
 pub(crate) fn provider() -> CryptoProvider {
     CryptoProvider {
@@ -37,8 +33,7 @@ pub(crate) fn provider() -> CryptoProvider {
         kx_groups: kx::ALL_KX_GROUPS.to_vec(),
         signature_verification_algorithms: WebPkiSupportedAlgorithms {
             all: &[],
-            mapping: &[
-            ],
+            mapping: &[],
         },
         secure_random: &SecureRandomProvider,
         key_provider: KEY_PROVIDER.get().unwrap(),
@@ -68,17 +63,21 @@ impl rustls::crypto::SecureRandom for SecureRandomProvider {
 }
 
 impl rustls::crypto::KeyProvider for KeyProvider {
-    fn load_private_key(&self, key_der: PrivateKeyDer<'static>) -> Result<Arc<dyn SigningKey>, Error> {
+    fn load_private_key(
+        &self,
+        key_der: PrivateKeyDer<'static>,
+    ) -> Result<Arc<dyn SigningKey>, Error> {
         match key_der {
             PrivateKeyDer::Pkcs8(der) => {
-                let id = self.factory.create(&der.secret_pkcs8_der().to_vec()).map_err(|e| Error::General(e.to_string()))?;
+                let id = self
+                    .factory
+                    .create(&der.secret_pkcs8_der().to_vec())
+                    .map_err(|e| Error::General(e.to_string()))?;
                 Ok(Arc::new(TlsKey::new(id)))
-            },
+            }
             _ => panic!("unsupported private key format"),
         }
     }
 }
 
-static ALL_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
-    TLS13_AES_128_GCM_SHA256,
-];
+static ALL_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[TLS13_AES_128_GCM_SHA256];

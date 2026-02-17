@@ -7,4 +7,3 @@ mod call_stub;
 
 pub use receipt::*;
 pub use service::*;
-

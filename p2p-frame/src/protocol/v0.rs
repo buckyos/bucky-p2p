@@ -1,10 +1,9 @@
-use bucky_raw_codec::{RawDecode, RawEncode};
-use crate::endpoint::Endpoint;
-use crate::error::{P2pErrorCode};
-use crate::p2p_identity::{P2pId, EncodedP2pIdentityCert};
-use crate::types::{SessionId, TunnelId, Timestamp, Sequence};
 use super::sn::*;
-
+use crate::endpoint::Endpoint;
+use crate::error::P2pErrorCode;
+use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId};
+use crate::types::{Sequence, SessionId, Timestamp, TunnelId};
+use bucky_raw_codec::{RawDecode, RawEncode};
 
 // #[test]
 // fn encode_protocol_session_data() {
@@ -162,15 +161,15 @@ pub struct SynClose {
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
 pub struct AckClose {
-    pub tunnel_id: TunnelId
+    pub tunnel_id: TunnelId,
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnCallResp {
     //sn call的响应包
-    pub seq: Sequence,                 //序列事情
-    pub sn_peer_id: P2pId,         //sn设备id
-    pub result: u8,                   //
+    pub seq: Sequence,                                //序列事情
+    pub sn_peer_id: P2pId,                            //sn设备id
+    pub result: u8,                                   //
     pub to_peer_info: Option<EncodedP2pIdentityCert>, //
 }
 
@@ -191,23 +190,21 @@ pub struct SnCalled {
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnCalledResp {
     //sn called的应答报文
-    pub seq: Sequence,         //序列号
+    pub seq: Sequence,     //序列号
     pub sn_peer_id: P2pId, //sn的设备id
-    pub result: u8,           //
+    pub result: u8,        //
 }
-
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct SnPingResp {
     //SN Server收到来自device的SNPing包时，返回device的外网地址
-    pub seq: Sequence,                      //包序列包
-    pub sn_peer_id: P2pId,              //sn的设备id
-    pub result: u8,                        //是否接受device的接入
-    pub peer_info: Option<EncodedP2pIdentityCert>,         //sn的设备信息
-    pub end_point_array: Vec<Endpoint>,    //外网地址列表
-    pub receipt: Option<SnServiceReceipt>, //返回sn的一些连接信息，如当前连接的peer数量
+    pub seq: Sequence,                             //包序列包
+    pub sn_peer_id: P2pId,                         //sn的设备id
+    pub result: u8,                                //是否接受device的接入
+    pub peer_info: Option<EncodedP2pIdentityCert>, //sn的设备信息
+    pub end_point_array: Vec<Endpoint>,            //外网地址列表
+    pub receipt: Option<SnServiceReceipt>,         //返回sn的一些连接信息，如当前连接的peer数量
 }
-
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 pub struct AckProxy {

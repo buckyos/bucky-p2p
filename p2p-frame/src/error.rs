@@ -5,7 +5,9 @@ pub use sfo_result::err as p2p_err;
 pub use sfo_result::into_err as into_p2p_err;
 
 #[repr(u16)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, FromPrimitive, ToPrimitive, RawEncode, RawDecode)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Default, FromPrimitive, ToPrimitive, RawEncode, RawDecode,
+)]
 pub enum P2pErrorCode {
     Ok = 0,
 
@@ -122,4 +124,3 @@ impl P2pErrorCode {
 
 pub type P2pResult<T> = Result<T, P2pErrorCode>;
 pub type P2pError = sfo_result::Error<P2pErrorCode>;
-

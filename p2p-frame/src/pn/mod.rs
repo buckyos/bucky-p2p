@@ -1,7 +1,7 @@
 mod client;
-mod service;
 mod protocol;
+mod service;
 
 pub use client::*;
-pub use service::*;
 pub use protocol::*;
+pub use service::*;

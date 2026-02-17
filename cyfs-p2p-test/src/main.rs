@@ -1,27 +1,33 @@
 extern crate core;
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use bucky_crypto::PrivateKey;
+use bucky_objects::{
+    sign_and_push_named_object, Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner,
+    SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF,
+};
+use bucky_objects::{Endpoint, EndpointArea, Protocol};
+use bucky_raw_codec::FileDecoder;
+use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
+use cyfs_p2p::p2p_identity::P2pId;
+use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
+use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
+use cyfs_p2p::{
+    create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint, CyfsIdentity,
+    CyfsIdentityCertFactory, CyfsIdentityFactory,
+};
+use p2p_frame::endpoint::Endpoint as P2pEndpoint;
+use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
+use p2p_frame::sn::client::{SNClientServiceRef, SnLocalIpProvider, SnLocalIpProviderRef};
+use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use std::future::Future;
-use bucky_crypto::PrivateKey;
-use bucky_objects::{sign_and_push_named_object, Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner, SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF};
-use bucky_raw_codec::FileDecoder;
-use cyfs_p2p::{CyfsIdentity, cyfs_to_p2p_endpoint, CyfsIdentityCertFactory, CyfsIdentityFactory, create_cyfs_p2p_config, create_cyfs_p2p_stack_config};
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bucky_objects::{Endpoint, EndpointArea, Protocol};
-use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
-use cyfs_p2p::p2p_identity::{P2pId};
-use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
-use cyfs_p2p::stack::{create_p2p_stack, create_p2p_env, P2pStackRef};
-use p2p_frame::endpoint::Endpoint as P2pEndpoint;
-use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
-use p2p_frame::sn::client::SNClientServiceRef;
-use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef};
 
 const APP_NAME: &str = "cyfs-p2p-test";
 
@@ -49,17 +55,29 @@ impl P2pConfig {
     pub fn get_ep_list(&self) -> Vec<Endpoint> {
         let mut eps = Vec::new();
         for ep in self.ep_list.iter() {
-            eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
-            eps.push(Endpoint::from((Protocol::Tcp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+            eps.push(Endpoint::from((
+                Protocol::Udp,
+                SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)),
+            )));
+            eps.push(Endpoint::from((
+                Protocol::Tcp,
+                SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)),
+            )));
         }
         if let Some(tcp) = self.tcp.as_ref() {
             for ep in tcp.ep_list.iter() {
-                eps.push(Endpoint::from((Protocol::Tcp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+                eps.push(Endpoint::from((
+                    Protocol::Tcp,
+                    SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)),
+                )));
             }
         }
         if let Some(udp) = self.udp.as_ref() {
             for ep in udp.ep_list.iter() {
-                eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)))));
+                eps.push(Endpoint::from((
+                    Protocol::Udp,
+                    SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)),
+                )));
             }
         }
         eps
@@ -112,24 +130,41 @@ async fn main() {
         .set_log_to_file(true)
         .set_log_file_count(5)
         .set_log_level("debug")
-        .start().unwrap();
+        .start()
+        .unwrap();
 
     let data_folder = std::env::current_dir().unwrap();
     let matches = clap::App::new(APP_NAME)
         .subcommand(clap::SubCommand::with_name("all-in-one").about("all in one"))
-        .subcommand(clap::SubCommand::with_name("client").arg(
-            clap::Arg::with_name("config").short("c").long("config").takes_value(true)
-                .default_value(data_folder.to_str().unwrap())
-                .help("config path")
-        ).arg(
-            clap::Arg::with_name("target").short("t").long("target").takes_value(true)
-                .help("target device id")
-        ))
-        .subcommand(clap::SubCommand::with_name("server").arg(
-            clap::Arg::with_name("config").short("c").long("config").takes_value(true)
-                .default_value(data_folder.to_str().unwrap())
-                .help("config path")
-        )).get_matches();
+        .subcommand(
+            clap::SubCommand::with_name("client")
+                .arg(
+                    clap::Arg::with_name("config")
+                        .short("c")
+                        .long("config")
+                        .takes_value(true)
+                        .default_value(data_folder.to_str().unwrap())
+                        .help("config path"),
+                )
+                .arg(
+                    clap::Arg::with_name("target")
+                        .short("t")
+                        .long("target")
+                        .takes_value(true)
+                        .help("target device id"),
+                ),
+        )
+        .subcommand(
+            clap::SubCommand::with_name("server").arg(
+                clap::Arg::with_name("config")
+                    .short("c")
+                    .long("config")
+                    .takes_value(true)
+                    .default_value(data_folder.to_str().unwrap())
+                    .help("config path"),
+            ),
+        )
+        .get_matches();
 
     match matches.subcommand() {
         ("all-in-one", _) => {
@@ -170,7 +205,9 @@ async fn main() {
 
 async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
     let sn_desc_path = data_folder.join("sn.desc");
-    let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new()).unwrap().0;
+    let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new())
+        .unwrap()
+        .0;
     let config_path = data_folder.join("config.toml");
     let (local_eps, map_port_list) = if config_path.exists() {
         let config = std::fs::read_to_string(config_path.as_path()).unwrap();
@@ -180,12 +217,20 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         (local_eps, Some(map_port_list))
     } else {
         let mut local_eps = Vec::new();
-        let mut ep = Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
+        let mut ep = Endpoint::from((
+            Protocol::Udp,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
+        ));
         ep.set_area(EndpointArea::Lan);
         local_eps.push(ep);
         (local_eps, None)
     };
-    let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
+    let mut p2p_config = create_cyfs_p2p_config(
+        local_eps
+            .iter()
+            .map(|v| cyfs_to_p2p_endpoint(v))
+            .collect::<Vec<_>>(),
+    );
     if let Some(map_port_list) = map_port_list {
         for (ep, port) in map_port_list.iter() {
             p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
@@ -194,26 +239,41 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
 
     let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()])
+        .await
+        .unwrap();
     stack.wait_online(None).await.unwrap();
 
     // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
     let remote_id = if target.is_some() {
         P2pId::from(target.unwrap().object_id().as_slice())
     } else {
-        P2pId::from(DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP").unwrap().object_id().as_slice())
+        P2pId::from(
+            DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP")
+                .unwrap()
+                .object_id()
+                .as_slice(),
+        )
     };
 
     loop {
         {
-            let (mut read, mut write) = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+            let (mut read, mut write) = stack
+                .stream_manager()
+                .connect_from_id(&remote_id, 80)
+                .await
+                .unwrap();
             write.write_all("test".as_bytes()).await.unwrap();
             let mut buf = [0u8; 1024];
             let len = read.read(buf.as_mut_slice()).await.unwrap();
             log::info!("recv {}", String::from_utf8_lossy(&buf[..len]));
         }
         {
-            let (mut read, mut write) = stack.stream_manager().connect_from_id(&remote_id, 80).await.unwrap();
+            let (mut read, mut write) = stack
+                .stream_manager()
+                .connect_from_id(&remote_id, 80)
+                .await
+                .unwrap();
             write.write_all("test".as_bytes()).await.unwrap();
             let mut buf = [0u8; 1024];
             let len = read.read(buf.as_mut_slice()).await.unwrap();
@@ -225,7 +285,9 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
 
 async fn server_instance(data_folder: &Path) {
     let sn_desc_path = data_folder.join("sn.desc");
-    let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new()).unwrap().0;
+    let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new())
+        .unwrap()
+        .0;
 
     let config_path = data_folder.join("config.toml");
     let (local_eps, map_port_lsit) = if config_path.exists() {
@@ -236,12 +298,20 @@ async fn server_instance(data_folder: &Path) {
         (local_eps, Some(map_port_list))
     } else {
         let mut local_eps = Vec::new();
-        let mut ep = bucky_objects::Endpoint::from((bucky_objects::Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433))));
+        let mut ep = bucky_objects::Endpoint::from((
+            bucky_objects::Protocol::Udp,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
+        ));
         ep.set_area(bucky_objects::EndpointArea::Lan);
         local_eps.push(ep);
         (local_eps, None)
     };
-    let mut p2p_config = create_cyfs_p2p_config(local_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
+    let mut p2p_config = create_cyfs_p2p_config(
+        local_eps
+            .iter()
+            .map(|v| cyfs_to_p2p_endpoint(v))
+            .collect::<Vec<_>>(),
+    );
     if let Some(map_port_list) = map_port_lsit {
         for (ep, port) in map_port_list.iter() {
             p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
@@ -250,7 +320,9 @@ async fn server_instance(data_folder: &Path) {
 
     let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()])
+        .await
+        .unwrap();
     stack.wait_online(None).await.unwrap();
 
     let listener = stack.stream_manager().listen(80).await.unwrap();
@@ -283,6 +355,16 @@ struct OverrideDeviceFinder {
     sn_client: SNClientServiceRef,
     cert_factory: Arc<CyfsIdentityCertFactory>,
     override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+    blocked_ids: HashSet<P2pId>,
+    blocked_all: bool,
+}
+
+struct EmptySnLocalIpProvider;
+
+impl SnLocalIpProvider for EmptySnLocalIpProvider {
+    fn get_local_ips(&self) -> Vec<IpAddr> {
+        Vec::new()
+    }
 }
 
 impl OverrideDeviceFinder {
@@ -291,10 +373,22 @@ impl OverrideDeviceFinder {
         cert_factory: Arc<CyfsIdentityCertFactory>,
         override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
     ) -> DeviceFinderRef {
+        Self::new_with_block(sn_client, cert_factory, override_eps, HashSet::new(), false)
+    }
+
+    fn new_with_block(
+        sn_client: SNClientServiceRef,
+        cert_factory: Arc<CyfsIdentityCertFactory>,
+        override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+        blocked_ids: HashSet<P2pId>,
+        blocked_all: bool,
+    ) -> DeviceFinderRef {
         Arc::new(Self {
             sn_client,
             cert_factory,
             override_eps,
+            blocked_ids,
+            blocked_all,
         })
     }
 }
@@ -302,6 +396,14 @@ impl OverrideDeviceFinder {
 #[async_trait::async_trait]
 impl DeviceFinder for OverrideDeviceFinder {
     async fn get_identity_cert(&self, device_id: &P2pId) -> P2pResult<P2pIdentityCertRef> {
+        if self.blocked_all || self.blocked_ids.contains(device_id) {
+            return Err(P2pError::from((
+                P2pErrorCode::NotFound,
+                format!("device {} blocked by test finder", device_id),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "device blocked"),
+            )));
+        }
+
         let resp = self.sn_client.query(device_id).await?;
         let peer_info = match resp.peer_info {
             Some(peer_info) => peer_info,
@@ -382,7 +484,11 @@ where
             if passed {
                 log::info!("[case:{}] pass latency={}ms", name, latency_ms);
             } else {
-                log::warn!("[case:{}] unexpected success latency={}ms", name, latency_ms);
+                log::warn!(
+                    "[case:{}] unexpected success latency={}ms",
+                    name,
+                    latency_ms
+                );
             }
         }
         Err(e) => {
@@ -448,11 +554,17 @@ async fn start_stream_listener(stack: P2pStackRef, port: u16, label: &'static st
         let (mut read, mut write) = listener.accept().await.unwrap();
         tokio::task::spawn(async move {
             let ret: std::io::Result<()> = async {
-                write.write_all(format!("{}-hello", label).as_bytes()).await?;
+                write
+                    .write_all(format!("{}-hello", label).as_bytes())
+                    .await?;
                 write.flush().await?;
                 let mut buf = [0u8; 128];
                 let len = read.read(buf.as_mut_slice()).await?;
-                log::info!("[listener:{}] recv {}", label, String::from_utf8_lossy(&buf[..len]));
+                log::info!(
+                    "[listener:{}] recv {}",
+                    label,
+                    String::from_utf8_lossy(&buf[..len])
+                );
                 Ok(())
             }
             .await;
@@ -472,7 +584,11 @@ async fn start_datagram_listener(stack: P2pStackRef, port: u16, label: &'static 
             let mut buf = [0u8; 128];
             match recv.read(buf.as_mut_slice()).await {
                 Ok(len) => {
-                    log::info!("[datagram:{}] recv {}", label, String::from_utf8_lossy(&buf[..len]));
+                    log::info!(
+                        "[datagram:{}] recv {}",
+                        label,
+                        String::from_utf8_lossy(&buf[..len])
+                    );
                 }
                 Err(e) => {
                     log::warn!("[datagram:{}] read err {:?}", label, e);
@@ -483,24 +599,50 @@ async fn start_datagram_listener(stack: P2pStackRef, port: u16, label: &'static 
 }
 
 async fn all_in_one() {
-    let sn_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e))).unwrap();
+    let sn_key = PrivateKey::generate_rsa(1024)
+        .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))
+        .unwrap();
     let sn_public_key = sn_key.public();
-    let mut sn_desc = Device::new(None, UniqueId::default(), vec![], vec![], vec![], sn_public_key.clone(), Area::default(), DeviceCategory::OOD).build();
+    let mut sn_desc = Device::new(
+        None,
+        UniqueId::default(),
+        vec![],
+        vec![],
+        vec![],
+        sn_public_key.clone(),
+        Area::default(),
+        DeviceCategory::OOD,
+    )
+    .build();
 
     let eps = sn_desc.mut_connect_info().mut_endpoints();
     if eps.len() == 0 {
         // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
-        eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 3456, 0, 0)))));
+        eps.push(Endpoint::from((
+            Protocol::Udp,
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from_str("127.0.0.1").unwrap(),
+                3456,
+            )),
+        )));
     }
 
     let signer = RsaCPUObjectSigner::new(sn_public_key, sn_key.clone());
-    sign_and_push_named_object(&signer, &mut sn_desc, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e))).unwrap();
+    sign_and_push_named_object(
+        &signer,
+        &mut sn_desc,
+        &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF),
+    )
+    .await
+    .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))
+    .unwrap();
 
     let sn_service = SnServiceConfig::new(
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
-    ).set_support_proxy(true);
+    )
+    .set_support_proxy(true);
     let sn_service = create_sn_service(sn_service).await;
     sn_service.start().await.unwrap();
 
@@ -522,48 +664,120 @@ async fn all_in_one() {
     //     .start();
 
     let mut env_eps = Vec::new();
-    let mut env_ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0))));
+    let mut env_ep = bucky_objects::Endpoint::from((
+        Protocol::Udp,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
+    ));
     env_ep.set_area(bucky_objects::EndpointArea::Lan);
     env_eps.push(env_ep);
 
-    let mut p2p_config = create_cyfs_p2p_config(env_eps.iter().map(|v| cyfs_to_p2p_endpoint(v)).collect::<Vec<_>>());
-    p2p_config = p2p_config.set_tcp_accept_timout(std::time::Duration::from_secs(5))
+    let mut p2p_config = create_cyfs_p2p_config(
+        env_eps
+            .iter()
+            .map(|v| cyfs_to_p2p_endpoint(v))
+            .collect::<Vec<_>>(),
+    );
+    p2p_config = p2p_config
+        .set_tcp_accept_timout(std::time::Duration::from_secs(5))
         .set_quic_connect_timeout(Duration::from_secs(5))
         .set_quic_idle_time(Duration::from_secs(30));
     let env = create_p2p_env(p2p_config).await.unwrap();
 
     let mut direct_eps = Vec::new();
-    let mut direct_ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 4433, 0, 0))));
+    let mut direct_ep = bucky_objects::Endpoint::from((
+        Protocol::Udp,
+        SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::from_str("127.0.0.1").unwrap(),
+            4433,
+        )),
+    ));
     direct_ep.set_area(bucky_objects::EndpointArea::Lan);
     direct_eps.push(direct_ep);
 
     let mut reverse_eps = Vec::new();
-    let mut reverse_ep = bucky_objects::Endpoint::from((Protocol::Udp, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0))));
+    let mut reverse_ep = bucky_objects::Endpoint::from((
+        Protocol::Udp,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
+    ));
     reverse_ep.set_area(bucky_objects::EndpointArea::Lan);
     reverse_eps.push(reverse_ep);
 
-    let stack_direct_target = create_stack(env.clone(), Path::new("./"), direct_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack_direct_target = create_stack(
+        env.clone(),
+        Path::new("./"),
+        direct_eps.clone(),
+        vec![sn_desc.clone()],
+    )
+    .await
+    .unwrap();
     stack_direct_target.wait_online(None).await.unwrap();
 
-    let stack_reverse_target = create_stack(env.clone(), Path::new("./"), reverse_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack_reverse_target = create_stack(
+        env.clone(),
+        Path::new("./"),
+        reverse_eps.clone(),
+        vec![sn_desc.clone()],
+    )
+    .await
+    .unwrap();
     stack_reverse_target.wait_online(None).await.unwrap();
 
-    let stack_proxy_target = create_stack(env.clone(), Path::new("./"), reverse_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
-    stack_proxy_target.wait_online(None).await.unwrap();
-
-    let stack_client = create_stack(env.clone(), Path::new("./"), direct_eps.clone(), vec![sn_desc.clone()]).await.unwrap();
+    let stack_client = create_stack(
+        env.clone(),
+        Path::new("./"),
+        direct_eps.clone(),
+        vec![sn_desc.clone()],
+    )
+    .await
+    .unwrap();
     stack_client.wait_online(None).await.unwrap();
 
-    let direct_target_id = stack_direct_target.local_identity().get_identity_cert().unwrap().get_id();
-    let reverse_target_id = stack_reverse_target.local_identity().get_identity_cert().unwrap().get_id();
-    let proxy_target_id = stack_proxy_target.local_identity().get_identity_cert().unwrap().get_id();
+    let cert_factory = Arc::new(CyfsIdentityCertFactory);
+    let proxy_target_finder = OverrideDeviceFinder::new_with_block(
+        stack_client.sn_client().clone(),
+        cert_factory.clone(),
+        HashMap::new(),
+        HashSet::new(),
+        true,
+    );
+
+    let stack_proxy_target = create_stack_with_device_finder(
+        env.clone(),
+        Path::new("./"),
+        reverse_eps.clone(),
+        vec![sn_desc.clone()],
+        Some(proxy_target_finder),
+        None,
+    )
+    .await
+    .unwrap();
+    stack_proxy_target.wait_online(None).await.unwrap();
+
+    let direct_target_id = stack_direct_target
+        .local_identity()
+        .get_identity_cert()
+        .unwrap()
+        .get_id();
+    let reverse_target_id = stack_reverse_target
+        .local_identity()
+        .get_identity_cert()
+        .unwrap()
+        .get_id();
+    let proxy_target_id = stack_proxy_target
+        .local_identity()
+        .get_identity_cert()
+        .unwrap()
+        .get_id();
 
     let unreachable_eps = vec![p2p_frame::endpoint::Endpoint::from((
         p2p_frame::endpoint::Protocol::Quic,
-        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 6553, 0, 0)),
+        SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from_str("::1").unwrap(),
+            6553,
+            0,
+            0,
+        )),
     ))];
-
-    let cert_factory = Arc::new(CyfsIdentityCertFactory);
 
     let mut reverse_override = HashMap::new();
     reverse_override.insert(reverse_target_id.clone(), unreachable_eps.clone());
@@ -587,6 +801,7 @@ async fn all_in_one() {
         direct_eps.clone(),
         vec![sn_desc.clone()],
         Some(reverse_finder),
+        None,
     )
     .await
     .unwrap();
@@ -598,15 +813,37 @@ async fn all_in_one() {
         reverse_eps.clone(),
         vec![sn_desc.clone()],
         Some(proxy_finder),
+        Some(Arc::new(EmptySnLocalIpProvider)),
     )
     .await
     .unwrap();
     stack_proxy_caller.wait_online(None).await.unwrap();
 
-    tokio::task::spawn(start_stream_listener(stack_direct_target.clone(), 1234, "direct"));
-    tokio::task::spawn(start_datagram_listener(stack_direct_target.clone(), 1234, "direct"));
-    tokio::task::spawn(start_stream_listener(stack_reverse_target.clone(), 2234, "reverse"));
-    tokio::task::spawn(start_stream_listener(stack_proxy_target.clone(), 3234, "proxy"));
+    tokio::task::spawn(start_stream_listener(
+        stack_direct_target.clone(),
+        1234,
+        "direct",
+    ));
+    tokio::task::spawn(start_datagram_listener(
+        stack_direct_target.clone(),
+        1234,
+        "direct",
+    ));
+    tokio::task::spawn(start_stream_listener(
+        stack_reverse_target.clone(),
+        2234,
+        "reverse",
+    ));
+    tokio::task::spawn(start_stream_listener(
+        stack_proxy_target.clone(),
+        3234,
+        "proxy",
+    ));
+    tokio::task::spawn(start_datagram_listener(
+        stack_proxy_target.clone(),
+        3236,
+        "proxy",
+    ));
 
     let mut stats: HashMap<&'static str, CaseMetric> = HashMap::new();
     let mut round: u64 = 0;
@@ -626,7 +863,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_direct_success failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "stream_wrong_port_fail_expected", CaseExpectation::Fail, || async {
             let _ = stack_client.stream_manager().connect_from_id(&direct_target_id, 19999).await?;
             Ok(())
@@ -634,7 +871,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_wrong_port_fail_expected failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "datagram_direct_success", CaseExpectation::Success, || async {
             let mut send = stack_client.datagram_manager().connect_from_id(&direct_target_id, 1234).await?;
             send.write_all("datagram direct".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "datagram write failed".to_string(), e)))?;
@@ -643,7 +880,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case datagram_direct_success failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "direct_bad_endpoint_fail_expected", CaseExpectation::Fail, || async {
             let (_read, _write) = stack_client.stream_manager().connect_direct(
                 vec![p2p_frame::endpoint::Endpoint::from((p2p_frame::endpoint::Protocol::Quic, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 55555, 0, 0))))],
@@ -655,7 +892,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case direct_bad_endpoint_fail_expected failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "reverse_connect_case", CaseExpectation::Success, || async {
             let (mut read, mut write) = stack_reverse_caller.stream_manager().connect_from_id(&reverse_target_id, 2234).await?;
             let mut buf = [0u8; 64];
@@ -667,7 +904,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reverse_connect_case failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "reverse_fail_case", CaseExpectation::Fail, || async {
             let _ = stack_reverse_caller.stream_manager().connect_from_id(&reverse_target_id, 2235).await?;
             Ok(())
@@ -676,18 +913,46 @@ async fn all_in_one() {
             return;
         }
 
-        if !run_case(&mut stats, "proxy_connect_case", CaseExpectation::Success, || async {
-            let (mut read, mut write) = stack_proxy_caller.stream_manager().connect_from_id(&proxy_target_id, 3234).await?;
-            let mut buf = [0u8; 64];
-            let _ = read.read(buf.as_mut_slice()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy read failed".to_string(), e)))?;
-            write.write_all("proxy hello".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy write failed".to_string(), e)))?;
-            write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy flush failed".to_string(), e)))?;
-            Ok(())
-        }).await {
+        if !run_case(
+            &mut stats,
+            "proxy_connect_case",
+            CaseExpectation::Success,
+            || async {
+                let (mut read, mut write) = stack_proxy_caller
+                    .stream_manager()
+                    .connect_from_id(&proxy_target_id, 3234)
+                    .await?;
+                let mut buf = [0u8; 64];
+                let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
+                    P2pError::from((P2pErrorCode::Failed, "proxy read failed".to_string(), e))
+                })?;
+                write
+                    .write_all("proxy hello".as_bytes())
+                    .await
+                    .map_err(|e| {
+                        P2pError::from((P2pErrorCode::Failed, "proxy write failed".to_string(), e))
+                    })?;
+                write.flush().await.map_err(|e| {
+                    P2pError::from((P2pErrorCode::Failed, "proxy flush failed".to_string(), e))
+                })?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case proxy_connect_case failed");
             return;
         }
 
+        if !run_case(&mut stats, "proxy_datagram_case", CaseExpectation::Success, || async {
+            let mut send = stack_proxy_caller.datagram_manager().connect_from_id(&proxy_target_id, 3236).await?;
+            send.write_all("proxy datagram".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy datagram write failed".to_string(), e)))?;
+            Ok(())
+        }).await {
+            log::error!("all-in-one stop: case proxy_datagram_case failed");
+            return;
+        }
+        
         if !run_case(&mut stats, "proxy_fail_case", CaseExpectation::Fail, || async {
             let _ = stack_proxy_caller.stream_manager().connect_from_id(&proxy_target_id, 3235).await?;
             Ok(())
@@ -695,7 +960,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_fail_case failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "reconnect_stability", CaseExpectation::Success, || async {
             for _ in 0..3 {
                 let (_read, mut write) = stack_client.stream_manager().connect_from_id(&direct_target_id, 1234).await?;
@@ -707,7 +972,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reconnect_stability failed");
             return;
         }
-
+        
         if !run_case(&mut stats, "concurrent_stream_burst", CaseExpectation::Success, || async {
             let mut tasks = Vec::new();
             for _ in 0..10 {
@@ -721,12 +986,12 @@ async fn all_in_one() {
                 });
                 tasks.push(task);
             }
-
+        
             for task in tasks {
                 let ret = task.await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e)))?;
                 ret?;
             }
-
+        
             Ok(())
         }).await {
             log::error!("all-in-one stop: case concurrent_stream_burst failed");
@@ -740,10 +1005,14 @@ async fn all_in_one() {
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}
         }
     }
-
 }
-async fn create_stack(env: P2pEnvRef, config_path: &Path, eps: Vec<bucky_objects::Endpoint>, sn_list: Vec<Device>) -> P2pResult<P2pStackRef> {
-    create_stack_with_device_finder(env, config_path, eps, sn_list, None).await
+async fn create_stack(
+    env: P2pEnvRef,
+    config_path: &Path,
+    eps: Vec<bucky_objects::Endpoint>,
+    sn_list: Vec<Device>,
+) -> P2pResult<P2pStackRef> {
+    create_stack_with_device_finder(env, config_path, eps, sn_list, None, None).await
 }
 
 async fn create_stack_with_device_finder(
@@ -752,24 +1021,52 @@ async fn create_stack_with_device_finder(
     eps: Vec<bucky_objects::Endpoint>,
     sn_list: Vec<Device>,
     device_finder: Option<DeviceFinderRef>,
+    local_ip_provider: Option<SnLocalIpProviderRef>,
 ) -> P2pResult<P2pStackRef> {
-    let (private_key, device) = if config_path.join("device.desc").exists() && config_path.join("device.sec").exists() {
-        let (device_desc, _) = Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
-        let (private_key, _) = PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new()).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
+    let (private_key, device) = if config_path.join("device.desc").exists()
+        && config_path.join("device.sec").exists()
+    {
+        let (device_desc, _) =
+            Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new())
+                .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
+        let (private_key, _) =
+            PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new())
+                .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
         (private_key, device_desc)
     } else {
-        let private_key = PrivateKey::generate_rsa(1024).map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
+        let private_key = PrivateKey::generate_rsa(1024)
+            .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
         let public_key = private_key.public();
-        let mut device = Device::new(None, UniqueId::default(), eps, vec![], vec![], public_key.clone(), Area::default(), DeviceCategory::OOD).build();
+        let mut device = Device::new(
+            None,
+            UniqueId::default(),
+            eps,
+            vec![],
+            vec![],
+            public_key.clone(),
+            Area::default(),
+            DeviceCategory::OOD,
+        )
+        .build();
 
         let signer = RsaCPUObjectSigner::new(public_key, private_key.clone());
-        sign_and_push_named_object(&signer, &mut device, &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF)).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
+        sign_and_push_named_object(
+            &signer,
+            &mut device,
+            &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF),
+        )
+        .await
+        .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
         (private_key, device)
     };
 
-    let mut config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list).set_support_proxy(true);
+    let mut config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list)
+        .set_support_proxy(true);
     if let Some(device_finder) = device_finder {
         config = config.set_device_finder(device_finder);
+    }
+    if let Some(local_ip_provider) = local_ip_provider {
+        config = config.set_local_ip_provider(local_ip_provider);
     }
 
     create_p2p_stack(config).await

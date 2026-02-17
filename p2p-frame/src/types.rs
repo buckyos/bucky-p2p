@@ -1,14 +1,12 @@
+use crate::endpoint::{Endpoint, Protocol};
+use bucky_raw_codec::{RawDecode, RawEncode};
 use rand::Rng;
 use std::fmt;
 use std::{
     hash::{Hash, Hasher},
-    sync::{
-        atomic::{AtomicU32, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH}
+    sync::atomic::{AtomicU32, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use bucky_raw_codec::{RawDecode, RawEncode};
-use crate::endpoint::{Endpoint, Protocol};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, RawEncode, RawDecode)]
 pub struct Sequence(u32);
@@ -41,19 +39,22 @@ pub struct SequenceGenerator {
     cur: AtomicU32,
 }
 
-
 impl From<TunnelId> for SequenceGenerator {
     fn from(init: TunnelId) -> Self {
         Self {
-            cur: AtomicU32::new(init.value())
+            cur: AtomicU32::new(init.value()),
         }
     }
 }
 
-
 impl SequenceGenerator {
     pub fn new() -> Self {
-        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
+        let now = TunnelId::now(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        );
         Self {
             cur: AtomicU32::new(now),
         }
@@ -78,7 +79,10 @@ impl TunnelId {
     }
 
     fn now(_now: Timestamp) -> u32 {
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u32;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u32;
         now
     }
 
@@ -126,19 +130,22 @@ pub struct TunnelIdGenerator {
     cur: AtomicU32,
 }
 
-
 impl From<TunnelId> for TunnelIdGenerator {
     fn from(init: TunnelId) -> Self {
         Self {
-            cur: AtomicU32::new(init.value())
+            cur: AtomicU32::new(init.value()),
         }
     }
 }
 
-
 impl TunnelIdGenerator {
     pub fn new() -> Self {
-        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64);
+        let now = TunnelId::now(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as u64,
+        );
         Self {
             cur: AtomicU32::new(now),
         }

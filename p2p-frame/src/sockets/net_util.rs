@@ -5,9 +5,9 @@ use std::mem;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 #[cfg(unix)]
-use tokio::net::UdpSocket;
-#[cfg(unix)]
 use crate::runtime::RawFd;
+#[cfg(unix)]
+use tokio::net::UdpSocket;
 #[cfg(unix)]
 extern crate libc;
 
@@ -19,16 +19,16 @@ extern crate libc;
 #[cfg(windows)]
 use std::ptr;
 
+use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::sockets::get_if_addrs::get_if_addrs;
 #[cfg(windows)]
 use winapi::{
     shared::minwindef::{BOOL, DWORD, FALSE, LPDWORD, LPVOID},
     um::{
         mswsock::SIO_UDP_CONNRESET,
-        winsock2::{WSAGetLastError, WSAIoctl, SOCKET, SOCKET_ERROR},
+        winsock2::{SOCKET, SOCKET_ERROR, WSAGetLastError, WSAIoctl},
     },
 };
-use crate::error::{p2p_err, into_p2p_err, P2pError, P2pErrorCode, P2pResult};
-use crate::sockets::get_if_addrs::get_if_addrs;
 
 pub fn get_all_ips() -> P2pResult<Vec<IpAddr>> {
     let mut ret = Vec::new();
@@ -208,7 +208,12 @@ pub fn parse_address(address: &str) -> Result<(String, u16), P2pError> {
             Ok(port) => Ok(("0.0.0.0".to_string(), port)),
             Err(e) => {
                 error!("invalid address port, address={}, e={}", address, e);
-                Err(p2p_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
+                Err(p2p_err!(
+                    P2pErrorCode::Failed,
+                    "invalid address port, address={}, e={}",
+                    address,
+                    e
+                ))
             }
         }
     } else {
@@ -216,7 +221,12 @@ pub fn parse_address(address: &str) -> Result<(String, u16), P2pError> {
             Ok(port) => Ok((parts[0].to_string(), port)),
             Err(e) => {
                 error!("invalid address port, address={}, e={}", address, e);
-                Err(p2p_err!(P2pErrorCode::Failed, "invalid address port, address={}, e={}", address, e))
+                Err(p2p_err!(
+                    P2pErrorCode::Failed,
+                    "invalid address port, address={}, e={}",
+                    address,
+                    e
+                ))
             }
         }
     }
@@ -240,7 +250,8 @@ pub fn is_private_ip(ip: &str) -> bool {
         || (parts[0] == "192" && parts[1] == "168");
 }
 
-static SYSTEM_HOST_INFO: once_cell::sync::OnceCell<SystemHostInfo> = once_cell::sync::OnceCell::new();
+static SYSTEM_HOST_INFO: once_cell::sync::OnceCell<SystemHostInfo> =
+    once_cell::sync::OnceCell::new();
 
 #[derive(Clone)]
 pub struct SystemHostInfo {
