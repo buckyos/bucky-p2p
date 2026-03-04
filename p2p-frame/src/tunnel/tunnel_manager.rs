@@ -555,6 +555,7 @@ impl<F: P2pConnectionFactory> TunnelManager<F> {
             }
             for tunnel in remove_list.into_iter() {
                 let seq = tunnel.get_tunnel_id();
+                log::info!("tunnel manager idle cleanup remove tunnel {:?}", seq);
                 let mut state = tunnels.state.lock().unwrap();
                 state.tunnels.remove(&seq);
                 removed_count += 1;

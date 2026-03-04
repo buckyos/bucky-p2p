@@ -26,7 +26,7 @@ use std::time::Duration;
 
 // Direct connect starts first, then reverse connect is fired after a short delay
 // to reduce tail latency when NAT conditions make direct path slow.
-const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
+const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(2000);
 
 macro_rules! p2p_err_from_result {
     ($result:expr) => {{
