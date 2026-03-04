@@ -352,7 +352,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         let (notify, waiter) = Notify::new();
         future_cache.add_reverse_waiter(tunnel_id, notify);
         let call_data = SessionSnCall { vport, session_id };
-        log::debug!(
+        log::info!(
             "tunnel {:?} remote {} path reverse sn-call start session {} vport {}",
             tunnel_id,
             remote_id,
@@ -389,7 +389,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         future_cache.remove_reverse_waiter(tunnel_id);
         let result = result?;
         let ReverseResult::Session(result, tunnel_conn, read, write) = result;
-        log::debug!(
+        log::info!(
             "tunnel {:?} remote {} path reverse sn-call done session {} vport {} result {}",
             tunnel_id,
             remote_id,
@@ -407,7 +407,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
         future_cache: Arc<dyn ReverseWaiterCache>,
     ) -> P2pResult<(TunnelConnectionRead, TunnelConnectionWrite)> {
         if self.tunnel_conn.is_some() {
-            log::debug!(
+            log::info!(
                 "tunnel {:?} remote {} path reuse session {} vport {}",
                 self.tunnel_id,
                 self.remote_id,
@@ -438,7 +438,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
             if latest_connection_info.direct == ConnectDirection::Direct {
                 for ep in self.remote_eps.iter() {
                     if ep == &latest_connection_info.remote_ep {
-                        log::debug!(
+                        log::info!(
                             "tunnel {:?} remote {} path direct(cache) start session {} vport {} ep {}",
                             self.tunnel_id,
                             self.remote_id,
@@ -474,7 +474,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     }
                 }
             } else if latest_connection_info.direct == ConnectDirection::Reverse {
-                log::debug!(
+                log::info!(
                     "tunnel {:?} remote {} path reverse(cache) start session {} vport {}",
                     self.tunnel_id,
                     self.remote_id,
@@ -514,7 +514,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                     }
                 }
             } else if latest_connection_info.direct == ConnectDirection::Proxy {
-                log::debug!(
+                log::info!(
                     "tunnel {:?} remote {} path proxy(cache) start session {} vport {}",
                     self.tunnel_id,
                     self.remote_id,
@@ -591,7 +591,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
 
         if futures.len() > 0 {
             if !has_reversed {
-                log::debug!(
+                log::info!(
                     "tunnel {:?} remote {} path hedged start session {} vport {} direct_eps {:?} delay_ms {}",
                     self.tunnel_id,
                     self.remote_id,

@@ -534,10 +534,7 @@ impl runtime::AsyncWrite for QuicUniWrite {
 
 impl Drop for QuicUniWrite {
     fn drop(&mut self) {
-        log::trace!(
-            "quic conn {} uni write side drop",
-            self.socket.stable_id(),
-        );
+        log::trace!("quic conn {} uni write side drop", self.socket.stable_id(),);
     }
 }
 

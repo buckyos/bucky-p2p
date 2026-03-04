@@ -470,7 +470,7 @@ impl P2pStackConfig {
         self.device_finder = Some(device_finder);
         self
     }
-    
+
     pub fn set_local_ip_provider(mut self, local_ip_provider: SnLocalIpProviderRef) -> Self {
         self.local_ip_provider = Some(local_ip_provider);
         self
@@ -545,7 +545,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
             sn_ping_interval,
             sn_call_timeout,
             conn_timeout,
-            local_ip_provider
+            local_ip_provider,
         )
     } else {
         SNClientService::new(

@@ -173,10 +173,7 @@ impl QuicListener {
         Ok(())
     }
 
-    async fn accept(
-        &self,
-        conn: Incoming,
-    ) -> P2pResult<(QuicConnection, P2pId, P2pId, String)> {
+    async fn accept(&self, conn: Incoming) -> P2pResult<(QuicConnection, P2pId, P2pId, String)> {
         let connection = conn.await.map_err(into_p2p_err!(
             P2pErrorCode::QuicError,
             "QuicListener accept error"

@@ -852,63 +852,161 @@ async fn all_in_one() {
     loop {
         round += 1;
 
-        if !run_case(&mut stats, "stream_direct_success", CaseExpectation::Success, || async {
-            let (mut read, mut write) = stack_client.stream_manager().connect_from_id(&direct_target_id, 1234).await?;
-            let mut buf = [0u8; 64];
-            let _ = read.read(buf.as_mut_slice()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "stream read failed".to_string(), e)))?;
-            write.write_all("stream direct".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "stream write failed".to_string(), e)))?;
-            write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "stream flush failed".to_string(), e)))?;
-            Ok(())
-        }).await {
+        if !run_case(
+            &mut stats,
+            "stream_direct_success",
+            CaseExpectation::Success,
+            || async {
+                let (mut read, mut write) = stack_client
+                    .stream_manager()
+                    .connect_from_id(&direct_target_id, 1234)
+                    .await?;
+                let mut buf = [0u8; 64];
+                let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
+                    P2pError::from((P2pErrorCode::Failed, "stream read failed".to_string(), e))
+                })?;
+                write
+                    .write_all("stream direct".as_bytes())
+                    .await
+                    .map_err(|e| {
+                        P2pError::from((P2pErrorCode::Failed, "stream write failed".to_string(), e))
+                    })?;
+                write.flush().await.map_err(|e| {
+                    P2pError::from((P2pErrorCode::Failed, "stream flush failed".to_string(), e))
+                })?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case stream_direct_success failed");
             return;
         }
-        
-        if !run_case(&mut stats, "stream_wrong_port_fail_expected", CaseExpectation::Fail, || async {
-            let _ = stack_client.stream_manager().connect_from_id(&direct_target_id, 19999).await?;
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "stream_wrong_port_fail_expected",
+            CaseExpectation::Fail,
+            || async {
+                let _ = stack_client
+                    .stream_manager()
+                    .connect_from_id(&direct_target_id, 19999)
+                    .await?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case stream_wrong_port_fail_expected failed");
             return;
         }
-        
-        if !run_case(&mut stats, "datagram_direct_success", CaseExpectation::Success, || async {
-            let mut send = stack_client.datagram_manager().connect_from_id(&direct_target_id, 1234).await?;
-            send.write_all("datagram direct".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "datagram write failed".to_string(), e)))?;
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "datagram_direct_success",
+            CaseExpectation::Success,
+            || async {
+                let mut send = stack_client
+                    .datagram_manager()
+                    .connect_from_id(&direct_target_id, 1234)
+                    .await?;
+                send.write_all("datagram direct".as_bytes())
+                    .await
+                    .map_err(|e| {
+                        P2pError::from((
+                            P2pErrorCode::Failed,
+                            "datagram write failed".to_string(),
+                            e,
+                        ))
+                    })?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case datagram_direct_success failed");
             return;
         }
-        
-        if !run_case(&mut stats, "direct_bad_endpoint_fail_expected", CaseExpectation::Fail, || async {
-            let (_read, _write) = stack_client.stream_manager().connect_direct(
-                vec![p2p_frame::endpoint::Endpoint::from((p2p_frame::endpoint::Protocol::Quic, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from_str("::1").unwrap(), 55555, 0, 0))))],
-                1234,
-                None,
-            ).await?;
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "direct_bad_endpoint_fail_expected",
+            CaseExpectation::Fail,
+            || async {
+                let (_read, _write) = stack_client
+                    .stream_manager()
+                    .connect_direct(
+                        vec![p2p_frame::endpoint::Endpoint::from((
+                            p2p_frame::endpoint::Protocol::Quic,
+                            SocketAddr::V6(SocketAddrV6::new(
+                                Ipv6Addr::from_str("::1").unwrap(),
+                                55555,
+                                0,
+                                0,
+                            )),
+                        ))],
+                        1234,
+                        None,
+                    )
+                    .await?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case direct_bad_endpoint_fail_expected failed");
             return;
         }
-        
-        if !run_case(&mut stats, "reverse_connect_case", CaseExpectation::Success, || async {
-            let (mut read, mut write) = stack_reverse_caller.stream_manager().connect_from_id(&reverse_target_id, 2234).await?;
-            let mut buf = [0u8; 64];
-            let _ = read.read(buf.as_mut_slice()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reverse read failed".to_string(), e)))?;
-            write.write_all("reverse hello".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reverse write failed".to_string(), e)))?;
-            write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reverse flush failed".to_string(), e)))?;
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "reverse_connect_case",
+            CaseExpectation::Success,
+            || async {
+                let (mut read, mut write) = stack_reverse_caller
+                    .stream_manager()
+                    .connect_from_id(&reverse_target_id, 2234)
+                    .await?;
+                let mut buf = [0u8; 64];
+                let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
+                    P2pError::from((P2pErrorCode::Failed, "reverse read failed".to_string(), e))
+                })?;
+                write
+                    .write_all("reverse hello".as_bytes())
+                    .await
+                    .map_err(|e| {
+                        P2pError::from((
+                            P2pErrorCode::Failed,
+                            "reverse write failed".to_string(),
+                            e,
+                        ))
+                    })?;
+                write.flush().await.map_err(|e| {
+                    P2pError::from((P2pErrorCode::Failed, "reverse flush failed".to_string(), e))
+                })?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case reverse_connect_case failed");
             return;
         }
-        
-        if !run_case(&mut stats, "reverse_fail_case", CaseExpectation::Fail, || async {
-            let _ = stack_reverse_caller.stream_manager().connect_from_id(&reverse_target_id, 2235).await?;
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "reverse_fail_case",
+            CaseExpectation::Fail,
+            || async {
+                let _ = stack_reverse_caller
+                    .stream_manager()
+                    .connect_from_id(&reverse_target_id, 2235)
+                    .await?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case reverse_fail_case failed");
             return;
         }
@@ -944,56 +1042,130 @@ async fn all_in_one() {
             return;
         }
 
-        if !run_case(&mut stats, "proxy_datagram_case", CaseExpectation::Success, || async {
-            let mut send = stack_proxy_caller.datagram_manager().connect_from_id(&proxy_target_id, 3236).await?;
-            send.write_all("proxy datagram".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "proxy datagram write failed".to_string(), e)))?;
-            Ok(())
-        }).await {
+        if !run_case(
+            &mut stats,
+            "proxy_datagram_case",
+            CaseExpectation::Success,
+            || async {
+                let mut send = stack_proxy_caller
+                    .datagram_manager()
+                    .connect_from_id(&proxy_target_id, 3236)
+                    .await?;
+                send.write_all("proxy datagram".as_bytes())
+                    .await
+                    .map_err(|e| {
+                        P2pError::from((
+                            P2pErrorCode::Failed,
+                            "proxy datagram write failed".to_string(),
+                            e,
+                        ))
+                    })?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case proxy_datagram_case failed");
             return;
         }
-        
-        if !run_case(&mut stats, "proxy_fail_case", CaseExpectation::Fail, || async {
-            let _ = stack_proxy_caller.stream_manager().connect_from_id(&proxy_target_id, 3235).await?;
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "proxy_fail_case",
+            CaseExpectation::Fail,
+            || async {
+                let _ = stack_proxy_caller
+                    .stream_manager()
+                    .connect_from_id(&proxy_target_id, 3235)
+                    .await?;
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case proxy_fail_case failed");
             return;
         }
-        
-        if !run_case(&mut stats, "reconnect_stability", CaseExpectation::Success, || async {
-            for _ in 0..3 {
-                let (_read, mut write) = stack_client.stream_manager().connect_from_id(&direct_target_id, 1234).await?;
-                write.write_all("reconnect".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reconnect write failed".to_string(), e)))?;
-                write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "reconnect flush failed".to_string(), e)))?;
-            }
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "reconnect_stability",
+            CaseExpectation::Success,
+            || async {
+                for _ in 0..3 {
+                    let (_read, mut write) = stack_client
+                        .stream_manager()
+                        .connect_from_id(&direct_target_id, 1234)
+                        .await?;
+                    write.write_all("reconnect".as_bytes()).await.map_err(|e| {
+                        P2pError::from((
+                            P2pErrorCode::Failed,
+                            "reconnect write failed".to_string(),
+                            e,
+                        ))
+                    })?;
+                    write.flush().await.map_err(|e| {
+                        P2pError::from((
+                            P2pErrorCode::Failed,
+                            "reconnect flush failed".to_string(),
+                            e,
+                        ))
+                    })?;
+                }
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case reconnect_stability failed");
             return;
         }
-        
-        if !run_case(&mut stats, "concurrent_stream_burst", CaseExpectation::Success, || async {
-            let mut tasks = Vec::new();
-            for _ in 0..10 {
-                let stack = stack_client.clone();
-                let remote = direct_target_id.clone();
-                let task = tokio::task::spawn(async move {
-                    let (_read, mut write) = stack.stream_manager().connect_from_id(&remote, 1234).await?;
-                    write.write_all("burst".as_bytes()).await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "burst write failed".to_string(), e)))?;
-                    write.flush().await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "burst flush failed".to_string(), e)))?;
-                    Ok::<(), P2pError>(())
-                });
-                tasks.push(task);
-            }
-        
-            for task in tasks {
-                let ret = task.await.map_err(|e| P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e)))?;
-                ret?;
-            }
-        
-            Ok(())
-        }).await {
+
+        if !run_case(
+            &mut stats,
+            "concurrent_stream_burst",
+            CaseExpectation::Success,
+            || async {
+                let mut tasks = Vec::new();
+                for _ in 0..10 {
+                    let stack = stack_client.clone();
+                    let remote = direct_target_id.clone();
+                    let task = tokio::task::spawn(async move {
+                        let (_read, mut write) = stack
+                            .stream_manager()
+                            .connect_from_id(&remote, 1234)
+                            .await?;
+                        write.write_all("burst".as_bytes()).await.map_err(|e| {
+                            P2pError::from((
+                                P2pErrorCode::Failed,
+                                "burst write failed".to_string(),
+                                e,
+                            ))
+                        })?;
+                        write.flush().await.map_err(|e| {
+                            P2pError::from((
+                                P2pErrorCode::Failed,
+                                "burst flush failed".to_string(),
+                                e,
+                            ))
+                        })?;
+                        Ok::<(), P2pError>(())
+                    });
+                    tasks.push(task);
+                }
+
+                for task in tasks {
+                    let ret = task.await.map_err(|e| {
+                        P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e))
+                    })?;
+                    ret?;
+                }
+
+                Ok(())
+            },
+        )
+        .await
+        {
             log::error!("all-in-one stop: case concurrent_stream_burst failed");
             return;
         }

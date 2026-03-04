@@ -57,7 +57,7 @@ impl Endpoint {
         other_ip.set_port(0);
         self_ip == other_ip
     }
-    
+
     pub fn is_loopback(&self) -> bool {
         self.addr.ip().is_loopback()
     }
