@@ -21,6 +21,7 @@ futures = { version = '0.3', features = ['default', 'thread-pool'] }
 rand = "0.7.3"
 sha2 = "0.8.2"
 sfo-result = { version = "0.2.4" }
+clap = "2.34.0"
 
 [target.'cfg(unix)'.dependencies]
 nix = '0.24'

@@ -662,7 +662,7 @@ impl<F: P2pConnectionFactory> Tunnel<F> {
                                 for ep in direct_eps.iter() {
                                     future_cache.on_direct_connect_result(ep, false);
                                 }
-                                log::warn!("connect direct failed, fallback to reverse: {:?} msg: {}", e.code(), e.msg());
+                                log::warn!("connect direct failed, fallback to reverse: {:?}", e);
                                 match reverse_future.await {
                                     Ok((result, tunnel_conn, read, write)) => {
                                         log::info!(

@@ -1100,6 +1100,7 @@ dependencies = [
  "bucky-crypto 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bucky-objects 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bucky-raw-codec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "clap",
  "futures",
  "futures-rustls",
  "log",
