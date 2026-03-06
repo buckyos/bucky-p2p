@@ -259,11 +259,10 @@ pub struct TunnelConnectionRead {
     vport: u16,
     remainder: u16,
     state: ReadState,
-    buf: [u8; 1024],
+    buf: [u8; MTU_LARGE],
     buf_cache_len: usize,
     buf_read_pos: usize,
     read_future: Option<Pin<Box<dyn Send + Future<Output = P2pResult<usize>>>>>,
-    recv_header_handle: Option<SpawnHandle<P2pResult<(PackageCmdCode, PackageHeader)>>>,
 }
 
 impl TunnelConnectionRead {
@@ -274,7 +273,7 @@ impl TunnelConnectionRead {
         vport: u16,
     ) -> Self {
         conn.tunnel_stat.increase_work_instance();
-        let mut this = Self {
+        Self {
             conn,
             local: read.local(),
             remote: read.remote(),
@@ -286,14 +285,11 @@ impl TunnelConnectionRead {
             vport,
             remainder: 0,
             state: ReadState::Work,
-            buf: [0u8; 1024],
+            buf: [0u8; MTU_LARGE],
             buf_cache_len: 0,
             buf_read_pos: 0,
             read_future: None,
-            recv_header_handle: None,
-        };
-        this.enter_recv_header();
-        this
+        }
     }
 
     pub fn remote(&self) -> Endpoint {
@@ -313,77 +309,85 @@ impl TunnelConnectionRead {
         self.local_id.clone()
     }
 
-    fn enter_recv_header(&mut self) -> P2pResult<()> {
-        if self.recv_header_handle.is_some() {
-            return Ok(());
-        }
-
-        let read = self.read.clone();
-        let conn = self.conn.clone();
-        let local_id = self.local_id.clone();
-        let tunnel_id = self.conn.get_tunnel_id();
-        let recv_header_handle = Executor::spawn_with_handle(async move {
-            let mut buf_header = [0u8; 16];
-            read.get()
-                .await
-                .as_mut()
-                .unwrap()
-                .read_exact(&mut buf_header[0..PackageHeader::raw_bytes().unwrap()])
+    async fn read_exact_from_holder(
+        read: ReadHolder,
+        tunnel_id: TunnelId,
+        local_id: P2pId,
+        buf: &mut [u8],
+    ) -> P2pResult<()> {
+        let mut read_guard = read.get().await;
+        if let Some(read) = read_guard.as_mut() {
+            let ret = read
+                .read_exact(buf)
                 .await
                 .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-            let header = PackageHeader::clone_from_slice(buf_header.as_slice())
-                .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            let cmd_code = match header.cmd_code() {
-                Ok(cmd_code) => cmd_code,
-                Err(err) => {
-                    return Err(err);
-                }
-            };
-            if cmd_code == PackageCmdCode::SynClose {
-                let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-                let mut read_guard = read.get().await;
-                if read_guard.is_some() {
-                    read_guard
-                        .as_mut()
-                        .unwrap()
-                        .read_exact(cmd_body.as_mut_slice())
-                        .await
-                        .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                    Ok((cmd_code, header))
-                } else {
-                    Err(p2p_err!(
-                        P2pErrorCode::IoError,
-                        "get read failed tunnel {:?} local {}",
-                        tunnel_id,
-                        local_id.to_string()
-                    ))
-                }
-            } else if cmd_code == PackageCmdCode::PieceData {
-                Ok((cmd_code, header))
-            } else {
-                let mut cmd_body = vec![0u8; header.pkg_len() as usize];
-                let mut read_guard = read.get().await;
-                if read_guard.is_some() {
-                    read_guard
-                        .as_mut()
-                        .unwrap()
-                        .read_exact(cmd_body.as_mut_slice())
-                        .await
-                        .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                    Ok((cmd_code, header))
-                } else {
-                    Err(p2p_err!(
-                        P2pErrorCode::IoError,
-                        "get read failed tunnel {:?} local {}",
-                        tunnel_id,
-                        local_id.to_string()
-                    ))
-                }
+            if ret != buf.len() {
+                return Err(p2p_err!(P2pErrorCode::IoError, "read len not match"));
             }
-        })
-        .map_err(into_p2p_err!(P2pErrorCode::Failed, "spawn error"))?;
-        self.recv_header_handle = Some(recv_header_handle);
-        Ok(())
+            Ok(())
+        } else {
+            Err(p2p_err!(
+                P2pErrorCode::IoError,
+                "get read failed tunnel {:?} local {}",
+                tunnel_id,
+                local_id.to_string()
+            ))
+        }
+    }
+
+    async fn read_next_cmd(&mut self) -> P2pResult<PackageCmdCode> {
+        let mut buf_header = [0u8; 16];
+        let tunnel_id = self.conn.get_tunnel_id();
+        let local_id = self.local_id.clone();
+        let read = self.read.clone();
+        Self::read_exact_from_holder(
+            read.clone(),
+            tunnel_id,
+            local_id.clone(),
+            &mut buf_header[0..PackageHeader::raw_bytes().unwrap()],
+        )
+        .await?;
+        let header = PackageHeader::clone_from_slice(buf_header.as_slice())
+            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        let cmd_code = header.cmd_code()?;
+        match cmd_code {
+            PackageCmdCode::PieceData => {
+                self.remainder = header.pkg_len();
+                Ok(cmd_code)
+            }
+            PackageCmdCode::SynClose => {
+                if header.pkg_len() > 0 {
+                    let mut cmd_body = vec![0u8; header.pkg_len() as usize];
+                    Self::read_exact_from_holder(
+                        read.clone(),
+                        tunnel_id,
+                        local_id.clone(),
+                        cmd_body.as_mut_slice(),
+                    )
+                    .await?;
+                }
+                self.state = ReadState::Closed;
+                Ok(cmd_code)
+            }
+            _ => {
+                if header.pkg_len() > 0 {
+                    let mut cmd_body = vec![0u8; header.pkg_len() as usize];
+                    Self::read_exact_from_holder(
+                        read,
+                        tunnel_id,
+                        local_id,
+                        cmd_body.as_mut_slice(),
+                    )
+                    .await?;
+                }
+                Err(p2p_err!(
+                    P2pErrorCode::ErrorState,
+                    "tunnel {:?} invalid cmd code {:?}",
+                    self.session_id,
+                    cmd_code
+                ))
+            }
+        }
     }
 
     async fn recv_inner(&mut self, buf: &mut [u8]) -> P2pResult<usize> {
@@ -391,36 +395,12 @@ impl TunnelConnectionRead {
             return Ok(0);
         }
 
-        if self.recv_header_handle.is_some() {
-            let (cmd_code, header) = self
-                .recv_header_handle
-                .as_mut()
-                .unwrap()
-                .await
-                .map_err(into_p2p_err!(P2pErrorCode::Failed, "get spawn result"))??;
-            self.recv_header_handle = None;
-            if (cmd_code == PackageCmdCode::SynClose) {
+        if self.remainder == 0 {
+            let cmd_code = self.read_next_cmd().await?;
+            if cmd_code == PackageCmdCode::SynClose {
                 self.state = ReadState::Closed;
                 return Ok(0);
             }
-            if (cmd_code != PackageCmdCode::PieceData) {
-                log::error!(
-                    "tunnel {:?} invalid cmd code {:?}",
-                    self.session_id,
-                    cmd_code
-                );
-                self.state = ReadState::Error;
-                let tunnel_id = self.conn.get_tunnel_id();
-                let mut state = self.conn.state.lock().unwrap();
-                log::info!(
-                    "tunnel {:?} state from {:?} to Error",
-                    tunnel_id,
-                    state.tunnel_state
-                );
-                state.tunnel_state = TunnelState::Error;
-                return Ok(0);
-            }
-            self.remainder = header.pkg_len();
         }
         if self.remainder as usize > buf.len() {
             let recv_len = self
@@ -433,9 +413,6 @@ impl TunnelConnectionRead {
                 .await
                 .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
             self.remainder -= recv_len as u16;
-            if self.remainder == 0 {
-                self.enter_recv_header()?;
-            }
             Ok(recv_len)
         } else {
             let recv_len = self.remainder;
@@ -454,9 +431,6 @@ impl TunnelConnectionRead {
                 }
             }
             self.remainder = 0;
-            if self.remainder == 0 {
-                self.enter_recv_header()?;
-            }
             Ok(recv_len as usize)
         }
     }
@@ -503,8 +477,8 @@ impl TunnelConnectionRead {
                 return;
             }
         }
-        let recv_header_handle = self.recv_header_handle.take();
         let local_id = self.local_id.clone();
+        let initial_remainder = self.remainder;
         Executor::spawn_ok(async move {
             if read_state == ReadState::Closed {
                 let read = read.get().await.take().unwrap();
@@ -531,146 +505,113 @@ impl TunnelConnectionRead {
                     conn.enter_idle_mode(read);
                 }
             } else if read_state == ReadState::Work {
-                // 如果read正在接受数据，则继续接收数据，直到出现错误，或者收到关闭消息
-                if recv_header_handle.is_none() {
-                    let read = read.get().await.take().unwrap();
-                    let tunnel_id = conn.get_tunnel_id();
-                    let mut state = conn.state.lock().unwrap();
-                    log::info!(
-                        "tunnel {:?} state from {:?} to Error",
-                        tunnel_id,
-                        state.tunnel_state
-                    );
-                    state.tunnel_state = TunnelState::Error;
-                    state.read = Some(read);
-                } else {
-                    match recv_header_handle.unwrap().await {
-                        Ok(ret) => match ret {
-                            Ok((cmd_code, header)) => {
-                                if cmd_code == PackageCmdCode::SynClose {
-                                    let read = read.get().await.take().unwrap();
-                                    let read = {
-                                        let tunnel_id = conn.get_tunnel_id();
-                                        let mut state = conn.state.lock().unwrap();
-                                        if state.tunnel_state == TunnelState::Worked {
-                                            log::info!(
-                                                "tunnel {:?} state from {:?} to ReadClosed",
-                                                tunnel_id,
-                                                state.tunnel_state
-                                            );
-                                            state.tunnel_state = TunnelState::ReadClosed;
-                                            state.read = Some(read);
-                                            None
-                                        } else if state.tunnel_state == TunnelState::WriteClosed {
-                                            Some(read)
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some(read) = read {
-                                        conn.enter_idle_mode(read);
-                                    }
-                                }
-                                if cmd_code == PackageCmdCode::PieceData {
-                                    let mut read = read.get().await.take().unwrap();
-                                    let out_conn = conn.clone();
-                                    let ret: P2pResult<()> = async move {
-                                            let mut buf = vec![0u8; header.pkg_len() as usize];
-                                            let ret = read.read_exact(buf.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                                            if ret != buf.len() {
-                                                return Err(p2p_err!(P2pErrorCode::IoError, "read len not match"));
-                                            }
+                let mut read = read.get().await.take().unwrap();
+                let out_conn = conn.clone();
+                let (read, ret): (P2pReadHalf, P2pResult<()>) = async move {
+                    if initial_remainder > 0 {
+                        let mut buf = vec![0u8; initial_remainder as usize];
+                        let ret = read
+                            .read_exact(buf.as_mut_slice())
+                            .await
+                            .map_err(into_p2p_err!(P2pErrorCode::IoError));
+                        let ret = match ret {
+                            Ok(ret) => ret,
+                            Err(err) => return (read, Err(err)),
+                        };
+                        if ret != buf.len() {
+                            return (read, Err(p2p_err!(P2pErrorCode::IoError, "read len not match")));
+                        }
+                    }
 
-                                            loop {
-                                                let mut buf_header = vec![0u8; PackageHeader::raw_bytes().unwrap()];
-                                                let ret = read.read_exact(buf_header.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                                                if ret != buf_header.len() {
-                                                    break Err(p2p_err!(P2pErrorCode::IoError, "read len not match"));
-                                                }
+                    loop {
+                        let mut buf_header = vec![0u8; PackageHeader::raw_bytes().unwrap()];
+                        let ret = read
+                            .read_exact(buf_header.as_mut_slice())
+                            .await
+                            .map_err(into_p2p_err!(P2pErrorCode::IoError));
+                        let ret = match ret {
+                            Ok(ret) => ret,
+                            Err(err) => break (read, Err(err)),
+                        };
+                        if ret != buf_header.len() {
+                            break (read, Err(p2p_err!(P2pErrorCode::IoError, "read len not match")));
+                        }
 
-                                                let header = PackageHeader::clone_from_slice(buf_header.as_slice()).map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-                                                let cmd_code = match header.cmd_code() {
-                                                    Ok(cmd_code) => cmd_code,
-                                                    Err(err) => {
-                                                        break Err(err);
-                                                    }
-                                                };
+                        let header = PackageHeader::clone_from_slice(buf_header.as_slice())
+                            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError));
+                        let header = match header {
+                            Ok(header) => header,
+                            Err(err) => break (read, Err(err)),
+                        };
+                        let cmd_code = match header.cmd_code() {
+                            Ok(cmd_code) => cmd_code,
+                            Err(err) => break (read, Err(err)),
+                        };
 
-                                                if cmd_code == PackageCmdCode::SynClose {
-                                                    let mut buf = vec![0u8; header.pkg_len() as usize];
-                                                    let ret = read.read_exact(buf.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                                                    if ret != buf.len() {
-                                                        break Err(p2p_err!(P2pErrorCode::IoError, "read len not match"));
-                                                    }
-
-                                                    let read = {
-                                                        let tunnel_id = conn.get_tunnel_id();
-                                                        let mut state = conn.state.lock().unwrap();
-                                                        if state.tunnel_state == TunnelState::Worked {
-                                                            log::info!("tunnel {:?} state from {:?} to ReadClosed", tunnel_id, state.tunnel_state);
-                                                            state.tunnel_state = TunnelState::ReadClosed;
-                                                            state.read = Some(read);
-                                                            None
-                                                        } else if state.tunnel_state == TunnelState::WriteClosed {
-                                                            Some(read)
-                                                        } else {
-                                                            None
-                                                        }
-                                                    };
-                                                    if let Some(read) = read {
-                                                        conn.enter_idle_mode(read);
-                                                    }
-                                                    break Ok(());
-                                                } else if cmd_code == PackageCmdCode::PieceData {
-                                                    let mut buf = vec![0u8; header.pkg_len() as usize];
-                                                    let ret = read.read_exact(buf.as_mut_slice()).await.map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-                                                    if ret != buf.len() {
-                                                        break Err(p2p_err!(P2pErrorCode::IoError, "read len not match"));
-                                                    }
-                                                } else {
-                                                    break Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel {:?} invalid cmd code {:?}", session_id, cmd_code));
-                                                }
-                                            }
-                                        }.await;
-                                    if ret.is_err() {
-                                        let tunnel_id = out_conn.get_tunnel_id();
-                                        let mut state = out_conn.state.lock().unwrap();
-                                        log::info!(
-                                            "tunnel {:?} state from {:?} to Error.err {:?}",
-                                            tunnel_id,
-                                            state.tunnel_state,
-                                            ret.err()
-                                        );
-                                        state.tunnel_state = TunnelState::Error;
-                                    }
-                                }
+                        let mut body = vec![0u8; header.pkg_len() as usize];
+                        if !body.is_empty() {
+                            let ret = read
+                                .read_exact(body.as_mut_slice())
+                                .await
+                                .map_err(into_p2p_err!(P2pErrorCode::IoError));
+                            let ret = match ret {
+                                Ok(ret) => ret,
+                                Err(err) => break (read, Err(err)),
+                            };
+                            if ret != body.len() {
+                                break (read, Err(p2p_err!(P2pErrorCode::IoError, "read len not match")));
                             }
-                            Err(e) => {
-                                let read = read.get().await.take().unwrap();
-                                let tunnel_id = conn.get_tunnel_id();
-                                let mut state = conn.state.lock().unwrap();
-                                log::info!(
-                                    "tunnel {:?} state from {:?} to Error",
-                                    tunnel_id,
-                                    state.tunnel_state
-                                );
-                                state.tunnel_state = TunnelState::Error;
-                                state.read = Some(read);
+                        }
+
+                        match cmd_code {
+                            PackageCmdCode::SynClose => break (read, Ok(())),
+                            PackageCmdCode::PieceData => {}
+                            _ => {
+                                break (read, Err(p2p_err!(
+                                    P2pErrorCode::ErrorState,
+                                    "tunnel {:?} invalid cmd code {:?}",
+                                    session_id,
+                                    cmd_code
+                                )));
                             }
-                        },
-                        Err(e) => {
-                            let read = read.get().await.take().unwrap();
-                            let tunnel_id = conn.get_tunnel_id();
-                            let mut state = conn.state.lock().unwrap();
+                        }
+                    }
+                }
+                .await;
+
+                if ret.is_ok() {
+                    let read = {
+                        let tunnel_id = conn.get_tunnel_id();
+                        let mut state = conn.state.lock().unwrap();
+                        if state.tunnel_state == TunnelState::Worked {
                             log::info!(
-                                "tunnel {:?} state from {:?} to Error",
+                                "tunnel {:?} state from {:?} to ReadClosed",
                                 tunnel_id,
                                 state.tunnel_state
                             );
-                            state.tunnel_state = TunnelState::Error;
+                            state.tunnel_state = TunnelState::ReadClosed;
                             state.read = Some(read);
+                            None
+                        } else if state.tunnel_state == TunnelState::WriteClosed {
+                            Some(read)
+                        } else {
+                            None
                         }
+                    };
+                    if let Some(read) = read {
+                        conn.enter_idle_mode(read);
                     }
+                } else {
+                    let tunnel_id = out_conn.get_tunnel_id();
+                    let mut state = out_conn.state.lock().unwrap();
+                    log::info!(
+                        "tunnel {:?} state from {:?} to Error.err {:?}",
+                        tunnel_id,
+                        state.tunnel_state,
+                        ret.err()
+                    );
+                    state.tunnel_state = TunnelState::Error;
+                    state.read = Some(read);
                 }
             }
         });
@@ -794,7 +735,6 @@ impl TunnelConnectionWrite {
                 .write_all(header.to_vec().unwrap().as_slice())
                 .await?;
             self.write.as_mut().unwrap().write_all(chunk).await?;
-            self.write.as_mut().unwrap().flush().await?;
             remainder = &remainder[chunk.len()..];
         }
         Ok(())

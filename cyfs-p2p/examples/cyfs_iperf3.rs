@@ -20,10 +20,54 @@ const DEFAULT_CLIENT_BIND: &str = "0.0.0.0:0";
 
 type AppResult<T> = Result<T, String>;
 
+struct ReportSnapshot {
+    start_secs: f64,
+    end_secs: f64,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+enum TransportProtocol {
+    Quic,
+    Tcp,
+}
+
+impl TransportProtocol {
+    fn parse(value: &str) -> AppResult<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "quic" => Ok(Self::Quic),
+            "tcp" => Ok(Self::Tcp),
+            _ => Err(format!("invalid protocol: {value}, expected quic or tcp")),
+        }
+    }
+
+    fn cyfs_protocol(self) -> CyfsProtocol {
+        match self {
+            Self::Quic => CyfsProtocol::Udp,
+            Self::Tcp => CyfsProtocol::Tcp,
+        }
+    }
+
+    fn p2p_protocol(self) -> P2pProtocol {
+        match self {
+            Self::Quic => P2pProtocol::Quic,
+            Self::Tcp => P2pProtocol::Tcp,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Quic => "QUIC",
+            Self::Tcp => "TCP",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ServerOpts {
     bind: SocketAddr,
     interval_secs: u64,
+    protocol: TransportProtocol,
 }
 
 #[derive(Clone)]
@@ -34,6 +78,7 @@ struct ClientOpts {
     len: usize,
     parallel: usize,
     interval_secs: u64,
+    protocol: TransportProtocol,
 }
 
 enum Command {
@@ -43,6 +88,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // sfo_log::Logger::new("cyfs_iperf3").set_log_to_file(false).start().unwrap();
     if let Err(err) = run().await {
         eprintln!("error: {err}");
         std::process::exit(1);
@@ -64,13 +110,25 @@ fn parse_command() -> AppResult<Command> {
                 .about("Run throughput server")
                 .arg(
                     Arg::with_name("bind")
+                        .short("B")
                         .long("bind")
                         .takes_value(true)
                         .default_value(DEFAULT_SERVER_BIND)
-                        .help("QUIC listen address"),
+                        .help("listen address"),
+                )
+                .arg(
+                    Arg::with_name("protocol")
+                        .short("X")
+                        .long("protocol")
+                        .takes_value(true)
+                        .default_value("quic")
+                        .possible_values(&["quic", "tcp"])
+                        .case_insensitive(true)
+                        .help("transport protocol"),
                 )
                 .arg(
                     Arg::with_name("interval")
+                        .short("i")
                         .long("interval")
                         .takes_value(true)
                         .default_value("1")
@@ -82,6 +140,7 @@ fn parse_command() -> AppResult<Command> {
                 .about("Run throughput client")
                 .arg(
                     Arg::with_name("server")
+                        .short("c")
                         .long("server")
                         .takes_value(true)
                         .required(true)
@@ -89,13 +148,25 @@ fn parse_command() -> AppResult<Command> {
                 )
                 .arg(
                     Arg::with_name("bind")
+                        .short("B")
                         .long("bind")
                         .takes_value(true)
                         .default_value(DEFAULT_CLIENT_BIND)
                         .help("local bind address"),
                 )
                 .arg(
+                    Arg::with_name("protocol")
+                        .short("X")
+                        .long("protocol")
+                        .takes_value(true)
+                        .default_value("quic")
+                        .possible_values(&["quic", "tcp"])
+                        .case_insensitive(true)
+                        .help("transport protocol"),
+                )
+                .arg(
                     Arg::with_name("time")
+                        .short("t")
                         .long("time")
                         .takes_value(true)
                         .default_value("10")
@@ -103,6 +174,7 @@ fn parse_command() -> AppResult<Command> {
                 )
                 .arg(
                     Arg::with_name("len")
+                        .short("l")
                         .long("len")
                         .takes_value(true)
                         .default_value("16384")
@@ -110,6 +182,7 @@ fn parse_command() -> AppResult<Command> {
                 )
                 .arg(
                     Arg::with_name("parallel")
+                        .short("P")
                         .long("parallel")
                         .takes_value(true)
                         .default_value("1")
@@ -117,6 +190,7 @@ fn parse_command() -> AppResult<Command> {
                 )
                 .arg(
                     Arg::with_name("interval")
+                        .short("i")
                         .long("interval")
                         .takes_value(true)
                         .default_value("1")
@@ -135,6 +209,7 @@ fn parse_command() -> AppResult<Command> {
 fn parse_server_args(matches: &clap::ArgMatches<'_>) -> AppResult<ServerOpts> {
     let bind = parse_socket(value_of(matches, "bind")?)?;
     let interval_secs = parse_u64("--interval", value_of(matches, "interval")?)?;
+    let protocol = TransportProtocol::parse(value_of(matches, "protocol")?)?;
 
     if interval_secs == 0 {
         return Err("--interval must be > 0".to_string());
@@ -143,6 +218,7 @@ fn parse_server_args(matches: &clap::ArgMatches<'_>) -> AppResult<ServerOpts> {
     Ok(ServerOpts {
         bind,
         interval_secs,
+        protocol,
     })
 }
 
@@ -153,6 +229,7 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
     let len = parse_usize("--len", value_of(matches, "len")?)?;
     let parallel = parse_usize("--parallel", value_of(matches, "parallel")?)?;
     let interval_secs = parse_u64("--interval", value_of(matches, "interval")?)?;
+    let protocol = TransportProtocol::parse(value_of(matches, "protocol")?)?;
 
     if time_secs == 0 {
         return Err("--time must be > 0".to_string());
@@ -174,6 +251,7 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
         len,
         parallel,
         interval_secs,
+        protocol,
     })
 }
 
@@ -206,31 +284,92 @@ fn usage() -> String {
         "cyfs_iperf3 (QUIC direct mode, no SN)",
         "",
         "Usage:",
-        "  cyfs_iperf3 server [--bind <ip:port>] [--interval <seconds>]",
-        "  cyfs_iperf3 client --server <ip:port> [--bind <ip:port>] [--time <seconds>] [--len <bytes>] [--parallel <n>] [--interval <seconds>]",
+        "  cyfs_iperf3 server [-B <ip:port>] [-X <quic|tcp>] [-i <seconds>]",
+        "  cyfs_iperf3 client -c <ip:port> [-B <ip:port>] [-X <quic|tcp>] [-t <seconds>] [-l <bytes>] [-P <n>] [-i <seconds>]",
         "",
         "Examples:",
-        "  cyfs_iperf3 server --bind 0.0.0.0:4433",
-        "  cyfs_iperf3 client --server 127.0.0.1:4433 --time 10 --parallel 4",
+        "  cyfs_iperf3 server -B 0.0.0.0:4433 -X quic",
+        "  cyfs_iperf3 client -c 127.0.0.1:4433 -t 10 -P 4 -X tcp",
     ]
     .join("\n")
 }
 
-fn format_mbps(bytes: u64, secs: f64) -> f64 {
-    if secs <= 0.0 {
-        return 0.0;
+fn format_bytes(bytes: u64) -> (f64, &'static str) {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GB {
+        (bytes_f / GB, "GBytes")
+    } else if bytes_f >= MB {
+        (bytes_f / MB, "MBytes")
+    } else if bytes_f >= KB {
+        (bytes_f / KB, "KBytes")
+    } else {
+        (bytes_f, "Bytes")
     }
-    (bytes as f64) * 8.0 / secs / 1_000_000.0
 }
 
-fn new_quic_endpoint(addr: SocketAddr) -> CyfsEndpoint {
-    let mut ep = CyfsEndpoint::from((CyfsProtocol::Udp, addr));
+fn format_bitrate(bytes: u64, secs: f64) -> (f64, &'static str) {
+    const KBIT: f64 = 1_000.0;
+    const MBIT: f64 = 1_000_000.0;
+    const GBIT: f64 = 1_000_000_000.0;
+
+    let bits_per_sec = if secs > 0.0 {
+        bytes as f64 * 8.0 / secs
+    } else {
+        0.0
+    };
+
+    if bits_per_sec >= GBIT {
+        (bits_per_sec / GBIT, "Gbits/sec")
+    } else if bits_per_sec >= MBIT {
+        (bits_per_sec / MBIT, "Mbits/sec")
+    } else if bits_per_sec >= KBIT {
+        (bits_per_sec / KBIT, "Kbits/sec")
+    } else {
+        (bits_per_sec, "bits/sec")
+    }
+}
+
+fn print_separator() {
+    println!("-----------------------------------------------------------");
+}
+
+fn print_report_header() {
+    println!("[ ID] Interval           Transfer     Bitrate");
+}
+
+fn print_connection_line(id: &str, local: SocketAddr, remote: SocketAddr) {
+    println!("[{id:>3}] local {local} connected to {remote}");
+}
+
+fn print_report_line(id: &str, snapshot: &ReportSnapshot) {
+    let (transfer, transfer_unit) = format_bytes(snapshot.bytes);
+    let (bitrate, bitrate_unit) = format_bitrate(
+        snapshot.bytes,
+        snapshot.end_secs - snapshot.start_secs,
+    );
+    println!(
+        "[{id:>3}] {start:>6.2}-{end:>6.2} sec  {transfer:>6.2} {transfer_unit:<7}  {bitrate:>6.2} {bitrate_unit}",
+        start = snapshot.start_secs,
+        end = snapshot.end_secs,
+        transfer = transfer,
+        transfer_unit = transfer_unit,
+        bitrate = bitrate,
+        bitrate_unit = bitrate_unit,
+    );
+}
+
+fn new_endpoint(protocol: TransportProtocol, addr: SocketAddr) -> CyfsEndpoint {
+    let mut ep = CyfsEndpoint::from((protocol.cyfs_protocol(), addr));
     ep.set_area(EndpointArea::Lan);
     ep
 }
 
-async fn create_stack(bind_addr: SocketAddr) -> AppResult<P2pStackRef> {
-    let local_ep = new_quic_endpoint(bind_addr);
+async fn create_stack(bind_addr: SocketAddr, protocol: TransportProtocol) -> AppResult<P2pStackRef> {
+    let local_ep = new_endpoint(protocol, bind_addr);
     let config = create_cyfs_p2p_config(vec![cyfs_to_p2p_endpoint(&local_ep)]);
     let env = create_p2p_env(config).await.map_err(|e| {
         format!(
@@ -242,13 +381,15 @@ async fn create_stack(bind_addr: SocketAddr) -> AppResult<P2pStackRef> {
 
     let (device, key) = generate_runtime_identity(vec![local_ep]).await?;
     let stack_config = create_cyfs_p2p_stack_config(env, device, key, vec![]);
-    create_p2p_stack(stack_config).await.map_err(|e| {
+    let stack = create_p2p_stack(stack_config).await.map_err(|e| {
         format!(
             "create p2p stack failed, code={:?}, msg={}",
             e.code(),
             e.msg()
         )
-    })
+    })?;
+    stack.set_as_default();
+    Ok(stack)
 }
 
 async fn generate_runtime_identity(eps: Vec<CyfsEndpoint>) -> AppResult<(Device, PrivateKey)> {
@@ -280,7 +421,7 @@ async fn generate_runtime_identity(eps: Vec<CyfsEndpoint>) -> AppResult<(Device,
 }
 
 async fn run_server(opts: ServerOpts) -> AppResult<()> {
-    let stack = create_stack(opts.bind).await?;
+    let stack = create_stack(opts.bind, opts.protocol).await?;
     let listener = stack
         .stream_manager()
         .listen(PERF_VPORT)
@@ -310,6 +451,7 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
             let mut interval_started: Option<Instant> = None;
             let mut bytes = 0u64;
             let mut interval_bytes = 0u64;
+            let mut printed_intro = false;
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 match read.read(buf.as_mut_slice()).await {
@@ -322,6 +464,16 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
                         if transfer_started.is_none() {
                             transfer_started = Some(now);
                             interval_started = Some(now);
+                            if !printed_intro {
+                                print_separator();
+                                print_connection_line(
+                                    &conn_id.to_string(),
+                                    read.local().addr().clone(),
+                                    read.remote().addr().clone(),
+                                );
+                                print_report_header();
+                                printed_intro = true;
+                            }
                         }
                         bytes += n;
                         interval_bytes += n;
@@ -329,13 +481,14 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
                             let elapsed = now.duration_since(begin);
                             if elapsed >= interval {
                                 if interval_bytes > 0 {
-                                    let mbps = format_mbps(interval_bytes, elapsed.as_secs_f64());
-                                    println!(
-                                        "[server][conn {conn_id}] interval={:.2}s bytes={} rate={:.3} Mbps total={}",
-                                        elapsed.as_secs_f64(),
-                                        interval_bytes,
-                                        mbps,
-                                        bytes
+                                    let base = transfer_started.unwrap();
+                                    print_report_line(
+                                        &conn_id.to_string(),
+                                        &ReportSnapshot {
+                                            start_secs: begin.duration_since(base).as_secs_f64(),
+                                            end_secs: now.duration_since(base).as_secs_f64(),
+                                            bytes: interval_bytes,
+                                        },
                                     );
                                 }
                                 interval_started = Some(now);
@@ -356,21 +509,23 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
                 if let Some(begin) = interval_started {
                     let elapsed = Instant::now().duration_since(begin);
                     if interval_bytes > 0 && elapsed.as_secs_f64() > 0.0 {
-                        let mbps = format_mbps(interval_bytes, elapsed.as_secs_f64());
-                        println!(
-                            "[server][conn {conn_id}] interval={:.2}s bytes={} rate={:.3} Mbps total={}",
-                            elapsed.as_secs_f64(),
-                            interval_bytes,
-                            mbps,
-                            bytes
+                        print_report_line(
+                            &conn_id.to_string(),
+                            &ReportSnapshot {
+                                start_secs: begin.duration_since(started).as_secs_f64(),
+                                end_secs: Instant::now().duration_since(started).as_secs_f64(),
+                                bytes: interval_bytes,
+                            },
                         );
                     }
                 }
-                let secs = started.elapsed().as_secs_f64();
-                let mbps = format_mbps(bytes, secs);
-                println!(
-                    "[server][conn {conn_id}] done: bytes={} elapsed={:.2}s avg={:.3} Mbps",
-                    bytes, secs, mbps
+                print_report_line(
+                    &conn_id.to_string(),
+                    &ReportSnapshot {
+                        start_secs: 0.0,
+                        end_secs: started.elapsed().as_secs_f64(),
+                        bytes,
+                    },
                 );
             }
         });
@@ -379,35 +534,43 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
 }
 
 async fn run_client(opts: ClientOpts) -> AppResult<()> {
-    let stack = create_stack(opts.bind).await?;
-    let remote = P2pEndpoint::from((P2pProtocol::Quic, opts.server));
+    let stack = create_stack(opts.bind, opts.protocol).await?;
+    let remote = P2pEndpoint::from((opts.protocol.p2p_protocol(), opts.server));
     let deadline = Instant::now() + Duration::from_secs(opts.time_secs);
 
+    print_separator();
     println!(
-        "client started: bind={} server={} protocol=quic streams={} duration={}s len={}B internal_vport={}",
-        opts.bind, opts.server, opts.parallel, opts.time_secs, opts.len, PERF_VPORT
+        "Client connecting to {}, {} port {}",
+        opts.server.ip(),
+        opts.protocol.name(),
+        opts.server.port()
     );
+    println!("[  5] local {} connected to {}", opts.bind, opts.server);
+    print_report_header();
 
     let bytes_total = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let report_handle = tokio::task::spawn(start_reporter(
-        "client",
         bytes_total.clone(),
         Duration::from_secs(opts.interval_secs),
         stop.clone(),
+        Instant::now(),
+        opts.parallel,
     ));
 
     let started = Instant::now();
     let mut handles = Vec::with_capacity(opts.parallel);
-    for _ in 0..opts.parallel {
+    for index in 0..opts.parallel {
         let stack = stack.clone();
         let remote = remote.clone();
         let bytes_total = bytes_total.clone();
         let deadline = deadline;
         let payload = vec![0u8; opts.len];
+        let stream_id = (index + 5).to_string();
+        let interval = Duration::from_secs(opts.interval_secs);
 
         handles.push(tokio::task::spawn(async move {
-            let (_read, mut write) = stack
+            let (read, mut write) = stack
                 .stream_manager()
                 .connect_direct(vec![remote], PERF_VPORT, None)
                 .await
@@ -419,18 +582,60 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
                     )
                 })?;
 
+            print_connection_line(&stream_id, read.local().addr().clone(), read.remote().addr().clone());
+
+            let stream_started = Instant::now();
+            let mut interval_started = stream_started;
+            let mut interval_bytes = 0u64;
+            let mut total_bytes = 0u64;
             while Instant::now() < deadline {
                 write
                     .write_all(payload.as_slice())
                     .await
                     .map_err(|e| format!("client write failed: {e}"))?;
                 bytes_total.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                total_bytes += payload.len() as u64;
+                interval_bytes += payload.len() as u64;
+
+                let now = Instant::now();
+                if now.duration_since(interval_started) >= interval {
+                    print_report_line(
+                        &stream_id,
+                        &ReportSnapshot {
+                            start_secs: interval_started.duration_since(stream_started).as_secs_f64(),
+                            end_secs: now.duration_since(stream_started).as_secs_f64(),
+                            bytes: interval_bytes,
+                        },
+                    );
+                    interval_started = now;
+                    interval_bytes = 0;
+                }
             }
 
             write
                 .flush()
                 .await
                 .map_err(|e| format!("client flush failed: {e}"))?;
+
+            if interval_bytes > 0 {
+                let now = Instant::now();
+                print_report_line(
+                    &stream_id,
+                    &ReportSnapshot {
+                        start_secs: interval_started.duration_since(stream_started).as_secs_f64(),
+                        end_secs: now.duration_since(stream_started).as_secs_f64(),
+                        bytes: interval_bytes,
+                    },
+                );
+            }
+            print_report_line(
+                &stream_id,
+                &ReportSnapshot {
+                    start_secs: 0.0,
+                    end_secs: stream_started.elapsed().as_secs_f64(),
+                    bytes: total_bytes,
+                },
+            );
             Ok::<(), String>(())
         }));
     }
@@ -446,34 +651,45 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
 
     let elapsed = started.elapsed().as_secs_f64();
     let total_bytes = bytes_total.load(Ordering::Relaxed);
-    let avg_mbps = format_mbps(total_bytes, elapsed);
-    println!(
-        "client done: bytes={} elapsed={:.2}s avg={:.3} Mbps",
-        total_bytes, elapsed, avg_mbps
-    );
+    if opts.parallel > 1 {
+        print_report_line(
+            "SUM",
+            &ReportSnapshot {
+                start_secs: 0.0,
+                end_secs: elapsed,
+                bytes: total_bytes,
+            },
+        );
+    }
     Ok(())
 }
 
 async fn start_reporter(
-    role: &'static str,
     total_bytes: Arc<AtomicU64>,
     interval: Duration,
     stop: Arc<AtomicBool>,
+    started: Instant,
+    parallel: usize,
 ) {
-    let started = Instant::now();
     let mut last_bytes = 0u64;
     while !stop.load(Ordering::Relaxed) {
         tokio::time::sleep(interval).await;
         let now_total = total_bytes.load(Ordering::Relaxed);
         let delta = now_total.saturating_sub(last_bytes);
         last_bytes = now_total;
-        let secs = interval.as_secs_f64();
-        let instant_mbps = format_mbps(delta, secs);
-        let elapsed = started.elapsed().as_secs_f64();
-        let avg_mbps = format_mbps(now_total, elapsed);
-        println!(
-            "[{role}] interval={:.2}s bytes={} rate={:.3} Mbps total={} avg={:.3} Mbps",
-            secs, delta, instant_mbps, now_total, avg_mbps
-        );
+        if delta == 0 {
+            continue;
+        }
+        let now = Instant::now();
+        if parallel > 1 {
+            print_report_line(
+                "SUM",
+                &ReportSnapshot {
+                    start_secs: now.duration_since(started).as_secs_f64() - interval.as_secs_f64(),
+                    end_secs: now.duration_since(started).as_secs_f64(),
+                    bytes: delta,
+                },
+            );
+        }
     }
 }

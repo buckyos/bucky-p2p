@@ -26,6 +26,11 @@ clap = "2.34.0"
 [target.'cfg(unix)'.dependencies]
 nix = '0.24'
 
+[dev-dependencies]
+sfo-log = "0.1"
+rcgen = "0.13"
+rustls = { version = "0.23.20", default-features = false, features = ["ring", "std"] }
+
 [features]
 default = ["runtime-tokio"]
 runtime-tokio = ["p2p-frame/runtime-tokio", "tokio/time", "tokio/rt", "tokio/net", "tokio/macros", "tokio/io-std", "tokio/io-util", "tokio-rustls"]

@@ -13,7 +13,7 @@ use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 pub use dep::*;
 
 pub const MTU: usize = 1472;
-pub const MTU_LARGE: usize = 1024 * 30;
+pub const MTU_LARGE: usize = 0xFFFF;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
