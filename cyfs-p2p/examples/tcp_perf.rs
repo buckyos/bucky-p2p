@@ -1,22 +1,20 @@
-use bucky_crypto::PrivateKey;
-use bucky_objects::{
-    sign_and_push_named_object, Area, Device, DeviceCategory, Endpoint as CyfsEndpoint,
-    EndpointArea, Protocol as CyfsProtocol, RsaCPUObjectSigner, SignatureSource, UniqueId,
-    SIGNATURE_SOURCE_REFINDEX_SELF,
-};
 use clap::{App, Arg, SubCommand};
-use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
-use cyfs_p2p::{create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint};
-use p2p_frame::endpoint::{Endpoint as P2pEndpoint, Protocol as P2pProtocol};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, ServerConfig, SignatureScheme,
+};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
-const PERF_VPORT: u16 = 5201;
-const DEFAULT_SERVER_BIND: &str = "0.0.0.0:4433";
+const DEFAULT_SERVER_BIND: &str = "0.0.0.0:5201";
 const DEFAULT_CLIENT_BIND: &str = "0.0.0.0:0";
+const DEFAULT_TLS_SERVER_NAME: &str = "tcp-iperf3.local";
 
 type AppResult<T> = Result<T, String>;
 
@@ -26,48 +24,11 @@ struct ReportSnapshot {
     bytes: u64,
 }
 
-#[derive(Clone, Copy)]
-enum TransportProtocol {
-    Quic,
-    Tcp,
-}
-
-impl TransportProtocol {
-    fn parse(value: &str) -> AppResult<Self> {
-        match value.to_ascii_lowercase().as_str() {
-            "quic" => Ok(Self::Quic),
-            "tcp" => Ok(Self::Tcp),
-            _ => Err(format!("invalid protocol: {value}, expected quic or tcp")),
-        }
-    }
-
-    fn cyfs_protocol(self) -> CyfsProtocol {
-        match self {
-            Self::Quic => CyfsProtocol::Udp,
-            Self::Tcp => CyfsProtocol::Tcp,
-        }
-    }
-
-    fn p2p_protocol(self) -> P2pProtocol {
-        match self {
-            Self::Quic => P2pProtocol::Quic,
-            Self::Tcp => P2pProtocol::Tcp,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Quic => "QUIC",
-            Self::Tcp => "TCP",
-        }
-    }
-}
-
 #[derive(Clone)]
 struct ServerOpts {
     bind: SocketAddr,
     interval_secs: u64,
-    protocol: TransportProtocol,
+    tls: bool,
 }
 
 #[derive(Clone)]
@@ -78,17 +39,71 @@ struct ClientOpts {
     len: usize,
     parallel: usize,
     interval_secs: u64,
-    protocol: TransportProtocol,
+    tls: bool,
 }
+
+trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+type BoxedStream = Box<dyn AsyncStream>;
+
+struct ConnectedStream {
+    stream: BoxedStream,
+    local: SocketAddr,
+    remote: SocketAddr,
+}
+
+#[derive(Debug)]
+struct NoCertificateVerification;
 
 enum Command {
     Server(ServerOpts),
     Client(ClientOpts),
 }
 
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    // sfo_log::Logger::new("cyfs_iperf3").set_log_to_file(false).start().unwrap();
     if let Err(err) = run().await {
         eprintln!("error: {err}");
         std::process::exit(1);
@@ -103,8 +118,8 @@ async fn run() -> AppResult<()> {
 }
 
 fn parse_command() -> AppResult<Command> {
-    let app = App::new("cyfs_iperf3")
-        .about("QUIC direct mode throughput tool for cyfs-p2p")
+    let app = App::new("tcp_iperf3")
+        .about("TCP throughput tool")
         .subcommand(
             SubCommand::with_name("server")
                 .about("Run throughput server")
@@ -117,22 +132,17 @@ fn parse_command() -> AppResult<Command> {
                         .help("listen address"),
                 )
                 .arg(
-                    Arg::with_name("protocol")
-                        .short("X")
-                        .long("protocol")
-                        .takes_value(true)
-                        .default_value("quic")
-                        .possible_values(&["quic", "tcp"])
-                        .case_insensitive(true)
-                        .help("transport protocol"),
-                )
-                .arg(
                     Arg::with_name("interval")
                         .short("i")
                         .long("interval")
                         .takes_value(true)
                         .default_value("1")
                         .help("report interval in seconds"),
+                )
+                .arg(
+                    Arg::with_name("tls")
+                        .long("tls")
+                        .help("enable TLS over TCP"),
                 ),
         )
         .subcommand(
@@ -155,16 +165,6 @@ fn parse_command() -> AppResult<Command> {
                         .help("local bind address"),
                 )
                 .arg(
-                    Arg::with_name("protocol")
-                        .short("X")
-                        .long("protocol")
-                        .takes_value(true)
-                        .default_value("quic")
-                        .possible_values(&["quic", "tcp"])
-                        .case_insensitive(true)
-                        .help("transport protocol"),
-                )
-                .arg(
                     Arg::with_name("time")
                         .short("t")
                         .long("time")
@@ -177,7 +177,7 @@ fn parse_command() -> AppResult<Command> {
                         .short("l")
                         .long("len")
                         .takes_value(true)
-                        .default_value("16384")
+                        .default_value("262144")
                         .help("write size per send in bytes"),
                 )
                 .arg(
@@ -195,6 +195,11 @@ fn parse_command() -> AppResult<Command> {
                         .takes_value(true)
                         .default_value("1")
                         .help("report interval in seconds"),
+                )
+                .arg(
+                    Arg::with_name("tls")
+                        .long("tls")
+                        .help("enable TLS over TCP"),
                 ),
         );
 
@@ -209,7 +214,6 @@ fn parse_command() -> AppResult<Command> {
 fn parse_server_args(matches: &clap::ArgMatches<'_>) -> AppResult<ServerOpts> {
     let bind = parse_socket(value_of(matches, "bind")?)?;
     let interval_secs = parse_u64("--interval", value_of(matches, "interval")?)?;
-    let protocol = TransportProtocol::parse(value_of(matches, "protocol")?)?;
 
     if interval_secs == 0 {
         return Err("--interval must be > 0".to_string());
@@ -218,7 +222,7 @@ fn parse_server_args(matches: &clap::ArgMatches<'_>) -> AppResult<ServerOpts> {
     Ok(ServerOpts {
         bind,
         interval_secs,
-        protocol,
+        tls: matches.is_present("tls"),
     })
 }
 
@@ -229,7 +233,6 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
     let len = parse_usize("--len", value_of(matches, "len")?)?;
     let parallel = parse_usize("--parallel", value_of(matches, "parallel")?)?;
     let interval_secs = parse_u64("--interval", value_of(matches, "interval")?)?;
-    let protocol = TransportProtocol::parse(value_of(matches, "protocol")?)?;
 
     if time_secs == 0 {
         return Err("--time must be > 0".to_string());
@@ -251,7 +254,7 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
         len,
         parallel,
         interval_secs,
-        protocol,
+        tls: matches.is_present("tls"),
     })
 }
 
@@ -281,17 +284,47 @@ fn parse_usize(name: &str, value: &str) -> AppResult<usize> {
 
 fn usage() -> String {
     [
-        "cyfs_iperf3 (QUIC direct mode, no SN)",
+        "tcp_perf",
         "",
         "Usage:",
-        "  cyfs_iperf3 server [-B <ip:port>] [-X <quic|tcp>] [-i <seconds>]",
-        "  cyfs_iperf3 client -c <ip:port> [-B <ip:port>] [-X <quic|tcp>] [-t <seconds>] [-l <bytes>] [-P <n>] [-i <seconds>]",
+        "  tcp_perf server [-B <ip:port>] [-i <seconds>] [--tls]",
+        "  tcp_perf client -c <ip:port> [-B <ip:port>] [-t <seconds>] [-l <bytes>] [-P <n>] [-i <seconds>] [--tls]",
         "",
         "Examples:",
-        "  cyfs_iperf3 server -B 0.0.0.0:4433 -X quic",
-        "  cyfs_iperf3 client -c 127.0.0.1:4433 -t 10 -P 4 -X tcp",
+        "  tcp_perf server -B 0.0.0.0:5201",
+        "  tcp_perf client -c 127.0.0.1:5201 -t 10 -P 4",
+        "  tcp_perf server -B 0.0.0.0:5201 --tls",
+        "  tcp_perf client -c 127.0.0.1:5201 -t 10 -P 4 --tls",
     ]
     .join("\n")
+}
+
+fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::ring::default_provider()
+}
+
+fn build_server_tls_acceptor() -> AppResult<TlsAcceptor> {
+    let certified = rcgen::generate_simple_self_signed(vec![DEFAULT_TLS_SERVER_NAME.to_string()])
+        .map_err(|e| format!("generate self-signed certificate failed: {e}"))?;
+    let cert_chain = vec![certified.cert.der().clone()];
+    let key = PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der());
+    let config = ServerConfig::builder_with_provider(provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| format!("build tls server config failed: {e}"))?
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key.into())
+        .map_err(|e| format!("install tls server certificate failed: {e}"))?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+fn build_client_tls_connector() -> AppResult<TlsConnector> {
+    let config = ClientConfig::builder_with_provider(provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| format!("build tls client config failed: {e}"))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
+    Ok(TlsConnector::from(Arc::new(config)))
 }
 
 fn format_bytes(bytes: u64) -> (f64, &'static str) {
@@ -347,10 +380,8 @@ fn print_connection_line(id: &str, local: SocketAddr, remote: SocketAddr) {
 
 fn print_report_line(id: &str, snapshot: &ReportSnapshot) {
     let (transfer, transfer_unit) = format_bytes(snapshot.bytes);
-    let (bitrate, bitrate_unit) = format_bitrate(
-        snapshot.bytes,
-        snapshot.end_secs - snapshot.start_secs,
-    );
+    let (bitrate, bitrate_unit) =
+        format_bitrate(snapshot.bytes, snapshot.end_secs - snapshot.start_secs);
     println!(
         "[{id:>3}] {start:>6.2}-{end:>6.2} sec  {transfer:>6.2} {transfer_unit:<7}  {bitrate:>6.2} {bitrate_unit}",
         start = snapshot.start_secs,
@@ -362,102 +393,65 @@ fn print_report_line(id: &str, snapshot: &ReportSnapshot) {
     );
 }
 
-fn new_endpoint(protocol: TransportProtocol, addr: SocketAddr) -> CyfsEndpoint {
-    let mut ep = CyfsEndpoint::from((protocol.cyfs_protocol(), addr));
-    ep.set_area(EndpointArea::Lan);
-    ep
-}
-
-async fn create_stack(bind_addr: SocketAddr, protocol: TransportProtocol) -> AppResult<P2pStackRef> {
-    let local_ep = new_endpoint(protocol, bind_addr);
-    let config = create_cyfs_p2p_config(vec![cyfs_to_p2p_endpoint(&local_ep)]);
-    let env = create_p2p_env(config).await.map_err(|e| {
-        format!(
-            "create p2p env failed, code={:?}, msg={}",
-            e.code(),
-            e.msg()
-        )
-    })?;
-
-    let (device, key) = generate_runtime_identity(vec![local_ep]).await?;
-    let stack_config = create_cyfs_p2p_stack_config(env, device, key, vec![]);
-    let stack = create_p2p_stack(stack_config).await.map_err(|e| {
-        format!(
-            "create p2p stack failed, code={:?}, msg={}",
-            e.code(),
-            e.msg()
-        )
-    })?;
-    stack.set_as_default();
-    Ok(stack)
-}
-
-async fn generate_runtime_identity(eps: Vec<CyfsEndpoint>) -> AppResult<(Device, PrivateKey)> {
-    let private_key = PrivateKey::generate_rsa(1024)
-        .map_err(|e| format!("generate rsa key failed: {e}"))?;
-    let public_key = private_key.public();
-    let mut device = Device::new(
-        None,
-        UniqueId::default(),
-        eps,
-        vec![],
-        vec![],
-        public_key.clone(),
-        Area::default(),
-        DeviceCategory::OOD,
-    )
-    .build();
-
-    let signer = RsaCPUObjectSigner::new(public_key, private_key.clone());
-    sign_and_push_named_object(
-        &signer,
-        &mut device,
-        &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF),
-    )
-    .await
-    .map_err(|e| format!("sign runtime device failed: {e}"))?;
-
-    Ok((device, private_key))
-}
-
 async fn run_server(opts: ServerOpts) -> AppResult<()> {
-    let stack = create_stack(opts.bind, opts.protocol).await?;
-    let listener = stack
-        .stream_manager()
-        .listen(PERF_VPORT)
+    let tls_acceptor = if opts.tls {
+        Some(build_server_tls_acceptor()?)
+    } else {
+        None
+    };
+    let listener = TcpListener::bind(opts.bind)
         .await
-        .map_err(|e| {
-            format!(
-                "listen failed, code={:?}, msg={}",
-                e.code(),
-                e.msg()
-            )
-        })?;
+        .map_err(|e| format!("tcp listen failed on {}: {e}", opts.bind))?;
+    let local = listener
+        .local_addr()
+        .map_err(|e| format!("get local listen address failed: {e}"))?;
+
+    println!(
+        "Server listening on {local} ({})",
+        if opts.tls {
+            "TLS over TCP"
+        } else {
+            "plain TCP"
+        }
+    );
 
     let interval = Duration::from_secs(opts.interval_secs);
     let next_conn_id = Arc::new(AtomicU64::new(1));
 
     loop {
-        let (mut read, _write) = listener.accept().await.map_err(|e| {
-            format!(
-                "accept failed, code={:?}, msg={}",
-                e.code(),
-                e.msg()
-            )
-        })?;
+        let (stream, remote) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept failed: {e}"))?;
+        let local = stream
+            .local_addr()
+            .map_err(|e| format!("get accepted local address failed: {e}"))?;
         let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
+        let tls_acceptor = tls_acceptor.clone();
+
         tokio::task::spawn(async move {
+            let mut stream: BoxedStream = if let Some(tls_acceptor) = tls_acceptor {
+                match tls_acceptor.accept(stream).await {
+                    Ok(stream) => Box::new(TlsStream::from(stream)),
+                    Err(e) => {
+                        eprintln!("server tls accept failed, conn {conn_id}: {e}");
+                        return;
+                    }
+                }
+            } else {
+                Box::new(stream)
+            };
+
             let mut transfer_started: Option<Instant> = None;
             let mut interval_started: Option<Instant> = None;
             let mut bytes = 0u64;
             let mut interval_bytes = 0u64;
             let mut printed_intro = false;
             let mut buf = vec![0u8; 64 * 1024];
+
             loop {
-                match read.read(buf.as_mut_slice()).await {
-                    Ok(0) => {
-                        break;
-                    }
+                match stream.read(buf.as_mut_slice()).await {
+                    Ok(0) => break,
                     Ok(n) => {
                         let n = n as u64;
                         let now = Instant::now();
@@ -466,11 +460,7 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
                             interval_started = Some(now);
                             if !printed_intro {
                                 print_separator();
-                                print_connection_line(
-                                    &conn_id.to_string(),
-                                    read.local().addr().clone(),
-                                    read.remote().addr().clone(),
-                                );
+                                print_connection_line(&conn_id.to_string(), local, remote);
                                 print_report_header();
                                 printed_intro = true;
                             }
@@ -506,14 +496,15 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
             }
 
             if let Some(started) = transfer_started {
+                let finished = Instant::now();
                 if let Some(begin) = interval_started {
-                    let elapsed = Instant::now().duration_since(begin);
+                    let elapsed = finished.duration_since(begin);
                     if interval_bytes > 0 && elapsed.as_secs_f64() > 0.0 {
                         print_report_line(
                             &conn_id.to_string(),
                             &ReportSnapshot {
                                 start_secs: begin.duration_since(started).as_secs_f64(),
-                                end_secs: Instant::now().duration_since(started).as_secs_f64(),
+                                end_secs: finished.duration_since(started).as_secs_f64(),
                                 bytes: interval_bytes,
                             },
                         );
@@ -523,26 +514,28 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
                     &conn_id.to_string(),
                     &ReportSnapshot {
                         start_secs: 0.0,
-                        end_secs: started.elapsed().as_secs_f64(),
+                        end_secs: finished.duration_since(started).as_secs_f64(),
                         bytes,
                     },
                 );
             }
         });
     }
-
 }
 
 async fn run_client(opts: ClientOpts) -> AppResult<()> {
-    let stack = create_stack(opts.bind, opts.protocol).await?;
-    let remote = P2pEndpoint::from((opts.protocol.p2p_protocol(), opts.server));
     let deadline = Instant::now() + Duration::from_secs(opts.time_secs);
+    let tls_connector = if opts.tls {
+        Some(build_client_tls_connector()?)
+    } else {
+        None
+    };
 
     print_separator();
     println!(
         "Client connecting to {}, {} port {}",
         opts.server.ip(),
-        opts.protocol.name(),
+        if opts.tls { "TLS/TCP" } else { "TCP" },
         opts.server.port()
     );
     println!("[  5] local {} connected to {}", opts.bind, opts.server);
@@ -561,35 +554,30 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
     let started = Instant::now();
     let mut handles = Vec::with_capacity(opts.parallel);
     for index in 0..opts.parallel {
-        let stack = stack.clone();
-        let remote = remote.clone();
+        let bind = opts.bind;
+        let server = opts.server;
         let bytes_total = bytes_total.clone();
         let deadline = deadline;
         let payload = vec![0u8; opts.len];
         let stream_id = (index + 5).to_string();
         let interval = Duration::from_secs(opts.interval_secs);
+        let tls_connector = tls_connector.clone();
 
         handles.push(tokio::task::spawn(async move {
-            let (read, mut write) = stack
-                .stream_manager()
-                .connect_direct(vec![remote], PERF_VPORT, None)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "connect direct failed, code={:?}, msg={}",
-                        e.code(),
-                        e.msg()
-                    )
-                })?;
+            let ConnectedStream {
+                mut stream,
+                local,
+                remote,
+            } = connect_from(bind, server, tls_connector).await?;
 
-            print_connection_line(&stream_id, read.local().addr().clone(), read.remote().addr().clone());
+            print_connection_line(&stream_id, local, remote);
 
             let stream_started = Instant::now();
             let mut interval_started = stream_started;
             let mut interval_bytes = 0u64;
             let mut total_bytes = 0u64;
             while Instant::now() < deadline {
-                write
+                stream
                     .write_all(payload.as_slice())
                     .await
                     .map_err(|e| format!("client write failed: {e}"))?;
@@ -602,7 +590,9 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
                     print_report_line(
                         &stream_id,
                         &ReportSnapshot {
-                            start_secs: interval_started.duration_since(stream_started).as_secs_f64(),
+                            start_secs: interval_started
+                                .duration_since(stream_started)
+                                .as_secs_f64(),
                             end_secs: now.duration_since(stream_started).as_secs_f64(),
                             bytes: interval_bytes,
                         },
@@ -612,7 +602,7 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
                 }
             }
 
-            write
+            stream
                 .flush()
                 .await
                 .map_err(|e| format!("client flush failed: {e}"))?;
@@ -622,7 +612,9 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
                 print_report_line(
                     &stream_id,
                     &ReportSnapshot {
-                        start_secs: interval_started.duration_since(stream_started).as_secs_f64(),
+                        start_secs: interval_started
+                            .duration_since(stream_started)
+                            .as_secs_f64(),
                         end_secs: now.duration_since(stream_started).as_secs_f64(),
                         bytes: interval_bytes,
                     },
@@ -662,6 +654,49 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
         );
     }
     Ok(())
+}
+
+async fn connect_from(
+    bind: SocketAddr,
+    server: SocketAddr,
+    tls_connector: Option<TlsConnector>,
+) -> AppResult<ConnectedStream> {
+    let socket = if server.is_ipv4() {
+        tokio::net::TcpSocket::new_v4().map_err(|e| format!("create tcp v4 socket failed: {e}"))?
+    } else {
+        tokio::net::TcpSocket::new_v6().map_err(|e| format!("create tcp v6 socket failed: {e}"))?
+    };
+    socket
+        .bind(bind)
+        .map_err(|e| format!("bind local tcp address {bind} failed: {e}"))?;
+    let socket = socket
+        .connect(server)
+        .await
+        .map_err(|e| format!("connect tcp server {server} failed: {e}"))?;
+    let local = socket
+        .local_addr()
+        .map_err(|e| format!("get local tcp address failed: {e}"))?;
+    let remote = socket
+        .peer_addr()
+        .map_err(|e| format!("get remote tcp address failed: {e}"))?;
+
+    let stream: BoxedStream = if let Some(tls_connector) = tls_connector {
+        let server_name = ServerName::try_from(DEFAULT_TLS_SERVER_NAME)
+            .map_err(|e| format!("invalid tls server name: {e}"))?;
+        let stream = tls_connector
+            .connect(server_name, socket)
+            .await
+            .map_err(|e| format!("tls connect to {server} failed: {e}"))?;
+        Box::new(TlsStream::from(stream))
+    } else {
+        Box::new(socket)
+    };
+
+    Ok(ConnectedStream {
+        stream,
+        local,
+        remote,
+    })
 }
 
 async fn start_reporter(

@@ -519,7 +519,10 @@ impl TunnelConnectionRead {
                             Err(err) => return (read, Err(err)),
                         };
                         if ret != buf.len() {
-                            return (read, Err(p2p_err!(P2pErrorCode::IoError, "read len not match")));
+                            return (
+                                read,
+                                Err(p2p_err!(P2pErrorCode::IoError, "read len not match")),
+                            );
                         }
                     }
 
@@ -534,7 +537,10 @@ impl TunnelConnectionRead {
                             Err(err) => break (read, Err(err)),
                         };
                         if ret != buf_header.len() {
-                            break (read, Err(p2p_err!(P2pErrorCode::IoError, "read len not match")));
+                            break (
+                                read,
+                                Err(p2p_err!(P2pErrorCode::IoError, "read len not match")),
+                            );
                         }
 
                         let header = PackageHeader::clone_from_slice(buf_header.as_slice())
@@ -559,7 +565,10 @@ impl TunnelConnectionRead {
                                 Err(err) => break (read, Err(err)),
                             };
                             if ret != body.len() {
-                                break (read, Err(p2p_err!(P2pErrorCode::IoError, "read len not match")));
+                                break (
+                                    read,
+                                    Err(p2p_err!(P2pErrorCode::IoError, "read len not match")),
+                                );
                             }
                         }
 
@@ -567,12 +576,15 @@ impl TunnelConnectionRead {
                             PackageCmdCode::SynClose => break (read, Ok(())),
                             PackageCmdCode::PieceData => {}
                             _ => {
-                                break (read, Err(p2p_err!(
-                                    P2pErrorCode::ErrorState,
-                                    "tunnel {:?} invalid cmd code {:?}",
-                                    session_id,
-                                    cmd_code
-                                )));
+                                break (
+                                    read,
+                                    Err(p2p_err!(
+                                        P2pErrorCode::ErrorState,
+                                        "tunnel {:?} invalid cmd code {:?}",
+                                        session_id,
+                                        cmd_code
+                                    )),
+                                );
                             }
                         }
                     }

@@ -1,18 +1,19 @@
 use clap::{App, Arg, SubCommand};
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, ServerConfig, SignatureScheme};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, ServerConfig, SignatureScheme,
+};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
+use tokio::io::AsyncWriteExt;
 
 const DEFAULT_SERVER_BIND: &str = "0.0.0.0:5201";
 const DEFAULT_CLIENT_BIND: &str = "0.0.0.0:0";
-const DEFAULT_TLS_SERVER_NAME: &str = "tcp-iperf3.local";
+const DEFAULT_TLS_SERVER_NAME: &str = "quinn-iperf3.local";
 
 type AppResult<T> = Result<T, String>;
 
@@ -26,7 +27,6 @@ struct ReportSnapshot {
 struct ServerOpts {
     bind: SocketAddr,
     interval_secs: u64,
-    tls: bool,
 }
 
 #[derive(Clone)]
@@ -37,19 +37,6 @@ struct ClientOpts {
     len: usize,
     parallel: usize,
     interval_secs: u64,
-    tls: bool,
-}
-
-trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
-type BoxedStream = Box<dyn AsyncStream>;
-
-struct ConnectedStream {
-    stream: BoxedStream,
-    local: SocketAddr,
-    remote: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -116,8 +103,8 @@ async fn run() -> AppResult<()> {
 }
 
 fn parse_command() -> AppResult<Command> {
-    let app = App::new("tcp_iperf3")
-        .about("TCP throughput tool")
+    let app = App::new("quinn_perf")
+        .about("QUIC throughput tool based on quinn")
         .subcommand(
             SubCommand::with_name("server")
                 .about("Run throughput server")
@@ -136,11 +123,6 @@ fn parse_command() -> AppResult<Command> {
                         .takes_value(true)
                         .default_value("1")
                         .help("report interval in seconds"),
-                )
-                .arg(
-                    Arg::with_name("tls")
-                        .long("tls")
-                        .help("enable TLS over TCP"),
                 ),
         )
         .subcommand(
@@ -193,11 +175,6 @@ fn parse_command() -> AppResult<Command> {
                         .takes_value(true)
                         .default_value("1")
                         .help("report interval in seconds"),
-                )
-                .arg(
-                    Arg::with_name("tls")
-                        .long("tls")
-                        .help("enable TLS over TCP"),
                 ),
         );
 
@@ -220,7 +197,6 @@ fn parse_server_args(matches: &clap::ArgMatches<'_>) -> AppResult<ServerOpts> {
     Ok(ServerOpts {
         bind,
         interval_secs,
-        tls: matches.is_present("tls"),
     })
 }
 
@@ -252,7 +228,6 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
         len,
         parallel,
         interval_secs,
-        tls: matches.is_present("tls"),
     })
 }
 
@@ -282,17 +257,15 @@ fn parse_usize(name: &str, value: &str) -> AppResult<usize> {
 
 fn usage() -> String {
     [
-        "tcp_iperf3",
+        "quinn_perf",
         "",
         "Usage:",
-        "  tcp_iperf3 server [-B <ip:port>] [-i <seconds>] [--tls]",
-        "  tcp_iperf3 client -c <ip:port> [-B <ip:port>] [-t <seconds>] [-l <bytes>] [-P <n>] [-i <seconds>] [--tls]",
+        "  quinn_perf server [-B <ip:port>] [-i <seconds>]",
+        "  quinn_perf client -c <ip:port> [-B <ip:port>] [-t <seconds>] [-l <bytes>] [-P <n>] [-i <seconds>]",
         "",
         "Examples:",
-        "  tcp_iperf3 server -B 0.0.0.0:5201",
-        "  tcp_iperf3 client -c 127.0.0.1:5201 -t 10 -P 4",
-        "  tcp_iperf3 server -B 0.0.0.0:5201 --tls",
-        "  tcp_iperf3 client -c 127.0.0.1:5201 -t 10 -P 4 --tls",
+        "  quinn_perf server -B 0.0.0.0:5201",
+        "  quinn_perf client -c 127.0.0.1:5201 -t 10 -P 4",
     ]
     .join("\n")
 }
@@ -301,7 +274,7 @@ fn provider() -> rustls::crypto::CryptoProvider {
     rustls::crypto::ring::default_provider()
 }
 
-fn build_server_tls_acceptor() -> AppResult<TlsAcceptor> {
+fn build_server_config() -> AppResult<quinn::ServerConfig> {
     let certified = rcgen::generate_simple_self_signed(vec![DEFAULT_TLS_SERVER_NAME.to_string()])
         .map_err(|e| format!("generate self-signed certificate failed: {e}"))?;
     let cert_chain = vec![certified.cert.der().clone()];
@@ -312,17 +285,37 @@ fn build_server_tls_acceptor() -> AppResult<TlsAcceptor> {
         .with_no_client_auth()
         .with_single_cert(cert_chain, key.into())
         .map_err(|e| format!("install tls server certificate failed: {e}"))?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
+
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+        QuicServerConfig::try_from(config)
+            .map_err(|e| format!("create quic server config failed: {e}"))?,
+    ));
+    let transport = Arc::get_mut(&mut server_config.transport)
+        .ok_or_else(|| "server transport config already shared".to_string())?;
+    transport.max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()));
+    transport.max_concurrent_bidi_streams(1024_u32.into());
+
+    Ok(server_config)
 }
 
-fn build_client_tls_connector() -> AppResult<TlsConnector> {
+fn build_client_config(parallel: usize) -> AppResult<quinn::ClientConfig> {
     let config = ClientConfig::builder_with_provider(provider().into())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| format!("build tls client config failed: {e}"))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
         .with_no_client_auth();
-    Ok(TlsConnector::from(Arc::new(config)))
+
+    let mut client_config = quinn::ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(config)
+            .map_err(|e| format!("create quic client config failed: {e}"))?,
+    ));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()));
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
+    transport.max_concurrent_bidi_streams((parallel as u32).max(1).into());
+    client_config.transport_config(Arc::new(transport));
+    Ok(client_config)
 }
 
 fn format_bytes(bytes: u64) -> (f64, &'static str) {
@@ -392,147 +385,162 @@ fn print_report_line(id: &str, snapshot: &ReportSnapshot) {
 }
 
 async fn run_server(opts: ServerOpts) -> AppResult<()> {
-    let tls_acceptor = if opts.tls {
-        Some(build_server_tls_acceptor()?)
-    } else {
-        None
-    };
-    let listener = TcpListener::bind(opts.bind)
-        .await
-        .map_err(|e| format!("tcp listen failed on {}: {e}", opts.bind))?;
-    let local = listener
+    let endpoint = quinn::Endpoint::server(build_server_config()?, opts.bind)
+        .map_err(|e| format!("quic listen failed on {}: {e}", opts.bind))?;
+    let local = endpoint
         .local_addr()
         .map_err(|e| format!("get local listen address failed: {e}"))?;
 
-    println!(
-        "Server listening on {local} ({})",
-        if opts.tls { "TLS over TCP" } else { "plain TCP" }
-    );
+    println!("Server listening on {local} (QUIC)");
 
     let interval = Duration::from_secs(opts.interval_secs);
-    let next_conn_id = Arc::new(AtomicU64::new(1));
+    let next_stream_id = Arc::new(AtomicU64::new(1));
 
-    loop {
-        let (stream, remote) = listener
-            .accept()
-            .await
-            .map_err(|e| format!("accept failed: {e}"))?;
-        let local = stream
-            .local_addr()
-            .map_err(|e| format!("get accepted local address failed: {e}"))?;
-        let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
-        let tls_acceptor = tls_acceptor.clone();
-
+    while let Some(incoming) = endpoint.accept().await {
+        let next_stream_id = next_stream_id.clone();
         tokio::task::spawn(async move {
-            let mut stream: BoxedStream = if let Some(tls_acceptor) = tls_acceptor {
-                match tls_acceptor.accept(stream).await {
-                    Ok(stream) => Box::new(TlsStream::from(stream)),
-                    Err(e) => {
-                        eprintln!("server tls accept failed, conn {conn_id}: {e}");
-                        return;
-                    }
+            let connection = match incoming.await {
+                Ok(connection) => connection,
+                Err(e) => {
+                    eprintln!("server quic accept failed: {e}");
+                    return;
                 }
-            } else {
-                Box::new(stream)
             };
-
-            let mut transfer_started: Option<Instant> = None;
-            let mut interval_started: Option<Instant> = None;
-            let mut bytes = 0u64;
-            let mut interval_bytes = 0u64;
-            let mut printed_intro = false;
-            let mut buf = vec![0u8; 64 * 1024];
+            let remote = connection.remote_address();
 
             loop {
-                match stream.read(buf.as_mut_slice()).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let n = n as u64;
-                        let now = Instant::now();
-                        if transfer_started.is_none() {
-                            transfer_started = Some(now);
-                            interval_started = Some(now);
-                            if !printed_intro {
-                                print_separator();
-                                print_connection_line(&conn_id.to_string(), local, remote);
-                                print_report_header();
-                                printed_intro = true;
-                            }
-                        }
-                        bytes += n;
-                        interval_bytes += n;
-                        if let Some(begin) = interval_started {
-                            let elapsed = now.duration_since(begin);
-                            if elapsed >= interval {
-                                if interval_bytes > 0 {
-                                    let base = transfer_started.unwrap();
-                                    print_report_line(
-                                        &conn_id.to_string(),
-                                        &ReportSnapshot {
-                                            start_secs: begin.duration_since(base).as_secs_f64(),
-                                            end_secs: now.duration_since(base).as_secs_f64(),
-                                            bytes: interval_bytes,
-                                        },
-                                    );
-                                }
-                                interval_started = Some(now);
-                                interval_bytes = 0;
-                            }
-                        }
+                match connection.accept_bi().await {
+                    Ok((_send, recv)) => {
+                        let stream_id = next_stream_id.fetch_add(1, Ordering::Relaxed);
+                        tokio::task::spawn(handle_server_stream(
+                            stream_id, local, remote, interval, recv,
+                        ));
                     }
+                    Err(quinn::ConnectionError::ApplicationClosed(_)) => break,
+                    Err(quinn::ConnectionError::ConnectionClosed(_)) => break,
+                    Err(quinn::ConnectionError::LocallyClosed) => break,
                     Err(e) => {
-                        if transfer_started.is_some() {
-                            eprintln!("server connection read error, conn {conn_id}: {e}");
-                        }
+                        eprintln!("server stream accept error from {remote}: {e}");
                         break;
                     }
                 }
             }
+        });
+    }
 
-            if let Some(started) = transfer_started {
-                let finished = Instant::now();
-                if let Some(begin) = interval_started {
-                    let elapsed = finished.duration_since(begin);
-                    if interval_bytes > 0 && elapsed.as_secs_f64() > 0.0 {
-                        print_report_line(
-                            &conn_id.to_string(),
-                            &ReportSnapshot {
-                                start_secs: begin.duration_since(started).as_secs_f64(),
-                                end_secs: finished.duration_since(started).as_secs_f64(),
-                                bytes: interval_bytes,
-                            },
-                        );
+    Ok(())
+}
+
+async fn handle_server_stream(
+    stream_id: u64,
+    local: SocketAddr,
+    remote: SocketAddr,
+    interval: Duration,
+    mut recv: quinn::RecvStream,
+) {
+    let mut transfer_started: Option<Instant> = None;
+    let mut interval_started: Option<Instant> = None;
+    let mut bytes = 0u64;
+    let mut interval_bytes = 0u64;
+    let mut printed_intro = false;
+    let mut buf = vec![0u8; 64 * 1024];
+
+    loop {
+        match recv.read(buf.as_mut_slice()).await {
+            Ok(None) => break,
+            Ok(Some(n)) => {
+                let n = n as u64;
+                let now = Instant::now();
+                if transfer_started.is_none() {
+                    transfer_started = Some(now);
+                    interval_started = Some(now);
+                    if !printed_intro {
+                        print_separator();
+                        print_connection_line(&stream_id.to_string(), local, remote);
+                        print_report_header();
+                        printed_intro = true;
                     }
                 }
+                bytes += n;
+                interval_bytes += n;
+                if let Some(begin) = interval_started {
+                    let elapsed = now.duration_since(begin);
+                    if elapsed >= interval {
+                        if interval_bytes > 0 {
+                            let base = transfer_started.unwrap();
+                            print_report_line(
+                                &stream_id.to_string(),
+                                &ReportSnapshot {
+                                    start_secs: begin.duration_since(base).as_secs_f64(),
+                                    end_secs: now.duration_since(base).as_secs_f64(),
+                                    bytes: interval_bytes,
+                                },
+                            );
+                        }
+                        interval_started = Some(now);
+                        interval_bytes = 0;
+                    }
+                }
+            }
+            Err(e) => {
+                if transfer_started.is_some() {
+                    eprintln!("server connection read error, stream {stream_id}: {e}");
+                }
+                break;
+            }
+        }
+    }
+
+    if let Some(started) = transfer_started {
+        let finished = Instant::now();
+        if let Some(begin) = interval_started {
+            let elapsed = finished.duration_since(begin);
+            if interval_bytes > 0 && elapsed.as_secs_f64() > 0.0 {
                 print_report_line(
-                    &conn_id.to_string(),
+                    &stream_id.to_string(),
                     &ReportSnapshot {
-                        start_secs: 0.0,
+                        start_secs: begin.duration_since(started).as_secs_f64(),
                         end_secs: finished.duration_since(started).as_secs_f64(),
-                        bytes,
+                        bytes: interval_bytes,
                     },
                 );
             }
-        });
+        }
+        print_report_line(
+            &stream_id.to_string(),
+            &ReportSnapshot {
+                start_secs: 0.0,
+                end_secs: finished.duration_since(started).as_secs_f64(),
+                bytes,
+            },
+        );
     }
 }
 
 async fn run_client(opts: ClientOpts) -> AppResult<()> {
     let deadline = Instant::now() + Duration::from_secs(opts.time_secs);
-    let tls_connector = if opts.tls {
-        Some(build_client_tls_connector()?)
-    } else {
-        None
-    };
+    let client_config = build_client_config(opts.parallel)?;
+    let mut endpoint = quinn::Endpoint::client(opts.bind)
+        .map_err(|e| format!("create quic client endpoint on {} failed: {e}", opts.bind))?;
+    endpoint.set_default_client_config(client_config);
+
+    let connection = endpoint
+        .connect(opts.server, DEFAULT_TLS_SERVER_NAME)
+        .map_err(|e| format!("start quic connect to {} failed: {e}", opts.server))?
+        .await
+        .map_err(|e| format!("quic connect to {} failed: {e}", opts.server))?;
+    let local = endpoint
+        .local_addr()
+        .map_err(|e| format!("get local quic address failed: {e}"))?;
+    let remote = connection.remote_address();
 
     print_separator();
     println!(
-        "Client connecting to {}, {} port {}",
+        "Client connecting to {}, QUIC port {}",
         opts.server.ip(),
-        if opts.tls { "TLS/TCP" } else { "TCP" },
         opts.server.port()
     );
-    println!("[  5] local {} connected to {}", opts.bind, opts.server);
+    println!("[  5] local {local} connected to {remote}");
     print_report_header();
 
     let bytes_total = Arc::new(AtomicU64::new(0));
@@ -548,21 +556,17 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
     let started = Instant::now();
     let mut handles = Vec::with_capacity(opts.parallel);
     for index in 0..opts.parallel {
-        let bind = opts.bind;
-        let server = opts.server;
+        let connection = connection.clone();
         let bytes_total = bytes_total.clone();
-        let deadline = deadline;
         let payload = vec![0u8; opts.len];
         let stream_id = (index + 5).to_string();
         let interval = Duration::from_secs(opts.interval_secs);
-        let tls_connector = tls_connector.clone();
 
         handles.push(tokio::task::spawn(async move {
-            let ConnectedStream {
-                mut stream,
-                local,
-                remote,
-            } = connect_from(bind, server, tls_connector).await?;
+            let (mut send, _recv) = connection
+                .open_bi()
+                .await
+                .map_err(|e| format!("open quic stream failed: {e}"))?;
 
             print_connection_line(&stream_id, local, remote);
 
@@ -571,8 +575,7 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
             let mut interval_bytes = 0u64;
             let mut total_bytes = 0u64;
             while Instant::now() < deadline {
-                stream
-                    .write_all(payload.as_slice())
+                send.write_all(payload.as_slice())
                     .await
                     .map_err(|e| format!("client write failed: {e}"))?;
                 bytes_total.fetch_add(payload.len() as u64, Ordering::Relaxed);
@@ -584,7 +587,9 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
                     print_report_line(
                         &stream_id,
                         &ReportSnapshot {
-                            start_secs: interval_started.duration_since(stream_started).as_secs_f64(),
+                            start_secs: interval_started
+                                .duration_since(stream_started)
+                                .as_secs_f64(),
                             end_secs: now.duration_since(stream_started).as_secs_f64(),
                             bytes: interval_bytes,
                         },
@@ -594,17 +599,21 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
                 }
             }
 
-            stream
-                .flush()
+            send.flush()
                 .await
                 .map_err(|e| format!("client flush failed: {e}"))?;
+            send.shutdown()
+                .await
+                .map_err(|e| format!("client shutdown failed: {e}"))?;
 
             if interval_bytes > 0 {
                 let now = Instant::now();
                 print_report_line(
                     &stream_id,
                     &ReportSnapshot {
-                        start_secs: interval_started.duration_since(stream_started).as_secs_f64(),
+                        start_secs: interval_started
+                            .duration_since(stream_started)
+                            .as_secs_f64(),
                         end_secs: now.duration_since(stream_started).as_secs_f64(),
                         bytes: interval_bytes,
                     },
@@ -643,50 +652,10 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
             },
         );
     }
+
+    connection.close(0u32.into(), b"done");
+    endpoint.wait_idle().await;
     Ok(())
-}
-
-async fn connect_from(
-    bind: SocketAddr,
-    server: SocketAddr,
-    tls_connector: Option<TlsConnector>,
-) -> AppResult<ConnectedStream> {
-    let socket = if server.is_ipv4() {
-        tokio::net::TcpSocket::new_v4().map_err(|e| format!("create tcp v4 socket failed: {e}"))?
-    } else {
-        tokio::net::TcpSocket::new_v6().map_err(|e| format!("create tcp v6 socket failed: {e}"))?
-    };
-    socket
-        .bind(bind)
-        .map_err(|e| format!("bind local tcp address {bind} failed: {e}"))?;
-    let socket = socket
-        .connect(server)
-        .await
-        .map_err(|e| format!("connect tcp server {server} failed: {e}"))?;
-    let local = socket
-        .local_addr()
-        .map_err(|e| format!("get local tcp address failed: {e}"))?;
-    let remote = socket
-        .peer_addr()
-        .map_err(|e| format!("get remote tcp address failed: {e}"))?;
-
-    let stream: BoxedStream = if let Some(tls_connector) = tls_connector {
-        let server_name = ServerName::try_from(DEFAULT_TLS_SERVER_NAME)
-            .map_err(|e| format!("invalid tls server name: {e}"))?;
-        let stream = tls_connector
-            .connect(server_name, socket)
-            .await
-            .map_err(|e| format!("tls connect to {server} failed: {e}"))?;
-        Box::new(TlsStream::from(stream))
-    } else {
-        Box::new(socket)
-    };
-
-    Ok(ConnectedStream {
-        stream,
-        local,
-        remote,
-    })
 }
 
 async fn start_reporter(

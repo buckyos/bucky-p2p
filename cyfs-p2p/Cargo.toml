@@ -29,6 +29,7 @@ nix = '0.24'
 [dev-dependencies]
 sfo-log = "0.1"
 rcgen = "0.13"
+quinn = { version = "0.11.9", default-features = false, features = ["rustls", "ring", "runtime-tokio"] }
 rustls = { version = "0.23.20", default-features = false, features = ["ring", "std"] }
 
 [features]

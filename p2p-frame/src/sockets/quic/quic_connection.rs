@@ -378,13 +378,13 @@ impl runtime::AsyncRead for QuicRead {
             Poll::Ready(ret) => match ret {
                 Ok(size) => {
                     buf.advance(size);
-                    log::trace!(
-                        "quic conn {} stream {} read size {} data {}",
-                        self.socket.stable_id(),
-                        self.recv.id(),
-                        size,
-                        hex::encode(buf.filled())
-                    );
+                    // log::trace!(
+                    //     "quic conn {} stream {} read size {} data {}",
+                    //     self.socket.stable_id(),
+                    //     self.recv.id(),
+                    //     size,
+                    //     hex::encode(buf.filled())
+                    // );
                     Poll::Ready(Ok(()))
                 }
                 Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
@@ -555,18 +555,18 @@ impl runtime::AsyncWrite for QuicWrite {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        let conn_id = self.socket.as_ref().unwrap().stable_id();
+        // let conn_id = self.socket.as_ref().unwrap().stable_id();
         let send = self.send.as_mut().unwrap();
-        let stream_id = send.id();
+        // let stream_id = send.id();
         match Pin::new(send).poll_write(cx, buf) {
             Poll::Ready(ret) => match ret {
                 Ok(size) => {
-                    log::trace!(
-                        "quic connection {} stream {} send data {}",
-                        conn_id,
-                        stream_id,
-                        hex::encode(buf)
-                    );
+                    // log::trace!(
+                    //     "quic connection {} stream {} send data {}",
+                    //     conn_id,
+                    //     stream_id,
+                    //     hex::encode(buf)
+                    // );
                     Poll::Ready(Ok(size))
                 }
                 Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
