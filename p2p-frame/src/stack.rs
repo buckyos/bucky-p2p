@@ -4,8 +4,9 @@ use crate::error::P2pResult;
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
-    DefaultDeviceFinder, NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicTunnelNetwork,
-    TcpTunnelNetwork, TunnelManager as NetworkTunnelManager, TunnelNetworkRef,
+    DefaultDeviceFinder, IncomingTunnelValidatorRef, NetManager, NetManagerRef,
+    QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
+    TunnelManager as NetworkTunnelManager, TunnelNetworkRef, allow_all_incoming_tunnel_validator,
 };
 use crate::p2p_identity::{
     P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef,
@@ -78,6 +79,7 @@ pub struct P2pConfig {
     identity_cert_cache: P2pIdentityCertCacheRef,
     sever_cert_resolver: ServerCertResolverRef,
     connection_info_cache: P2pConnectionInfoCacheRef,
+    incoming_tunnel_validator: IncomingTunnelValidatorRef,
     extra_networks: Vec<TunnelNetworkRef>,
     endpoints: Vec<Endpoint>,
     port_mapping: Option<Vec<(Endpoint, u16)>>,
@@ -106,6 +108,7 @@ impl P2pConfig {
             )),
             sever_cert_resolver: DefaultTlsServerCertResolver::new(),
             connection_info_cache: DefaultP2pConnectionInfoCache::new(),
+            incoming_tunnel_validator: allow_all_incoming_tunnel_validator(),
             extra_networks: Vec::new(),
             endpoints,
             port_mapping: None,
@@ -231,6 +234,18 @@ impl P2pConfig {
         &self.connection_info_cache
     }
 
+    pub fn incoming_tunnel_validator(&self) -> &IncomingTunnelValidatorRef {
+        &self.incoming_tunnel_validator
+    }
+
+    pub fn set_incoming_tunnel_validator(
+        mut self,
+        incoming_tunnel_validator: IncomingTunnelValidatorRef,
+    ) -> Self {
+        self.incoming_tunnel_validator = incoming_tunnel_validator;
+        self
+    }
+
     pub fn quic_congestion_algorithm(&self) -> QuicCongestionAlgorithm {
         self.quic_congestion_algorithm
     }
@@ -270,7 +285,11 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
             config.quic_idle_time,
         )) as TunnelNetworkRef,
     ]);
-    let net_manager = NetManager::new(tunnel_networks, tsl_server_cert_resolver.clone())?;
+    let net_manager = NetManager::new_with_incoming_tunnel_validator(
+        tunnel_networks,
+        tsl_server_cert_resolver.clone(),
+        config.incoming_tunnel_validator().clone(),
+    )?;
     Ok(P2pEnv::new(
         net_manager,
         identity_factory.clone(),

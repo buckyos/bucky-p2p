@@ -5,22 +5,25 @@ mod network;
 mod quic;
 mod tcp;
 mod tunnel;
+mod validator;
 
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
+pub use crate::tunnel::{
+    DefaultDeviceFinder, DeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerRef,
+    TunnelSubscription,
+};
 pub use command::*;
 use futures::FutureExt;
 pub use listener::*;
 pub use net_manager::*;
 pub use network::*;
 pub use quic::*;
-pub use crate::tunnel::{
-    DefaultDeviceFinder, DeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerRef,
-    TunnelSubscription,
-};
 use rustls::pki_types::ServerName;
 use std::fmt::Debug;
+use std::future::Future;
 pub use tcp::*;
 pub use tunnel::*;
+pub use validator::*;
 
 pub fn validate_server_name(server_name: String) -> String {
     match ServerName::try_from(server_name.as_str()) {
