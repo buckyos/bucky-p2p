@@ -128,6 +128,7 @@ pub struct Config {
 async fn main() {
     sfo_log::Logger::new("cyfs-p2p-test")
         .set_log_to_file(true)
+        .add_filter("quinn")
         .set_log_file_count(5)
         .set_log_level("debug")
         .start()
@@ -169,6 +170,7 @@ async fn main() {
     match matches.subcommand() {
         ("all-in-one", _) => {
             all_in_one().await;
+            return;
         }
         ("client", Some(matches)) => {
             let data_folder = matches.value_of("config").unwrap();
@@ -494,20 +496,13 @@ where
         Err(e) => {
             if passed {
                 log::info!(
-                    "[case:{}] pass(expected fail) code={:?} msg={} latency={}ms",
+                    "[case:{}] pass(expected fail) err={:?}latency={}ms",
                     name,
-                    e.code(),
-                    e.msg(),
+                    e,
                     latency_ms
                 );
             } else {
-                log::error!(
-                    "[case:{}] fail code={:?} msg={} latency={}ms",
-                    name,
-                    e.code(),
-                    e.msg(),
-                    latency_ms
-                );
+                log::error!("[case:{}] fail err={:?} latency={}ms", name, e, latency_ms);
             }
         }
     }
@@ -882,7 +877,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_direct_success failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "stream_wrong_port_fail_expected",
@@ -900,7 +895,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_wrong_port_fail_expected failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "datagram_direct_success",
@@ -927,7 +922,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case datagram_direct_success failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "direct_bad_endpoint_fail_expected",
@@ -957,7 +952,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case direct_bad_endpoint_fail_expected failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "reverse_connect_case",
@@ -992,7 +987,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reverse_connect_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "reverse_fail_case",
@@ -1010,7 +1005,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reverse_fail_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "proxy_connect_case",
@@ -1041,7 +1036,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_connect_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "proxy_datagram_case",
@@ -1068,7 +1063,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_datagram_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "proxy_fail_case",
@@ -1086,7 +1081,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_fail_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "reconnect_stability",
@@ -1120,7 +1115,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reconnect_stability failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "concurrent_stream_burst",
@@ -1153,14 +1148,14 @@ async fn all_in_one() {
                     });
                     tasks.push(task);
                 }
-
+        
                 for task in tasks {
                     let ret = task.await.map_err(|e| {
                         P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e))
                     })?;
                     ret?;
                 }
-
+        
                 Ok(())
             },
         )

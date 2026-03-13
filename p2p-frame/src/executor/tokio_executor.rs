@@ -1,7 +1,7 @@
 use crate::error::P2pResult;
 use once_cell::sync::OnceCell;
 use std::future::Future;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::task::JoinHandle;
 
 pub struct Executor;
@@ -45,11 +45,22 @@ impl Executor {
     {
         EXECUTOR.get().unwrap().spawn(future);
     }
-    pub fn block_on<F: Future>(f: F) -> F::Output {
-        if Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| EXECUTOR.get().unwrap().block_on(f))
-        } else {
-            EXECUTOR.get().unwrap().block_on(f)
+    pub fn block_on<F>(f: F) -> F::Output
+    where
+        F: Future + Send,
+        F::Output: Send,
+    {
+        match Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| EXECUTOR.get().unwrap().block_on(f))
+            }
+            Ok(_) => std::thread::scope(|scope| {
+                scope
+                    .spawn(|| EXECUTOR.get().unwrap().block_on(f))
+                    .join()
+                    .unwrap()
+            }),
+            Err(_) => EXECUTOR.get().unwrap().block_on(f),
         }
     }
 }

@@ -9,11 +9,11 @@ description = "Rust desc-tool package"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
-bucky-error = {git = "https://github.com/buckyos/bucky-error.git"}
-bucky-crypto = {git = "https://github.com/buckyos/bucky-crypto.git"}
-bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
-bucky-objects = {git = "https://github.com/buckyos/bucky-objects.git"}
+bucky-raw-codec = { version = "0.1", features = ["derive"] }
+bucky-error = "0.1"
+bucky-crypto = "0.1"
+bucky-time = "0.1"
+bucky-objects = "0.1"
 tokio = { version = "1.43.0", features = ["full"]}
 serde_json = "1.0"
 clap = "2.34.0"

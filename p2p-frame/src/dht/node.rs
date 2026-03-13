@@ -1,5 +1,5 @@
 use super::k_bucket::*;
-use crate::protocol::v0::*;
+use crate::sn::protocol::v0::*;
 use async_trait::async_trait;
 use log::*;
 use std::ops::Add;

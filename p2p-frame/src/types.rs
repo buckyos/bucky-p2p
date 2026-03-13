@@ -91,6 +91,68 @@ impl TunnelId {
     // }
 }
 
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
+pub struct TunnelCandidateId(u32);
+
+impl TunnelCandidateId {
+    pub fn value(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for TunnelCandidateId {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+impl From<u32> for TunnelCandidateId {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl Hash for TunnelCandidateId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u32(self.0)
+    }
+}
+
+pub struct TunnelCandidateIdGenerator {
+    cur: AtomicU32,
+}
+
+impl From<TunnelCandidateId> for TunnelCandidateIdGenerator {
+    fn from(init: TunnelCandidateId) -> Self {
+        Self {
+            cur: AtomicU32::new(init.value()),
+        }
+    }
+}
+
+impl TunnelCandidateIdGenerator {
+    pub fn new() -> Self {
+        let now = TunnelId::now(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+        );
+        Self {
+            cur: AtomicU32::new(now),
+        }
+    }
+
+    pub fn generate(&self) -> TunnelCandidateId {
+        let v = self.cur.fetch_add(1, Ordering::SeqCst);
+        if v == 0 {
+            TunnelCandidateId(self.cur.fetch_add(1, Ordering::SeqCst))
+        } else {
+            TunnelCandidateId(v)
+        }
+    }
+}
+
 impl PartialOrd for TunnelId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         if self.0 == 0 || other.0 == 0 {

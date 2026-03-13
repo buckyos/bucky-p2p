@@ -1,5 +1,5 @@
 use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId};
-use crate::protocol::{ReceiptWithSignature, SnServiceReceipt};
+use crate::sn::protocol::{ReceiptWithSignature, SnServiceReceipt};
 use std::time::SystemTime;
 
 pub type IsRequestReceipt = bool;

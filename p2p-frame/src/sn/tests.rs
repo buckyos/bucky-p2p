@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactory, P2pIdentityRef, P2pSn};
-use crate::protocol::v0::{SnCalled, TunnelType};
+use crate::sn::protocol::v0::{SnCalled, TunnelType};
 use crate::sn::service::{SnServiceConfig, SnServiceRef, create_sn_service};
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::TunnelId;

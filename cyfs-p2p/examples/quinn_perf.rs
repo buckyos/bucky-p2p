@@ -6,8 +6,8 @@ use rustls::{
     ClientConfig, DigitallySignedStruct, Error as RustlsError, ServerConfig, SignatureScheme,
 };
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 

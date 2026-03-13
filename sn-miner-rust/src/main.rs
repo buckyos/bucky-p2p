@@ -1,25 +1,16 @@
 use bucky_crypto::PrivateKey;
 use bucky_objects::{
-    Area, Device, DeviceCategory, DeviceId, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId,
+    Area, Device, DeviceCategory, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId,
 };
 use bucky_raw_codec::{FileDecoder, FileEncoder};
-use log::Record;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
 use std::sync::Arc;
-use std::thread;
 
 use cyfs_p2p::{CyfsIdentity, CyfsIdentityCertFactory, CyfsIdentityFactory};
 
 use cyfs_p2p::executor::Executor;
-use cyfs_p2p::p2p_identity::{EncodedP2pIdentityCert, P2pId};
-use cyfs_p2p::protocol::{ReceiptWithSignature, SnServiceReceipt};
-use cyfs_p2p::sn::service::{
-    create_sn_service, IsAcceptClient, ReceiptRequestTime, SnService, SnServiceConfig,
-    SnServiceContractServer,
-};
-#[warn(unused_imports)]
-pub(crate) use sfo_result::err as miner_err;
+use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
 pub(crate) use sfo_result::into_err as into_miner_err;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -31,30 +22,6 @@ pub type MinerResult<T> = sfo_result::Result<T, MinerErrorCode>;
 pub type MinerError = sfo_result::Error<MinerErrorCode>;
 
 const APP_NAME: &str = "sn-miner";
-
-struct SnServiceContractServerImpl {}
-
-impl SnServiceContractServerImpl {
-    fn new() -> SnServiceContractServerImpl {
-        SnServiceContractServerImpl {}
-    }
-}
-
-impl SnServiceContractServer for SnServiceContractServerImpl {
-    fn check_receipt(
-        &self,
-        _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
-        _local_receipt: &SnServiceReceipt,          // 本地(服务端)统计的服务清单
-        _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
-        _last_request_time: &ReceiptRequestTime,
-    ) -> IsAcceptClient {
-        IsAcceptClient::Accept(false)
-    }
-
-    fn verify_auth(&self, _client_peer_id: &P2pId) -> IsAcceptClient {
-        IsAcceptClient::Accept(false)
-    }
-}
 
 #[tokio::main]
 async fn main() {

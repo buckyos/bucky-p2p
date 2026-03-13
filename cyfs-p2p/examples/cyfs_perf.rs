@@ -177,7 +177,7 @@ fn parse_command() -> AppResult<Command> {
                         .short("l")
                         .long("len")
                         .takes_value(true)
-                        .default_value("16384")
+                        .default_value("262144")
                         .help("write size per send in bytes"),
                 )
                 .arg(

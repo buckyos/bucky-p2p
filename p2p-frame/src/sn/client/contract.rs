@@ -1,11 +1,11 @@
 use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef};
-use crate::protocol::{v0::*, *};
+use crate::sn::protocol::{v0::*, *};
 use crate::types::TunnelId;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{hash_map::Entry, HashMap},
     sync::{
-        Arc, Mutex,
         atomic::{self, AtomicU32},
+        Arc, Mutex,
     },
     time::SystemTime,
 };
@@ -49,7 +49,7 @@ struct ContractStat {
 }
 
 impl Contract {
-    fn on_ping_resp(&self, resp: &SnPingResp, rto: u16) {
+    fn on_ping_resp(&self, resp: &ReportSnResp, rto: u16) {
         if let Ok(wait_seq) = self.wait_seq.compare_exchange(
             resp.seq.value(),
             0,

@@ -1,6 +1,6 @@
 use crate::error::P2pResult;
+use crate::networks::parse_server_name;
 use crate::p2p_identity::{P2pId, P2pIdentity};
-use crate::sockets::parse_server_name;
 use crate::tls::sign::TlsKey;
 use rustls::pki_types::CertificateDer;
 use rustls::server::{ClientHello, ResolvesServerCert};

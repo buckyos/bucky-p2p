@@ -5,7 +5,7 @@ use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_connection::{P2pConnectionRef, P2pRead, P2pWrite};
 use crate::p2p_identity::P2pId;
-use crate::protocol::{Package, PackageCmdCode, PackageHeader};
+use crate::sn::protocol::{Package, PackageCmdCode, PackageHeader};
 use crate::runtime;
 use crate::types::TunnelId;
 
