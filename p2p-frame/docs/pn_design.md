@@ -90,8 +90,8 @@ PN 使用固定 `vport` 在 relay 上承载 channel stream：
 该 stream 由 `TTP` 提供：
 
 - `A` 侧通过 `TtpClient.open_stream(..., PN_PROXY_VPORT)` 打到 `S`
-- `S` 侧通过 `TtpServer` 接收来自 `A` 的 stream
-- `S` 再通过 `TtpServer.open_stream_by_id(..., PN_PROXY_VPORT)` 在到 `B` 的既有 tunnel 上打开一条新 stream
+- `S` 侧通过 `PnServer` 内部持有的 `TtpServer` 接收来自 `A` 的 stream
+- `S` 再通过 `PnServer` 内部的 `TtpServer.open_stream_by_id(..., PN_PROXY_VPORT)` 在到 `B` 的既有 tunnel 上打开一条新 stream
 - `B` 侧通过 `TtpClient.listen_stream(PN_PROXY_VPORT)` 收到 relay 转发过来的 stream
 
 ### 2. 建链命令层
@@ -264,7 +264,7 @@ pub struct ProxyOpenResp {
 
 ### `PnServer`
 
-`PnServer` 运行在 relay 侧。
+`PnServer` 运行在 relay 侧，并负责 PN relay 逻辑。
 
 它负责：
 
@@ -275,6 +275,8 @@ pub struct ProxyOpenResp {
 5. 读取 `B` 返回的 `ProxyOpenResp`
 6. 将 `ProxyOpenResp` 转发给 `A`
 7. 若结果成功，则桥接两端 stream
+
+`PnServer` 自己负责监听 `PN_PROXY_VPORT`、转发请求和 bridge 两端 stream。
 
 relay 不负责：
 
@@ -443,6 +445,7 @@ PN 当前主要暴露：
 
 - client 侧通过共享 `TtpClient` 打开/监听 `PN_PROXY_VPORT`
 - relay 侧通过 `TtpServer` 接收和打开 `PN_PROXY_VPORT`
+- 具体实现上这部分能力由 `PnServer` 统一持有和调度
 - PN 自己不再维护独立的“通知后再回连”数据连接模型
 
 从职责上看：

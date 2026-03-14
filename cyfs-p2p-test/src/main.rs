@@ -9,6 +9,7 @@ use bucky_objects::{Endpoint, EndpointArea, Protocol};
 use bucky_raw_codec::FileDecoder;
 use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::P2pId;
+use cyfs_p2p::pn::PnServer;
 use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
 use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
 use cyfs_p2p::{
@@ -636,9 +637,10 @@ async fn all_in_one() {
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
-    )
-    .set_support_proxy(true);
+    );
     let sn_service = create_sn_service(sn_service).await;
+    let _pn_server = PnServer::new(sn_service.ttp_server());
+    _pn_server.start().await.unwrap();
     sn_service.start().await.unwrap();
 
     //
@@ -877,7 +879,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_direct_success failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "stream_wrong_port_fail_expected",
@@ -895,7 +897,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_wrong_port_fail_expected failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "datagram_direct_success",
@@ -922,7 +924,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case datagram_direct_success failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "direct_bad_endpoint_fail_expected",
@@ -952,7 +954,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case direct_bad_endpoint_fail_expected failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "reverse_connect_case",
@@ -987,7 +989,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reverse_connect_case failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "reverse_fail_case",
@@ -1005,7 +1007,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reverse_fail_case failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "proxy_connect_case",
@@ -1036,7 +1038,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_connect_case failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "proxy_datagram_case",
@@ -1063,7 +1065,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_datagram_case failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "proxy_fail_case",
@@ -1081,7 +1083,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_fail_case failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "reconnect_stability",
@@ -1115,7 +1117,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reconnect_stability failed");
             return;
         }
-        
+
         if !run_case(
             &mut stats,
             "concurrent_stream_burst",
@@ -1148,14 +1150,14 @@ async fn all_in_one() {
                     });
                     tasks.push(task);
                 }
-        
+
                 for task in tasks {
                     let ret = task.await.map_err(|e| {
                         P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e))
                     })?;
                     ret?;
                 }
-        
+
                 Ok(())
             },
         )

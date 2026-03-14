@@ -10,6 +10,7 @@ use std::sync::Arc;
 use cyfs_p2p::{CyfsIdentity, CyfsIdentityCertFactory, CyfsIdentityFactory};
 
 use cyfs_p2p::executor::Executor;
+use cyfs_p2p::pn::PnServer;
 use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
 pub(crate) use sfo_result::into_err as into_miner_err;
 
@@ -65,9 +66,11 @@ async fn main() {
                 Arc::new(CyfsIdentity::new(device, private_key)),
                 Arc::new(CyfsIdentityFactory),
                 Arc::new(CyfsIdentityCertFactory),
-            )
-            .set_support_proxy(true);
-            let _service = create_sn_service(config).await;
+            );
+            let service = create_sn_service(config).await;
+            let _pn_server = PnServer::new(service.ttp_server());
+            _pn_server.start().await.unwrap();
+            service.start().await.unwrap();
             std::future::pending::<u8>().await;
         }
         Err(e) => {

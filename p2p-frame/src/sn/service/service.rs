@@ -5,34 +5,30 @@ use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
     NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
-    TunnelNetworkRef,
+    TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite,
 };
 use crate::p2p_identity::{
-    EncodedP2pIdentityCert, P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef,
-    P2pIdentityFactoryRef, P2pIdentityRef,
+    EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
 };
-use crate::pn::{PN_PROXY_VPORT, PnServer};
 use crate::sn::protocol::{v0::*, *};
-use crate::runtime;
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SN_CMD_VPORT, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
-use crate::ttp::{TtpPortListener, TtpServer, TtpServerRef};
-use crate::types::{SequenceGenerator, SessionIdGenerator, Timestamp, TunnelId, TunnelIdGenerator};
+use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
+use crate::types::{SequenceGenerator, Timestamp, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use log::*;
-use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
-use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
-use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
+use sfo_cmd_server::server::{CmdServer, CmdTunnelService, DefaultCmdServerService};
+use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{self, AtomicBool},
     },
     time::Duration,
 };
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 // const TRACKER_INTERVAL: Duration = Duration::from_secs(60);
 // struct CallTracker {
@@ -40,101 +36,10 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 //     begin_time: Instant,
 // }
 
-pub struct SnTunnelListener {
-    _ttp_server: TtpServerRef,
-    cmd_rx: AsyncMutex<mpsc::UnboundedReceiver<CmdTunnel<SnTunnelRead, SnTunnelWrite>>>,
-    cmd_accept_task: crate::executor::SpawnHandle<()>,
-    proxy_accept_task: Option<crate::executor::SpawnHandle<()>>,
-}
-
-impl SnTunnelListener {
-    pub(crate) async fn new(
-        ttp_server: TtpServerRef,
-        support_proxy: bool,
-    ) -> P2pResult<(Self, mpsc::UnboundedReceiver<crate::pn::ProxyStream>)> {
-        let cmd_listener = ttp_server.listen_stream(SN_CMD_VPORT).await?;
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (proxy_tx, proxy_rx) = mpsc::unbounded_channel();
-        let cmd_accept_task = Executor::spawn_with_handle(async move {
-            loop {
-                let accepted = match cmd_listener.accept().await {
-                    Ok(accepted) => accepted,
-                    Err(err) => {
-                        log::warn!("sn service cmd accept stopped: {:?}", err);
-                        break;
-                    }
-                };
-                let (meta, read, write) = accepted;
-                let local = meta.local_ep.unwrap_or_default();
-                let remote = meta.remote_ep.unwrap_or_default();
-                let local_id = meta.local_id;
-                let remote_id = meta.remote_id;
-                let _ = cmd_tx.send(CmdTunnel::new(
-                    SnTunnelRead::new(read, local, remote, local_id.clone(), remote_id.clone()),
-                    SnTunnelWrite::new(write, local, remote, local_id, remote_id),
-                ));
-            }
-        })
-        .unwrap();
-        let proxy_accept_task = if support_proxy {
-            let proxy_listener = ttp_server.listen_stream(PN_PROXY_VPORT).await?;
-            Some(
-                Executor::spawn_with_handle(async move {
-                    loop {
-                        match proxy_listener.accept().await {
-                            Ok((meta, read, write)) => {
-                                let _ = proxy_tx.send(crate::pn::ProxyStream::new(
-                                    meta.remote_id,
-                                    read,
-                                    write,
-                                ));
-                            }
-                            Err(err) => {
-                                log::warn!("sn service proxy accept stopped: {:?}", err);
-                                break;
-                            }
-                        }
-                    }
-                })
-                .unwrap(),
-            )
-        } else {
-            None
-        };
-        Ok((
-            Self {
-                _ttp_server: ttp_server,
-                cmd_rx: AsyncMutex::new(cmd_rx),
-                cmd_accept_task,
-                proxy_accept_task,
-            },
-            proxy_rx,
-        ))
-    }
-}
-
-impl Drop for SnTunnelListener {
-    fn drop(&mut self) {
-        self.cmd_accept_task.abort();
-        if let Some(task) = self.proxy_accept_task.take() {
-            task.abort();
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl CmdTunnelListener<(), SnTunnelRead, SnTunnelWrite> for SnTunnelListener {
-    async fn accept(&self) -> CmdResult<CmdTunnel<SnTunnelRead, SnTunnelWrite>> {
-        let mut rx = self.cmd_rx.lock().await;
-        rx.recv()
-            .await
-            .ok_or_else(|| cmd_err!(CmdErrorCode::Failed, "sn command listener closed"))
-    }
-}
-
-type SnCmdServer = DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>;
-pub type SnCmdServerRef =
-    Arc<DefaultCmdServer<(), SnTunnelRead, SnTunnelWrite, u16, u8, SnTunnelListener>>;
+type SnCmdService = DefaultCmdServerService<(), SnTunnelRead, SnTunnelWrite, u16, u8>;
+pub type SnCmdServiceRef = Arc<SnCmdService>;
+pub type SnServiceRef = Arc<SnService>;
+pub type SnServerRef = Arc<SnServer>;
 
 struct DefaultSnServiceContractServer {}
 
@@ -162,102 +67,36 @@ impl SnServiceContractServer for DefaultSnServiceContractServer {
 
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
-    device_cache: P2pIdentityCertCacheRef,
     local_identity: P2pIdentityRef,
-    stopped: AtomicBool,
-    contract: Box<dyn SnServiceContractServer + Send + Sync>,
-
-    // call_tracker: CallTracker,
+    _contract: Box<dyn SnServiceContractServer + Send + Sync>,
     peer_mgr: PeerManagerRef,
     call_stub: CallStub,
     cert_factory: P2pIdentityCertFactoryRef,
-    net_manager: NetManagerRef,
-    cmd_server: SnCmdServerRef,
-    proxy_server: Option<Arc<PnServer>>,
+    cmd_server: SnCmdServiceRef,
     cmd_version: u8,
 }
 
-pub type SnServiceRef = Arc<SnService>;
-
 impl SnService {
-    pub(crate) async fn new(
+    fn new(
         local_identity: P2pIdentityRef,
-        identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
-        congestion_algorithm: QuicCongestionAlgorithm,
-        support_proxy: bool,
     ) -> SnServiceRef {
-        Executor::init_new_multi_thread(None);
-        init_tls(identity_factory);
-        let device_cache = Arc::new(DeviceCache::new(
-            &DeviceCacheConfig {
-                expire: Duration::from_secs(240),
-                capacity: 10240,
-            },
-            None,
-        ));
-        let cert_resolver = DefaultTlsServerCertResolver::new();
-        let _ = cert_resolver
-            .add_server_identity(local_identity.clone())
-            .await;
-        cert_resolver.set_default_server_identity(&local_identity.get_id());
-
-        let tunnel_networks = vec![
-            Arc::new(TcpTunnelNetwork::new(
-                cert_resolver.clone(),
-                cert_factory.clone(),
-                Duration::from_secs(30),
-                Duration::from_secs(5),
-                Duration::from_secs(15),
-            )) as TunnelNetworkRef,
-            Arc::new(QuicTunnelNetwork::new(
-                device_cache.clone(),
-                cert_resolver.clone(),
-                cert_factory.clone(),
-                congestion_algorithm,
-                Duration::from_secs(30),
-                Duration::from_secs(30),
-            )) as TunnelNetworkRef,
-        ];
-
-        let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
-        let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
-        let (sn_tunnel_listener, proxy_rx) =
-            SnTunnelListener::new(ttp_server.clone(), support_proxy)
-                .await
-                .unwrap();
-        let sn_cmd_server = DefaultCmdServer::new(sn_tunnel_listener);
-
-        let proxy_server = if support_proxy {
-            let proxy_server = PnServer::new(ttp_server, proxy_rx);
-            proxy_server.start();
-            Some(proxy_server)
-        } else {
-            None
-        };
-
-        let service = SnService {
+        let service = Arc::new(SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
-            device_cache,
             local_identity: local_identity.clone(),
-            stopped: AtomicBool::new(false),
-            contract,
+            _contract: contract,
             peer_mgr: PeerManager::new(),
             call_stub: CallStub::new(),
             cert_factory,
-            net_manager,
-            cmd_server: sn_cmd_server,
-            proxy_server,
+            cmd_server: DefaultCmdServerService::new(),
             cmd_version: 0,
-        };
-
-        let service_ref = Arc::new(service);
-
-        service_ref
+        });
+        service.register_sn_cmd_handler();
+        service
     }
 
-    pub fn get_cmd_server(&self) -> &SnCmdServerRef {
+    pub fn get_cmd_server(&self) -> &SnCmdServiceRef {
         &self.cmd_server
     }
 
@@ -267,7 +106,7 @@ impl SnService {
             PackageCmdCode::SnCall as u8,
             move |peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
@@ -286,7 +125,7 @@ impl SnService {
             PackageCmdCode::SnCalledResp as u8,
             move |_peer_id: PeerId,
                   _tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
@@ -304,7 +143,7 @@ impl SnService {
             PackageCmdCode::ReportSn as u8,
             move |peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
@@ -324,7 +163,7 @@ impl SnService {
             PackageCmdCode::SnQuery as u8,
             move |peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
@@ -335,24 +174,6 @@ impl SnService {
                 }
             },
         );
-    }
-
-    pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
-        self.net_manager
-            .listen(self.local_identity.endpoints().as_slice(), None)
-            .await?;
-        self.register_sn_cmd_handler();
-        self.cmd_server.start();
-
-        Ok(())
-    }
-
-    pub fn stop(&self) {
-        self.stopped.store(true, atomic::Ordering::Relaxed);
-    }
-
-    pub fn is_stopped(&self) -> bool {
-        self.stopped.load(atomic::Ordering::Relaxed)
     }
 
     pub fn local_identity_id(&self) -> P2pId {
@@ -537,15 +358,14 @@ impl SnService {
                 remotes.push(remote);
             }
         }
-        let mut remote_ep = remotes
+        remotes
             .iter_mut()
             .filter(|remote| !remote.is_loopback())
             .map(|remote| {
                 remote.set_area(EndpointArea::Wan);
                 remote.clone()
             })
-            .collect();
-        remote_ep
+            .collect()
     }
 
     async fn get_peer_wan_ep_with_map_port(
@@ -668,8 +488,196 @@ impl SnService {
     }
 }
 
+#[async_trait::async_trait]
+impl CmdTunnelService<(), SnTunnelRead, SnTunnelWrite> for SnService {
+    async fn handle_tunnel(&self, tunnel: CmdTunnel<SnTunnelRead, SnTunnelWrite>) -> CmdResult<()> {
+        self.cmd_server.serve_tunnel(tunnel).await
+    }
+}
+
+pub struct SnServer {
+    local_identity: P2pIdentityRef,
+    net_manager: NetManagerRef,
+    ttp_server: TtpServerRef,
+    service: SnServiceRef,
+    started: AtomicBool,
+    stopped: AtomicBool,
+    cmd_accept_task: Mutex<Option<crate::executor::SpawnHandle<()>>>,
+}
+
+impl SnServer {
+    pub(crate) async fn new(
+        local_identity: P2pIdentityRef,
+        identity_factory: P2pIdentityFactoryRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        contract: Box<dyn SnServiceContractServer + Send + Sync>,
+        congestion_algorithm: QuicCongestionAlgorithm,
+    ) -> SnServerRef {
+        Executor::init_new_multi_thread(None);
+        init_tls(identity_factory);
+
+        let device_cache = Arc::new(DeviceCache::new(
+            &DeviceCacheConfig {
+                expire: Duration::from_secs(240),
+                capacity: 10240,
+            },
+            None,
+        ));
+        let cert_resolver = DefaultTlsServerCertResolver::new();
+        let _ = cert_resolver
+            .add_server_identity(local_identity.clone())
+            .await;
+        cert_resolver.set_default_server_identity(&local_identity.get_id());
+
+        let tunnel_networks = vec![
+            Arc::new(TcpTunnelNetwork::new(
+                cert_resolver.clone(),
+                cert_factory.clone(),
+                Duration::from_secs(30),
+                Duration::from_secs(5),
+                Duration::from_secs(15),
+            )) as TunnelNetworkRef,
+            Arc::new(QuicTunnelNetwork::new(
+                device_cache,
+                cert_resolver.clone(),
+                cert_factory.clone(),
+                congestion_algorithm,
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+            )) as TunnelNetworkRef,
+        ];
+
+        let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
+        let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
+        let service = SnService::new(local_identity.clone(), cert_factory, contract);
+
+        Arc::new(Self {
+            local_identity,
+            net_manager,
+            ttp_server,
+            service,
+            started: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            cmd_accept_task: Mutex::new(None),
+        })
+    }
+
+    pub fn get_cmd_server(&self) -> &SnCmdServiceRef {
+        self.service.get_cmd_server()
+    }
+
+    pub fn service(&self) -> &SnServiceRef {
+        &self.service
+    }
+
+    pub fn ttp_server(&self) -> TtpServerRef {
+        self.ttp_server.clone()
+    }
+
+    pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
+        if self
+            .started
+            .compare_exchange(
+                false,
+                true,
+                atomic::Ordering::SeqCst,
+                atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        if let Err(err) = self.start_inner().await {
+            self.abort_accept_tasks();
+            self.started.store(false, atomic::Ordering::SeqCst);
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    async fn start_inner(self: &Arc<Self>) -> P2pResult<()> {
+        self.net_manager
+            .listen(self.local_identity.endpoints().as_slice(), None)
+            .await?;
+        self.start_cmd_accept_loop().await?;
+        Ok(())
+    }
+
+    async fn start_cmd_accept_loop(self: &Arc<Self>) -> P2pResult<()> {
+        let listener = self.ttp_server.listen_stream(SN_CMD_VPORT).await?;
+        let server = self.clone();
+        let task = Executor::spawn_with_handle(async move {
+            server.run_cmd_accept_loop(listener).await;
+        })
+        .unwrap();
+        *self.cmd_accept_task.lock().unwrap() = Some(task);
+        Ok(())
+    }
+
+    async fn run_cmd_accept_loop(self: Arc<Self>, listener: TtpListenerRef) {
+        loop {
+            let accepted = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    warn!("sn server cmd accept stopped: {:?}", err);
+                    break;
+                }
+            };
+
+            let tunnel = Self::into_cmd_tunnel(accepted);
+            let service = self.service.clone();
+            Executor::spawn(async move {
+                if let Err(err) = service.handle_tunnel(tunnel).await {
+                    error!("sn server handle cmd tunnel failed: {:?}", err);
+                }
+            });
+        }
+    }
+
+    fn into_cmd_tunnel(
+        accepted: (
+            crate::ttp::TtpStreamMeta,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        ),
+    ) -> CmdTunnel<SnTunnelRead, SnTunnelWrite> {
+        let (meta, read, write) = accepted;
+        let local = meta.local_ep.unwrap_or_default();
+        let remote = meta.remote_ep.unwrap_or_default();
+        let local_id = meta.local_id;
+        let remote_id = meta.remote_id;
+        CmdTunnel::new(
+            SnTunnelRead::new(read, local, remote, local_id.clone(), remote_id.clone()),
+            SnTunnelWrite::new(write, local, remote, local_id, remote_id),
+        )
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, atomic::Ordering::Relaxed);
+        self.abort_accept_tasks();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(atomic::Ordering::Relaxed)
+    }
+
+    fn abort_accept_tasks(&self) {
+        if let Some(task) = self.cmd_accept_task.lock().unwrap().take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for SnServer {
+    fn drop(&mut self) {
+        self.abort_accept_tasks();
+    }
+}
+
 // #[async_trait::async_trait]
-// impl TcpListenerEventListener for SnService {
+// impl TcpListenerEventListener for SnServer {
 //     async fn on_new_connection(&self, socket: TCPSocket) -> BdtResult<()> {
 //         self.handle(socket).await
 //     }
@@ -680,7 +688,6 @@ pub struct SnServiceConfig {
     identity_factory: P2pIdentityFactoryRef,
     cert_factory: P2pIdentityCertFactoryRef,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
-    support_proxy: bool,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
 }
 
@@ -695,7 +702,6 @@ impl SnServiceConfig {
             identity_factory,
             cert_factory,
             contract: Box::new(DefaultSnServiceContractServer::new()),
-            support_proxy: false,
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
         }
     }
@@ -708,11 +714,6 @@ impl SnServiceConfig {
         self
     }
 
-    pub fn set_support_proxy(mut self, support_proxy: bool) -> Self {
-        self.support_proxy = support_proxy;
-        self
-    }
-
     pub fn set_quic_congestion_algorithm(
         mut self,
         quic_algorithm: QuicCongestionAlgorithm,
@@ -722,14 +723,13 @@ impl SnServiceConfig {
     }
 }
 
-pub async fn create_sn_service(config: SnServiceConfig) -> SnServiceRef {
-    let service = SnService::new(
+pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
+    let service = SnServer::new(
         config.local_identity,
         config.identity_factory,
         config.cert_factory,
         config.contract,
         config.quic_congestion_algorithm,
-        config.support_proxy,
     )
     .await;
     service
@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sn_tunnel_listener_routes_sn_cmd_vport() {
+    async fn sn_server_wraps_sn_cmd_vport_into_cmd_tunnel() {
         init_executor();
         let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23001".parse().unwrap()));
         let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23002".parse().unwrap()));
@@ -1054,7 +1054,7 @@ mod tests {
         .unwrap();
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
-        let (listener, _proxy_rx) = SnTunnelListener::new(ttp_server, true).await.unwrap();
+        let listener = ttp_server.listen_stream(SN_CMD_VPORT).await.unwrap();
 
         let (tunnel, stream_tx) =
             FakeTunnel::new(identity.get_id(), remote_id(), local_ep, remote_ep);
@@ -1062,47 +1062,16 @@ mod tests {
         stream_tx.send((SN_CMD_VPORT, read, write)).unwrap();
         fake_network.push_tunnel(tunnel);
 
-        let cmd_tunnel = timeout(Duration::from_secs(1), listener.accept())
+        let accepted = timeout(Duration::from_secs(1), listener.accept())
             .await
             .unwrap()
             .unwrap();
+        let cmd_tunnel = SnServer::into_cmd_tunnel(accepted);
         let (mut cmd_read, _cmd_write) = cmd_tunnel.split();
 
         remote_write.write_all(b"ping").await.unwrap();
         let mut buf = [0u8; 4];
         cmd_read.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ping");
-    }
-
-    #[tokio::test]
-    async fn sn_tunnel_listener_routes_pn_proxy_vport() {
-        init_executor();
-        let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23011".parse().unwrap()));
-        let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23012".parse().unwrap()));
-        let identity = test_identity(local_ep);
-        let fake_network = FakeTunnelNetwork::new(Protocol::Quic);
-        let net_manager = NetManager::new(
-            vec![fake_network.clone() as TunnelNetworkRef],
-            DefaultTlsServerCertResolver::new(),
-        )
-        .unwrap();
-        net_manager.listen(&[local_ep], None).await.unwrap();
-        let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
-        let (_listener, mut proxy_rx) = SnTunnelListener::new(ttp_server, true).await.unwrap();
-
-        let (tunnel, stream_tx) =
-            FakeTunnel::new(identity.get_id(), remote_id(), local_ep, remote_ep);
-        let ((read, write), mut remote_write) = make_stream_pair();
-        stream_tx.send((PN_PROXY_VPORT, read, write)).unwrap();
-        fake_network.push_tunnel(tunnel);
-
-        let mut proxy_stream = timeout(Duration::from_secs(1), proxy_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        remote_write.write_all(b"pong").await.unwrap();
-        let mut buf = [0u8; 4];
-        proxy_stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"pong");
     }
 }

@@ -2,10 +2,10 @@ use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryR
 use crate::sn::protocol::{v0::*, *};
 use crate::types::TunnelId;
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     sync::{
-        atomic::{self, AtomicU32},
         Arc, Mutex,
+        atomic::{self, AtomicU32},
     },
     time::SystemTime,
 };

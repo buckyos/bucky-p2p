@@ -603,12 +603,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "c_linked_list"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4964518bd3b4a8190e832886cdc0da9794f12e8e6c1613a9e90ff331c4c8724b"
-
-[[package]]
 name = "callback-result"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2172,7 +2166,6 @@ dependencies = [
  "base58",
  "bucky-raw-codec",
  "bucky-time",
- "c_linked_list",
  "callback-result",
  "callback-trait",
  "chrono",
@@ -3103,9 +3096,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4a687e43605735b1c6d57b00a97cbc7f86e4b9b297d415ef60a17391329b152"
+checksum = "8a7a25e75e247f178fa928fc4a1c9896cfbb3723dcc2295168084f88fb0c2de1"
 dependencies = [
  "as-any",
  "async-named-locker",

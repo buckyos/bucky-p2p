@@ -3,9 +3,9 @@ use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
 use crate::pn::pn_virtual_endpoint;
-use crate::sn::protocol::v0::{SnCalled, TunnelType};
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
+use crate::sn::protocol::v0::{SnCalled, TunnelType};
 use crate::types::{TunnelCandidateId, TunnelId, TunnelIdGenerator};
 use async_named_locker::Locker;
 use bucky_time::bucky_time_now;
@@ -19,13 +19,11 @@ use tokio::sync::mpsc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
-use super::{
-    ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionInfoCacheRef,
-};
+use super::{ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionInfoCacheRef};
 use crate::networks::{
-    ListenVPortsRef, NetManagerRef, TunnelCommandResult, TunnelConnectIntent,
-    TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelNetworkRef, TunnelRef, TunnelState,
-    TunnelStreamRead, TunnelStreamWrite,
+    ListenVPortsRef, NetManagerRef, TunnelCommandResult, TunnelConnectIntent, TunnelDatagramRead,
+    TunnelDatagramWrite, TunnelForm, TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead,
+    TunnelStreamWrite,
 };
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(2000);
@@ -1160,8 +1158,8 @@ mod tests {
     use crate::executor::Executor;
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
     use crate::networks::{TunnelListener, TunnelListenerInfo, TunnelNetwork};
-    use crate::tunnel::DefaultP2pConnectionInfoCache;
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
+    use crate::tunnel::DefaultP2pConnectionInfoCache;
     use crate::types::{TunnelCandidateId, TunnelIdGenerator};
     use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
     use std::sync::Once;

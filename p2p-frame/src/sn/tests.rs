@@ -9,7 +9,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactory, P2pIdentityRef, P2pSn};
 use crate::sn::protocol::v0::{SnCalled, TunnelType};
-use crate::sn::service::{SnServiceConfig, SnServiceRef, create_sn_service};
+use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::TunnelId;
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
@@ -49,7 +49,7 @@ async fn start_sn_service(
     sn_identity: P2pIdentityRef,
     identity_factory: Arc<X509IdentityFactory>,
     cert_factory: Arc<X509IdentityCertFactory>,
-) -> P2pResult<SnServiceRef> {
+) -> P2pResult<SnServerRef> {
     let service = create_sn_service(SnServiceConfig::new(
         sn_identity,
         identity_factory,
@@ -91,7 +91,7 @@ async fn start_client_stack(
 async fn setup_sn_and_one_client(
     name: &str,
 ) -> (
-    SnServiceRef,
+    SnServerRef,
     P2pStackRef,
     P2pId,
     P2pId,
@@ -148,7 +148,7 @@ async fn setup_sn_and_one_client(
 }
 
 async fn setup_sn_and_two_clients() -> (
-    SnServiceRef,
+    SnServerRef,
     P2pStackRef,
     P2pId,
     P2pStackRef,

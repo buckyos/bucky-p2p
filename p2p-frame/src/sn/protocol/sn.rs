@@ -6,7 +6,7 @@ use crate::types::{Sequence, Timestamp, TunnelId};
 use bucky_raw_codec::{
     CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes,
 };
-use bucky_time::{bucky_time_to_system_time, system_time_to_bucky_time, MIN_BUCKY_TIME};
+use bucky_time::{MIN_BUCKY_TIME, bucky_time_to_system_time, system_time_to_bucky_time};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

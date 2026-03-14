@@ -85,9 +85,9 @@ SN 体系由三层组成：
 ### `sn/service`
 
 - `service.rs`
+  - `SnServer`
   - `SnService`
-  - `SnTunnelListener`
-  - 命令处理主流程
+  - 服务端监听与命令处理主流程
 - `peer_manager.rs`
   - peer 在线信息缓存与更新
 - `call_stub.rs`
@@ -160,26 +160,31 @@ SN 体系由三层组成：
 
 ## 服务端架构
 
-服务端核心对象是 `SnService`。
+服务端由 `SnServer + SnService` 两层组成。
 
-它负责：
+其中：
+
+- `SnServer` 负责监听、accept 和服务端生命周期调度
+- `SnService` 负责拿到命令连接后的业务处理
+
+整体负责：
 
 - 创建专用 `NetManager`
 - 监听本地 endpoint
 - 从入站 tunnel 中提取 `SN_CMD_VPORT` 命令流
-- 注册 SN 命令处理器
+- 将命令连接交给 `SnService`
 - 维护在线 peer 信息
 - 执行 call/query/report 的业务逻辑
 
-### `SnTunnelListener`
+### `SnServer`
 
-`SnTunnelListener` 是服务端接入层。
+`SnServer` 是服务端接入层与生命周期入口。
 
 它通过 `TtpServer` 获取按 `vport` 分好的入站 stream，然后：
 
 1. 监听 `SN_CMD_VPORT`
 2. 将接收到的 `(meta, read, write)` 转为 `CmdTunnel<SnTunnelRead, SnTunnelWrite>`
-3. 交给 `SnCmdServer`
+3. 交给 `SnService.handle_tunnel()`
 
 当前实现中：
 
@@ -187,6 +192,17 @@ SN 体系由三层组成：
 - 其他特定 `vport` 仍可通过同一个 `TtpServer` 被其他子系统复用
 
 就 SN 本身而言，它只消费 `SN_CMD_VPORT`。
+
+### `SnService`
+
+`SnService` 是服务端业务层。
+
+它负责：
+
+- 注册 SN 命令处理器
+- 基于 `DefaultCmdServerService` 管理命令 tunnel
+- 维护 `PeerManager`
+- 执行 `ReportSn` / `SnQuery` / `SnCall` / `SnCalledResp` 的处理逻辑
 
 ### `PeerManager`
 
@@ -453,15 +469,17 @@ SN 使用的命令码如下：
 
 ### 服务端
 
-`SnService` 通过 `create_sn_service(SnServiceConfig)` 创建：
+`SnServer` 通过 `create_sn_service(SnServiceConfig)` 创建：
 
 1. 初始化 TLS 与 `NetManager`
 2. 创建 TCP/QUIC tunnel network
-3. 监听本地 endpoint
-4. 创建 `TtpServer`
-5. 基于 `TtpServer` 创建 `SnTunnelListener`
-6. 创建并启动 `SnCmdServer`
-7. 注册 SN 命令处理器
+3. 创建 `TtpServer`
+4. 创建内层 `SnService`
+5. 在 `start()` 时监听本地 endpoint
+6. 拉起 `SN_CMD_VPORT` accept loop
+7. 将接受到的命令连接交给 `SnService`
+
+若需要 PN relay，则由独立的 `PnServer` 基于同一个 `TtpServer` 显式创建和启动。
 
 服务端默认同时支持：
 
@@ -513,7 +531,7 @@ SN 是否能成功 query/call 某个 peer，取决于：
 
 ### 5. 服务端入站 tunnel 分发当前有复用点
 
-`SnTunnelListener` 当前建立在 `TtpServer` 之上，不只消费 `SN_CMD_VPORT`，还可以继续复用其他 `vport` 的入站 stream。这说明 SN 服务端已经切到统一的 `Ttp` 传输接入层。
+`SnServer` 当前直接建立在 `TtpServer` 之上，不只消费 `SN_CMD_VPORT`，还可以继续复用其他 `vport` 的入站 stream。这说明 SN 服务端已经切到统一的 `Ttp` 传输接入层。
 
 ## 小结
 

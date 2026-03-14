@@ -1,13 +1,16 @@
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{self, AtomicBool},
+};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{ReadBuf, copy_bidirectional};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::executor::Executor;
 use crate::networks::{
     TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelStreamRead, TunnelStreamWrite,
     read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
@@ -15,23 +18,18 @@ use crate::networks::{
 use crate::p2p_identity::P2pId;
 use crate::pn::{PN_PROXY_VPORT, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
-use crate::ttp::TtpServerRef;
+use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServerRef};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) struct ProxyStream {
-    remote_id: P2pId,
+struct ProxyStream {
     read: TunnelStreamRead,
     write: TunnelStreamWrite,
 }
 
 impl ProxyStream {
-    pub(crate) fn new(remote_id: P2pId, read: TunnelStreamRead, write: TunnelStreamWrite) -> Self {
-        Self {
-            remote_id,
-            read,
-            write,
-        }
+    fn new(read: TunnelStreamRead, write: TunnelStreamWrite) -> Self {
+        Self { read, write }
     }
 }
 
@@ -65,18 +63,22 @@ impl tokio::io::AsyncWrite for ProxyStream {
 
 pub struct PnServer {
     ttp_server: TtpServerRef,
-    data_rx: AsyncMutex<mpsc::UnboundedReceiver<ProxyStream>>,
+    service: PnServiceRef,
+    started: AtomicBool,
+    stopped: AtomicBool,
+    accept_task: Mutex<Option<crate::executor::SpawnHandle<()>>>,
 }
 
-impl PnServer {
-    pub(crate) fn new(
-        ttp_server: TtpServerRef,
-        data_rx: mpsc::UnboundedReceiver<ProxyStream>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            ttp_server,
-            data_rx: AsyncMutex::new(data_rx),
-        })
+pub type PnServerRef = Arc<PnServer>;
+pub type PnServiceRef = Arc<PnService>;
+
+pub struct PnService {
+    ttp_server: TtpServerRef,
+}
+
+impl PnService {
+    fn new(ttp_server: TtpServerRef) -> PnServiceRef {
+        Arc::new(Self { ttp_server })
     }
 
     async fn handle_proxy_open_req(
@@ -226,18 +228,18 @@ impl PnServer {
                 req.vport,
                 PN_PROXY_VPORT
             );
-            let mut source_stream = ProxyStream::new(from, read, source_write);
-            let mut target_stream = ProxyStream::new(req.to, target_read, target_write);
+            let mut source_stream = ProxyStream::new(read, source_write);
+            let mut target_stream = ProxyStream::new(target_read, target_write);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
         }
     }
 
-    async fn handle_data_connection(self: &Arc<Self>, conn: ProxyStream) {
-        let from = conn.remote_id.clone();
-        let ProxyStream {
-            mut read, write, ..
-        } = conn;
-
+    async fn handle_proxy_connection(
+        self: &Arc<Self>,
+        from: P2pId,
+        mut read: TunnelStreamRead,
+        write: TunnelStreamWrite,
+    ) {
         let header = match read_tunnel_command_header(&mut read).await {
             Ok(v) => v,
             Err(e) => {
@@ -261,29 +263,89 @@ impl PnServer {
             }
         }
     }
+}
 
-    fn start_data_accept_loop(self: &Arc<Self>) {
-        let this = self.clone();
-        crate::executor::Executor::spawn(async move {
-            loop {
-                let conn = {
-                    let mut rx = this.data_rx.lock().await;
-                    rx.recv().await
-                };
-                let Some(conn) = conn else {
-                    break;
-                };
-
-                let this_for_conn = this.clone();
-                crate::executor::Executor::spawn(async move {
-                    this_for_conn.handle_data_connection(conn).await;
-                });
-            }
-        });
+impl PnServer {
+    pub fn new(ttp_server: TtpServerRef) -> PnServerRef {
+        let service = PnService::new(ttp_server.clone());
+        Arc::new(Self {
+            ttp_server,
+            service,
+            started: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            accept_task: Mutex::new(None),
+        })
     }
 
-    pub fn start(self: &Arc<Self>) {
-        self.start_data_accept_loop();
+    pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
+        if self
+            .started
+            .compare_exchange(
+                false,
+                true,
+                atomic::Ordering::SeqCst,
+                atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        let listener = match self.ttp_server.listen_stream(PN_PROXY_VPORT).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                self.started.store(false, atomic::Ordering::SeqCst);
+                return Err(err);
+            }
+        };
+
+        let this = self.clone();
+        let task = Executor::spawn_with_handle(async move {
+            this.run_accept_loop(listener).await;
+        })
+        .unwrap();
+        *self.accept_task.lock().unwrap() = Some(task);
+        Ok(())
+    }
+
+    async fn run_accept_loop(self: Arc<Self>, listener: TtpListenerRef) {
+        loop {
+            let (meta, read, write) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    log::warn!("pn server accept stopped: {:?}", err);
+                    break;
+                }
+            };
+
+            let service = self.service.clone();
+            Executor::spawn(async move {
+                service
+                    .handle_proxy_connection(meta.remote_id, read, write)
+                    .await;
+            });
+        }
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, atomic::Ordering::Relaxed);
+        self.abort_accept_task();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(atomic::Ordering::Relaxed)
+    }
+
+    fn abort_accept_task(&self) {
+        if let Some(task) = self.accept_task.lock().unwrap().take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for PnServer {
+    fn drop(&mut self) {
+        self.abort_accept_task();
     }
 }
 
@@ -314,4 +376,469 @@ where
     let header = read_tunnel_command_header(read).await?;
     let command = read_tunnel_command_body::<_, T>(read, header).await?;
     Ok(command.body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoint::{Endpoint, Protocol};
+    use crate::error::p2p_err;
+    use crate::networks::{
+        NetManager, Tunnel, TunnelCommand, TunnelListener, TunnelListenerInfo, TunnelListenerRef,
+        TunnelNetwork, TunnelNetworkRef, TunnelState,
+    };
+    use crate::p2p_identity::{
+        EncodedP2pIdentity, P2pIdentity, P2pIdentityCertRef, P2pIdentityRef, P2pSignature,
+    };
+    use crate::pn::PnChannelKind;
+    use crate::tls::DefaultTlsServerCertResolver;
+    use crate::ttp::TtpServer;
+    use crate::types::{TunnelCandidateId, TunnelId};
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, split};
+    use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+    use tokio::time::{Duration, timeout};
+
+    struct DummyIdentity {
+        id: P2pId,
+        name: String,
+        endpoints: Vec<Endpoint>,
+    }
+
+    impl P2pIdentity for DummyIdentity {
+        fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+        }
+
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn sign(&self, _message: &[u8]) -> P2pResult<P2pSignature> {
+            Ok(vec![])
+        }
+
+        fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
+            Ok(vec![])
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            self.endpoints.clone()
+        }
+
+        fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityRef {
+            Arc::new(Self {
+                id: self.id.clone(),
+                name: self.name.clone(),
+                endpoints: eps,
+            })
+        }
+    }
+
+    struct FakeTunnel {
+        tunnel_id: TunnelId,
+        candidate_id: TunnelCandidateId,
+        local_id: P2pId,
+        remote_id: P2pId,
+        local_ep: Endpoint,
+        remote_ep: Endpoint,
+        incoming_rx:
+            AsyncMutex<mpsc::UnboundedReceiver<(u16, TunnelStreamRead, TunnelStreamWrite)>>,
+        opened_tx:
+            Option<mpsc::UnboundedSender<(u16, ReadHalf<DuplexStream>, WriteHalf<DuplexStream>)>>,
+        attached_tx: StdMutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl FakeTunnel {
+        fn new(
+            local_id: P2pId,
+            remote_id: P2pId,
+            local_ep: Endpoint,
+            remote_ep: Endpoint,
+        ) -> (
+            Arc<Self>,
+            mpsc::UnboundedSender<(u16, TunnelStreamRead, TunnelStreamWrite)>,
+            oneshot::Receiver<()>,
+        ) {
+            let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+            let (attached_tx, attached_rx) = oneshot::channel();
+            (
+                Arc::new(Self {
+                    tunnel_id: TunnelId::from(1),
+                    candidate_id: TunnelCandidateId::from(1),
+                    local_id,
+                    remote_id,
+                    local_ep,
+                    remote_ep,
+                    incoming_rx: AsyncMutex::new(incoming_rx),
+                    opened_tx: None,
+                    attached_tx: StdMutex::new(Some(attached_tx)),
+                }),
+                incoming_tx,
+                attached_rx,
+            )
+        }
+
+        fn new_with_open_stream(
+            local_id: P2pId,
+            remote_id: P2pId,
+            local_ep: Endpoint,
+            remote_ep: Endpoint,
+        ) -> (
+            Arc<Self>,
+            mpsc::UnboundedReceiver<(u16, ReadHalf<DuplexStream>, WriteHalf<DuplexStream>)>,
+            oneshot::Receiver<()>,
+        ) {
+            let (opened_tx, opened_rx) = mpsc::unbounded_channel();
+            let (attached_tx, attached_rx) = oneshot::channel();
+            (
+                Arc::new(Self {
+                    tunnel_id: TunnelId::from(2),
+                    candidate_id: TunnelCandidateId::from(2),
+                    local_id,
+                    remote_id,
+                    local_ep,
+                    remote_ep,
+                    incoming_rx: AsyncMutex::new(mpsc::unbounded_channel().1),
+                    opened_tx: Some(opened_tx),
+                    attached_tx: StdMutex::new(Some(attached_tx)),
+                }),
+                opened_rx,
+                attached_rx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tunnel for FakeTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            self.tunnel_id
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            self.candidate_id
+        }
+
+        fn form(&self) -> crate::networks::TunnelForm {
+            crate::networks::TunnelForm::Active
+        }
+
+        fn is_reverse(&self) -> bool {
+            false
+        }
+
+        fn protocol(&self) -> Protocol {
+            self.local_ep.protocol()
+        }
+
+        fn local_id(&self) -> P2pId {
+            self.local_id.clone()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            self.remote_id.clone()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            Some(self.local_ep)
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            Some(self.remote_ep)
+        }
+
+        fn state(&self) -> TunnelState {
+            TunnelState::Connected
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        async fn close(&self) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+            if let Some(tx) = self.attached_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Ok(())
+        }
+
+        async fn listen_datagram(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+        ) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            vport: u16,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            let ((local_read, local_write), (remote_read, remote_write)) = make_stream_pair();
+            if let Some(opened_tx) = &self.opened_tx {
+                opened_tx
+                    .send((vport, remote_read, remote_write))
+                    .map_err(|_| {
+                        p2p_err!(P2pErrorCode::Interrupted, "open stream observer closed")
+                    })?;
+                Ok((local_read, local_write))
+            } else {
+                Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+            }
+        }
+
+        async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+            let mut rx = self.incoming_rx.lock().await;
+            rx.recv()
+                .await
+                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream closed"))
+        }
+
+        async fn open_datagram(
+            &self,
+            _vport: u16,
+        ) -> P2pResult<crate::networks::TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+        }
+
+        async fn accept_datagram(&self) -> P2pResult<(u16, crate::networks::TunnelDatagramRead)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+        }
+    }
+
+    struct FakeTunnelListener {
+        rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<crate::networks::TunnelRef>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TunnelListener for FakeTunnelListener {
+        async fn accept_tunnel(&self) -> P2pResult<crate::networks::TunnelRef> {
+            let mut rx = self.rx.lock().await;
+            rx.recv()
+                .await
+                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "tunnel listener closed"))?
+        }
+    }
+
+    struct FakeTunnelNetwork {
+        protocol: Protocol,
+        listener: TunnelListenerRef,
+        tx: mpsc::UnboundedSender<P2pResult<crate::networks::TunnelRef>>,
+        infos: Mutex<Vec<TunnelListenerInfo>>,
+    }
+
+    impl FakeTunnelNetwork {
+        fn new(protocol: Protocol) -> Arc<Self> {
+            let (tx, rx) = mpsc::unbounded_channel();
+            Arc::new(Self {
+                protocol,
+                listener: Arc::new(FakeTunnelListener {
+                    rx: AsyncMutex::new(rx),
+                }),
+                tx,
+                infos: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn push_tunnel(&self, tunnel: crate::networks::TunnelRef) {
+            let _ = self.tx.send(Ok(tunnel));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TunnelNetwork for FakeTunnelNetwork {
+        fn protocol(&self) -> Protocol {
+            self.protocol
+        }
+
+        fn is_udp(&self) -> bool {
+            self.protocol == Protocol::Quic
+        }
+
+        async fn listen(
+            &self,
+            local: &Endpoint,
+            _out: Option<Endpoint>,
+            mapping_port: Option<u16>,
+        ) -> P2pResult<TunnelListenerRef> {
+            *self.infos.lock().unwrap() = vec![TunnelListenerInfo {
+                local: *local,
+                mapping_port,
+            }];
+            Ok(self.listener.clone())
+        }
+
+        async fn close_all_listener(&self) -> P2pResult<()> {
+            Ok(())
+        }
+
+        fn listeners(&self) -> Vec<TunnelListenerRef> {
+            vec![self.listener.clone()]
+        }
+
+        fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
+            self.infos.lock().unwrap().clone()
+        }
+
+        async fn create_tunnel_with_intent(
+            &self,
+            _local_identity: &P2pIdentityRef,
+            _remote: &Endpoint,
+            _remote_id: &P2pId,
+            _remote_name: Option<String>,
+            _intent: crate::networks::TunnelConnectIntent,
+        ) -> P2pResult<crate::networks::TunnelRef> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+        }
+
+        async fn create_tunnel_with_local_ep_and_intent(
+            &self,
+            _local_identity: &P2pIdentityRef,
+            _local_ep: &Endpoint,
+            _remote: &Endpoint,
+            _remote_id: &P2pId,
+            _remote_name: Option<String>,
+            _intent: crate::networks::TunnelConnectIntent,
+        ) -> P2pResult<crate::networks::TunnelRef> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+        }
+    }
+
+    fn test_identity(local_ep: Endpoint) -> P2pIdentityRef {
+        Arc::new(DummyIdentity {
+            id: P2pId::from(vec![1u8; 32]),
+            name: "pn-server-test".to_owned(),
+            endpoints: vec![local_ep],
+        })
+    }
+
+    fn make_stream_pair() -> (
+        (TunnelStreamRead, TunnelStreamWrite),
+        (ReadHalf<DuplexStream>, WriteHalf<DuplexStream>),
+    ) {
+        let (test_end, tunnel_end) = tokio::io::duplex(256);
+        let (test_read, test_write) = split(test_end);
+        let (tunnel_read, tunnel_write) = split(tunnel_end);
+        (
+            (Box::pin(tunnel_read), Box::pin(tunnel_write)),
+            (test_read, test_write),
+        )
+    }
+
+    fn init_executor() {
+        Executor::init_new_multi_thread(None);
+    }
+
+    #[tokio::test]
+    async fn pn_server_listens_and_bridges_proxy_stream() {
+        init_executor();
+
+        let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23101".parse().unwrap()));
+        let source_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23102".parse().unwrap()));
+        let target_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23103".parse().unwrap()));
+        let identity = test_identity(local_ep);
+        let source_id = P2pId::from(vec![2u8; 32]);
+        let target_id = P2pId::from(vec![3u8; 32]);
+
+        let fake_network = FakeTunnelNetwork::new(Protocol::Quic);
+        let net_manager = NetManager::new(
+            vec![fake_network.clone() as TunnelNetworkRef],
+            DefaultTlsServerCertResolver::new(),
+        )
+        .unwrap();
+        net_manager.listen(&[local_ep], None).await.unwrap();
+        let ttp_server = TtpServer::new(identity.clone(), net_manager).unwrap();
+
+        let pn_server = PnServer::new(ttp_server.clone());
+        pn_server.start().await.unwrap();
+
+        let (target_tunnel, mut target_open_rx, target_attached) = FakeTunnel::new_with_open_stream(
+            identity.get_id(),
+            target_id.clone(),
+            local_ep,
+            target_ep,
+        );
+        fake_network.push_tunnel(target_tunnel);
+        timeout(Duration::from_secs(1), target_attached)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (source_tunnel, source_stream_tx, source_attached) =
+            FakeTunnel::new(identity.get_id(), source_id.clone(), local_ep, source_ep);
+        fake_network.push_tunnel(source_tunnel);
+        timeout(Duration::from_secs(1), source_attached)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ((server_read, server_write), (mut source_read, mut source_write)) = make_stream_pair();
+        source_stream_tx
+            .send((PN_PROXY_VPORT, server_read, server_write))
+            .unwrap();
+
+        let req = ProxyOpenReq {
+            tunnel_id: TunnelId::from(42),
+            from: source_id.clone(),
+            to: target_id.clone(),
+            kind: PnChannelKind::Stream,
+            vport: 2000,
+        };
+        let command = TunnelCommand::new(req.clone()).unwrap();
+        write_tunnel_command(&mut source_write, &command)
+            .await
+            .unwrap();
+
+        let (vport, mut target_read, mut target_write) =
+            timeout(Duration::from_secs(1), target_open_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(vport, PN_PROXY_VPORT);
+
+        let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
+        let target_req =
+            read_tunnel_command_body::<_, ProxyOpenReq>(&mut target_read, target_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(target_req.tunnel_id, req.tunnel_id);
+        assert_eq!(target_req.from, source_id);
+        assert_eq!(target_req.to, target_id);
+
+        let resp = TunnelCommand::new(ProxyOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: TunnelCommandResult::Success as u8,
+        })
+        .unwrap();
+        write_tunnel_command(&mut target_write, &resp)
+            .await
+            .unwrap();
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.tunnel_id, req.tunnel_id);
+        assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
+
+        source_write.write_all(b"ping").await.unwrap();
+        let mut ping_buf = [0u8; 4];
+        target_read.read_exact(&mut ping_buf).await.unwrap();
+        assert_eq!(&ping_buf, b"ping");
+
+        target_write.write_all(b"pong").await.unwrap();
+        let mut pong_buf = [0u8; 4];
+        source_read.read_exact(&mut pong_buf).await.unwrap();
+        assert_eq!(&pong_buf, b"pong");
+    }
 }

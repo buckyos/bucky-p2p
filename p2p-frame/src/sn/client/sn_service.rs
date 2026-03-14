@@ -6,11 +6,11 @@ use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef,
     P2pSn,
 };
+use crate::runtime;
 use crate::sn::protocol::v0::{SnCallResp, SnCalled, SnCalledResp, TunnelType};
 use crate::sn::protocol::{
     Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp,
 };
-use crate::runtime;
 use crate::sn::types::{
     CmdTunnelId, SN_CMD_VPORT, SnCmdHeader, SnTunnelClassification, SnTunnelRead, SnTunnelWrite,
 };
