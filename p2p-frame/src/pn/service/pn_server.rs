@@ -16,7 +16,7 @@ use crate::networks::{
     read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
 use crate::p2p_identity::P2pId;
-use crate::pn::{PN_PROXY_VPORT, ProxyOpenReq, ProxyOpenResp};
+use crate::pn::{PROXY_SERVICE, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
 use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServerRef};
 
@@ -90,13 +90,13 @@ impl PnService {
     ) {
         req.from = from.clone();
         log::debug!(
-            "pn server open recv tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_vport={}",
+            "pn server open recv tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_service={}",
             req.tunnel_id,
             req.from,
             req.to,
             req.kind,
             req.purpose,
-            PN_PROXY_VPORT
+            PROXY_SERVICE
         );
 
         let mut source_write = write;
@@ -105,7 +105,7 @@ impl PnService {
             self.ttp_server.open_stream_by_id(
                 &req.to,
                 Some(req.to.to_string()),
-                crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap(),
+                crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
             ),
         )
         .await
@@ -115,11 +115,11 @@ impl PnService {
         let open_result = match open_result {
             Ok((_meta, mut target_read, mut target_write)) => {
                 log::debug!(
-                    "pn server open upstream connected tunnel_id={:?} target={} requested_purpose={} proxy_vport={}",
+                    "pn server open upstream connected tunnel_id={:?} target={} requested_purpose={} proxy_service={}",
                     req.tunnel_id,
                     req.to,
                     req.purpose,
-                    PN_PROXY_VPORT
+                    PROXY_SERVICE
                 );
                 let bridge_ready = async {
                     write_proxy_command(&mut target_write, req.clone()).await?;
@@ -149,12 +149,12 @@ impl PnService {
                 match bridge_ready {
                     Ok((result, target_read, target_write)) => {
                         log::debug!(
-                            "pn server open upstream resp tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_vport={} result={:?}",
+                            "pn server open upstream resp tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_service={} result={:?}",
                             req.tunnel_id,
                             req.to,
                             req.kind,
                             req.purpose,
-                            PN_PROXY_VPORT,
+                            PROXY_SERVICE,
                             result
                         );
                         let _ = write_proxy_command(
@@ -176,12 +176,12 @@ impl PnService {
                     }
                     Err(err) => {
                         log::warn!(
-                            "pn server open upstream failed tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_vport={} code={:?} msg={}",
+                            "pn server open upstream failed tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_service={} code={:?} msg={}",
                             req.tunnel_id,
                             req.to,
                             req.kind,
                             req.purpose,
-                            PN_PROXY_VPORT,
+                            PROXY_SERVICE,
                             err.code(),
                             err.msg()
                         );
@@ -199,13 +199,13 @@ impl PnService {
             }
             Err(err) => {
                 log::warn!(
-                    "pn server open target failed tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_vport={} code={:?} msg={}",
+                    "pn server open target failed tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_service={} code={:?} msg={}",
                     req.tunnel_id,
                     req.from,
                     req.to,
                     req.kind,
                     req.purpose,
-                    PN_PROXY_VPORT,
+                    PROXY_SERVICE,
                     err.code(),
                     err.msg()
                 );
@@ -223,13 +223,13 @@ impl PnService {
 
         if let Ok((target_read, target_write)) = open_result {
             log::debug!(
-                "pn server bridge start tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_vport={}",
+                "pn server bridge start tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_service={}",
                 req.tunnel_id,
                 from,
                 req.to,
                 req.kind,
                 req.purpose,
-                PN_PROXY_VPORT
+                PROXY_SERVICE
             );
             let mut source_stream = ProxyStream::new(read, source_write);
             let mut target_stream = ProxyStream::new(target_read, target_write);
@@ -296,7 +296,7 @@ impl PnServer {
 
         let listener = match self
             .ttp_server
-            .listen_stream(crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap())
+            .listen_stream(crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap())
             .await
         {
             Ok(listener) => listener,
@@ -818,7 +818,7 @@ mod tests {
         let ((server_read, server_write), (mut source_read, mut source_write)) = make_stream_pair();
         source_stream_tx
             .send((
-                crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap(),
+                crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
                 server_read,
                 server_write,
             ))
@@ -843,7 +843,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             purpose,
-            crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap()
+            crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap()
         );
 
         let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();

@@ -17,7 +17,7 @@ pub struct PingSessionResp {
     pub endpoints: Vec<Endpoint>,
 }
 
-pub const SN_CMD_VPORT: u16 = 0xfff0;
+pub const SN_CMD_SERVICE: &str = "sn_service";
 
 #[derive(Clone, Debug, Hash, Eq)]
 pub struct SnTunnelClassification {

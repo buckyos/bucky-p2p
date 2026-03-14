@@ -9,7 +9,7 @@ use crate::networks::{
     read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
-use crate::pn::{PN_PROXY_VPORT, PnChannelKind, ProxyOpenReq, ProxyOpenResp};
+use crate::pn::{PROXY_SERVICE, PnChannelKind, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
 use crate::ttp::{TtpClientRef, TtpPortListener};
 use crate::types::TunnelIdGenerator;
@@ -108,7 +108,7 @@ impl PnShared {
     async fn create_data_connection(&self) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let (_meta, read, write) = self
             .ttp_client
-            .open_stream_on_latest_tunnel(TunnelPurpose::from_value(&PN_PROXY_VPORT)?)
+            .open_stream_on_latest_tunnel(TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
             .await?;
         Ok((read, write))
     }
@@ -156,26 +156,26 @@ impl TunnelNetwork for PnClient {
             let listener = self.listener.lock().unwrap();
             if let Some(listener) = listener.as_ref() {
                 log::debug!(
-                    "pn client listen reuse local_id={} local_ep={} proxy_vport={} mapping_port={:?}",
+                    "pn client listen reuse local_id={} local_ep={} proxy_service={} mapping_port={:?}",
                     self.shared.local_id(),
                     local,
-                    PN_PROXY_VPORT,
+                    PROXY_SERVICE,
                     mapping_port
                 );
                 return Ok(listener.clone());
             }
         }
         log::debug!(
-            "pn client listen start local_id={} local_ep={} proxy_vport={} mapping_port={:?}",
+            "pn client listen start local_id={} local_ep={} proxy_service={} mapping_port={:?}",
             self.shared.local_id(),
             local,
-            PN_PROXY_VPORT,
+            PROXY_SERVICE,
             mapping_port
         );
         let ttp_listener = self
             .shared
             .ttp_client
-            .listen_stream(TunnelPurpose::from_value(&PN_PROXY_VPORT)?)
+            .listen_stream(TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
             .await?;
         let listener: TunnelListenerRef =
             Arc::new(PnListener::new(self.shared.local_id(), ttp_listener));
@@ -185,10 +185,10 @@ impl TunnelNetwork for PnClient {
         }];
         *self.listener.lock().unwrap() = Some(listener.clone());
         log::debug!(
-            "pn client listen ready local_id={} local_ep={} proxy_vport={} protocol={:?}",
+            "pn client listen ready local_id={} local_ep={} proxy_service={} protocol={:?}",
             self.shared.local_id(),
             local,
-            PN_PROXY_VPORT,
+            PROXY_SERVICE,
             self.protocol()
         );
         Ok(listener)
@@ -196,20 +196,20 @@ impl TunnelNetwork for PnClient {
 
     async fn close_all_listener(&self) -> P2pResult<()> {
         log::debug!(
-            "pn client close listener local_id={} proxy_vport={} had_listener={}",
+            "pn client close listener local_id={} proxy_service={} had_listener={}",
             self.shared.local_id(),
-            PN_PROXY_VPORT,
+            PROXY_SERVICE,
             self.listener.lock().unwrap().is_some()
         );
         self.shared
             .ttp_client
-            .unlisten_stream(&TunnelPurpose::from_value(&PN_PROXY_VPORT)?)
+            .unlisten_stream(&TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
             .await?;
         *self.listener.lock().unwrap() = None;
         log::debug!(
-            "pn client listener closed local_id={} proxy_vport={}",
+            "pn client listener closed local_id={} proxy_service={}",
             self.shared.local_id(),
-            PN_PROXY_VPORT
+            PROXY_SERVICE
         );
         Ok(())
     }

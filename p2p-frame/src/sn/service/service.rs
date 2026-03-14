@@ -12,7 +12,7 @@ use crate::p2p_identity::{
 };
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sn::types::{CmdTunnelId, SN_CMD_VPORT, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
+use crate::sn::types::{CmdTunnelId, SN_CMD_SERVICE, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
 use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
 use crate::types::{SequenceGenerator, Timestamp, TunnelId};
@@ -613,7 +613,9 @@ impl SnServer {
     async fn start_cmd_accept_loop(self: &Arc<Self>) -> P2pResult<()> {
         let listener = self
             .ttp_server
-            .listen_stream(crate::networks::TunnelPurpose::from_value(&SN_CMD_VPORT).unwrap())
+            .listen_stream(
+                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
+            )
             .await?;
         let server = self.clone();
         let task = Executor::spawn_with_handle(async move {
@@ -1091,7 +1093,7 @@ mod tests {
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
         let listener = ttp_server
-            .listen_stream(crate::networks::TunnelPurpose::from_value(&SN_CMD_VPORT).unwrap())
+            .listen_stream(crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE).unwrap())
             .await
             .unwrap();
 
@@ -1100,7 +1102,7 @@ mod tests {
         let ((read, write), mut remote_write) = make_stream_pair();
         stream_tx
             .send((
-                crate::networks::TunnelPurpose::from_value(&SN_CMD_VPORT).unwrap(),
+                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE).unwrap(),
                 read,
                 write,
             ))
