@@ -2,7 +2,8 @@ use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
-    ListenVPortRegistry, TunnelManagerRef, TunnelRef, TunnelStreamRead, TunnelStreamWrite,
+    ListenPurposeRegistry, TunnelManagerRef, TunnelPurpose, TunnelRef, TunnelStreamRead,
+    TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
 use crate::types::SessionId;
@@ -17,7 +18,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 pub struct StreamRead {
     read: TunnelStreamRead,
     session_id: SessionId,
-    vport: u16,
+    purpose: TunnelPurpose,
     remote: Endpoint,
     local: Endpoint,
     remote_id: P2pId,
@@ -28,7 +29,7 @@ impl StreamRead {
     pub fn new(
         read: TunnelStreamRead,
         session_id: SessionId,
-        vport: u16,
+        purpose: TunnelPurpose,
         local_id: P2pId,
         remote_id: P2pId,
         local: Endpoint,
@@ -37,7 +38,7 @@ impl StreamRead {
         Self {
             read,
             session_id,
-            vport,
+            purpose,
             remote,
             local,
             remote_id,
@@ -49,8 +50,8 @@ impl StreamRead {
         self.session_id
     }
 
-    pub fn vport(&self) -> u16 {
-        self.vport
+    pub fn purpose(&self) -> &TunnelPurpose {
+        &self.purpose
     }
 
     pub fn remote(&self) -> Endpoint {
@@ -87,7 +88,7 @@ impl DerefMut for StreamRead {
 pub struct StreamWrite {
     write: Option<BufWriter<TunnelStreamWrite>>,
     session_id: SessionId,
-    vport: u16,
+    purpose: TunnelPurpose,
     remote: Endpoint,
     local: Endpoint,
     remote_id: P2pId,
@@ -98,7 +99,7 @@ impl StreamWrite {
     pub fn new(
         write: TunnelStreamWrite,
         session_id: SessionId,
-        vport: u16,
+        purpose: TunnelPurpose,
         local_id: P2pId,
         remote_id: P2pId,
         local: Endpoint,
@@ -107,7 +108,7 @@ impl StreamWrite {
         Self {
             write: Some(BufWriter::new(write)),
             session_id,
-            vport,
+            purpose,
             remote,
             local,
             remote_id,
@@ -119,8 +120,8 @@ impl StreamWrite {
         self.session_id
     }
 
-    pub fn vport(&self) -> u16 {
-        self.vport
+    pub fn purpose(&self) -> &TunnelPurpose {
+        &self.purpose
     }
 
     pub fn remote(&self) -> Endpoint {
@@ -170,15 +171,15 @@ struct StreamListenerState {
 }
 
 pub struct StreamListener {
-    listener_port: u16,
+    listener_purpose: TunnelPurpose,
     waiter: SingleCallbackWaiter<(StreamRead, StreamWrite)>,
     state: Mutex<StreamListenerState>,
 }
 
 impl StreamListener {
-    fn new(listener_port: u16) -> Self {
+    fn new(listener_purpose: TunnelPurpose) -> Self {
         Self {
-            listener_port,
+            listener_purpose,
             waiter: SingleCallbackWaiter::new(),
             state: Mutex::new(StreamListenerState {
                 abort_handle: None,
@@ -240,7 +241,7 @@ impl Drop for StreamListenerGuard {
     fn drop(&mut self) {
         self.listener.stop();
         self.stream_manager
-            .remove_listener(self.listener.listener_port);
+            .remove_listener(&self.listener.listener_purpose);
     }
 }
 
@@ -256,7 +257,7 @@ pub struct StreamManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: SessionIdGenerator,
-    listeners: Arc<ListenVPortRegistry<StreamListener>>,
+    listeners: Arc<ListenPurposeRegistry<StreamListener>>,
 }
 
 pub type StreamManagerRef = Arc<StreamManager>;
@@ -276,7 +277,7 @@ impl StreamManager {
             local_identity,
             tunnel_manager,
             session_gen: SessionIdGenerator::new(),
-            listeners: ListenVPortRegistry::new(),
+            listeners: ListenPurposeRegistry::new(),
         });
         stream.start_subscription_loop();
         stream
@@ -285,29 +286,29 @@ impl StreamManager {
     pub async fn connect(
         &self,
         remote: &P2pIdentityCertRef,
-        port: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(StreamRead, StreamWrite)> {
         let tunnel = self.tunnel_manager.open_tunnel(remote).await?;
         let session_id = self.session_gen.generate();
-        let (read, write) = tunnel.open_stream(port).await?;
-        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, port))
+        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
+        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, purpose))
     }
 
     pub async fn connect_from_id(
         &self,
         remote_id: &P2pId,
-        port: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(StreamRead, StreamWrite)> {
         let tunnel = self.tunnel_manager.open_tunnel_from_id(remote_id).await?;
         let session_id = self.session_gen.generate();
-        let (read, write) = tunnel.open_stream(port).await?;
-        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, port))
+        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
+        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, purpose))
     }
 
     pub async fn connect_direct(
         &self,
         remote_eps: Vec<Endpoint>,
-        port: u16,
+        purpose: TunnelPurpose,
         remote_id: Option<P2pId>,
     ) -> P2pResult<(StreamRead, StreamWrite)> {
         let tunnel = self
@@ -315,30 +316,33 @@ impl StreamManager {
             .open_direct_tunnel(remote_eps, remote_id)
             .await?;
         let session_id = self.session_gen.generate();
-        let (read, write) = tunnel.open_stream(port).await?;
-        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, port))
+        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
+        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, purpose))
     }
 
-    pub async fn listen(self: &StreamManagerRef, port: u16) -> P2pResult<StreamListenerGuard> {
-        if self.listeners.contains(port) {
+    pub async fn listen(
+        self: &StreamManagerRef,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<StreamListenerGuard> {
+        if self.listeners.contains(&purpose) {
             return Err(p2p_err!(
                 P2pErrorCode::StreamPortAlreadyListen,
-                "stream port {} already listen",
-                port
+                "stream purpose {} already listen",
+                purpose
             ));
         }
         log::debug!(
-            "stream listen register local_id={} vport={}",
+            "stream listen register local_id={} purpose={}",
             self.local_identity.get_id(),
-            port
+            purpose
         );
-        let listener = Arc::new(StreamListener::new(port));
-        self.listeners.insert(port, listener.clone());
+        let listener = Arc::new(StreamListener::new(purpose.clone()));
+        self.listeners.insert(purpose, listener.clone());
         Ok(StreamListenerGuard::new(listener, self.clone()))
     }
 
-    fn remove_listener(&self, port: u16) {
-        self.listeners.remove(port);
+    fn remove_listener(&self, purpose: &TunnelPurpose) {
+        self.listeners.remove(purpose);
     }
 
     fn start_subscription_loop(self: &Arc<Self>) {
@@ -395,8 +399,8 @@ impl StreamManager {
                     break;
                 };
                 match accepted {
-                    Ok((vport, read, write)) => {
-                        let listener = stream.listeners.get(vport);
+                    Ok((purpose, read, write)) => {
+                        let listener = stream.listeners.get(&purpose);
                         if let Some(listener) = listener {
                             let session_id = stream.session_gen.generate();
                             let (stream_read, stream_write) = stream.wrap_opened_stream(
@@ -404,7 +408,7 @@ impl StreamManager {
                                 read,
                                 write,
                                 session_id,
-                                vport,
+                                purpose,
                             );
                             listener
                                 .waiter
@@ -430,7 +434,7 @@ impl StreamManager {
         read: TunnelStreamRead,
         write: TunnelStreamWrite,
         session_id: SessionId,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> (StreamRead, StreamWrite) {
         let local = tunnel.local_ep().unwrap_or_default();
         let remote = tunnel.remote_ep().unwrap_or_default();
@@ -440,13 +444,15 @@ impl StreamManager {
             StreamRead::new(
                 read,
                 session_id,
-                vport,
+                purpose.clone(),
                 local_id.clone(),
                 remote_id.clone(),
                 local,
                 remote,
             ),
-            StreamWrite::new(write, session_id, vport, local_id, remote_id, local, remote),
+            StreamWrite::new(
+                write, session_id, purpose, local_id, remote_id, local, remote,
+            ),
         )
     }
 }

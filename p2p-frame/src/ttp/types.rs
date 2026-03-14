@@ -1,5 +1,5 @@
 use crate::endpoint::Endpoint;
-use crate::networks::TunnelDatagramRead;
+use crate::networks::{TunnelDatagramRead, TunnelPurpose};
 use crate::p2p_identity::P2pId;
 
 #[derive(Clone, Debug)]
@@ -17,7 +17,7 @@ pub struct TtpStreamMeta {
     pub local_id: P2pId,
     pub remote_id: P2pId,
     pub remote_name: Option<String>,
-    pub vport: u16,
+    pub purpose: TunnelPurpose,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +27,7 @@ pub struct TtpDatagramMeta {
     pub local_id: P2pId,
     pub remote_id: P2pId,
     pub remote_name: Option<String>,
-    pub vport: u16,
+    pub purpose: TunnelPurpose,
 }
 
 pub struct TtpDatagram {

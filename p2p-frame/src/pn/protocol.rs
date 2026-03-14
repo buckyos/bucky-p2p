@@ -1,4 +1,4 @@
-use crate::networks::TunnelCommandBody;
+use crate::networks::{TunnelCommandBody, TunnelPurpose};
 use crate::p2p_identity::P2pId;
 use crate::types::TunnelId;
 use bucky_raw_codec::{RawDecode, RawEncode};
@@ -22,7 +22,7 @@ pub struct ProxyOpenReq {
     pub from: P2pId,
     pub to: P2pId,
     pub kind: PnChannelKind,
-    pub vport: u16,
+    pub purpose: TunnelPurpose,
 }
 
 impl TunnelCommandBody for ProxyOpenReq {

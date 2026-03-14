@@ -3,8 +3,9 @@ use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
     ListenVPortsRef, Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult,
-    TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelState, TunnelStreamRead,
-    TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
+    TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelPurpose, TunnelState,
+    TunnelStreamRead, TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header,
+    write_tunnel_command,
 };
 use crate::p2p_identity::P2pId;
 use crate::runtime;
@@ -97,7 +98,7 @@ impl TunnelCommandBody for TunnelPong {
 struct TunnelOpenChannelReq {
     request_id: u64,
     kind: TunnelChannelKind,
-    vport: u16,
+    purpose: TunnelPurpose,
 }
 
 impl TunnelCommandBody for TunnelOpenChannelReq {
@@ -115,13 +116,13 @@ impl TunnelCommandBody for TunnelOpenChannelResp {
 }
 
 struct QuicAcceptedStream {
-    vport: u16,
+    purpose: TunnelPurpose,
     read: quinn::RecvStream,
     write: quinn::SendStream,
 }
 
 struct QuicAcceptedDatagram {
-    vport: u16,
+    purpose: TunnelPurpose,
     read: quinn::RecvStream,
 }
 
@@ -669,12 +670,16 @@ impl QuicTunnel {
         }
     }
 
-    fn incoming_open_result(&self, kind: TunnelChannelKind, vport: u16) -> TunnelCommandResult {
+    fn incoming_open_result(
+        &self,
+        kind: TunnelChannelKind,
+        purpose: &TunnelPurpose,
+    ) -> TunnelCommandResult {
         let Some(vports) = self.listen_vports(kind) else {
             return TunnelCommandResult::ListenerClosed;
         };
 
-        if !vports.is_listen(vport) {
+        if !vports.is_listen(purpose) {
             return TunnelCommandResult::PortNotListen;
         }
 
@@ -706,7 +711,7 @@ impl QuicTunnel {
         let result = if req.kind != TunnelChannelKind::Stream {
             TunnelCommandResult::InvalidParam
         } else {
-            self.incoming_open_result(req.kind, req.vport)
+            self.incoming_open_result(req.kind, &req.purpose)
         };
 
         if result != TunnelCommandResult::Success {
@@ -747,7 +752,7 @@ impl QuicTunnel {
         }
 
         let _ = self.stream_tx.send(QuicAcceptedStream {
-            vport: req.vport,
+            purpose: req.purpose,
             read: recv,
             write: send,
         });
@@ -774,14 +779,14 @@ impl QuicTunnel {
         let mut result = if req.kind != TunnelChannelKind::Datagram {
             TunnelCommandResult::InvalidParam
         } else {
-            self.incoming_open_result(req.kind, req.vport)
+            self.incoming_open_result(req.kind, &req.purpose)
         };
 
         if result == TunnelCommandResult::Success
             && self
                 .datagram_tx
                 .send(QuicAcceptedDatagram {
-                    vport: req.vport,
+                    purpose: req.purpose,
                     read: recv,
                 })
                 .is_err()
@@ -894,7 +899,10 @@ impl Tunnel for QuicTunnel {
         Ok(())
     }
 
-    async fn open_stream(&self, vport: u16) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+    async fn open_stream(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let (mut send, recv) = self.socket.open_bi().await.map_err(into_p2p_err!(
             P2pErrorCode::ConnectFailed,
             "quic to {} open bi failed",
@@ -906,7 +914,7 @@ impl Tunnel for QuicTunnel {
             TunnelOpenChannelReq {
                 request_id,
                 kind: TunnelChannelKind::Stream,
-                vport,
+                purpose,
             },
         )
         .await?;
@@ -936,7 +944,9 @@ impl Tunnel for QuicTunnel {
         Ok((Box::pin(recv), Box::pin(send)))
     }
 
-    async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+    async fn accept_stream(
+        &self,
+    ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed"));
         }
@@ -952,13 +962,13 @@ impl Tunnel for QuicTunnel {
         tokio::select! {
             accepted = rx.recv() => {
                 let accepted = accepted.ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "quic stream accept queue closed"))?;
-                Ok((accepted.vport, Box::pin(accepted.read), Box::pin(accepted.write)))
+                Ok((accepted.purpose, Box::pin(accepted.read), Box::pin(accepted.write)))
             }
             _ = &mut closed => Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed")),
         }
     }
 
-    async fn open_datagram(&self, vport: u16) -> P2pResult<TunnelDatagramWrite> {
+    async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
         let mut send = self.socket.open_uni().await.map_err(into_p2p_err!(
             P2pErrorCode::ConnectFailed,
             "quic to {} open uni failed",
@@ -970,7 +980,7 @@ impl Tunnel for QuicTunnel {
             TunnelOpenChannelReq {
                 request_id,
                 kind: TunnelChannelKind::Datagram,
-                vport,
+                purpose,
             },
         )
         .await
@@ -986,7 +996,7 @@ impl Tunnel for QuicTunnel {
         Ok(Box::pin(send))
     }
 
-    async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)> {
+    async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed"));
         }
@@ -1002,7 +1012,7 @@ impl Tunnel for QuicTunnel {
         tokio::select! {
             accepted = rx.recv() => {
                 let accepted = accepted.ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "quic datagram accept queue closed"))?;
-                Ok((accepted.vport, Box::pin(accepted.read)))
+                Ok((accepted.purpose, Box::pin(accepted.read)))
             }
             _ = &mut closed => Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed")),
         }

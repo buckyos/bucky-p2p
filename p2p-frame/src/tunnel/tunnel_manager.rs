@@ -1432,20 +1432,31 @@ mod tests {
 
         async fn open_stream(
             &self,
-            _vport: u16,
+            _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
         }
 
-        async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
         }
 
-        async fn open_datagram(&self, _vport: u16) -> P2pResult<TunnelDatagramWrite> {
+        async fn open_datagram(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<TunnelDatagramWrite> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
         }
 
-        async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)> {
+        async fn accept_datagram(
+            &self,
+        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
         }
     }
@@ -1577,20 +1588,31 @@ mod tests {
 
         async fn open_stream(
             &self,
-            _vport: u16,
+            _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
         }
 
-        async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
         }
 
-        async fn open_datagram(&self, _vport: u16) -> P2pResult<TunnelDatagramWrite> {
+        async fn open_datagram(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<TunnelDatagramWrite> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
         }
 
-        async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)> {
+        async fn accept_datagram(
+            &self,
+        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
         }
     }

@@ -7,7 +7,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
     ListenVPortsRef, Tunnel, TunnelCommandResult, TunnelDatagramRead, TunnelDatagramWrite,
-    TunnelForm, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    TunnelForm, TunnelPurpose, TunnelState, TunnelStreamRead, TunnelStreamWrite,
 };
 use crate::p2p_identity::P2pId;
 use crate::pn::{PnChannelKind, ProxyOpenReq, ProxyOpenResp};
@@ -256,39 +256,39 @@ impl PnTunnel {
             self.wait_first_listen_if_needed(expected_kind).await;
 
             if let Some(listened) = self.current_listen_vports(expected_kind) {
-                if listened.is_listen(passive.request.vport) {
+                if listened.is_listen(&passive.request.purpose) {
                     log::debug!(
-                        "pn passive accept allow local={} remote={} kind={:?} vport={}",
+                        "pn passive accept allow local={} remote={} kind={:?} purpose={}",
                         self.local_id,
                         self.remote_id,
                         passive.request.kind,
-                        passive.request.vport
+                        passive.request.purpose
                     );
                     (TunnelCommandResult::Success, None)
                 } else {
                     log::warn!(
-                        "pn passive reject port-not-listen local={} remote={} kind={:?} vport={} expected_kind={:?}",
+                        "pn passive reject port-not-listen local={} remote={} kind={:?} purpose={} expected_kind={:?}",
                         self.local_id,
                         self.remote_id,
                         passive.request.kind,
-                        passive.request.vport,
+                        passive.request.purpose,
                         expected_kind
                     );
                     (
                         TunnelCommandResult::PortNotListen,
                         Some(TunnelCommandResult::PortNotListen.into_p2p_error(format!(
-                            "pn open rejected kind {:?} vport {}",
-                            passive.request.kind, passive.request.vport
+                            "pn open rejected kind {:?} purpose {}",
+                            passive.request.kind, passive.request.purpose
                         ))),
                     )
                 }
             } else {
                 log::warn!(
-                    "pn passive reject listener-closed local={} remote={} kind={:?} vport={} expected_kind={:?}",
+                    "pn passive reject listener-closed local={} remote={} kind={:?} purpose={} expected_kind={:?}",
                     self.local_id,
                     self.remote_id,
                     passive.request.kind,
-                    passive.request.vport,
+                    passive.request.purpose,
                     expected_kind
                 );
                 (
@@ -313,11 +313,11 @@ impl PnTunnel {
 
         if let Some(err) = post_error {
             log::debug!(
-                "pn passive accept finished with error local={} remote={} kind={:?} vport={} code={:?} msg={}",
+                "pn passive accept finished with error local={} remote={} kind={:?} purpose={} code={:?} msg={}",
                 self.local_id,
                 self.remote_id,
                 req.kind,
-                req.vport,
+                req.purpose,
                 err.code(),
                 err.msg()
             );
@@ -325,11 +325,11 @@ impl PnTunnel {
         }
 
         log::debug!(
-            "pn passive accept success local={} remote={} kind={:?} vport={}",
+            "pn passive accept success local={} remote={} kind={:?} purpose={}",
             self.local_id,
             self.remote_id,
             req.kind,
-            req.vport
+            req.purpose
         );
         Ok((req, read, write))
     }
@@ -420,7 +420,10 @@ impl Tunnel for PnTunnel {
         Ok(())
     }
 
-    async fn open_stream(&self, vport: u16) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+    async fn open_stream(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let PnTunnelRole::Active { network } = &self.role else {
             return Err(p2p_err!(
                 P2pErrorCode::NotSupport,
@@ -436,17 +439,19 @@ impl Tunnel for PnTunnel {
                 self.tunnel_id,
                 self.remote_id.clone(),
                 PnChannelKind::Stream,
-                vport,
+                purpose,
             )
             .await
     }
 
-    async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+    async fn accept_stream(
+        &self,
+    ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
         let (req, read, write) = self.accept_passive_stream(PnChannelKind::Stream).await?;
-        Ok((req.vport, read, write))
+        Ok((req.purpose, read, write))
     }
 
-    async fn open_datagram(&self, vport: u16) -> P2pResult<TunnelDatagramWrite> {
+    async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
         let PnTunnelRole::Active { network } = &self.role else {
             return Err(p2p_err!(
                 P2pErrorCode::NotSupport,
@@ -462,15 +467,15 @@ impl Tunnel for PnTunnel {
                 self.tunnel_id,
                 self.remote_id.clone(),
                 PnChannelKind::Datagram,
-                vport,
+                purpose,
             )
             .await?;
         Ok(write)
     }
 
-    async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)> {
+    async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
         let (req, read, _write) = self.accept_passive_stream(PnChannelKind::Datagram).await?;
-        Ok((req.vport, read))
+        Ok((req.purpose, read))
     }
 }
 
@@ -487,6 +492,10 @@ mod tests {
         P2pId::from(vec![byte; 32])
     }
 
+    fn purpose_of(vport: u16) -> TunnelPurpose {
+        TunnelPurpose::from_value(&vport).unwrap()
+    }
+
     fn passive_tunnel(
         kind: PnChannelKind,
         vport: u16,
@@ -498,7 +507,7 @@ mod tests {
             from: remote_id,
             to: local_id.clone(),
             kind,
-            vport,
+            purpose: purpose_of(vport),
         };
         let (local, remote) = tokio::io::duplex(1024);
         let (local_read, local_write) = split(local);
@@ -523,8 +532,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (vport, mut read, mut write) = tunnel.accept_stream().await.unwrap();
-        assert_eq!(vport, 1001);
+        let (purpose, mut read, mut write) = tunnel.accept_stream().await.unwrap();
+        assert_eq!(purpose, purpose_of(1001));
 
         let resp = read_pn_command::<_, ProxyOpenResp>(&mut peer_read)
             .await
@@ -551,8 +560,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (vport, mut read) = tunnel.accept_datagram().await.unwrap();
-        assert_eq!(vport, 2002);
+        let (purpose, mut read) = tunnel.accept_datagram().await.unwrap();
+        assert_eq!(purpose, purpose_of(2002));
 
         let resp = read_pn_command::<_, ProxyOpenResp>(&mut peer_read)
             .await
@@ -617,8 +626,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (vport, mut read, mut write) = pending_accept.await.unwrap();
-        assert_eq!(vport, 5005);
+        let (purpose, mut read, mut write) = pending_accept.await.unwrap();
+        assert_eq!(purpose, purpose_of(5005));
 
         let resp = read_pn_command::<_, ProxyOpenResp>(&mut peer_read)
             .await
@@ -661,8 +670,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (vport, _read, _write) = pending_accept.await.unwrap();
-        assert_eq!(vport, 5006);
+        let (purpose, _read, _write) = pending_accept.await.unwrap();
+        assert_eq!(purpose, purpose_of(5006));
 
         let resp = read_pn_command::<_, ProxyOpenResp>(&mut peer_read)
             .await

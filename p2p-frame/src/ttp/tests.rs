@@ -19,6 +19,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, split};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::time::{Duration, timeout};
 
+fn purpose_of(value: u16) -> crate::networks::TunnelPurpose {
+    crate::networks::TunnelPurpose::from_value(&value).unwrap()
+}
+
 struct DummyIdentity {
     id: P2pId,
     name: String,
@@ -66,12 +70,27 @@ struct FakeTunnel {
     remote_id: P2pId,
     local_ep: Endpoint,
     remote_ep: Endpoint,
-    incoming_stream_rx:
-        AsyncMutex<mpsc::UnboundedReceiver<P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)>>>,
-    incoming_stream_tx:
-        mpsc::UnboundedSender<P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)>>,
-    incoming_datagram_rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<(u16, TunnelDatagramRead)>>>,
-    incoming_datagram_tx: mpsc::UnboundedSender<P2pResult<(u16, TunnelDatagramRead)>>,
+    incoming_stream_rx: AsyncMutex<
+        mpsc::UnboundedReceiver<
+            P2pResult<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
+        >,
+    >,
+    incoming_stream_tx: mpsc::UnboundedSender<
+        P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )>,
+    >,
+    incoming_datagram_rx: AsyncMutex<
+        mpsc::UnboundedReceiver<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
+    >,
+    incoming_datagram_tx:
+        mpsc::UnboundedSender<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
     opened_stream_vports: Mutex<Vec<u16>>,
     opened_datagram_vports: Mutex<Vec<u16>>,
 }
@@ -106,7 +125,7 @@ impl FakeTunnel {
         let (tunnel_read, tunnel_write) = split(tunnel_end);
         drop(peer_end);
         let _ = self.incoming_stream_tx.send(Ok((
-            vport,
+            purpose_of(vport),
             Box::pin(tunnel_read),
             Box::pin(tunnel_write),
         )));
@@ -120,7 +139,7 @@ impl FakeTunnel {
         });
         let _ = self
             .incoming_datagram_tx
-            .send(Ok((vport, Box::pin(tunnel_read))));
+            .send(Ok((purpose_of(vport), Box::pin(tunnel_read))));
     }
 
     fn opened_stream_vports(&self) -> Vec<u16> {
@@ -190,7 +209,11 @@ impl Tunnel for FakeTunnel {
         Ok(())
     }
 
-    async fn open_stream(&self, vport: u16) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+    async fn open_stream(
+        &self,
+        purpose: crate::networks::TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let vport = purpose.decode_as::<u16>().unwrap();
         self.opened_stream_vports.lock().unwrap().push(vport);
         let (peer_end, tunnel_end) = tokio::io::duplex(64);
         let (tunnel_read, tunnel_write) = split(tunnel_end);
@@ -198,14 +221,24 @@ impl Tunnel for FakeTunnel {
         Ok((Box::pin(tunnel_read), Box::pin(tunnel_write)))
     }
 
-    async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+    async fn accept_stream(
+        &self,
+    ) -> P2pResult<(
+        crate::networks::TunnelPurpose,
+        TunnelStreamRead,
+        TunnelStreamWrite,
+    )> {
         let mut rx = self.incoming_stream_rx.lock().await;
         rx.recv()
             .await
             .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream closed"))?
     }
 
-    async fn open_datagram(&self, vport: u16) -> P2pResult<TunnelDatagramWrite> {
+    async fn open_datagram(
+        &self,
+        purpose: crate::networks::TunnelPurpose,
+    ) -> P2pResult<TunnelDatagramWrite> {
+        let vport = purpose.decode_as::<u16>().unwrap();
         self.opened_datagram_vports.lock().unwrap().push(vport);
         let (peer_end, tunnel_end) = tokio::io::duplex(64);
         let (_tunnel_read, tunnel_write) = split(tunnel_end);
@@ -213,7 +246,9 @@ impl Tunnel for FakeTunnel {
         Ok(Box::pin(tunnel_write))
     }
 
-    async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)> {
+    async fn accept_datagram(
+        &self,
+    ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
         let mut rx = self.incoming_datagram_rx.lock().await;
         rx.recv()
             .await
@@ -373,12 +408,15 @@ async fn client_open_stream_and_datagram_reuse_same_tunnel() {
     };
 
     let (stream_meta, _stream_read, _stream_write) =
-        client.open_stream(&target, 1001).await.unwrap();
-    let (datagram_meta, _datagram_write) = client.open_datagram(&target, 1002).await.unwrap();
+        client.open_stream(&target, purpose_of(1001)).await.unwrap();
+    let (datagram_meta, _datagram_write) = client
+        .open_datagram(&target, purpose_of(1002))
+        .await
+        .unwrap();
 
     assert_eq!(stream_meta.remote_id, target.remote_id);
-    assert_eq!(stream_meta.vport, 1001);
-    assert_eq!(datagram_meta.vport, 1002);
+    assert_eq!(stream_meta.purpose, purpose_of(1001));
+    assert_eq!(datagram_meta.purpose, purpose_of(1002));
     assert_eq!(network.create_count(), 1);
     assert_eq!(tunnel.opened_stream_vports(), vec![1001]);
     assert_eq!(tunnel.opened_datagram_vports(), vec![1002]);
@@ -395,8 +433,8 @@ async fn server_listeners_receive_incoming_stream_and_datagram() {
     let manager = make_manager(network.clone() as TunnelNetworkRef);
     manager.listen(&[local_ep], None).await.unwrap();
     let server = TtpServer::new(local.clone(), manager).unwrap();
-    let stream_listener = server.listen_stream(2001).await.unwrap();
-    let datagram_listener = server.listen_datagram(2002).await.unwrap();
+    let stream_listener = server.listen_stream(purpose_of(2001)).await.unwrap();
+    let datagram_listener = server.listen_datagram(purpose_of(2002)).await.unwrap();
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
 
     network.push_tunnel(tunnel.clone());
@@ -417,9 +455,9 @@ async fn server_listeners_receive_incoming_stream_and_datagram() {
     read.read_exact(&mut buf).await.unwrap();
 
     assert_eq!(stream_meta.remote_id, remote.get_id());
-    assert_eq!(stream_meta.vport, 2001);
+    assert_eq!(stream_meta.purpose, purpose_of(2001));
     assert_eq!(datagram.meta.remote_id, remote.get_id());
-    assert_eq!(datagram.meta.vport, 2002);
+    assert_eq!(datagram.meta.purpose, purpose_of(2002));
     assert_eq!(&buf, b"abc");
 }
 
@@ -441,7 +479,11 @@ async fn server_open_stream_requires_existing_incoming_tunnel() {
         remote_name: Some(remote.get_name()),
     };
 
-    let err = server.open_stream(&target, 3001).await.err().unwrap();
+    let err = server
+        .open_stream(&target, purpose_of(3001))
+        .await
+        .err()
+        .unwrap();
     assert_eq!(err.code(), P2pErrorCode::NotFound);
 }
 
@@ -456,7 +498,7 @@ async fn server_open_stream_and_datagram_reuse_existing_incoming_tunnel() {
     let manager = make_manager(network.clone() as TunnelNetworkRef);
     manager.listen(&[local_ep], None).await.unwrap();
     let server = TtpServer::new(local.clone(), manager).unwrap();
-    let listener = server.listen_stream(4001).await.unwrap();
+    let listener = server.listen_stream(purpose_of(4001)).await.unwrap();
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
 
     network.push_tunnel(tunnel.clone());
@@ -473,11 +515,14 @@ async fn server_open_stream_and_datagram_reuse_existing_incoming_tunnel() {
         remote_name: Some(remote.get_name()),
     };
     let (stream_meta, _stream_read, _stream_write) =
-        server.open_stream(&target, 4002).await.unwrap();
-    let (datagram_meta, _datagram_write) = server.open_datagram(&target, 4003).await.unwrap();
+        server.open_stream(&target, purpose_of(4002)).await.unwrap();
+    let (datagram_meta, _datagram_write) = server
+        .open_datagram(&target, purpose_of(4003))
+        .await
+        .unwrap();
 
-    assert_eq!(stream_meta.vport, 4002);
-    assert_eq!(datagram_meta.vport, 4003);
+    assert_eq!(stream_meta.purpose, purpose_of(4002));
+    assert_eq!(datagram_meta.purpose, purpose_of(4003));
     assert_eq!(tunnel.opened_stream_vports(), vec![4002]);
     assert_eq!(tunnel.opened_datagram_vports(), vec![4003]);
 }

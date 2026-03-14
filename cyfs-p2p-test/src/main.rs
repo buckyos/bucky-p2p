@@ -17,6 +17,7 @@ use cyfs_p2p::{
     CyfsIdentityCertFactory, CyfsIdentityFactory,
 };
 use p2p_frame::endpoint::Endpoint as P2pEndpoint;
+use p2p_frame::networks::TunnelPurpose;
 use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
 use p2p_frame::sn::client::{SNClientServiceRef, SnLocalIpProvider, SnLocalIpProviderRef};
 use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef};
@@ -31,6 +32,10 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const APP_NAME: &str = "cyfs-p2p-test";
+
+fn tunnel_purpose(value: u16) -> TunnelPurpose {
+    TunnelPurpose::from_value(&value).unwrap()
+}
 
 #[derive(Deserialize)]
 pub struct TcpConfig {
@@ -263,7 +268,7 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         {
             let (mut read, mut write) = stack
                 .stream_manager()
-                .connect_from_id(&remote_id, 80)
+                .connect_from_id(&remote_id, tunnel_purpose(80))
                 .await
                 .unwrap();
             write.write_all("test".as_bytes()).await.unwrap();
@@ -274,7 +279,7 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         {
             let (mut read, mut write) = stack
                 .stream_manager()
-                .connect_from_id(&remote_id, 80)
+                .connect_from_id(&remote_id, tunnel_purpose(80))
                 .await
                 .unwrap();
             write.write_all("test".as_bytes()).await.unwrap();
@@ -328,7 +333,11 @@ async fn server_instance(data_folder: &Path) {
         .unwrap();
     stack.wait_online(None).await.unwrap();
 
-    let listener = stack.stream_manager().listen(80).await.unwrap();
+    let listener = stack
+        .stream_manager()
+        .listen(tunnel_purpose(80))
+        .await
+        .unwrap();
     loop {
         let (mut read, mut write) = listener.accept().await.unwrap();
         tokio::task::spawn(async move {
@@ -545,7 +554,11 @@ fn print_case_stats(round: u64, stats: &HashMap<&'static str, CaseMetric>) {
 }
 
 async fn start_stream_listener(stack: P2pStackRef, port: u16, label: &'static str) {
-    let listener = stack.stream_manager().listen(port).await.unwrap();
+    let listener = stack
+        .stream_manager()
+        .listen(tunnel_purpose(port))
+        .await
+        .unwrap();
     loop {
         let (mut read, mut write) = listener.accept().await.unwrap();
         tokio::task::spawn(async move {
@@ -573,7 +586,11 @@ async fn start_stream_listener(stack: P2pStackRef, port: u16, label: &'static st
 }
 
 async fn start_datagram_listener(stack: P2pStackRef, port: u16, label: &'static str) {
-    let listener = stack.datagram_manager().listen(port).await.unwrap();
+    let listener = stack
+        .datagram_manager()
+        .listen(tunnel_purpose(port))
+        .await
+        .unwrap();
     loop {
         let mut recv = listener.accept().await.unwrap();
         tokio::task::spawn(async move {
@@ -856,7 +873,7 @@ async fn all_in_one() {
             || async {
                 let (mut read, mut write) = stack_client
                     .stream_manager()
-                    .connect_from_id(&direct_target_id, 1234)
+                    .connect_from_id(&direct_target_id, tunnel_purpose(1234))
                     .await?;
                 let mut buf = [0u8; 64];
                 let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
@@ -887,7 +904,7 @@ async fn all_in_one() {
             || async {
                 let _ = stack_client
                     .stream_manager()
-                    .connect_from_id(&direct_target_id, 19999)
+                    .connect_from_id(&direct_target_id, tunnel_purpose(19999))
                     .await?;
                 Ok(())
             },
@@ -905,7 +922,7 @@ async fn all_in_one() {
             || async {
                 let mut send = stack_client
                     .datagram_manager()
-                    .connect_from_id(&direct_target_id, 1234)
+                    .connect_from_id(&direct_target_id, tunnel_purpose(1234))
                     .await?;
                 send.write_all("datagram direct".as_bytes())
                     .await
@@ -942,7 +959,7 @@ async fn all_in_one() {
                                 0,
                             )),
                         ))],
-                        1234,
+                        tunnel_purpose(1234),
                         None,
                     )
                     .await?;
@@ -962,7 +979,7 @@ async fn all_in_one() {
             || async {
                 let (mut read, mut write) = stack_reverse_caller
                     .stream_manager()
-                    .connect_from_id(&reverse_target_id, 2234)
+                    .connect_from_id(&reverse_target_id, tunnel_purpose(2234))
                     .await?;
                 let mut buf = [0u8; 64];
                 let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
@@ -997,7 +1014,7 @@ async fn all_in_one() {
             || async {
                 let _ = stack_reverse_caller
                     .stream_manager()
-                    .connect_from_id(&reverse_target_id, 2235)
+                    .connect_from_id(&reverse_target_id, tunnel_purpose(2235))
                     .await?;
                 Ok(())
             },
@@ -1015,7 +1032,7 @@ async fn all_in_one() {
             || async {
                 let (mut read, mut write) = stack_proxy_caller
                     .stream_manager()
-                    .connect_from_id(&proxy_target_id, 3234)
+                    .connect_from_id(&proxy_target_id, tunnel_purpose(3234))
                     .await?;
                 let mut buf = [0u8; 64];
                 let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
@@ -1046,7 +1063,7 @@ async fn all_in_one() {
             || async {
                 let mut send = stack_proxy_caller
                     .datagram_manager()
-                    .connect_from_id(&proxy_target_id, 3236)
+                    .connect_from_id(&proxy_target_id, tunnel_purpose(3236))
                     .await?;
                 send.write_all("proxy datagram".as_bytes())
                     .await
@@ -1073,7 +1090,7 @@ async fn all_in_one() {
             || async {
                 let _ = stack_proxy_caller
                     .stream_manager()
-                    .connect_from_id(&proxy_target_id, 3235)
+                    .connect_from_id(&proxy_target_id, tunnel_purpose(3235))
                     .await?;
                 Ok(())
             },
@@ -1092,7 +1109,7 @@ async fn all_in_one() {
                 for _ in 0..3 {
                     let (_read, mut write) = stack_client
                         .stream_manager()
-                        .connect_from_id(&direct_target_id, 1234)
+                        .connect_from_id(&direct_target_id, tunnel_purpose(1234))
                         .await?;
                     write.write_all("reconnect".as_bytes()).await.map_err(|e| {
                         P2pError::from((
@@ -1130,7 +1147,7 @@ async fn all_in_one() {
                     let task = tokio::task::spawn(async move {
                         let (_read, mut write) = stack
                             .stream_manager()
-                            .connect_from_id(&remote, 1234)
+                            .connect_from_id(&remote, tunnel_purpose(1234))
                             .await?;
                         write.write_all("burst".as_bytes()).await.map_err(|e| {
                             P2pError::from((

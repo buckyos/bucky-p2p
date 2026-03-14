@@ -3,7 +3,8 @@ use crate::error::{P2pError, P2pErrorCode, P2pResult};
 use crate::p2p_identity::P2pId;
 use crate::runtime;
 use crate::types::{TunnelCandidateId, TunnelId};
-use bucky_raw_codec::{RawDecode, RawEncode};
+use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -11,6 +12,51 @@ pub type TunnelStreamRead = Pin<Box<dyn runtime::AsyncRead + Send + Unpin + 'sta
 pub type TunnelStreamWrite = Pin<Box<dyn runtime::AsyncWrite + Send + Unpin + 'static>>;
 pub type TunnelDatagramRead = Pin<Box<dyn runtime::AsyncRead + Send + Unpin + 'static>>;
 pub type TunnelDatagramWrite = Pin<Box<dyn runtime::AsyncWrite + Send + Unpin + 'static>>;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, RawEncode, RawDecode)]
+pub struct TunnelPurpose(Vec<u8>);
+
+impl TunnelPurpose {
+    fn codec_error(err: bucky_raw_codec::CodecError) -> P2pError {
+        P2pError::new(P2pErrorCode::RawCodecError, err.to_string())
+    }
+
+    pub fn from_bytes(raw: Vec<u8>) -> Self {
+        Self(raw)
+    }
+
+    pub fn from_value<T>(value: &T) -> P2pResult<Self>
+    where
+        T: RawEncode,
+    {
+        value.to_vec().map(Self).map_err(Self::codec_error)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    pub fn decode_as<T>(&self) -> P2pResult<T>
+    where
+        for<'de> T: RawFrom<'de, T>,
+    {
+        T::clone_from_slice(self.0.as_slice()).map_err(Self::codec_error)
+    }
+}
+
+impl fmt::Display for TunnelPurpose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x")?;
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, RawEncode, RawDecode)]
@@ -68,7 +114,7 @@ impl TunnelCommandResult {
 }
 
 pub trait ListenVPorts: Send + Sync + 'static {
-    fn is_listen(&self, vport: u16) -> bool;
+    fn is_listen(&self, purpose: &TunnelPurpose) -> bool;
 }
 
 pub type ListenVPortsRef = Arc<dyn ListenVPorts>;
@@ -76,13 +122,61 @@ pub type ListenVPortsRef = Arc<dyn ListenVPorts>;
 pub struct AllowAllListenVPorts;
 
 impl ListenVPorts for AllowAllListenVPorts {
-    fn is_listen(&self, _vport: u16) -> bool {
+    fn is_listen(&self, _purpose: &TunnelPurpose) -> bool {
         true
     }
 }
 
 pub fn allow_all_listen_vports() -> ListenVPortsRef {
     Arc::new(AllowAllListenVPorts)
+}
+
+pub fn allow_all_tunnel_purposes() -> ListenVPortsRef {
+    allow_all_listen_vports()
+}
+
+pub struct ListenPurposeRegistry<L> {
+    listeners: std::sync::RwLock<std::collections::HashMap<TunnelPurpose, Arc<L>>>,
+}
+
+impl<L> ListenPurposeRegistry<L> {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            listeners: std::sync::RwLock::new(std::collections::HashMap::new()),
+        })
+    }
+
+    pub fn as_listen_vports_ref(self: &Arc<Self>) -> ListenVPortsRef
+    where
+        L: Send + Sync + 'static,
+    {
+        self.clone()
+    }
+
+    pub fn contains(&self, purpose: &TunnelPurpose) -> bool {
+        self.listeners.read().unwrap().contains_key(purpose)
+    }
+
+    pub fn insert(&self, purpose: TunnelPurpose, listener: Arc<L>) -> Option<Arc<L>> {
+        self.listeners.write().unwrap().insert(purpose, listener)
+    }
+
+    pub fn get(&self, purpose: &TunnelPurpose) -> Option<Arc<L>> {
+        self.listeners.read().unwrap().get(purpose).cloned()
+    }
+
+    pub fn remove(&self, purpose: &TunnelPurpose) -> Option<Arc<L>> {
+        self.listeners.write().unwrap().remove(purpose)
+    }
+}
+
+impl<L> ListenVPorts for ListenPurposeRegistry<L>
+where
+    L: Send + Sync + 'static,
+{
+    fn is_listen(&self, purpose: &TunnelPurpose) -> bool {
+        self.contains(purpose)
+    }
 }
 
 pub struct ListenVPortRegistry<L> {
@@ -124,8 +218,12 @@ impl<L> ListenVPorts for ListenVPortRegistry<L>
 where
     L: Send + Sync + 'static,
 {
-    fn is_listen(&self, vport: u16) -> bool {
-        self.contains(vport)
+    fn is_listen(&self, purpose: &TunnelPurpose) -> bool {
+        purpose
+            .decode_as::<u16>()
+            .ok()
+            .map(|vport| self.contains(vport))
+            .unwrap_or(false)
     }
 }
 
@@ -166,11 +264,16 @@ pub trait Tunnel: Send + Sync + 'static {
     async fn listen_stream(&self, vports: ListenVPortsRef) -> P2pResult<()>;
     async fn listen_datagram(&self, vports: ListenVPortsRef) -> P2pResult<()>;
 
-    async fn open_stream(&self, vport: u16) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)>;
-    async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)>;
+    async fn open_stream(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)>;
+    async fn accept_stream(
+        &self,
+    ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)>;
 
-    async fn open_datagram(&self, vport: u16) -> P2pResult<TunnelDatagramWrite>;
-    async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)>;
+    async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite>;
+    async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)>;
 }
 
 pub type TunnelRef = Arc<dyn Tunnel>;

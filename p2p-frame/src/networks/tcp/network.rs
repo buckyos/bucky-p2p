@@ -249,7 +249,9 @@ impl TunnelNetwork for TcpTunnelNetwork {
 #[cfg(all(test, feature = "x509"))]
 mod tests {
     use super::*;
-    use crate::networks::{ListenVPortRegistry, Tunnel, TunnelListener, allow_all_listen_vports};
+    use crate::networks::{
+        ListenVPortRegistry, Tunnel, TunnelListener, TunnelPurpose, allow_all_listen_vports,
+    };
     use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
@@ -279,6 +281,32 @@ mod tests {
 
     fn loopback_tcp_ep() -> Endpoint {
         Endpoint::from((Protocol::Tcp, "127.0.0.1:0".parse().unwrap()))
+    }
+
+    fn purpose_of(vport: u16) -> TunnelPurpose {
+        TunnelPurpose::from_value(&vport).unwrap()
+    }
+
+    fn tcp_id(value: u32) -> crate::types::TunnelId {
+        crate::types::TunnelId::from(value)
+    }
+
+    fn claim_req(
+        channel_id: u32,
+        kind: super::super::protocol::TcpChannelKind,
+        purpose_vport: u16,
+        conn_id: super::super::protocol::TcpConnId,
+        lease_seq: super::super::protocol::TcpLeaseSeq,
+        claim_nonce: u64,
+    ) -> super::super::protocol::ClaimConnReq {
+        super::super::protocol::ClaimConnReq {
+            channel_id: tcp_id(channel_id),
+            kind,
+            purpose: purpose_of(purpose_vport),
+            conn_id,
+            lease_seq,
+            claim_nonce,
+        }
     }
 
     fn new_network() -> (TcpTunnelNetwork, Arc<DefaultTlsServerCertResolver>) {
@@ -558,7 +586,13 @@ mod tests {
     async fn wait_for_claiming(
         tunnel: &Arc<TcpTunnel>,
         conn_id: super::super::protocol::TcpConnId,
-    ) -> (u64, u64, u64, super::super::protocol::TcpChannelKind, u16) {
+    ) -> (
+        super::super::protocol::TcpChannelId,
+        super::super::protocol::TcpLeaseSeq,
+        u64,
+        super::super::protocol::TcpChannelKind,
+        TunnelPurpose,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Some(claiming) = tunnel.current_claiming_for_test(conn_id) {
@@ -582,7 +616,10 @@ mod tests {
             .listen_stream(allow_all_listen_vports())
             .await
             .unwrap();
-        let (opened, accepted) = tokio::join!(active.open_stream(3990), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3990)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -664,7 +701,10 @@ mod tests {
     async fn tcp_tunnel_stream_returns_connection_after_drain() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(1001), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(1001)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -690,7 +730,10 @@ mod tests {
         let (active, reverse) = setup_pair().await;
 
         let (opened, accepted) = timeout(Duration::from_secs(2), async {
-            tokio::join!(active.open_datagram(2002), reverse.accept_datagram())
+            tokio::join!(
+                active.open_datagram(purpose_of(2002)),
+                reverse.accept_datagram()
+            )
         })
         .await
         .unwrap();
@@ -721,7 +764,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (opened, accepted) = tokio::join!(reverse.open_stream(2100), active.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            reverse.open_stream(purpose_of(2100)),
+            active.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -755,7 +801,10 @@ mod tests {
         assert_eq!(active.data_conn_count_for_test(), 1);
         assert_eq!(reverse.data_conn_count_for_test(), 1);
 
-        let (opened, accepted) = tokio::join!(reverse.open_stream(2200), active.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            reverse.open_stream(purpose_of(2200)),
+            active.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -820,7 +869,7 @@ mod tests {
             tunnel_id: crate::types::TunnelId::from(0x1234),
             candidate_id: crate::types::TunnelCandidateId::from(1),
             is_reverse: false,
-            conn_id: Some(0x5678),
+            conn_id: Some(tcp_id(0x5678)),
             open_request_id: None,
         };
 
@@ -841,7 +890,7 @@ mod tests {
             read_raw_frame::<_, super::super::protocol::DataConnReady>(&mut connection.stream)
                 .await
                 .unwrap();
-        assert_eq!(ready.conn_id, 0x5678);
+        assert_eq!(ready.conn_id, tcp_id(0x5678));
         assert_eq!(
             ready.result,
             super::super::protocol::DataConnReadyResult::TunnelNotFound
@@ -872,7 +921,7 @@ mod tests {
             tunnel_id,
             candidate_id: crate::types::TunnelCandidateId::from(2),
             is_reverse: false,
-            conn_id: Some(1),
+            conn_id: Some(tcp_id(1)),
             open_request_id: None,
         };
 
@@ -1549,7 +1598,7 @@ mod tests {
             read_raw_frame::<_, super::super::protocol::DataConnReady>(&mut data_connection.stream)
                 .await
                 .unwrap();
-        assert_eq!(ready.conn_id, 0);
+        assert_eq!(ready.conn_id, tcp_id(0));
         assert_eq!(
             ready.result,
             super::super::protocol::DataConnReadyResult::ProtocolError
@@ -1575,7 +1624,7 @@ mod tests {
         let server_ep = server_listener.bound_local();
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(X509IdentityCertFactory);
         let tunnel_id = crate::types::TunnelId::from(0x4567);
-        let conn_id = 42;
+        let conn_id = tcp_id(42);
 
         let mut control_connection = connect_with_optional_local(
             cert_factory.clone(),
@@ -1755,7 +1804,7 @@ mod tests {
             super::super::protocol::write_raw_frame(
                 &mut connection.stream,
                 &super::super::protocol::DataConnReady {
-                    conn_id: hello.conn_id.unwrap() + 1,
+                    conn_id: tcp_id(hello.conn_id.unwrap().value().wrapping_add(1)),
                     candidate_id: hello.candidate_id,
                     result: super::super::protocol::DataConnReadyResult::Success,
                 },
@@ -2365,14 +2414,14 @@ mod tests {
         let (active, reverse) = setup_pair().await;
 
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7000,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3099,
-                conn_id: 0xdead_beef,
-                lease_seq: 1,
-                claim_nonce: 1,
-            })
+            .simulate_claim_req_for_test(claim_req(
+                7000,
+                super::super::protocol::TcpChannelKind::Stream,
+                3099,
+                tcp_id(0xdead_beef),
+                tcp_id(1),
+                1,
+            ))
             .await
             .unwrap();
 
@@ -2403,14 +2452,14 @@ mod tests {
         );
 
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7003,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3203,
+            .simulate_claim_req_for_test(claim_req(
+                7003,
+                super::super::protocol::TcpChannelKind::Stream,
+                3203,
                 conn_id,
-                lease_seq: 1,
-                claim_nonce: 100,
-            })
+                tcp_id(1),
+                100,
+            ))
             .await
             .unwrap();
 
@@ -2433,14 +2482,17 @@ mod tests {
     async fn tcp_tunnel_first_successful_claim_commits_lease_seq_one() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3204), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3204)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
         let conn_id = active.first_conn_id_for_test().unwrap();
         let (_channel_id, lease_seq, _tx_bytes, _rx_bytes) =
             active.current_lease_for_test(conn_id).unwrap();
-        assert_eq!(lease_seq, 1);
+        assert_eq!(lease_seq, tcp_id(1));
 
         drop(write);
         drop(read);
@@ -2479,20 +2531,20 @@ mod tests {
             .start_claim_for_test(
                 conn_id,
                 super::super::protocol::TcpChannelKind::Stream,
-                3301,
+                purpose_of(3301),
                 11,
             )
             .unwrap();
 
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7004,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3302,
+            .simulate_claim_req_for_test(claim_req(
+                7004,
+                super::super::protocol::TcpChannelKind::Stream,
+                3302,
                 conn_id,
                 lease_seq,
-                claim_nonce: 10,
-            })
+                10,
+            ))
             .await
             .unwrap();
 
@@ -2512,7 +2564,7 @@ mod tests {
                 lease_seq,
                 11,
                 super::super::protocol::TcpChannelKind::Stream,
-                3301,
+                purpose_of(3301),
             ))
         );
         assert!(
@@ -2546,20 +2598,20 @@ mod tests {
             .start_claim_for_test(
                 conn_id,
                 super::super::protocol::TcpChannelKind::Stream,
-                3303,
+                purpose_of(3303),
                 77,
             )
             .unwrap();
 
         let response = loser
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7005,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3304,
+            .simulate_claim_req_for_test(claim_req(
+                7005,
+                super::super::protocol::TcpChannelKind::Stream,
+                3304,
                 conn_id,
                 lease_seq,
-                claim_nonce: 77,
-            })
+                77,
+            ))
             .await
             .unwrap();
 
@@ -2572,13 +2624,16 @@ mod tests {
                 }
             ) if result == super::super::protocol::ClaimConnAckResult::Success as u8
         ));
-        assert_eq!(loser.current_lease_for_test(conn_id).unwrap().0, 7005);
+        assert_eq!(
+            loser.current_lease_for_test(conn_id).unwrap().0,
+            tcp_id(7005)
+        );
 
         let accepted = timeout(Duration::from_millis(100), loser.accept_stream())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(accepted.0, 3304);
+        assert_eq!(accepted.0, purpose_of(3304));
         let (_vport, read, write) = accepted;
         drop(read);
         drop(write);
@@ -2608,21 +2663,21 @@ mod tests {
             .start_claim_for_test(
                 conn_id,
                 super::super::protocol::TcpChannelKind::Stream,
-                3307,
+                purpose_of(3307),
                 7,
             )
             .unwrap();
         let pending_claim = loser.register_pending_claim_for_test(local_channel_id);
 
         let response = loser
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7009,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3308,
+            .simulate_claim_req_for_test(claim_req(
+                7009,
+                super::super::protocol::TcpChannelKind::Stream,
+                3308,
                 conn_id,
                 lease_seq,
-                claim_nonce: 7,
-            })
+                7,
+            ))
             .await
             .unwrap();
 
@@ -2640,13 +2695,16 @@ mod tests {
             Err(err) => err,
         };
         assert_eq!(err.code(), P2pErrorCode::Conflict);
-        assert_eq!(loser.current_lease_for_test(conn_id).unwrap().0, 7009);
+        assert_eq!(
+            loser.current_lease_for_test(conn_id).unwrap().0,
+            tcp_id(7009)
+        );
 
         let accepted = timeout(Duration::from_millis(100), loser.accept_stream())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(accepted.0, 3308);
+        assert_eq!(accepted.0, purpose_of(3308));
         let (_vport, read, write) = accepted;
         drop(read);
         drop(write);
@@ -2663,14 +2721,14 @@ mod tests {
             .await
             .unwrap();
         let conn_id = active.first_conn_id_for_test().unwrap();
-        let req = super::super::protocol::ClaimConnReq {
-            channel_id: 7001,
-            kind: super::super::protocol::TcpChannelKind::Stream,
-            vport: 3100,
+        let req = claim_req(
+            7001,
+            super::super::protocol::TcpChannelKind::Stream,
+            3100,
             conn_id,
-            lease_seq: 1,
-            claim_nonce: 42,
-        };
+            tcp_id(1),
+            42,
+        );
 
         let first = active
             .simulate_claim_req_for_test(req.clone())
@@ -2721,14 +2779,14 @@ mod tests {
             .await
             .unwrap();
         let conn_id = active.first_conn_id_for_test().unwrap();
-        let req = super::super::protocol::ClaimConnReq {
-            channel_id: 7002,
-            kind: super::super::protocol::TcpChannelKind::Stream,
-            vport: 3200,
+        let req = claim_req(
+            7002,
+            super::super::protocol::TcpChannelKind::Stream,
+            3200,
             conn_id,
-            lease_seq: 2,
-            claim_nonce: 99,
-        };
+            tcp_id(2),
+            99,
+        );
 
         let first = active
             .simulate_claim_req_for_test(req.clone())
@@ -2765,14 +2823,14 @@ mod tests {
 
         let conn_id = active.first_conn_id_for_test().unwrap();
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7006,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3205,
+            .simulate_claim_req_for_test(claim_req(
+                7006,
+                super::super::protocol::TcpChannelKind::Stream,
+                3205,
                 conn_id,
-                lease_seq: 3,
-                claim_nonce: 1,
-            })
+                tcp_id(3),
+                1,
+            ))
             .await
             .unwrap();
 
@@ -2800,20 +2858,20 @@ mod tests {
             .start_claim_for_test(
                 conn_id,
                 super::super::protocol::TcpChannelKind::Stream,
-                3206,
+                purpose_of(3206),
                 9,
             )
             .unwrap();
 
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7007,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3207,
+            .simulate_claim_req_for_test(claim_req(
+                7007,
+                super::super::protocol::TcpChannelKind::Stream,
+                3207,
                 conn_id,
-                lease_seq: lease_seq + 1,
-                claim_nonce: 2,
-            })
+                tcp_id(lease_seq.value().wrapping_add(1)),
+                2,
+            ))
             .await
             .unwrap();
 
@@ -2833,7 +2891,7 @@ mod tests {
                 lease_seq,
                 9,
                 super::super::protocol::TcpChannelKind::Stream,
-                3206,
+                purpose_of(3206),
             ))
         );
 
@@ -2852,14 +2910,14 @@ mod tests {
 
         let conn_id = active.first_conn_id_for_test().unwrap();
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7010,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3210,
+            .simulate_claim_req_for_test(claim_req(
+                7010,
+                super::super::protocol::TcpChannelKind::Stream,
+                3210,
                 conn_id,
-                lease_seq: 1,
-                claim_nonce: 1,
-            })
+                tcp_id(1),
+                1,
+            ))
             .await
             .unwrap();
 
@@ -2881,7 +2939,10 @@ mod tests {
     async fn tcp_tunnel_claim_req_returns_not_idle_when_connection_is_bound() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3211), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3211)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -2890,14 +2951,14 @@ mod tests {
             active.current_lease_for_test(conn_id).unwrap();
 
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7012,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3212,
+            .simulate_claim_req_for_test(claim_req(
+                7012,
+                super::super::protocol::TcpChannelKind::Stream,
+                3212,
                 conn_id,
                 lease_seq,
-                claim_nonce: 2,
-            })
+                2,
+            ))
             .await
             .unwrap();
 
@@ -2928,14 +2989,14 @@ mod tests {
             .unwrap();
 
         let conn_id = active.first_conn_id_for_test().unwrap();
-        let first_req = super::super::protocol::ClaimConnReq {
-            channel_id: 7013,
-            kind: super::super::protocol::TcpChannelKind::Stream,
-            vport: 3213,
+        let first_req = claim_req(
+            7013,
+            super::super::protocol::TcpChannelKind::Stream,
+            3213,
             conn_id,
-            lease_seq: 1,
-            claim_nonce: 11,
-        };
+            tcp_id(1),
+            11,
+        );
 
         let first = active
             .simulate_claim_req_for_test(first_req.clone())
@@ -2953,7 +3014,7 @@ mod tests {
 
         let second = active
             .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                vport: 3214,
+                purpose: purpose_of(3214),
                 ..first_req
             })
             .await
@@ -2989,14 +3050,14 @@ mod tests {
 
         let conn_id = active.first_conn_id_for_test().unwrap();
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7011,
-                kind: super::super::protocol::TcpChannelKind::Stream,
-                vport: 3211,
+            .simulate_claim_req_for_test(claim_req(
+                7011,
+                super::super::protocol::TcpChannelKind::Stream,
+                3211,
                 conn_id,
-                lease_seq: 1,
-                claim_nonce: 2,
-            })
+                tcp_id(1),
+                2,
+            ))
             .await
             .unwrap();
 
@@ -3024,7 +3085,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = active.open_stream(3924).await.err().unwrap();
+        let err = active.open_stream(purpose_of(3924)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
 
         active.close().await.unwrap();
@@ -3037,7 +3098,7 @@ mod tests {
 
         let mut pending_open = Box::pin({
             let active = active.clone();
-            async move { active.open_stream(3926).await }
+            async move { active.open_stream(purpose_of(3926)).await }
         });
 
         assert!(
@@ -3055,7 +3116,7 @@ mod tests {
         let (vport, mut peer_read, mut peer_write) = reverse.accept_stream().await.unwrap();
         let (mut read, mut write) = opened;
 
-        assert_eq!(vport, 3926);
+        assert_eq!(vport, purpose_of(3926));
 
         write.write_all(b"ping").await.unwrap();
         let mut buf = [0u8; 4];
@@ -3077,7 +3138,7 @@ mod tests {
 
         let mut pending_open = Box::pin({
             let active = active.clone();
-            async move { active.open_stream(3927).await }
+            async move { active.open_stream(purpose_of(3927)).await }
         });
 
         reverse
@@ -3098,7 +3159,7 @@ mod tests {
 
         let opened = pending_open.await.unwrap();
         let (vport, _peer_read, _peer_write) = reverse.accept_stream().await.unwrap();
-        assert_eq!(vport, 3927);
+        assert_eq!(vport, purpose_of(3927));
         drop(opened);
 
         active.close().await.unwrap();
@@ -3111,11 +3172,11 @@ mod tests {
 
         let mut pending_open_1 = Box::pin({
             let active = active.clone();
-            async move { active.open_stream(3928).await }
+            async move { active.open_stream(purpose_of(3928)).await }
         });
         let mut pending_open_2 = Box::pin({
             let active = active.clone();
-            async move { active.open_stream(3929).await }
+            async move { active.open_stream(purpose_of(3929)).await }
         });
 
         assert!(
@@ -3140,8 +3201,8 @@ mod tests {
         let accepted_1 = reverse.accept_stream().await.unwrap();
         let accepted_2 = reverse.accept_stream().await.unwrap();
         let accepted_vports = vec![accepted_1.0, accepted_2.0];
-        assert!(accepted_vports.contains(&3928));
-        assert!(accepted_vports.contains(&3929));
+        assert!(accepted_vports.contains(&purpose_of(3928)));
+        assert!(accepted_vports.contains(&purpose_of(3929)));
 
         active.close().await.unwrap();
         reverse.close().await.unwrap();
@@ -3173,8 +3234,10 @@ mod tests {
     async fn tcp_tunnel_datagram_hidden_direction_nonzero_fin_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) =
-            tokio::join!(active.open_datagram(3220), reverse.accept_datagram());
+        let (opened, accepted) = tokio::join!(
+            active.open_datagram(purpose_of(3220)),
+            reverse.accept_datagram()
+        );
         let mut writer = opened.unwrap();
         let (_vport, peer_read) = accepted.unwrap();
 
@@ -3202,8 +3265,10 @@ mod tests {
     async fn tcp_tunnel_datagram_hidden_zero_path_sends_auto_zero_fin_and_read_done() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) =
-            tokio::join!(active.open_datagram(3221), reverse.accept_datagram());
+        let (opened, accepted) = tokio::join!(
+            active.open_datagram(purpose_of(3221)),
+            reverse.accept_datagram()
+        );
         let writer = opened.unwrap();
         let (_vport, reader) = accepted.unwrap();
 
@@ -3230,8 +3295,10 @@ mod tests {
     async fn tcp_tunnel_datagram_hidden_direction_nonzero_bytes_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) =
-            tokio::join!(active.open_datagram(3222), reverse.accept_datagram());
+        let (opened, accepted) = tokio::join!(
+            active.open_datagram(purpose_of(3222)),
+            reverse.accept_datagram()
+        );
         let writer = opened.unwrap();
         let reader = accepted.unwrap().1;
 
@@ -3278,7 +3345,7 @@ mod tests {
 
         let pending = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3900).await }
+            async move { active.open_stream(purpose_of(3900)).await }
         });
 
         sleep(Duration::from_millis(50)).await;
@@ -3302,7 +3369,7 @@ mod tests {
 
         let pending_open = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3930).await }
+            async move { active.open_stream(purpose_of(3930)).await }
         });
 
         let conn_id = active.first_conn_id_for_test().unwrap();
@@ -3318,14 +3385,14 @@ mod tests {
             .await
             .unwrap();
         let response = active
-            .simulate_claim_req_for_test(super::super::protocol::ClaimConnReq {
-                channel_id: 7030,
+            .simulate_claim_req_for_test(claim_req(
+                7030,
                 kind,
-                vport: 3931,
+                3931,
                 conn_id,
                 lease_seq,
-                claim_nonce: claim_nonce.saturating_add(1),
-            })
+                claim_nonce.saturating_add(1),
+            ))
             .await
             .unwrap();
 
@@ -3352,7 +3419,10 @@ mod tests {
     async fn tcp_tunnel_pending_read_done_before_local_fin_is_applied_after_fin() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3910), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3910)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -3385,7 +3455,10 @@ mod tests {
     async fn tcp_tunnel_write_fin_before_tail_data_still_returns_connection_to_idle() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3911), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3911)),
+            reverse.accept_stream()
+        );
         let (mut read, write) = opened.unwrap();
         let (_vport, peer_read, mut peer_write) = accepted.unwrap();
 
@@ -3418,7 +3491,10 @@ mod tests {
     async fn tcp_tunnel_local_read_drop_with_matching_peer_fin_still_reuses_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3912), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3912)),
+            reverse.accept_stream()
+        );
         let (mut read, write) = opened.unwrap();
         let (_vport, peer_read, mut peer_write) = accepted.unwrap();
 
@@ -3443,7 +3519,10 @@ mod tests {
     async fn tcp_tunnel_local_read_drop_with_mismatched_peer_fin_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3913), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3913)),
+            reverse.accept_stream()
+        );
         let (mut read, write) = opened.unwrap();
         let (_vport, peer_read, mut peer_write) = accepted.unwrap();
 
@@ -3469,7 +3548,10 @@ mod tests {
     async fn tcp_tunnel_local_write_drop_with_failed_write_fin_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3914), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3914)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -3494,9 +3576,9 @@ mod tests {
         let err = active
             .simulate_control_cmd_for_test(super::super::protocol::TcpControlCmd::WriteFin(
                 super::super::protocol::WriteFin {
-                    channel_id: 9001,
-                    conn_id: 0xdead_beef,
-                    lease_seq: 1,
+                    channel_id: tcp_id(9001),
+                    conn_id: tcp_id(0xdead_beef),
+                    lease_seq: tcp_id(1),
                     final_tx_bytes: 0,
                 },
             ))
@@ -3526,9 +3608,9 @@ mod tests {
         let err = active
             .simulate_control_cmd_for_test(super::super::protocol::TcpControlCmd::ReadDone(
                 super::super::protocol::ReadDone {
-                    channel_id: 9002,
-                    conn_id: 0xdead_beef,
-                    lease_seq: 1,
+                    channel_id: tcp_id(9002),
+                    conn_id: tcp_id(0xdead_beef),
+                    lease_seq: tcp_id(1),
                     final_rx_bytes: 0,
                 },
             ))
@@ -3558,9 +3640,9 @@ mod tests {
 
         let conn_id = active.first_conn_id_for_test().unwrap();
         active.simulate_write_fin_for_test(super::super::protocol::WriteFin {
-            channel_id: 9901,
+            channel_id: tcp_id(9901),
             conn_id,
-            lease_seq: 2,
+            lease_seq: tcp_id(2),
             final_tx_bytes: 0,
         });
 
@@ -3578,9 +3660,9 @@ mod tests {
 
         let conn_id = active.first_conn_id_for_test().unwrap();
         active.simulate_read_done_for_test(super::super::protocol::ReadDone {
-            channel_id: 9902,
+            channel_id: tcp_id(9902),
             conn_id,
-            lease_seq: 2,
+            lease_seq: tcp_id(2),
             final_rx_bytes: 0,
         });
 
@@ -3635,7 +3717,10 @@ mod tests {
         )
         .await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3920), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3920)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -3682,7 +3767,7 @@ mod tests {
         seed_idle_stream(&active, &reverse).await;
         reverse.set_claim_req_delay_for_test(Duration::from_millis(400));
 
-        let err = match active.open_stream(3925).await {
+        let err = match active.open_stream(purpose_of(3925)).await {
             Ok(_) => panic!("claim should time out"),
             Err(err) => err,
         };
@@ -3710,7 +3795,7 @@ mod tests {
             .start_claim_for_test(
                 conn_id,
                 super::super::protocol::TcpChannelKind::Stream,
-                3926,
+                purpose_of(3926),
                 1,
             )
             .unwrap();
@@ -3745,7 +3830,7 @@ mod tests {
 
         let pending_open = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3927).await }
+            async move { active.open_stream(purpose_of(3927)).await }
         });
 
         let conn_id = active.first_conn_id_for_test().unwrap();
@@ -3778,7 +3863,10 @@ mod tests {
     async fn tcp_tunnel_write_fin_channel_mismatch_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3310), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3310)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -3787,7 +3875,7 @@ mod tests {
             active.current_lease_for_test(conn_id).unwrap();
 
         active.simulate_write_fin_for_test(super::super::protocol::WriteFin {
-            channel_id: channel_id + 1,
+            channel_id: tcp_id(channel_id.value().wrapping_add(1)),
             conn_id,
             lease_seq,
             final_tx_bytes: 0,
@@ -3807,7 +3895,10 @@ mod tests {
     async fn tcp_tunnel_conflicting_duplicate_write_fin_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3300), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3300)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -3847,7 +3938,10 @@ mod tests {
     async fn tcp_tunnel_duplicate_write_fin_with_same_value_is_idempotent() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3301), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3301)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -3890,7 +3984,10 @@ mod tests {
     async fn tcp_tunnel_conflicting_duplicate_read_done_retires_connection() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3400), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3400)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -3932,7 +4029,10 @@ mod tests {
     async fn tcp_tunnel_duplicate_read_done_with_same_value_is_idempotent() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3401), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3401)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 
@@ -3975,8 +4075,10 @@ mod tests {
     async fn tcp_tunnel_stale_write_fin_and_read_done_are_ignored_after_reuse() {
         let (active, reverse) = setup_pair().await;
 
-        let (first_opened, first_accepted) =
-            tokio::join!(active.open_stream(3500), reverse.accept_stream());
+        let (first_opened, first_accepted) = tokio::join!(
+            active.open_stream(purpose_of(3500)),
+            reverse.accept_stream()
+        );
         let (first_read, mut first_write) = first_opened.unwrap();
         let (_vport1, mut first_peer_read, first_peer_write) = first_accepted.unwrap();
 
@@ -3996,8 +4098,10 @@ mod tests {
         wait_for_idle_pool_len(&active, 1).await;
         wait_for_idle_pool_len(&reverse, 1).await;
 
-        let (second_opened, second_accepted) =
-            tokio::join!(active.open_stream(3501), reverse.accept_stream());
+        let (second_opened, second_accepted) = tokio::join!(
+            active.open_stream(purpose_of(3501)),
+            reverse.accept_stream()
+        );
         let (second_read, mut second_write) = second_opened.unwrap();
         let (_vport2, mut second_peer_read, second_peer_write) = second_accepted.unwrap();
 
@@ -4036,7 +4140,10 @@ mod tests {
     async fn tcp_tunnel_late_claim_ack_is_ignored_after_channel_settles() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3600), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3600)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -4064,8 +4171,10 @@ mod tests {
 
         assert_eq!(active.idle_pool_len_for_test(), 1);
 
-        let (reopened, reaccepted) =
-            tokio::join!(active.open_stream(3601), reverse.accept_stream());
+        let (reopened, reaccepted) = tokio::join!(
+            active.open_stream(purpose_of(3601)),
+            reverse.accept_stream()
+        );
         let (read2, write2) = reopened.unwrap();
         let (_vport2, peer_read2, peer_write2) = reaccepted.unwrap();
         drop(write2);
@@ -4081,7 +4190,10 @@ mod tests {
     async fn tcp_tunnel_late_claim_error_ack_is_ignored_after_channel_settles() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3700), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3700)),
+            reverse.accept_stream()
+        );
         let (read, write) = opened.unwrap();
         let (_vport, peer_read, peer_write) = accepted.unwrap();
 
@@ -4109,8 +4221,10 @@ mod tests {
 
         assert_eq!(active.idle_pool_len_for_test(), 1);
 
-        let (reopened, reaccepted) =
-            tokio::join!(active.open_stream(3701), reverse.accept_stream());
+        let (reopened, reaccepted) = tokio::join!(
+            active.open_stream(purpose_of(3701)),
+            reverse.accept_stream()
+        );
         let (read2, write2) = reopened.unwrap();
         let (_vport2, peer_read2, peer_write2) = reaccepted.unwrap();
         drop(write2);
@@ -4136,7 +4250,7 @@ mod tests {
 
         let pending_open = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3702).await }
+            async move { active.open_stream(purpose_of(3702)).await }
         });
 
         let conn_id = active.first_conn_id_for_test().unwrap();
@@ -4214,7 +4328,7 @@ mod tests {
 
         let pending_open = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3705).await }
+            async move { active.open_stream(purpose_of(3705)).await }
         });
 
         let conn_id = active.first_conn_id_for_test().unwrap();
@@ -4295,7 +4409,7 @@ mod tests {
 
         let pending_open = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3703).await }
+            async move { active.open_stream(purpose_of(3703)).await }
         });
 
         let conn_id = active.first_conn_id_for_test().unwrap();
@@ -4344,7 +4458,7 @@ mod tests {
 
         let pending_open = tokio::spawn({
             let active = active.clone();
-            async move { active.open_stream(3704).await }
+            async move { active.open_stream(purpose_of(3704)).await }
         });
 
         let conn_id = active.first_conn_id_for_test().unwrap();
@@ -4392,7 +4506,10 @@ mod tests {
     async fn tcp_tunnel_control_close_keeps_current_channel_but_disables_reuse() {
         let (active, reverse) = setup_pair().await;
 
-        let (opened, accepted) = tokio::join!(active.open_stream(3800), reverse.accept_stream());
+        let (opened, accepted) = tokio::join!(
+            active.open_stream(purpose_of(3800)),
+            reverse.accept_stream()
+        );
         let (read, mut write) = opened.unwrap();
         let (_vport, mut peer_read, peer_write) = accepted.unwrap();
 

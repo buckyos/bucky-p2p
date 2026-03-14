@@ -5,8 +5,8 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::networks::{
     TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelListenerInfo, TunnelListenerRef,
-    TunnelNetwork, TunnelRef, TunnelStreamRead, TunnelStreamWrite, read_tunnel_command_body,
-    read_tunnel_command_header, write_tunnel_command,
+    TunnelNetwork, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite,
+    read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use crate::pn::{PN_PROXY_VPORT, PnChannelKind, ProxyOpenReq, ProxyOpenResp};
@@ -34,7 +34,7 @@ impl PnShared {
         tunnel_id: crate::types::TunnelId,
         remote_id: P2pId,
         kind: PnChannelKind,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let remote_id_for_log = remote_id.clone();
         let req = ProxyOpenReq {
@@ -42,15 +42,15 @@ impl PnShared {
             from: self.local_id(),
             to: remote_id,
             kind,
-            vport,
+            purpose: purpose.clone(),
         };
         log::debug!(
-            "pn open send tunnel_id={:?} from={} to={} kind={:?} vport={}",
+            "pn open send tunnel_id={:?} from={} to={} kind={:?} purpose={}",
             tunnel_id,
             req.from,
             req.to,
             kind,
-            vport
+            purpose
         );
         let (mut read, mut write) = self.create_data_connection().await?;
         write_pn_command(&mut write, req).await?;
@@ -64,11 +64,11 @@ impl PnShared {
             Ok(resp) => resp?,
             Err(err) => {
                 log::warn!(
-                    "pn open timeout tunnel_id={:?} to={} kind={:?} vport={} timeout_ms={}",
+                    "pn open timeout tunnel_id={:?} to={} kind={:?} purpose={} timeout_ms={}",
                     tunnel_id,
                     remote_id_for_log,
                     kind,
-                    vport,
+                    purpose,
                     PN_OPEN_TIMEOUT.as_millis()
                 );
                 return Err(into_p2p_err!(P2pErrorCode::Timeout, "pn open timeout")(err));
@@ -81,11 +81,11 @@ impl PnShared {
             ));
         }
         log::debug!(
-            "pn open resp tunnel_id={:?} to={} kind={:?} vport={} result={}",
+            "pn open resp tunnel_id={:?} to={} kind={:?} purpose={} result={}",
             tunnel_id,
             remote_id_for_log,
             kind,
-            vport,
+            purpose,
             resp.result
         );
         let result = TunnelCommandResult::from_u8(resp.result).ok_or_else(|| {
@@ -96,9 +96,10 @@ impl PnShared {
             )
         })?;
         if result != TunnelCommandResult::Success {
-            return Err(
-                result.into_p2p_error(format!("pn open rejected kind {:?} vport {}", kind, vport))
-            );
+            return Err(result.into_p2p_error(format!(
+                "pn open rejected kind {:?} purpose {}",
+                kind, purpose
+            )));
         }
 
         Ok((read, write))
@@ -107,7 +108,7 @@ impl PnShared {
     async fn create_data_connection(&self) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let (_meta, read, write) = self
             .ttp_client
-            .open_stream_on_latest_tunnel(PN_PROXY_VPORT)
+            .open_stream_on_latest_tunnel(TunnelPurpose::from_value(&PN_PROXY_VPORT)?)
             .await?;
         Ok((read, write))
     }
@@ -171,7 +172,11 @@ impl TunnelNetwork for PnClient {
             PN_PROXY_VPORT,
             mapping_port
         );
-        let ttp_listener = self.shared.ttp_client.listen_stream(PN_PROXY_VPORT).await?;
+        let ttp_listener = self
+            .shared
+            .ttp_client
+            .listen_stream(TunnelPurpose::from_value(&PN_PROXY_VPORT)?)
+            .await?;
         let listener: TunnelListenerRef =
             Arc::new(PnListener::new(self.shared.local_id(), ttp_listener));
         *self.listener_infos.lock().unwrap() = vec![TunnelListenerInfo {
@@ -198,7 +203,7 @@ impl TunnelNetwork for PnClient {
         );
         self.shared
             .ttp_client
-            .unlisten_stream(PN_PROXY_VPORT)
+            .unlisten_stream(&TunnelPurpose::from_value(&PN_PROXY_VPORT)?)
             .await?;
         *self.listener.lock().unwrap() = None;
         log::debug!(

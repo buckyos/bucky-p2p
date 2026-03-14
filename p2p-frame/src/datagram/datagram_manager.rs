@@ -2,7 +2,8 @@ use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
-    ListenVPortRegistry, TunnelDatagramRead, TunnelDatagramWrite, TunnelManagerRef, TunnelRef,
+    ListenPurposeRegistry, TunnelDatagramRead, TunnelDatagramWrite, TunnelManagerRef,
+    TunnelPurpose, TunnelRef,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
 use crate::types::{SessionId, SessionIdGenerator};
@@ -15,15 +16,15 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 pub struct DatagramRead {
     read: TunnelDatagramRead,
     session_id: SessionId,
-    vport: u16,
+    purpose: TunnelPurpose,
 }
 
 impl DatagramRead {
-    pub fn new(read: TunnelDatagramRead, session_id: SessionId, vport: u16) -> Self {
+    pub fn new(read: TunnelDatagramRead, session_id: SessionId, purpose: TunnelPurpose) -> Self {
         Self {
             read,
             session_id,
-            vport,
+            purpose,
         }
     }
 
@@ -31,8 +32,8 @@ impl DatagramRead {
         self.session_id
     }
 
-    pub fn vport(&self) -> u16 {
-        self.vport
+    pub fn purpose(&self) -> &TunnelPurpose {
+        &self.purpose
     }
 }
 
@@ -53,15 +54,15 @@ impl DerefMut for DatagramRead {
 pub struct DatagramWrite {
     write: Option<BufWriter<TunnelDatagramWrite>>,
     session_id: SessionId,
-    vport: u16,
+    purpose: TunnelPurpose,
 }
 
 impl DatagramWrite {
-    pub fn new(write: TunnelDatagramWrite, session_id: SessionId, vport: u16) -> Self {
+    pub fn new(write: TunnelDatagramWrite, session_id: SessionId, purpose: TunnelPurpose) -> Self {
         Self {
             write: Some(BufWriter::new(write)),
             session_id,
-            vport,
+            purpose,
         }
     }
 
@@ -69,8 +70,8 @@ impl DatagramWrite {
         self.session_id
     }
 
-    pub fn vport(&self) -> u16 {
-        self.vport
+    pub fn purpose(&self) -> &TunnelPurpose {
+        &self.purpose
     }
 }
 
@@ -104,21 +105,21 @@ struct DatagramListenerState {
 }
 
 pub struct DatagramListener {
-    listener_port: u16,
+    listener_purpose: TunnelPurpose,
     waiter: SingleCallbackWaiter<DatagramRead>,
     state: Mutex<DatagramListenerState>,
 }
 
 impl Drop for DatagramListener {
     fn drop(&mut self) {
-        log::info!("DatagramListener drop.port = {}", self.listener_port);
+        log::info!("DatagramListener drop.purpose = {}", self.listener_purpose);
     }
 }
 
 impl DatagramListener {
-    pub fn new(listener_port: u16) -> Self {
+    pub fn new(listener_purpose: TunnelPurpose) -> Self {
         Self {
-            listener_port,
+            listener_purpose,
             waiter: SingleCallbackWaiter::new(),
             state: Mutex::new(DatagramListenerState {
                 abort_handle: None,
@@ -171,7 +172,7 @@ impl Drop for DatagramListenerGuard {
     fn drop(&mut self) {
         self.listener.stop();
         self.datagram_manager
-            .remove_listener(self.listener.listener_port);
+            .remove_listener(&self.listener.listener_purpose);
     }
 }
 
@@ -193,7 +194,7 @@ pub struct DatagramManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: SessionIdGenerator,
-    listeners: Arc<ListenVPortRegistry<DatagramListener>>,
+    listeners: Arc<ListenPurposeRegistry<DatagramListener>>,
 }
 
 pub type DatagramManagerRef = Arc<DatagramManager>;
@@ -213,7 +214,7 @@ impl DatagramManager {
             local_identity,
             tunnel_manager,
             session_gen: SessionIdGenerator::new(),
-            listeners: ListenVPortRegistry::new(),
+            listeners: ListenPurposeRegistry::new(),
         });
         datagram.start_subscription_loop();
         datagram
@@ -222,25 +223,29 @@ impl DatagramManager {
     pub async fn connect(
         &self,
         remote: &P2pIdentityCertRef,
-        port: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<DatagramWrite> {
         let tunnel = self.tunnel_manager.open_tunnel(remote).await?;
         let session_id = self.session_gen.generate();
-        let write = tunnel.open_datagram(port).await?;
-        Ok(DatagramWrite::new(write, session_id, port))
+        let write = tunnel.open_datagram(purpose.clone()).await?;
+        Ok(DatagramWrite::new(write, session_id, purpose))
     }
 
-    pub async fn connect_from_id(&self, remote_id: &P2pId, port: u16) -> P2pResult<DatagramWrite> {
+    pub async fn connect_from_id(
+        &self,
+        remote_id: &P2pId,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<DatagramWrite> {
         let tunnel = self.tunnel_manager.open_tunnel_from_id(remote_id).await?;
         let session_id = self.session_gen.generate();
-        let write = tunnel.open_datagram(port).await?;
-        Ok(DatagramWrite::new(write, session_id, port))
+        let write = tunnel.open_datagram(purpose.clone()).await?;
+        Ok(DatagramWrite::new(write, session_id, purpose))
     }
 
     pub async fn connect_direct(
         &self,
         remote_pes: Vec<Endpoint>,
-        port: u16,
+        purpose: TunnelPurpose,
         remote_id: Option<P2pId>,
     ) -> P2pResult<DatagramWrite> {
         let tunnel = self
@@ -248,34 +253,37 @@ impl DatagramManager {
             .open_direct_tunnel(remote_pes, remote_id)
             .await?;
         let session_id = self.session_gen.generate();
-        let write = tunnel.open_datagram(port).await?;
-        Ok(DatagramWrite::new(write, session_id, port))
+        let write = tunnel.open_datagram(purpose.clone()).await?;
+        Ok(DatagramWrite::new(write, session_id, purpose))
     }
 
-    pub async fn listen(self: &DatagramManagerRef, port: u16) -> P2pResult<DatagramListenerGuard> {
-        if self.listeners.contains(port) {
+    pub async fn listen(
+        self: &DatagramManagerRef,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<DatagramListenerGuard> {
+        if self.listeners.contains(&purpose) {
             return Err(p2p_err!(
                 P2pErrorCode::DatagramPortAlreadyListen,
-                "stream port {} already listen",
-                port
+                "datagram purpose {} already listen",
+                purpose
             ));
         }
 
         log::debug!(
-            "datagram listen register local_id={} vport={}",
+            "datagram listen register local_id={} purpose={}",
             self.local_identity.get_id(),
-            port
+            purpose
         );
-        let listener = Arc::new(DatagramListener::new(port));
-        self.listeners.insert(port, listener.clone());
+        let listener = Arc::new(DatagramListener::new(purpose.clone()));
+        self.listeners.insert(purpose, listener.clone());
         Ok(DatagramListenerGuard {
             datagram_manager: self.clone(),
             listener,
         })
     }
 
-    fn remove_listener(&self, port: u16) {
-        self.listeners.remove(port);
+    fn remove_listener(&self, purpose: &TunnelPurpose) {
+        self.listeners.remove(purpose);
     }
 
     fn start_subscription_loop(self: &Arc<Self>) {
@@ -332,13 +340,13 @@ impl DatagramManager {
                     break;
                 };
                 match accepted {
-                    Ok((vport, read)) => {
-                        let listener = datagram.listeners.get(vport);
+                    Ok((purpose, read)) => {
+                        let listener = datagram.listeners.get(&purpose);
                         if let Some(listener) = listener {
                             listener.waiter.set_result_with_cache(DatagramRead::new(
                                 read,
                                 datagram.session_gen.generate(),
-                                vport,
+                                purpose,
                             ));
                         }
                     }

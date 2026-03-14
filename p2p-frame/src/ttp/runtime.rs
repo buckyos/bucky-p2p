@@ -1,5 +1,5 @@
 use crate::error::{P2pErrorCode, P2pResult};
-use crate::networks::{Tunnel, TunnelRef, TunnelStreamRead, TunnelStreamWrite};
+use crate::networks::{Tunnel, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite};
 use crate::runtime;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -24,22 +24,25 @@ impl TtpRuntime {
         })
     }
 
-    pub(crate) fn listen_stream(&self, vport: u16) -> P2pResult<TtpListenerRef> {
-        let rx = self.stream_registry.register(vport)?;
+    pub(crate) fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef> {
+        let rx = self.stream_registry.register(purpose)?;
         Ok(QueueTtpListener::new(rx))
     }
 
-    pub(crate) fn unlisten_stream(&self, vport: u16) {
-        self.stream_registry.remove(vport);
+    pub(crate) fn unlisten_stream(&self, purpose: &TunnelPurpose) {
+        self.stream_registry.remove(purpose);
     }
 
-    pub(crate) fn listen_datagram(&self, vport: u16) -> P2pResult<TtpDatagramListenerRef> {
-        let rx = self.datagram_registry.register(vport)?;
+    pub(crate) fn listen_datagram(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<TtpDatagramListenerRef> {
+        let rx = self.datagram_registry.register(purpose)?;
         Ok(QueueTtpDatagramListener::new(rx))
     }
 
-    pub(crate) fn unlisten_datagram(&self, vport: u16) {
-        self.datagram_registry.remove(vport);
+    pub(crate) fn unlisten_datagram(&self, purpose: &TunnelPurpose) {
+        self.datagram_registry.remove(purpose);
     }
 
     pub(crate) async fn attach_tunnel(self: &Arc<Self>, tunnel: TunnelRef) -> P2pResult<()> {
@@ -91,12 +94,12 @@ impl TtpRuntime {
         runtime::task::spawn(async move {
             loop {
                 match tunnel.accept_stream().await {
-                    Ok((vport, read, write)) => {
+                    Ok((purpose, read, write)) => {
                         let Some(runtime) = weak.upgrade() else {
                             break;
                         };
                         runtime.stream_registry.deliver(
-                            vport,
+                            &purpose,
                             Ok((
                                 TtpStreamMeta {
                                     local_ep: tunnel.local_ep(),
@@ -104,7 +107,7 @@ impl TtpRuntime {
                                     local_id: tunnel.local_id(),
                                     remote_id: tunnel.remote_id(),
                                     remote_name: None,
-                                    vport,
+                                    purpose: purpose.clone(),
                                 },
                                 read,
                                 write,
@@ -127,12 +130,12 @@ impl TtpRuntime {
         runtime::task::spawn(async move {
             loop {
                 match tunnel.accept_datagram().await {
-                    Ok((vport, read)) => {
+                    Ok((purpose, read)) => {
                         let Some(runtime) = weak.upgrade() else {
                             break;
                         };
                         runtime.datagram_registry.deliver(
-                            vport,
+                            &purpose,
                             Ok(TtpDatagram {
                                 meta: TtpDatagramMeta {
                                     local_ep: tunnel.local_ep(),
@@ -140,7 +143,7 @@ impl TtpRuntime {
                                     local_id: tunnel.local_id(),
                                     remote_id: tunnel.remote_id(),
                                     remote_name: None,
-                                    vport,
+                                    purpose: purpose.clone(),
                                 },
                                 read,
                             }),

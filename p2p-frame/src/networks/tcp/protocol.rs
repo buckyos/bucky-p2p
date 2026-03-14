@@ -1,16 +1,16 @@
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::networks::{
-    TunnelCommand, TunnelCommandBody, TunnelCommandHeader, read_tunnel_command_body,
+    TunnelCommand, TunnelCommandBody, TunnelCommandHeader, TunnelPurpose, read_tunnel_command_body,
     read_tunnel_command_header,
 };
 use crate::runtime;
 use crate::types::{Timestamp, TunnelCandidateId, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
 
-pub type TcpConnId = u64;
-pub type TcpLeaseSeq = u64;
-pub type TcpChannelId = u64;
-pub type TcpRequestId = u64;
+pub type TcpConnId = TunnelId;
+pub type TcpLeaseSeq = TunnelId;
+pub type TcpChannelId = TunnelId;
+pub type TcpRequestId = TunnelId;
 pub type TcpTunnelCandidateId = TunnelCandidateId;
 
 const MAX_TCP_TUNNEL_COMMAND_BODY_LEN: u32 = 1024 * 1024;
@@ -148,7 +148,7 @@ pub enum TcpChannelKind {
 pub struct ClaimConnReq {
     pub channel_id: TcpChannelId,
     pub kind: TcpChannelKind,
-    pub vport: u16,
+    pub purpose: TunnelPurpose,
     pub conn_id: TcpConnId,
     pub lease_seq: TcpLeaseSeq,
     pub claim_nonce: u64,

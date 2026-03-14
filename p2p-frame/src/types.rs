@@ -91,6 +91,12 @@ impl TunnelId {
     // }
 }
 
+impl fmt::Display for TunnelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
 pub struct TunnelCandidateId(u32);
 

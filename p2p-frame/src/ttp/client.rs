@@ -1,6 +1,7 @@
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
-    NetManagerRef, TunnelDatagramWrite, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    NetManagerRef, TunnelDatagramWrite, TunnelPurpose, TunnelRef, TunnelState, TunnelStreamRead,
+    TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use std::sync::{Arc, Mutex};
@@ -14,12 +15,12 @@ pub trait TtpConnector: Send + Sync + 'static {
     async fn open_stream(
         &self,
         target: &TtpTarget,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>;
     async fn open_datagram(
         &self,
         target: &TtpTarget,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(TtpDatagramMeta, TunnelDatagramWrite)>;
 }
 
@@ -72,12 +73,12 @@ impl TtpClient {
 
     pub async fn open_stream_on_latest_tunnel(
         &self,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
         let tunnel = self
             .latest_available_tunnel()
             .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no cached ttp tunnel available"))?;
-        let (read, write) = tunnel.open_stream(vport).await?;
+        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep(),
@@ -85,7 +86,7 @@ impl TtpClient {
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: None,
-                vport,
+                purpose,
             },
             read,
             write,
@@ -127,21 +128,21 @@ impl TtpClient {
 
 #[async_trait::async_trait]
 impl TtpPortListener for TtpClient {
-    async fn listen_stream(&self, vport: u16) -> P2pResult<TtpListenerRef> {
-        self.runtime.listen_stream(vport)
+    async fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef> {
+        self.runtime.listen_stream(purpose)
     }
 
-    async fn unlisten_stream(&self, vport: u16) -> P2pResult<()> {
-        self.runtime.unlisten_stream(vport);
+    async fn unlisten_stream(&self, purpose: &TunnelPurpose) -> P2pResult<()> {
+        self.runtime.unlisten_stream(purpose);
         Ok(())
     }
 
-    async fn listen_datagram(&self, vport: u16) -> P2pResult<TtpDatagramListenerRef> {
-        self.runtime.listen_datagram(vport)
+    async fn listen_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TtpDatagramListenerRef> {
+        self.runtime.listen_datagram(purpose)
     }
 
-    async fn unlisten_datagram(&self, vport: u16) -> P2pResult<()> {
-        self.runtime.unlisten_datagram(vport);
+    async fn unlisten_datagram(&self, purpose: &TunnelPurpose) -> P2pResult<()> {
+        self.runtime.unlisten_datagram(purpose);
         Ok(())
     }
 }
@@ -151,10 +152,10 @@ impl TtpConnector for TtpClient {
     async fn open_stream(
         &self,
         target: &TtpTarget,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
         let tunnel = self.get_or_create_tunnel(target).await?;
-        let (read, write) = tunnel.open_stream(vport).await?;
+        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep().or(target.local_ep),
@@ -162,7 +163,7 @@ impl TtpConnector for TtpClient {
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
-                vport,
+                purpose,
             },
             read,
             write,
@@ -172,10 +173,10 @@ impl TtpConnector for TtpClient {
     async fn open_datagram(
         &self,
         target: &TtpTarget,
-        vport: u16,
+        purpose: TunnelPurpose,
     ) -> P2pResult<(TtpDatagramMeta, TunnelDatagramWrite)> {
         let tunnel = self.get_or_create_tunnel(target).await?;
-        let write = tunnel.open_datagram(vport).await?;
+        let write = tunnel.open_datagram(purpose.clone()).await?;
         Ok((
             TtpDatagramMeta {
                 local_ep: tunnel.local_ep().or(target.local_ep),
@@ -183,7 +184,7 @@ impl TtpConnector for TtpClient {
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
-                vport,
+                purpose,
             },
             write,
         ))

@@ -1,5 +1,5 @@
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
-use crate::networks::{TunnelStreamRead, TunnelStreamWrite};
+use crate::networks::{TunnelPurpose, TunnelStreamRead, TunnelStreamWrite};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use std::sync::Arc;
@@ -22,11 +22,11 @@ pub type TtpDatagramListenerRef = Arc<dyn TtpDatagramListener>;
 
 #[async_trait::async_trait]
 pub trait TtpPortListener: Send + Sync + 'static {
-    async fn listen_stream(&self, vport: u16) -> P2pResult<TtpListenerRef>;
-    async fn unlisten_stream(&self, vport: u16) -> P2pResult<()>;
+    async fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef>;
+    async fn unlisten_stream(&self, purpose: &TunnelPurpose) -> P2pResult<()>;
 
-    async fn listen_datagram(&self, vport: u16) -> P2pResult<TtpDatagramListenerRef>;
-    async fn unlisten_datagram(&self, vport: u16) -> P2pResult<()>;
+    async fn listen_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TtpDatagramListenerRef>;
+    async fn unlisten_datagram(&self, purpose: &TunnelPurpose) -> P2pResult<()>;
 }
 
 pub(crate) struct QueueTtpListener {

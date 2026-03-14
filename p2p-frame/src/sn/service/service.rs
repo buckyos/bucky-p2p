@@ -606,7 +606,10 @@ impl SnServer {
     }
 
     async fn start_cmd_accept_loop(self: &Arc<Self>) -> P2pResult<()> {
-        let listener = self.ttp_server.listen_stream(SN_CMD_VPORT).await?;
+        let listener = self
+            .ttp_server
+            .listen_stream(crate::networks::TunnelPurpose::from_value(&SN_CMD_VPORT).unwrap())
+            .await?;
         let server = self.clone();
         let task = Executor::spawn_with_handle(async move {
             server.run_cmd_accept_loop(listener).await;
@@ -799,8 +802,13 @@ mod tests {
         remote_id: P2pId,
         local_ep: Endpoint,
         remote_ep: Endpoint,
-        incoming_rx:
-            AsyncMutex<mpsc::UnboundedReceiver<(u16, TunnelStreamRead, TunnelStreamWrite)>>,
+        incoming_rx: AsyncMutex<
+            mpsc::UnboundedReceiver<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
+        >,
     }
 
     impl FakeTunnel {
@@ -811,7 +819,11 @@ mod tests {
             remote_ep: Endpoint,
         ) -> (
             Arc<Self>,
-            mpsc::UnboundedSender<(u16, TunnelStreamRead, TunnelStreamWrite)>,
+            mpsc::UnboundedSender<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
         ) {
             let (tx, rx) = mpsc::unbounded_channel();
             (
@@ -892,12 +904,18 @@ mod tests {
 
         async fn open_stream(
             &self,
-            _vport: u16,
+            _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
 
-        async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )> {
             let mut rx = self.incoming_rx.lock().await;
             rx.recv()
                 .await
@@ -906,12 +924,17 @@ mod tests {
 
         async fn open_datagram(
             &self,
-            _vport: u16,
+            _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<crate::networks::TunnelDatagramWrite> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
 
-        async fn accept_datagram(&self) -> P2pResult<(u16, crate::networks::TunnelDatagramRead)> {
+        async fn accept_datagram(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            crate::networks::TunnelDatagramRead,
+        )> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
     }
@@ -1054,12 +1077,21 @@ mod tests {
         .unwrap();
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
-        let listener = ttp_server.listen_stream(SN_CMD_VPORT).await.unwrap();
+        let listener = ttp_server
+            .listen_stream(crate::networks::TunnelPurpose::from_value(&SN_CMD_VPORT).unwrap())
+            .await
+            .unwrap();
 
         let (tunnel, stream_tx) =
             FakeTunnel::new(identity.get_id(), remote_id(), local_ep, remote_ep);
         let ((read, write), mut remote_write) = make_stream_pair();
-        stream_tx.send((SN_CMD_VPORT, read, write)).unwrap();
+        stream_tx
+            .send((
+                crate::networks::TunnelPurpose::from_value(&SN_CMD_VPORT).unwrap(),
+                read,
+                write,
+            ))
+            .unwrap();
         fake_network.push_tunnel(tunnel);
 
         let accepted = timeout(Duration::from_secs(1), listener.accept())

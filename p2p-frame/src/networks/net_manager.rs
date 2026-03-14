@@ -331,7 +331,7 @@ mod tests {
     use super::*;
     use crate::networks::{
         IncomingTunnelValidator, ListenVPortsRef, Tunnel, TunnelDatagramRead, TunnelDatagramWrite,
-        TunnelForm, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+        TunnelForm, TunnelPurpose, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
     };
     use crate::tls::DefaultTlsServerCertResolver;
     use crate::types::{TunnelCandidateId, TunnelId};
@@ -464,20 +464,22 @@ mod tests {
 
         async fn open_stream(
             &self,
-            _vport: u16,
+            _purpose: TunnelPurpose,
         ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
 
-        async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
 
-        async fn open_datagram(&self, _vport: u16) -> P2pResult<TunnelDatagramWrite> {
+        async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
 
-        async fn accept_datagram(&self) -> P2pResult<(u16, TunnelDatagramRead)> {
+        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
     }

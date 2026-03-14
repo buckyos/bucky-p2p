@@ -27,12 +27,12 @@ impl TunnelListener for PnListener {
         let (_meta, mut read, write) = self.ttp_listener.accept().await?;
         let req = read_pn_command::<_, ProxyOpenReq>(&mut read).await?;
         log::debug!(
-            "pn listener accept local={} from={} to={} kind={:?} vport={} tunnel_id={:?}",
+            "pn listener accept local={} from={} to={} kind={:?} purpose={} tunnel_id={:?}",
             self.local_id,
             req.from,
             req.to,
             req.kind,
-            req.vport,
+            req.purpose,
             req.tunnel_id
         );
         let tunnel: TunnelRef = PnTunnel::new_passive(self.local_id.clone(), req, read, write);

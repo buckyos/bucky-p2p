@@ -1,7 +1,7 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::networks::NetManagerRef;
+use crate::networks::{NetManagerRef, TunnelPurpose};
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef,
     P2pSn,
@@ -114,7 +114,10 @@ impl SnClientTunnelFactory {
                     remote_id: remote_id.clone(),
                     remote_name: Some(remote_name.clone()),
                 },
-                SN_CMD_VPORT,
+                TunnelPurpose::from_value(&SN_CMD_VPORT).map_err(into_cmd_err!(
+                    CmdErrorCode::Failed,
+                    "encode sn cmd purpose failed"
+                ))?,
             )
             .await
             .map_err(into_cmd_err!(

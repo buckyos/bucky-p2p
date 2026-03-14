@@ -288,7 +288,9 @@ impl TunnelNetwork for QuicTunnelNetwork {
 mod tests {
     use super::*;
     use crate::finder::{DeviceCache, DeviceCacheConfig};
-    use crate::networks::{ListenVPortRegistry, Tunnel, TunnelListener, allow_all_listen_vports};
+    use crate::networks::{
+        ListenVPortRegistry, Tunnel, TunnelListener, TunnelPurpose, allow_all_listen_vports,
+    };
     use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
@@ -334,6 +336,10 @@ mod tests {
 
     fn loopback_quic_ep() -> Endpoint {
         Endpoint::from((Protocol::Quic, "127.0.0.1:0".parse().unwrap()))
+    }
+
+    fn purpose_of(vport: u16) -> TunnelPurpose {
+        TunnelPurpose::from_value(&vport).unwrap()
     }
 
     async fn register_listener_identity(
@@ -506,12 +512,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (opened_stream, accepted_stream) =
-            tokio::join!(opened.open_stream(1001), accepted.accept_stream());
+        let (opened_stream, accepted_stream) = tokio::join!(
+            opened.open_stream(purpose_of(1001)),
+            accepted.accept_stream()
+        );
         let (mut read, mut write) = opened_stream.unwrap();
-        let (vport, mut peer_read, mut peer_write) = accepted_stream.unwrap();
+        let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
 
-        assert_eq!(vport, 1001);
+        assert_eq!(purpose, purpose_of(1001));
 
         write.write_all(b"ping").await.unwrap();
         let mut buf = [0u8; 4];
@@ -537,12 +545,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (opened_datagram, accepted_datagram) =
-            tokio::join!(opened.open_datagram(2002), accepted.accept_datagram());
+        let (opened_datagram, accepted_datagram) = tokio::join!(
+            opened.open_datagram(purpose_of(2002)),
+            accepted.accept_datagram()
+        );
         let mut writer = opened_datagram.unwrap();
-        let (vport, mut peer_read) = accepted_datagram.unwrap();
+        let (purpose, mut peer_read) = accepted_datagram.unwrap();
 
-        assert_eq!(vport, 2002);
+        assert_eq!(purpose, purpose_of(2002));
 
         writer.write_all(b"hello").await.unwrap();
         writer.shutdown().await.unwrap();
@@ -559,7 +569,11 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        let result = timeout(Duration::from_millis(200), opened.open_stream(6001)).await;
+        let result = timeout(
+            Duration::from_millis(200),
+            opened.open_stream(purpose_of(6001)),
+        )
+        .await;
         assert!(result.is_err());
 
         opened.close().await.unwrap();
@@ -571,7 +585,11 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        let result = timeout(Duration::from_millis(200), opened.open_datagram(6002)).await;
+        let result = timeout(
+            Duration::from_millis(200),
+            opened.open_datagram(purpose_of(6002)),
+        )
+        .await;
         assert!(result.is_err());
 
         opened.close().await.unwrap();
@@ -589,7 +607,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = opened.open_stream(6553).await.err().unwrap();
+        let err = opened.open_stream(purpose_of(6553)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
 
         opened.close().await.unwrap();
@@ -607,7 +625,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = opened.open_datagram(6554).await.err().unwrap();
+        let err = opened.open_datagram(purpose_of(6554)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
 
         opened.close().await.unwrap();

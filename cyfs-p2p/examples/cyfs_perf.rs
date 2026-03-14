@@ -8,6 +8,7 @@ use clap::{App, Arg, SubCommand};
 use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
 use cyfs_p2p::{create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint};
 use p2p_frame::endpoint::{Endpoint as P2pEndpoint, Protocol as P2pProtocol};
+use p2p_frame::networks::TunnelPurpose;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,6 +18,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const PERF_VPORT: u16 = 5201;
 const DEFAULT_SERVER_BIND: &str = "0.0.0.0:4433";
 const DEFAULT_CLIENT_BIND: &str = "0.0.0.0:0";
+
+fn tunnel_purpose(value: u16) -> TunnelPurpose {
+    TunnelPurpose::from_value(&value).unwrap()
+}
 
 type AppResult<T> = Result<T, String>;
 
@@ -425,7 +430,7 @@ async fn run_server(opts: ServerOpts) -> AppResult<()> {
     let stack = create_stack(opts.bind, opts.protocol).await?;
     let listener = stack
         .stream_manager()
-        .listen(PERF_VPORT)
+        .listen(tunnel_purpose(PERF_VPORT))
         .await
         .map_err(|e| format!("listen failed, code={:?}, msg={}", e.code(), e.msg()))?;
 
@@ -563,7 +568,7 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
         handles.push(tokio::task::spawn(async move {
             let (read, mut write) = stack
                 .stream_manager()
-                .connect_direct(vec![remote], PERF_VPORT, None)
+                .connect_direct(vec![remote], tunnel_purpose(PERF_VPORT), None)
                 .await
                 .map_err(|e| {
                     format!(

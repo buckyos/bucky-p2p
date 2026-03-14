@@ -90,20 +90,23 @@ impl PnService {
     ) {
         req.from = from.clone();
         log::debug!(
-            "pn server open recv tunnel_id={:?} from={} to={} kind={:?} requested_vport={} proxy_vport={}",
+            "pn server open recv tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_vport={}",
             req.tunnel_id,
             req.from,
             req.to,
             req.kind,
-            req.vport,
+            req.purpose,
             PN_PROXY_VPORT
         );
 
         let mut source_write = write;
         let open_result = runtime::timeout(
             PN_OPEN_TIMEOUT,
-            self.ttp_server
-                .open_stream_by_id(&req.to, Some(req.to.to_string()), PN_PROXY_VPORT),
+            self.ttp_server.open_stream_by_id(
+                &req.to,
+                Some(req.to.to_string()),
+                crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap(),
+            ),
         )
         .await
         .map_err(into_p2p_err!(P2pErrorCode::Timeout, "pn open timeout"))
@@ -112,10 +115,10 @@ impl PnService {
         let open_result = match open_result {
             Ok((_meta, mut target_read, mut target_write)) => {
                 log::debug!(
-                    "pn server open upstream connected tunnel_id={:?} target={} requested_vport={} proxy_vport={}",
+                    "pn server open upstream connected tunnel_id={:?} target={} requested_purpose={} proxy_vport={}",
                     req.tunnel_id,
                     req.to,
-                    req.vport,
+                    req.purpose,
                     PN_PROXY_VPORT
                 );
                 let bridge_ready = async {
@@ -146,11 +149,11 @@ impl PnService {
                 match bridge_ready {
                     Ok((result, target_read, target_write)) => {
                         log::debug!(
-                            "pn server open upstream resp tunnel_id={:?} target={} kind={:?} requested_vport={} proxy_vport={} result={:?}",
+                            "pn server open upstream resp tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_vport={} result={:?}",
                             req.tunnel_id,
                             req.to,
                             req.kind,
-                            req.vport,
+                            req.purpose,
                             PN_PROXY_VPORT,
                             result
                         );
@@ -166,18 +169,18 @@ impl PnService {
                             Ok((target_read, target_write))
                         } else {
                             Err(result.into_p2p_error(format!(
-                                "pn open rejected kind {:?} vport {}",
-                                req.kind, req.vport
+                                "pn open rejected kind {:?} purpose {}",
+                                req.kind, req.purpose
                             )))
                         }
                     }
                     Err(err) => {
                         log::warn!(
-                            "pn server open upstream failed tunnel_id={:?} target={} kind={:?} requested_vport={} proxy_vport={} code={:?} msg={}",
+                            "pn server open upstream failed tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_vport={} code={:?} msg={}",
                             req.tunnel_id,
                             req.to,
                             req.kind,
-                            req.vport,
+                            req.purpose,
                             PN_PROXY_VPORT,
                             err.code(),
                             err.msg()
@@ -196,12 +199,12 @@ impl PnService {
             }
             Err(err) => {
                 log::warn!(
-                    "pn server open target failed tunnel_id={:?} from={} to={} kind={:?} requested_vport={} proxy_vport={} code={:?} msg={}",
+                    "pn server open target failed tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_vport={} code={:?} msg={}",
                     req.tunnel_id,
                     req.from,
                     req.to,
                     req.kind,
-                    req.vport,
+                    req.purpose,
                     PN_PROXY_VPORT,
                     err.code(),
                     err.msg()
@@ -220,12 +223,12 @@ impl PnService {
 
         if let Ok((target_read, target_write)) = open_result {
             log::debug!(
-                "pn server bridge start tunnel_id={:?} from={} to={} kind={:?} requested_vport={} proxy_vport={}",
+                "pn server bridge start tunnel_id={:?} from={} to={} kind={:?} requested_purpose={} proxy_vport={}",
                 req.tunnel_id,
                 from,
                 req.to,
                 req.kind,
-                req.vport,
+                req.purpose,
                 PN_PROXY_VPORT
             );
             let mut source_stream = ProxyStream::new(read, source_write);
@@ -291,7 +294,11 @@ impl PnServer {
             return Ok(());
         }
 
-        let listener = match self.ttp_server.listen_stream(PN_PROXY_VPORT).await {
+        let listener = match self
+            .ttp_server
+            .listen_stream(crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap())
+            .await
+        {
             Ok(listener) => listener,
             Err(err) => {
                 self.started.store(false, atomic::Ordering::SeqCst);
@@ -446,10 +453,20 @@ mod tests {
         remote_id: P2pId,
         local_ep: Endpoint,
         remote_ep: Endpoint,
-        incoming_rx:
-            AsyncMutex<mpsc::UnboundedReceiver<(u16, TunnelStreamRead, TunnelStreamWrite)>>,
-        opened_tx:
-            Option<mpsc::UnboundedSender<(u16, ReadHalf<DuplexStream>, WriteHalf<DuplexStream>)>>,
+        incoming_rx: AsyncMutex<
+            mpsc::UnboundedReceiver<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
+        >,
+        opened_tx: Option<
+            mpsc::UnboundedSender<(
+                crate::networks::TunnelPurpose,
+                ReadHalf<DuplexStream>,
+                WriteHalf<DuplexStream>,
+            )>,
+        >,
         attached_tx: StdMutex<Option<oneshot::Sender<()>>>,
     }
 
@@ -461,7 +478,11 @@ mod tests {
             remote_ep: Endpoint,
         ) -> (
             Arc<Self>,
-            mpsc::UnboundedSender<(u16, TunnelStreamRead, TunnelStreamWrite)>,
+            mpsc::UnboundedSender<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
             oneshot::Receiver<()>,
         ) {
             let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
@@ -490,7 +511,11 @@ mod tests {
             remote_ep: Endpoint,
         ) -> (
             Arc<Self>,
-            mpsc::UnboundedReceiver<(u16, ReadHalf<DuplexStream>, WriteHalf<DuplexStream>)>,
+            mpsc::UnboundedReceiver<(
+                crate::networks::TunnelPurpose,
+                ReadHalf<DuplexStream>,
+                WriteHalf<DuplexStream>,
+            )>,
             oneshot::Receiver<()>,
         ) {
             let (opened_tx, opened_rx) = mpsc::unbounded_channel();
@@ -579,12 +604,12 @@ mod tests {
 
         async fn open_stream(
             &self,
-            vport: u16,
+            purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
             let ((local_read, local_write), (remote_read, remote_write)) = make_stream_pair();
             if let Some(opened_tx) = &self.opened_tx {
                 opened_tx
-                    .send((vport, remote_read, remote_write))
+                    .send((purpose, remote_read, remote_write))
                     .map_err(|_| {
                         p2p_err!(P2pErrorCode::Interrupted, "open stream observer closed")
                     })?;
@@ -594,7 +619,13 @@ mod tests {
             }
         }
 
-        async fn accept_stream(&self) -> P2pResult<(u16, TunnelStreamRead, TunnelStreamWrite)> {
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )> {
             let mut rx = self.incoming_rx.lock().await;
             rx.recv()
                 .await
@@ -603,12 +634,17 @@ mod tests {
 
         async fn open_datagram(
             &self,
-            _vport: u16,
+            _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<crate::networks::TunnelDatagramWrite> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
 
-        async fn accept_datagram(&self) -> P2pResult<(u16, crate::networks::TunnelDatagramRead)> {
+        async fn accept_datagram(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            crate::networks::TunnelDatagramRead,
+        )> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
     }
@@ -781,7 +817,11 @@ mod tests {
 
         let ((server_read, server_write), (mut source_read, mut source_write)) = make_stream_pair();
         source_stream_tx
-            .send((PN_PROXY_VPORT, server_read, server_write))
+            .send((
+                crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap(),
+                server_read,
+                server_write,
+            ))
             .unwrap();
 
         let req = ProxyOpenReq {
@@ -789,19 +829,22 @@ mod tests {
             from: source_id.clone(),
             to: target_id.clone(),
             kind: PnChannelKind::Stream,
-            vport: 2000,
+            purpose: crate::networks::TunnelPurpose::from_value(&2000u16).unwrap(),
         };
         let command = TunnelCommand::new(req.clone()).unwrap();
         write_tunnel_command(&mut source_write, &command)
             .await
             .unwrap();
 
-        let (vport, mut target_read, mut target_write) =
+        let (purpose, mut target_read, mut target_write) =
             timeout(Duration::from_secs(1), target_open_rx.recv())
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(vport, PN_PROXY_VPORT);
+        assert_eq!(
+            purpose,
+            crate::networks::TunnelPurpose::from_value(&PN_PROXY_VPORT).unwrap()
+        );
 
         let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
         let target_req =
