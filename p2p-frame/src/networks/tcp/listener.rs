@@ -188,8 +188,9 @@ impl TcpTunnelListener {
         local: Endpoint,
         out: Option<Endpoint>,
         mapping_port: Option<u16>,
+        reuse_address: bool,
     ) -> P2pResult<()> {
-        let socket = bind_listener(local).await?;
+        let socket = bind_listener(local, reuse_address).await?;
         let mut state = self.state.lock().unwrap();
         state.local = Some(local);
         state.outer = out;

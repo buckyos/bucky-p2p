@@ -49,6 +49,7 @@ impl TunnelConnectIntent {
 pub trait TunnelNetwork: Send + Sync + 'static {
     fn protocol(&self) -> Protocol;
     fn is_udp(&self) -> bool;
+    fn set_reuse_address(&self, _reuse_address: bool) {}
 
     async fn listen(
         &self,

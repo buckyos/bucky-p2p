@@ -465,6 +465,7 @@ impl TcpTunnelConnector {
             &self.remote_id,
             self.remote_name.clone(),
             self.timeout,
+            false,
             &hello,
         )
         .await

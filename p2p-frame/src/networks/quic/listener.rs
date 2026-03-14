@@ -13,6 +13,7 @@ use quinn::Incoming;
 use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
 use rustls::pki_types::CertificateDer;
 use rustls::version::TLS13;
+use socket2::{Domain, Protocol as SocketProtocol, SockAddr, Socket, Type};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
@@ -108,6 +109,7 @@ impl QuicTunnelListener {
         local: Endpoint,
         out: Option<Endpoint>,
         mapping_port: Option<u16>,
+        reuse_address: bool,
     ) -> P2pResult<()> {
         let mut server_config =
             rustls::ServerConfig::builder_with_provider(crate::tls::provider().into())
@@ -150,9 +152,52 @@ impl QuicTunnelListener {
             }
         }
 
-        let endpoint = quinn::Endpoint::server(server_config, local.addr().to_owned()).map_err(
-            into_p2p_err!(P2pErrorCode::QuicError, "Create quic server error"),
+        let sockaddr: SockAddr = local.addr().to_owned().into();
+        let domain = match local.addr() {
+            std::net::SocketAddr::V4(_) => Domain::IPV4,
+            std::net::SocketAddr::V6(_) => Domain::IPV6,
+        };
+        let socket = Socket::new(domain, Type::DGRAM, Some(SocketProtocol::UDP)).map_err(
+            into_p2p_err!(P2pErrorCode::QuicError, "create quic socket failed"),
         )?;
+        socket.set_nonblocking(true).map_err(into_p2p_err!(
+            P2pErrorCode::QuicError,
+            "set quic socket nonblocking failed"
+        ))?;
+        #[cfg(target_os = "linux")]
+        if reuse_address {
+            socket.set_reuse_address(true).map_err(into_p2p_err!(
+                P2pErrorCode::QuicError,
+                "set reuse address failed"
+            ))?;
+        }
+        socket.bind(&sockaddr).map_err(into_p2p_err!(
+            P2pErrorCode::AlreadyExists,
+            "bind {} error",
+            local
+        ))?;
+        #[cfg(unix)]
+        let socket = unsafe {
+            use std::os::fd::{FromRawFd, IntoRawFd};
+
+            std::net::UdpSocket::from_raw_fd(socket.into_raw_fd())
+        };
+        #[cfg(windows)]
+        let socket = unsafe {
+            use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+
+            std::net::UdpSocket::from_raw_socket(socket.into_raw_socket())
+        };
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(into_p2p_err!(
+            P2pErrorCode::QuicError,
+            "Create quic server error"
+        ))?;
 
         let mut state = self.state.write().unwrap();
         state.local = Some(local);

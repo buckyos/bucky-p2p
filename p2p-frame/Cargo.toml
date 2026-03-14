@@ -41,6 +41,7 @@ x509-verify = { version = "0.4.6", optional = true, features = ["rsa", "sha2", "
 ring = { version = "0.17.11", optional = true, features = [] }
 rcgen = { version = "0.13.2", optional = true, features = ["aws_lc_rs"] }
 chrono = "0.4.40"
+socket2 = "0.5"
 
 hmac = "0.12.1"
 aes-gcm = "0.10.3"

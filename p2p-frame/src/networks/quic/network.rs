@@ -12,6 +12,7 @@ use crate::p2p_identity::{
 use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelCandidateId, TunnelId, TunnelIdGenerator};
 use rustls::pki_types::CertificateDer;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ pub struct QuicTunnelNetwork {
     idle_timeout: Duration,
     congestion_algorithm: QuicCongestionAlgorithm,
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
+    reuse_address: AtomicBool,
 }
 
 impl QuicTunnelNetwork {
@@ -44,6 +46,7 @@ impl QuicTunnelNetwork {
             idle_timeout,
             congestion_algorithm,
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
+            reuse_address: AtomicBool::new(false),
         }
     }
 
@@ -157,6 +160,10 @@ impl TunnelNetwork for QuicTunnelNetwork {
         true
     }
 
+    fn set_reuse_address(&self, reuse_address: bool) {
+        self.reuse_address.store(reuse_address, Ordering::Relaxed);
+    }
+
     async fn listen(
         &self,
         local: &Endpoint,
@@ -169,7 +176,14 @@ impl TunnelNetwork for QuicTunnelNetwork {
             self.cert_factory.clone(),
             self.congestion_algorithm,
         );
-        listener.bind(*local, out, mapping_port).await?;
+        listener
+            .bind(
+                *local,
+                out,
+                mapping_port,
+                self.reuse_address.load(Ordering::Relaxed),
+            )
+            .await?;
         listener.start();
         self.listeners.lock().unwrap().push(listener.clone());
         Ok(listener)

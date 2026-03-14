@@ -5,7 +5,7 @@ use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
     NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
-    TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite,
+    TunnelNetwork, TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite,
 };
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
@@ -512,6 +512,7 @@ impl SnServer {
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
         congestion_algorithm: QuicCongestionAlgorithm,
+        reuse_address: bool,
     ) -> SnServerRef {
         Executor::init_new_multi_thread(None);
         init_tls(identity_factory);
@@ -529,22 +530,26 @@ impl SnServer {
             .await;
         cert_resolver.set_default_server_identity(&local_identity.get_id());
 
+        let tcp_network = Arc::new(TcpTunnelNetwork::new(
+            cert_resolver.clone(),
+            cert_factory.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        ));
+        TunnelNetwork::set_reuse_address(tcp_network.as_ref(), reuse_address);
+        let quic_network = Arc::new(QuicTunnelNetwork::new(
+            device_cache,
+            cert_resolver.clone(),
+            cert_factory.clone(),
+            congestion_algorithm,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        ));
+        TunnelNetwork::set_reuse_address(quic_network.as_ref(), reuse_address);
         let tunnel_networks = vec![
-            Arc::new(TcpTunnelNetwork::new(
-                cert_resolver.clone(),
-                cert_factory.clone(),
-                Duration::from_secs(30),
-                Duration::from_secs(5),
-                Duration::from_secs(15),
-            )) as TunnelNetworkRef,
-            Arc::new(QuicTunnelNetwork::new(
-                device_cache,
-                cert_resolver.clone(),
-                cert_factory.clone(),
-                congestion_algorithm,
-                Duration::from_secs(30),
-                Duration::from_secs(30),
-            )) as TunnelNetworkRef,
+            tcp_network as TunnelNetworkRef,
+            quic_network as TunnelNetworkRef,
         ];
 
         let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
@@ -692,6 +697,7 @@ pub struct SnServiceConfig {
     cert_factory: P2pIdentityCertFactoryRef,
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
+    reuse_address: bool,
 }
 
 impl SnServiceConfig {
@@ -706,6 +712,7 @@ impl SnServiceConfig {
             cert_factory,
             contract: Box::new(DefaultSnServiceContractServer::new()),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
+            reuse_address: false,
         }
     }
 
@@ -724,6 +731,11 @@ impl SnServiceConfig {
         self.quic_congestion_algorithm = quic_algorithm;
         self
     }
+
+    pub fn set_reuse_address(mut self, reuse_address: bool) -> Self {
+        self.reuse_address = reuse_address;
+        self
+    }
 }
 
 pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
@@ -733,6 +745,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
         config.cert_factory,
         config.contract,
         config.quic_congestion_algorithm,
+        config.reuse_address,
     )
     .await;
     service

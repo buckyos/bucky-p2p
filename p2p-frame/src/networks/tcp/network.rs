@@ -14,6 +14,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelCandidateId, TunnelIdGenerator};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ pub struct TcpTunnelNetwork {
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
+    reuse_address: AtomicBool,
 }
 
 impl TcpTunnelNetwork {
@@ -59,6 +61,7 @@ impl TcpTunnelNetwork {
             heartbeat_interval,
             heartbeat_timeout,
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
+            reuse_address: AtomicBool::new(false),
         }
     }
 
@@ -97,6 +100,7 @@ impl TcpTunnelNetwork {
             remote_id,
             remote_name.clone(),
             self.timeout,
+            self.reuse_address.load(Ordering::Relaxed),
             &hello,
         )
         .await?;
@@ -159,6 +163,10 @@ impl TunnelNetwork for TcpTunnelNetwork {
         false
     }
 
+    fn set_reuse_address(&self, reuse_address: bool) {
+        self.reuse_address.store(reuse_address, Ordering::Relaxed);
+    }
+
     async fn listen(
         &self,
         local: &Endpoint,
@@ -173,7 +181,14 @@ impl TunnelNetwork for TcpTunnelNetwork {
             self.heartbeat_interval,
             self.heartbeat_timeout,
         );
-        listener.bind(*local, out, mapping_port).await?;
+        listener
+            .bind(
+                *local,
+                out,
+                mapping_port,
+                self.reuse_address.load(Ordering::Relaxed),
+            )
+            .await?;
         listener.start();
         self.listeners.lock().unwrap().push(listener.clone());
         Ok(listener)
@@ -881,6 +896,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &hello,
         )
         .await
@@ -933,6 +949,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &hello,
         )
         .await
@@ -1036,6 +1053,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &hello,
         )
         .await
@@ -1108,7 +1126,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let server_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1176,7 +1194,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let server_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1263,7 +1281,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let server_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1338,7 +1356,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let server_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1423,7 +1441,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let server_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1485,7 +1503,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let server_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1557,6 +1575,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &super::super::protocol::TcpConnectionHello {
                 role: super::super::protocol::TcpConnectionRole::Control,
                 tunnel_id,
@@ -1582,6 +1601,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &super::super::protocol::TcpConnectionHello {
                 role: super::super::protocol::TcpConnectionRole::Data,
                 tunnel_id,
@@ -1634,6 +1654,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &super::super::protocol::TcpConnectionHello {
                 role: super::super::protocol::TcpConnectionRole::Control,
                 tunnel_id,
@@ -1659,6 +1680,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &super::super::protocol::TcpConnectionHello {
                 role: super::super::protocol::TcpConnectionRole::Data,
                 tunnel_id,
@@ -1699,6 +1721,7 @@ mod tests {
             &server_identity.get_id(),
             Some(server_identity.get_name()),
             Duration::from_secs(3),
+            false,
             &super::super::protocol::TcpConnectionHello {
                 role: super::super::protocol::TcpConnectionRole::Data,
                 tunnel_id,
@@ -1785,7 +1808,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let fake_data_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -1958,7 +1981,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let fake_data_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -2058,7 +2081,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let fake_data_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -2158,7 +2181,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let fake_data_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -2258,7 +2281,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let fake_data_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));
@@ -2359,7 +2382,7 @@ mod tests {
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
-        let listener = super::super::connection::bind_listener(loopback_tcp_ep())
+        let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
             .await
             .unwrap();
         let fake_data_ep = Endpoint::from((Protocol::Tcp, listener.local_addr().unwrap()));

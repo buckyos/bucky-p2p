@@ -9,6 +9,7 @@ use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::version::TLS13;
+use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpSocket;
@@ -38,21 +39,47 @@ pub(crate) fn build_acceptor(
     TlsAcceptor::from(Arc::new(server_config))
 }
 
-pub(crate) async fn bind_listener(local: Endpoint) -> P2pResult<TcpListener> {
-    if local.addr().is_ipv4() {
-        TcpListener::bind(local.addr()).await.map_err(into_p2p_err!(
-            P2pErrorCode::AlreadyExists,
-            "bind port failed"
-        ))
-    } else {
-        let default_local = Endpoint::default_tcp(&local);
-        TcpListener::bind(default_local.addr())
-            .await
-            .map_err(into_p2p_err!(
-                P2pErrorCode::AlreadyExists,
-                "bind port failed"
-            ))
+fn new_tcp_socket(addr: &std::net::SocketAddr, reuse_address: bool) -> P2pResult<TcpSocket> {
+    let domain = match addr {
+        std::net::SocketAddr::V4(_) => Domain::IPV4,
+        std::net::SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(SocketProtocol::TCP)).map_err(
+        into_p2p_err!(P2pErrorCode::Failed, "create tcp socket failed"),
+    )?;
+    socket.set_nonblocking(true).map_err(into_p2p_err!(
+        P2pErrorCode::Failed,
+        "set tcp socket nonblocking failed"
+    ))?;
+    #[cfg(target_os = "linux")]
+    if reuse_address {
+        socket.set_reuse_address(true).map_err(into_p2p_err!(
+            P2pErrorCode::Failed,
+            "set reuse address failed"
+        ))?;
     }
+
+    Ok(TcpSocket::from_std_stream(socket.into()))
+}
+
+pub(crate) async fn bind_listener(local: Endpoint, reuse_address: bool) -> P2pResult<TcpListener> {
+    let bind_local = if local.addr().is_ipv4() {
+        local
+    } else {
+        Endpoint::default_tcp(&local)
+    };
+    let socket = new_tcp_socket(bind_local.addr(), reuse_address).map_err(into_p2p_err!(
+        P2pErrorCode::AlreadyExists,
+        "create tcp socket failed"
+    ))?;
+    socket.bind(*bind_local.addr()).map_err(into_p2p_err!(
+        P2pErrorCode::AlreadyExists,
+        "bind port failed"
+    ))?;
+    socket.listen(1024).map_err(into_p2p_err!(
+        P2pErrorCode::AlreadyExists,
+        "listen port failed"
+    ))
 }
 
 fn build_client_config(
@@ -85,16 +112,16 @@ pub(crate) async fn connect_with_optional_local(
     remote_identity_id: &P2pId,
     remote_name: Option<String>,
     timeout: Duration,
+    reuse_address: bool,
     hello: &TcpConnectionHello,
 ) -> P2pResult<TcpTlsConnection> {
     let client_config =
         build_client_config(cert_factory.clone(), local_identity_ref, remote_identity_id)?;
     let socket = if let Some(local_ep) = local_ep {
-        let socket = if local_ep.addr().is_ipv4() {
-            TcpSocket::new_v4().map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?
-        } else {
-            TcpSocket::new_v6().map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?
-        };
+        let socket = new_tcp_socket(local_ep.addr(), reuse_address).map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "create tcp socket failed"
+        ))?;
         socket.bind(*local_ep.addr()).map_err(into_p2p_err!(
             P2pErrorCode::ConnectFailed,
             "bind to {} failed",

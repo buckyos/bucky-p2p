@@ -1685,7 +1685,7 @@ mod tests {
             Duration::from_secs(5),
         );
         server_listener
-            .bind(loopback_tcp_ep(), None, None)
+            .bind(loopback_tcp_ep(), None, None, false)
             .await
             .unwrap();
         server_listener.start();

@@ -6,7 +6,8 @@ use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
     DefaultDeviceFinder, IncomingTunnelValidatorRef, NetManager, NetManagerRef,
     QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
-    TunnelManager as NetworkTunnelManager, TunnelNetworkRef, allow_all_incoming_tunnel_validator,
+    TunnelManager as NetworkTunnelManager, TunnelNetwork, TunnelNetworkRef,
+    allow_all_incoming_tunnel_validator,
 };
 use crate::p2p_identity::{
     P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef,
@@ -88,6 +89,7 @@ pub struct P2pConfig {
     quic_connect_timeout: Duration,
     quic_idle_time: Duration,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
+    reuse_address: bool,
 }
 
 impl P2pConfig {
@@ -117,6 +119,7 @@ impl P2pConfig {
             quic_connect_timeout: Duration::from_secs(10),
             quic_idle_time: Duration::from_secs(60),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
+            reuse_address: false,
         }
     }
 
@@ -257,6 +260,15 @@ impl P2pConfig {
         self.quic_congestion_algorithm = quic_congestion_algorithm;
         self
     }
+
+    pub fn reuse_address(&self) -> bool {
+        self.reuse_address
+    }
+
+    pub fn set_reuse_address(mut self, reuse_address: bool) -> Self {
+        self.reuse_address = reuse_address;
+        self
+    }
 }
 
 pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
@@ -268,22 +280,26 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
 
     let tsl_server_cert_resolver = config.sever_cert_resolver();
     let mut tunnel_networks = config.extra_networks().clone();
+    let tcp_network = Arc::new(TcpTunnelNetwork::new(
+        tsl_server_cert_resolver.clone(),
+        cert_factory.clone(),
+        config.tcp_connect_timout,
+        Duration::from_secs(5),
+        Duration::from_secs(15),
+    ));
+    TunnelNetwork::set_reuse_address(tcp_network.as_ref(), config.reuse_address());
+    let quic_network = Arc::new(QuicTunnelNetwork::new(
+        device_cache.clone(),
+        tsl_server_cert_resolver.clone(),
+        cert_factory.clone(),
+        config.quic_congestion_algorithm,
+        config.quic_connect_timeout,
+        config.quic_idle_time,
+    ));
+    TunnelNetwork::set_reuse_address(quic_network.as_ref(), config.reuse_address());
     tunnel_networks.extend(vec![
-        Arc::new(TcpTunnelNetwork::new(
-            tsl_server_cert_resolver.clone(),
-            cert_factory.clone(),
-            config.tcp_connect_timout,
-            Duration::from_secs(5),
-            Duration::from_secs(15),
-        )) as TunnelNetworkRef,
-        Arc::new(QuicTunnelNetwork::new(
-            device_cache.clone(),
-            tsl_server_cert_resolver.clone(),
-            cert_factory.clone(),
-            config.quic_congestion_algorithm,
-            config.quic_connect_timeout,
-            config.quic_idle_time,
-        )) as TunnelNetworkRef,
+        tcp_network as TunnelNetworkRef,
+        quic_network as TunnelNetworkRef,
     ]);
     let net_manager = NetManager::new_with_incoming_tunnel_validator(
         tunnel_networks,
