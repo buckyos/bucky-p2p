@@ -18,7 +18,7 @@ use crate::networks::{
 use crate::p2p_identity::P2pId;
 use crate::pn::{PROXY_SERVICE, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
-use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServerRef};
+use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -72,13 +72,42 @@ pub struct PnServer {
 pub type PnServerRef = Arc<PnServer>;
 pub type PnServiceRef = Arc<PnService>;
 
+#[async_trait::async_trait]
+pub trait PnTargetStreamFactory: Send + Sync + 'static {
+    async fn open_target_stream(
+        &self,
+        target: &P2pId,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)>;
+}
+
+pub type PnTargetStreamFactoryRef = Arc<dyn PnTargetStreamFactory>;
+
+#[async_trait::async_trait]
+impl PnTargetStreamFactory for TtpServer {
+    async fn open_target_stream(
+        &self,
+        target: &P2pId,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let (_meta, read, write) = self
+            .open_stream_by_id(
+                target,
+                Some(target.to_string()),
+                crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
+            )
+            .await?;
+        Ok((read, write))
+    }
+}
+
 pub struct PnService {
-    ttp_server: TtpServerRef,
+    target_stream_factory: PnTargetStreamFactoryRef,
 }
 
 impl PnService {
-    fn new(ttp_server: TtpServerRef) -> PnServiceRef {
-        Arc::new(Self { ttp_server })
+    pub fn new(target_stream_factory: PnTargetStreamFactoryRef) -> PnServiceRef {
+        Arc::new(Self {
+            target_stream_factory,
+        })
     }
 
     async fn handle_proxy_open_req(
@@ -102,18 +131,14 @@ impl PnService {
         let mut source_write = write;
         let open_result = runtime::timeout(
             PN_OPEN_TIMEOUT,
-            self.ttp_server.open_stream_by_id(
-                &req.to,
-                Some(req.to.to_string()),
-                crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
-            ),
+            self.target_stream_factory.open_target_stream(&req.to),
         )
         .await
         .map_err(into_p2p_err!(P2pErrorCode::Timeout, "pn open timeout"))
         .and_then(|ret| ret);
 
         let open_result = match open_result {
-            Ok((_meta, mut target_read, mut target_write)) => {
+            Ok((mut target_read, mut target_write)) => {
                 log::debug!(
                     "pn server open upstream connected tunnel_id={:?} target={} requested_purpose={} proxy_service={}",
                     req.tunnel_id,
@@ -270,7 +295,8 @@ impl PnService {
 
 impl PnServer {
     pub fn new(ttp_server: TtpServerRef) -> PnServerRef {
-        let service = PnService::new(ttp_server.clone());
+        let target_stream_factory: PnTargetStreamFactoryRef = ttp_server.clone();
+        let service = PnService::new(target_stream_factory);
         Arc::new(Self {
             ttp_server,
             service,
@@ -296,7 +322,9 @@ impl PnServer {
 
         let listener = match self
             .ttp_server
-            .listen_stream(crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap())
+            .listen_stream(
+                crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
+            )
             .await
         {
             Ok(listener) => listener,
@@ -768,8 +796,129 @@ mod tests {
         )
     }
 
+    struct FakeTargetStreamFactory {
+        target_stream: StdMutex<Option<(TunnelStreamRead, TunnelStreamWrite)>>,
+        opened_target: StdMutex<Option<P2pId>>,
+    }
+
+    impl FakeTargetStreamFactory {
+        fn new(target_stream: (TunnelStreamRead, TunnelStreamWrite)) -> Arc<Self> {
+            Arc::new(Self {
+                target_stream: StdMutex::new(Some(target_stream)),
+                opened_target: StdMutex::new(None),
+            })
+        }
+
+        fn opened_target(&self) -> Option<P2pId> {
+            self.opened_target.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PnTargetStreamFactory for FakeTargetStreamFactory {
+        async fn open_target_stream(
+            &self,
+            target: &P2pId,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            *self.opened_target.lock().unwrap() = Some(target.clone());
+            self.target_stream
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "target stream already opened"))
+        }
+    }
+
     fn init_executor() {
         Executor::init_new_multi_thread(None);
+    }
+
+    #[tokio::test]
+    async fn pn_service_uses_injected_target_stream_factory() {
+        let source_id = P2pId::from(vec![2u8; 32]);
+        let target_id = P2pId::from(vec![3u8; 32]);
+        let ((service_target_read, service_target_write), (mut target_read, mut target_write)) =
+            make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let service = PnService::new(target_stream_factory.clone());
+
+        let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
+            make_stream_pair();
+        let req = ProxyOpenReq {
+            tunnel_id: TunnelId::from(24),
+            from: P2pId::default(),
+            to: target_id.clone(),
+            kind: PnChannelKind::Stream,
+            purpose: crate::networks::TunnelPurpose::from_value(&2000u16).unwrap(),
+        };
+
+        let service_task = tokio::spawn({
+            let service = service.clone();
+            let source_id = source_id.clone();
+            let req = req.clone();
+            async move {
+                service
+                    .handle_proxy_open_req(
+                        source_id,
+                        req,
+                        service_source_read,
+                        service_source_write,
+                    )
+                    .await;
+            }
+        });
+
+        let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
+        let target_req =
+            read_tunnel_command_body::<_, ProxyOpenReq>(&mut target_read, target_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(
+            target_stream_factory.opened_target(),
+            Some(target_id.clone())
+        );
+        assert_eq!(target_req.tunnel_id, req.tunnel_id);
+        assert_eq!(target_req.from, source_id);
+        assert_eq!(target_req.to, target_id);
+
+        let resp = TunnelCommand::new(ProxyOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: TunnelCommandResult::Success as u8,
+        })
+        .unwrap();
+        write_tunnel_command(&mut target_write, &resp)
+            .await
+            .unwrap();
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.tunnel_id, req.tunnel_id);
+        assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
+
+        source_write.write_all(b"ping").await.unwrap();
+        let mut ping_buf = [0u8; 4];
+        target_read.read_exact(&mut ping_buf).await.unwrap();
+        assert_eq!(&ping_buf, b"ping");
+
+        target_write.write_all(b"pong").await.unwrap();
+        let mut pong_buf = [0u8; 4];
+        source_read.read_exact(&mut pong_buf).await.unwrap();
+        assert_eq!(&pong_buf, b"pong");
+
+        drop(source_write);
+        drop(target_write);
+        drop(source_read);
+        drop(target_read);
+        timeout(Duration::from_secs(1), service_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

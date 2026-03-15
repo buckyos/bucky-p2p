@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Notify;
 
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
@@ -23,8 +23,8 @@ const FIRST_LISTEN_WAIT_DONE: u8 = 2;
 
 struct PassivePnTunnel {
     request: ProxyOpenReq,
-    read: AsyncMutex<Option<TunnelStreamRead>>,
-    write: AsyncMutex<Option<TunnelStreamWrite>>,
+    read: Mutex<Option<TunnelStreamRead>>,
+    write: Mutex<Option<TunnelStreamWrite>>,
 }
 
 enum PnTunnelRole {
@@ -84,8 +84,8 @@ impl PnTunnel {
             remote_id: request.from.clone(),
             role: PnTunnelRole::Passive(PassivePnTunnel {
                 request,
-                read: AsyncMutex::new(Some(read)),
-                write: AsyncMutex::new(Some(write)),
+                read: Mutex::new(Some(read)),
+                write: Mutex::new(Some(write)),
             }),
             stream_vports: RwLock::new(None),
             stream_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
@@ -214,8 +214,8 @@ impl PnTunnel {
             ));
         };
 
-        let mut read = passive.read.lock().await;
-        let mut write = passive.write.lock().await;
+        let mut read = passive.read.lock().unwrap();
+        let mut write = passive.write.lock().unwrap();
         let read = read
             .take()
             .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "pn tunnel already consumed"))?;
@@ -388,8 +388,8 @@ impl Tunnel for PnTunnel {
     async fn close(&self) -> P2pResult<()> {
         self.closed.store(true, Ordering::SeqCst);
         if let PnTunnelRole::Passive(passive) = &self.role {
-            let _ = passive.read.lock().await.take();
-            let _ = passive.write.lock().await.take();
+            let _ = passive.read.lock().unwrap().take();
+            let _ = passive.write.lock().unwrap().take();
         }
         Ok(())
     }
