@@ -107,6 +107,10 @@ impl SnTunnelRead {
 }
 
 impl CmdTunnelRead<()> for SnTunnelRead {
+    fn get_local_peer_id(&self) -> PeerId {
+        PeerId::from(self.local_id.as_slice())
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         PeerId::from(self.remote_id.as_slice())
     }
@@ -186,6 +190,10 @@ impl SnTunnelWrite {
 }
 
 impl CmdTunnelWrite<()> for SnTunnelWrite {
+    fn get_local_peer_id(&self) -> PeerId {
+        PeerId::from(self.local_id.as_slice())
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         PeerId::from(self.remote_id.as_slice())
     }

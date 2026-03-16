@@ -67,7 +67,6 @@ impl SnServiceContractServer for DefaultSnServiceContractServer {
 
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
-    local_identity: P2pIdentityRef,
     _contract: Box<dyn SnServiceContractServer + Send + Sync>,
     peer_mgr: PeerManagerRef,
     call_stub: CallStub,
@@ -77,14 +76,12 @@ pub struct SnService {
 }
 
 impl SnService {
-    fn new(
-        local_identity: P2pIdentityRef,
+    pub fn new(
         cert_factory: P2pIdentityCertFactoryRef,
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
     ) -> SnServiceRef {
         let service = Arc::new(SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
-            local_identity: local_identity.clone(),
             _contract: contract,
             peer_mgr: PeerManager::new(),
             call_stub: CallStub::new(),
@@ -104,16 +101,18 @@ impl SnService {
         let service = self.clone();
         self.cmd_server.register_cmd_handler(
             PackageCmdCode::SnCall as u8,
-            move |peer_id: PeerId,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
                   _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
+                    let local_id = P2pId::from(local_id.as_slice());
                     let call_req = SnCall::clone_from_slice(cmd_body.read_all().await?.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                     service
-                        .handle_call(call_req, &peer_id, tunnel_id, bucky_time_now())
+                        .handle_call(call_req, &local_id, &peer_id, tunnel_id, bucky_time_now())
                         .await;
                     Ok(None)
                 }
@@ -123,7 +122,8 @@ impl SnService {
         let service = self.clone();
         self.cmd_server.register_cmd_handler(
             PackageCmdCode::SnCalledResp as u8,
-            move |_peer_id: PeerId,
+            move |_local_id: PeerId,
+                  _peer_id: PeerId,
                   _tunnel_id: CmdTunnelId,
                   _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
@@ -141,17 +141,19 @@ impl SnService {
         let service = self.clone();
         self.cmd_server.register_cmd_handler(
             PackageCmdCode::ReportSn as u8,
-            move |peer_id: PeerId,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
                   _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
+                    let local_id = P2pId::from(local_id.as_slice());
                     let report_sn =
                         ReportSn::clone_from_slice(cmd_body.read_all().await?.as_slice())
                             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                     service
-                        .handle_report_sn(&peer_id, tunnel_id, report_sn)
+                        .handle_report_sn(&local_id, &peer_id, tunnel_id, report_sn)
                         .await;
                     Ok(None)
                 }
@@ -161,7 +163,8 @@ impl SnService {
         let service = self.clone();
         self.cmd_server.register_cmd_handler(
             PackageCmdCode::SnQuery as u8,
-            move |peer_id: PeerId,
+            move |_local_id: PeerId,
+                  peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
                   _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
@@ -176,10 +179,6 @@ impl SnService {
         );
     }
 
-    pub fn local_identity_id(&self) -> P2pId {
-        self.local_identity.get_id()
-    }
-
     fn peer_manager(&self) -> &PeerManagerRef {
         &self.peer_mgr
     }
@@ -187,6 +186,7 @@ impl SnService {
     async fn handle_call(
         &self,
         mut call_req: SnCall,
+        local_id: &P2pId,
         peer_id: &PeerId,
         tunnel_id: CmdTunnelId,
         _send_time: Timestamp,
@@ -233,7 +233,7 @@ impl SnService {
                             let mut called_req = SnCalled {
                                 seq: called_seq,
                                 to_peer_id: call_req.to_peer_id.clone(),
-                                sn_peer_id: self.local_identity_id().clone(),
+                                sn_peer_id: local_id.clone(),
                                 peer_info: from_peer_desc.get_encoded_cert().unwrap(),
                                 tunnel_id: call_req.tunnel_id,
                                 call_send_time: call_req.send_time,
@@ -282,7 +282,7 @@ impl SnService {
 
                     SnCallResp {
                         seq: call_req.seq,
-                        sn_peer_id: self.local_identity_id().clone(),
+                        sn_peer_id: local_id.clone(),
                         result: P2pErrorCode::Ok.into_u8(),
                         to_peer_info: Some(to_peer_cache.desc.get_encoded_cert().unwrap()),
                     }
@@ -291,7 +291,7 @@ impl SnService {
 
                     SnCallResp {
                         seq: call_req.seq,
-                        sn_peer_id: self.local_identity_id().clone(),
+                        sn_peer_id: local_id.clone(),
                         result: P2pErrorCode::NotFound.into_u8(),
                         to_peer_info: None,
                     }
@@ -300,7 +300,7 @@ impl SnService {
                 warn!("{} to-peer not found.", log_key);
                 SnCallResp {
                     seq: call_req.seq,
-                    sn_peer_id: self.local_identity_id().clone(),
+                    sn_peer_id: local_id.clone(),
                     result: P2pErrorCode::NotFound.into_u8(),
                     to_peer_info: None,
                 }
@@ -309,7 +309,7 @@ impl SnService {
             warn!("{} from-peer not found.", log_key);
             SnCallResp {
                 seq: call_req.seq,
-                sn_peer_id: self.local_identity_id().clone(),
+                sn_peer_id: local_id.clone(),
                 result: P2pErrorCode::NotFound.into_u8(),
                 to_peer_info: None,
             }
@@ -391,6 +391,7 @@ impl SnService {
 
     async fn handle_report_sn(
         &self,
+        local_id: &P2pId,
         peer_id: &PeerId,
         tunnel_id: CmdTunnelId,
         report_sn: ReportSn,
@@ -422,7 +423,7 @@ impl SnService {
                 self.cmd_version,
                 ReportSnResp {
                     seq: report_sn.seq,
-                    sn_peer_id: self.local_identity_id().clone(),
+                    sn_peer_id: local_id.clone(),
                     result: P2pErrorCode::Ok.into_u8(),
                     peer_info: None,
                     end_point_array: remote_ep,
@@ -554,7 +555,7 @@ impl SnServer {
 
         let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
         let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
-        let service = SnService::new(local_identity.clone(), cert_factory, contract);
+        let service = SnService::new(cert_factory, contract);
 
         Arc::new(Self {
             local_identity,
@@ -1093,7 +1094,9 @@ mod tests {
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
         let listener = ttp_server
-            .listen_stream(crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE).unwrap())
+            .listen_stream(
+                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1102,7 +1105,7 @@ mod tests {
         let ((read, write), mut remote_write) = make_stream_pair();
         stream_tx
             .send((
-                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE).unwrap(),
+                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
                 read,
                 write,
             ))

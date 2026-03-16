@@ -419,9 +419,10 @@ impl SNClientService {
         let this = self.clone();
         self.cmd_client.register_cmd_handler(
             PackageCmdCode::SnCallResp as u8,
-            move |peer_id: PeerId,
+            move |_local_id: PeerId,
+                  _peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut body: CmdBody| {
                 let this = this.clone();
                 async move {
@@ -441,9 +442,10 @@ impl SNClientService {
         let this = self.clone();
         self.cmd_client.register_cmd_handler(
             PackageCmdCode::SnQueryResp as u8,
-            move |peer_id: PeerId,
+            move |_local_id: PeerId,
+                  _peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut body: CmdBody| {
                 let this = this.clone();
                 async move {
@@ -463,9 +465,10 @@ impl SNClientService {
         let this = self.clone();
         self.cmd_client.register_cmd_handler(
             PackageCmdCode::SnCalled as u8,
-            move |peer_id: PeerId,
+            move |_local_id: PeerId,
+                  _peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut body: CmdBody| {
                 let this = this.clone();
                 async move {
@@ -485,9 +488,10 @@ impl SNClientService {
         let this = self.clone();
         self.cmd_client.register_cmd_handler(
             PackageCmdCode::ReportSnResp as u8,
-            move |peer_id: PeerId,
+            move |_local_id: PeerId,
+                  _peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
-                  header: SnCmdHeader,
+                  _header: SnCmdHeader,
                   mut body: CmdBody| {
                 let this = this.clone();
                 async move {

@@ -3097,9 +3097,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.2.6"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a7a25e75e247f178fa928fc4a1c9896cfbb3723dcc2295168084f88fb0c2de1"
+checksum = "a14b5f4903e950d819f06e2f593084981657168e8c6a6c8fc651a6f5d9657ca5"
 dependencies = [
  "as-any",
  "async-named-locker",

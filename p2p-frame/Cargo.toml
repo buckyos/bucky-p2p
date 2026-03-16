@@ -33,7 +33,7 @@ rustls = { version = "0.23.20", default-features = false, features = ["ring", "s
 libc = '0.2'
 if-addrs = { version = "0.13.3" }
 async-named-locker = "0.1.2"
-sfo-cmd-server = "0.2.6"
+sfo-cmd-server = "0.3"
 #sfo-cmd-server = {path = "../../sfo-cmd-server"}
 sfo-split = { version = "0.1.5", features = ["io"] }
 x509-cert = { version = "0.2.5", optional = true }
