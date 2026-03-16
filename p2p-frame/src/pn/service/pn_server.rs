@@ -262,7 +262,7 @@ impl PnService {
         }
     }
 
-    async fn handle_proxy_connection(
+    pub async fn handle_proxy_connection(
         self: &Arc<Self>,
         from: P2pId,
         mut read: TunnelStreamRead,
