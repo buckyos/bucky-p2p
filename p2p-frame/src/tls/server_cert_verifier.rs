@@ -1,4 +1,5 @@
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
+use crate::tls::sign::{signature_scheme_for_sign_type, supported_verify_schemes};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, DigitallySignedStruct, Error, SignatureScheme};
@@ -75,6 +76,9 @@ impl ServerCertVerifier for TlsServerCertVerifier {
             .cert_factory
             .create(&device)
             .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        if dss.scheme != signature_scheme_for_sign_type(cert.sign_type()) {
+            return Err(Error::General("Invalid signature scheme".to_string()));
+        }
         if self.server_id.is_default() {
             if cert.verify(message, &sign) {
                 Ok(HandshakeSignatureValid::assertion())
@@ -91,6 +95,6 @@ impl ServerCertVerifier for TlsServerCertVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SignatureScheme::RSA_PSS_SHA256]
+        supported_verify_schemes()
     }
 }

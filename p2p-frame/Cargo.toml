@@ -37,7 +37,7 @@ sfo-cmd-server = "0.3"
 #sfo-cmd-server = {path = "../../sfo-cmd-server"}
 sfo-split = { version = "0.1.5", features = ["io"] }
 x509-cert = { version = "0.2.5", optional = true }
-x509-verify = { version = "0.4.6", optional = true, features = ["rsa", "sha2", "x509"] }
+x509-verify = { version = "0.4.6", optional = true, features = ["rsa", "sha2", "x509", "ed25519"] }
 ring = { version = "0.17.11", optional = true, features = [] }
 rcgen = { version = "0.13.2", optional = true, features = ["aws_lc_rs"] }
 chrono = "0.4.40"

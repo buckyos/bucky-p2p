@@ -217,6 +217,10 @@ mod tests {
             self.name.clone()
         }
 
+        fn sign_type(&self) -> crate::p2p_identity::P2pIdentitySignType {
+            crate::p2p_identity::P2pIdentitySignType::Rsa
+        }
+
         fn verify(&self, _message: &[u8], _sign: &P2pSignature) -> bool {
             true
         }

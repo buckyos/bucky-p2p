@@ -87,10 +87,17 @@ pub type P2pSignature = Vec<u8>;
 
 pub type EncodedP2pIdentity = Vec<u8>;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum P2pIdentitySignType {
+    Rsa,
+    Ed25519,
+}
+
 pub trait P2pIdentity: 'static + Send + Sync {
     fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef>;
     fn get_id(&self) -> P2pId;
     fn get_name(&self) -> String;
+    fn sign_type(&self) -> P2pIdentitySignType;
     fn sign(&self, message: &[u8]) -> P2pResult<P2pSignature>;
     fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity>;
     fn endpoints(&self) -> Vec<Endpoint>;
@@ -136,6 +143,7 @@ pub type P2pIdentityFactoryRef = Arc<dyn P2pIdentityFactory>;
 pub trait P2pIdentityCert: 'static + Send + Sync {
     fn get_id(&self) -> P2pId;
     fn get_name(&self) -> String;
+    fn sign_type(&self) -> P2pIdentitySignType;
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool;
     fn verify_cert(&self, name: &str) -> bool;
     fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert>;

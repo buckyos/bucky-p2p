@@ -42,6 +42,10 @@ impl P2pIdentity for DummyIdentity {
         self.name.clone()
     }
 
+    fn sign_type(&self) -> crate::p2p_identity::P2pIdentitySignType {
+        crate::p2p_identity::P2pIdentitySignType::Rsa
+    }
+
     fn sign(&self, _message: &[u8]) -> P2pResult<P2pSignature> {
         Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
     }

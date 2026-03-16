@@ -1,35 +1,43 @@
+mod ed25519;
+
 use crate::endpoint::Endpoint;
-use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::p2p_identity::{
     EncodedP2pIdentity, EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pIdentityCert,
-    P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef, P2pSignature,
-    P2pSn,
+    P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef,
+    P2pIdentitySignType, P2pSignature, P2pSn,
 };
-use bucky_raw_codec::{FileEncoder, RawConvertTo, RawDecode, RawEncode, RawFrom};
-use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_RSA_SHA256, RsaKeySize};
+use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
+use rcgen::{CertificateParams, KeyPair, PKCS_RSA_SHA256, RsaKeySize};
+use ring::signature::{self, Ed25519KeyPair};
 use sha2::Digest;
 use std::sync::Arc;
 use x509_cert::Certificate;
-use x509_cert::der::asn1::PrintableStringRef;
+use x509_cert::der::oid::ObjectIdentifier;
 use x509_cert::der::{Decode, DecodePem, Encode};
-use x509_cert::ext::pkix::name::GeneralName;
-use x509_cert::ext::pkix::{ID_CE_ISSUER_ALT_NAME, ID_CE_SUBJECT_ALT_NAME, SubjectAltName};
 use x509_cert::spki::AlgorithmIdentifierOwned;
-use x509_verify::der::oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION;
-use x509_verify::{Error, Message, VerifyInfo, VerifyingKey};
+use x509_verify::VerifyingKey;
+use x509_verify::der::oid::db::rfc5912::RSA_ENCRYPTION;
+
+pub use ed25519::generate_ed25519_x509_identity;
+
+const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 
 pub fn generate_x509_identity(name: Option<String>) -> P2pResult<X509Identity> {
     let key_pair = KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048)
         .map_err(into_p2p_err!(P2pErrorCode::CertError))?;
+    generate_x509_identity_with_key_pair(name, key_pair)
+}
+
+fn generate_x509_identity_with_key_pair(
+    name: Option<String>,
+    key_pair: KeyPair,
+) -> P2pResult<X509Identity> {
     let mut sha256 = sha2::Sha256::new();
     sha256.update(key_pair.public_key_raw());
     let p2p_id = P2pId::from(sha256.finalize().as_slice());
-    let subject_alt_names = if name.is_none() {
-        vec![p2p_id.to_string()]
-    } else {
-        vec![name.unwrap()]
-    };
-    let mut params = CertificateParams::new(subject_alt_names)
+    let subject_alt_names = vec![name.unwrap_or_else(|| p2p_id.to_string())];
+    let params = CertificateParams::new(subject_alt_names)
         .map_err(into_p2p_err!(P2pErrorCode::CertError))?;
     let cert = params
         .self_signed(&key_pair)
@@ -45,12 +53,33 @@ pub fn generate_x509_identity(name: Option<String>) -> P2pResult<X509Identity> {
     X509Identity::from_data(id_data)
 }
 
+fn sign_type_from_algorithm(
+    algorithm: &AlgorithmIdentifierOwned,
+) -> P2pResult<P2pIdentitySignType> {
+    if algorithm.oid == RSA_ENCRYPTION {
+        Ok(P2pIdentitySignType::Rsa)
+    } else if algorithm.oid == ED25519_OID {
+        Ok(P2pIdentitySignType::Ed25519)
+    } else {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "unsupported x509 key algorithm {}",
+            algorithm.oid
+        ))
+    }
+}
+
+fn sign_type_from_cert(cert: &Certificate) -> P2pResult<P2pIdentitySignType> {
+    sign_type_from_algorithm(&cert.tbs_certificate.subject_public_key_info.algorithm)
+}
+
 #[derive(Debug, Clone, RawEncode, RawDecode)]
 struct X509IdentityCertData {
     raw_cert: Vec<u8>,
     sn_list: Vec<P2pSn>,
     endpoints: Vec<Endpoint>,
 }
+
 pub struct X509IdentityCert {
     cert: Certificate,
     data: X509IdentityCertData,
@@ -112,7 +141,7 @@ impl X509IdentityCert {
             cert: self.cert.clone(),
             data: X509IdentityCertData {
                 raw_cert: self.data.raw_cert.clone(),
-                endpoints: eps.clone(),
+                endpoints: eps,
                 sn_list: self.data.sn_list.clone(),
             },
             sn_list: self.sn_list.clone(),
@@ -136,23 +165,19 @@ impl P2pIdentityCert for X509IdentityCert {
     fn get_name(&self) -> String {
         if let Some(ref extends) = self.cert.tbs_certificate.extensions {
             for extend in extends.iter() {
-                if extend.extn_id == ID_CE_SUBJECT_ALT_NAME {
-                    match SubjectAltName::from_der(extend.extn_value.as_ref()) {
+                if extend.extn_id == x509_verify::der::oid::db::rfc5912::ID_CE_SUBJECT_ALT_NAME {
+                    match x509_cert::ext::pkix::SubjectAltName::from_der(extend.extn_value.as_ref())
+                    {
                         Ok(name) => {
                             for general_name in name.0.iter() {
-                                match general_name {
-                                    GeneralName::DnsName(name) => {
-                                        return name.to_string();
-                                    }
-                                    _ => {
-                                        continue;
-                                    }
+                                if let x509_cert::ext::pkix::name::GeneralName::DnsName(name) =
+                                    general_name
+                                {
+                                    return name.to_string();
                                 }
                             }
                         }
-                        Err(_) => {
-                            continue;
-                        }
+                        Err(_) => continue,
                     }
                 }
             }
@@ -160,24 +185,30 @@ impl P2pIdentityCert for X509IdentityCert {
         "".to_string()
     }
 
+    fn sign_type(&self) -> P2pIdentitySignType {
+        sign_type_from_cert(&self.cert).unwrap_or(P2pIdentitySignType::Rsa)
+    }
+
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool {
-        let key = match VerifyingKey::try_from(&self.cert) {
-            Ok(key) => key,
-            Err(_) => return false,
-        };
-        let verify_info = VerifyInfo::new(
-            Message::new(message),
-            x509_verify::Signature::new(
-                &AlgorithmIdentifierOwned {
-                    oid: SHA_256_WITH_RSA_ENCRYPTION,
-                    parameters: None,
-                },
-                sign.as_slice(),
-            ),
-        );
-        match key.verify(&verify_info) {
-            Ok(_) => true,
-            Err(_) => false,
+        let public_key = self
+            .cert
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes();
+
+        match self.sign_type() {
+            P2pIdentitySignType::Rsa => signature::UnparsedPublicKey::new(
+                &signature::RSA_PKCS1_2048_8192_SHA256,
+                public_key,
+            )
+            .verify(message, sign.as_slice())
+            .is_ok(),
+            P2pIdentitySignType::Ed25519 => {
+                signature::UnparsedPublicKey::new(&signature::ED25519, public_key)
+                    .verify(message, sign.as_slice())
+                    .is_ok()
+            }
         }
     }
 
@@ -196,10 +227,9 @@ impl P2pIdentityCert for X509IdentityCert {
     }
 
     fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
-        Ok(self
-            .data
+        self.data
             .to_vec()
-            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?)
+            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))
     }
 
     fn endpoints(&self) -> Vec<Endpoint> {
@@ -211,15 +241,7 @@ impl P2pIdentityCert for X509IdentityCert {
     }
 
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityCertRef {
-        Arc::new(Self {
-            cert: self.cert.clone(),
-            data: X509IdentityCertData {
-                raw_cert: self.data.raw_cert.clone(),
-                endpoints: eps.clone(),
-                sn_list: self.data.sn_list.clone(),
-            },
-            sn_list: self.sn_list.clone(),
-        })
+        self.x509_update_endpoints(eps)
     }
 }
 
@@ -229,19 +251,35 @@ struct X509IdentityData {
     cert: X509IdentityCertData,
 }
 
+enum X509PrivateKey {
+    Rsa(ring::rsa::KeyPair),
+    Ed25519(Ed25519KeyPair),
+}
+
 pub struct X509Identity {
     cert: Arc<X509IdentityCert>,
-    key: ring::rsa::KeyPair,
+    key: X509PrivateKey,
     raw_key: Vec<u8>,
 }
 
 impl X509Identity {
     fn from_data(data: X509IdentityData) -> P2pResult<Self> {
         let cert = X509IdentityCert::from_data(data.cert)?;
+        let sign_type = cert.sign_type();
+        let key = match sign_type {
+            P2pIdentitySignType::Rsa => X509PrivateKey::Rsa(
+                ring::rsa::KeyPair::from_pkcs8(data.key.as_slice())
+                    .map_err(|e| p2p_err!(P2pErrorCode::CertError, "{:?}", e))?,
+            ),
+            P2pIdentitySignType::Ed25519 => X509PrivateKey::Ed25519(
+                Ed25519KeyPair::from_pkcs8(data.key.as_slice())
+                    .or_else(|_| Ed25519KeyPair::from_pkcs8_maybe_unchecked(data.key.as_slice()))
+                    .map_err(|e| p2p_err!(P2pErrorCode::CertError, "{:?}", e))?,
+            ),
+        };
         Ok(Self {
             cert: Arc::new(cert),
-            key: ring::rsa::KeyPair::from_pkcs8(data.key.as_slice())
-                .map_err(|e| p2p_err!(P2pErrorCode::CertError, "{:?}", e))?,
+            key,
             raw_key: data.key,
         })
     }
@@ -260,18 +298,26 @@ impl P2pIdentity for X509Identity {
         self.cert.get_name()
     }
 
+    fn sign_type(&self) -> P2pIdentitySignType {
+        self.cert.sign_type()
+    }
+
     fn sign(&self, message: &[u8]) -> P2pResult<P2pSignature> {
-        let rng = ring::rand::SystemRandom::new();
-        let mut actual = vec![0u8; self.key.public().modulus_len()];
-        self.key
-            .sign(
-                &ring::signature::RSA_PKCS1_SHA256,
-                &rng,
-                message,
-                actual.as_mut_slice(),
-            )
-            .map_err(|e| p2p_err!(P2pErrorCode::SignError, "{:?}", e))?;
-        Ok(actual)
+        match &self.key {
+            X509PrivateKey::Rsa(key) => {
+                let rng = ring::rand::SystemRandom::new();
+                let mut actual = vec![0u8; key.public().modulus_len()];
+                key.sign(
+                    &signature::RSA_PKCS1_SHA256,
+                    &rng,
+                    message,
+                    actual.as_mut_slice(),
+                )
+                .map_err(|e| p2p_err!(P2pErrorCode::SignError, "{:?}", e))?;
+                Ok(actual)
+            }
+            X509PrivateKey::Ed25519(key) => Ok(key.sign(message).as_ref().to_vec()),
+        }
     }
 
     fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
@@ -289,11 +335,15 @@ impl P2pIdentity for X509Identity {
     }
 
     fn update_endpoints(&self, eps: Vec<Endpoint>) -> P2pIdentityRef {
-        Arc::new(Self {
-            cert: self.cert.x509_update_endpoints(eps),
-            key: ring::rsa::KeyPair::from_pkcs8(self.raw_key.as_slice()).unwrap(),
-            raw_key: self.raw_key.clone(),
-        })
+        let data = X509IdentityData {
+            key: self.raw_key.clone(),
+            cert: X509IdentityCertData {
+                raw_cert: self.cert.get_data().raw_cert.clone(),
+                sn_list: self.cert.get_data().sn_list.clone(),
+                endpoints: eps,
+            },
+        };
+        Arc::new(Self::from_data(data).unwrap())
     }
 }
 
@@ -322,32 +372,49 @@ impl P2pIdentityCertFactory for X509IdentityCertFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p_identity::P2pIdentityCertFactory;
-    use crate::p2p_identity::P2pIdentityFactory;
+
+    fn assert_identity_roundtrip(id: &dyn P2pIdentity, expected_sign_type: P2pIdentitySignType) {
+        let id_ref = id.get_id();
+        let id_name = id.get_name();
+        assert_eq!(id_ref.to_string(), id_name);
+        assert_eq!(id.sign_type(), expected_sign_type);
+
+        let id_cert = id.get_identity_cert().unwrap();
+        let id_encoded = id.get_encoded_identity().unwrap();
+        let id_sign = id.sign(b"test").unwrap();
+
+        assert_eq!(id_cert.sign_type(), expected_sign_type);
+        assert_eq!(id_ref, id_cert.get_id());
+        assert!(id_cert.verify(b"test", &id_sign));
+        assert!(id_cert.verify_cert(id_cert.get_id().to_string().as_str()));
+
+        let id_cert_encoded = id_cert.get_encoded_cert().unwrap();
+
+        let factory = X509IdentityFactory;
+        let id2 = factory.create(&id_encoded).unwrap();
+        assert_eq!(id2.get_id(), id_ref);
+        assert_eq!(id2.sign_type(), expected_sign_type);
+        assert!(
+            id2.get_identity_cert()
+                .unwrap()
+                .verify(b"test", &id2.sign(b"test").unwrap())
+        );
+
+        let factory_cert = X509IdentityCertFactory;
+        let id_cert2 = factory_cert.create(&id_cert_encoded).unwrap();
+        assert_eq!(id_cert2.get_id(), id_ref);
+        assert_eq!(id_cert2.sign_type(), expected_sign_type);
+    }
 
     #[test]
     fn test_x509_identity() {
         let id = generate_x509_identity(None).unwrap();
-        let id_ref = id.get_id();
-        let id_name = id.get_name();
-        assert_eq!(id_ref.to_string(), id_name);
-        let id_cert = id.get_identity_cert().unwrap();
-        let id_encoded = id.get_encoded_identity().unwrap();
-        let id_endpoints = id.endpoints();
-        let id_sign = id.sign(b"test").unwrap();
-        let id_cert_id = id_cert.get_id();
-        assert_eq!(id_ref, id_cert_id);
-        let id_cert_verify = id_cert.verify(b"test", &id_sign);
-        assert!(id_cert_verify);
-        let id_cert_verify_cert = id_cert.verify_cert(id_cert_id.to_string().as_str());
-        assert!(id_cert_verify_cert);
-        let id_cert_encoded = id_cert.get_encoded_cert().unwrap();
-        let id_cert_sn_list = id_cert.sn_list();
-        let id_cert_update = id_cert.update_endpoints(vec![]);
+        assert_identity_roundtrip(&id, P2pIdentitySignType::Rsa);
+    }
 
-        let factory = X509IdentityFactory;
-        let id2 = factory.create(&id_encoded).unwrap();
-        let factory_cert = X509IdentityCertFactory;
-        let id_cert2 = factory_cert.create(&id_cert_encoded).unwrap();
+    #[test]
+    fn test_ed25519_x509_identity() {
+        let id = generate_ed25519_x509_identity(None).unwrap();
+        assert_identity_roundtrip(&id, P2pIdentitySignType::Ed25519);
     }
 }

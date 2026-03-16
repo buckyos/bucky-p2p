@@ -269,7 +269,10 @@ mod tests {
     };
     use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
-    use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
+    use crate::x509::{
+        X509IdentityCertFactory, X509IdentityFactory, generate_ed25519_x509_identity,
+        generate_x509_identity,
+    };
     use std::sync::Arc;
     use std::sync::Once;
     use tokio::time::{Instant, sleep, timeout};
@@ -285,6 +288,10 @@ mod tests {
 
     fn new_identity(name: &str) -> P2pIdentityRef {
         Arc::new(generate_x509_identity(Some(name.to_owned())).unwrap())
+    }
+
+    fn new_ed25519_identity(name: &str) -> P2pIdentityRef {
+        Arc::new(generate_ed25519_x509_identity(Some(name.to_owned())).unwrap())
     }
 
     async fn register_listener_identity(
@@ -649,6 +656,52 @@ mod tests {
 
         wait_for_idle_pool_len(active, 1).await;
         wait_for_idle_pool_len(reverse, 1).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_tunnel_mixed_rsa_and_ed25519_handshake_ok() {
+        init_tls_once();
+
+        let (client_network, client_resolver) = new_network();
+        let (server_network, server_resolver) = new_network();
+        let client_identity = new_ed25519_identity("client-ed25519");
+        let server_identity = new_identity("server-rsa");
+
+        register_listener_identity(&client_resolver, client_identity.clone()).await;
+        register_listener_identity(&server_resolver, server_identity.clone()).await;
+
+        client_network
+            .listen(&loopback_tcp_ep(), None, None)
+            .await
+            .unwrap();
+        server_network
+            .listen(&loopback_tcp_ep(), None, None)
+            .await
+            .unwrap();
+
+        let server_listener = server_network.listeners.lock().unwrap()[0].clone();
+        let server_ep = server_listener.bound_local();
+
+        let accept_task =
+            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let opened = client_network
+            .create_tunnel(
+                &client_identity,
+                &server_ep,
+                &server_identity.get_id(),
+                Some(server_identity.get_name()),
+            )
+            .await
+            .unwrap();
+        let accepted = accept_task.await.unwrap();
+
+        assert_eq!(opened.local_id(), client_identity.get_id());
+        assert_eq!(opened.remote_id(), server_identity.get_id());
+        assert_eq!(accepted.local_id(), server_identity.get_id());
+        assert_eq!(accepted.remote_id(), client_identity.get_id());
+
+        opened.close().await.unwrap();
+        accepted.close().await.unwrap();
     }
 
     #[tokio::test]

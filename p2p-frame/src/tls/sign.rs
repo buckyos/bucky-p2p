@@ -1,12 +1,32 @@
-use crate::p2p_identity::P2pIdentityRef;
-use bucky_raw_codec::RawConvertTo;
+use crate::p2p_identity::{P2pIdentityRef, P2pIdentitySignType};
 use rustls::sign::{Signer, SigningKey};
 use rustls::{SignatureAlgorithm, SignatureScheme};
 use std::fmt::{Debug, Formatter};
 
+pub(crate) fn signature_scheme_for_sign_type(sign_type: P2pIdentitySignType) -> SignatureScheme {
+    match sign_type {
+        P2pIdentitySignType::Rsa => SignatureScheme::RSA_PSS_SHA256,
+        P2pIdentitySignType::Ed25519 => SignatureScheme::ED25519,
+    }
+}
+
+pub(crate) fn signature_algorithm_for_sign_type(
+    sign_type: P2pIdentitySignType,
+) -> SignatureAlgorithm {
+    match sign_type {
+        P2pIdentitySignType::Rsa => SignatureAlgorithm::RSA,
+        P2pIdentitySignType::Ed25519 => SignatureAlgorithm::ED25519,
+    }
+}
+
+pub(crate) fn supported_verify_schemes() -> Vec<SignatureScheme> {
+    vec![SignatureScheme::RSA_PSS_SHA256, SignatureScheme::ED25519]
+}
+
 #[derive(Clone)]
 pub struct TlsKey {
     key: P2pIdentityRef,
+    sign_type: P2pIdentitySignType,
     scheme: SignatureScheme,
 }
 
@@ -18,9 +38,11 @@ impl Debug for TlsKey {
 
 impl TlsKey {
     pub fn new(key: P2pIdentityRef) -> Self {
+        let sign_type = key.sign_type();
         Self {
             key,
-            scheme: SignatureScheme::RSA_PSS_SHA256,
+            sign_type,
+            scheme: signature_scheme_for_sign_type(sign_type),
         }
     }
 }
@@ -35,7 +57,7 @@ impl SigningKey for TlsKey {
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
-        SignatureAlgorithm::RSA
+        signature_algorithm_for_sign_type(self.sign_type)
     }
 }
 
