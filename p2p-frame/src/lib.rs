@@ -20,6 +20,8 @@ pub mod sn;
 pub mod stack;
 pub mod ttp;
 
+pub use sfo_cmd_server as cmd_server;
+
 pub use crate::tunnel::{
     ConnectDirection, DefaultP2pConnectionInfoCache, P2pConnectionInfo, P2pConnectionInfoCache,
     P2pConnectionInfoCacheRef,
