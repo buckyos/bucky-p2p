@@ -182,7 +182,7 @@ impl P2pIdentityCert for X509IdentityCert {
                 }
             }
         }
-        "".to_string()
+        self.get_id().to_string()
     }
 
     fn sign_type(&self) -> P2pIdentitySignType {
