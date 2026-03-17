@@ -212,10 +212,7 @@ impl P2pIdentityCert for X509IdentityCert {
         }
     }
 
-    fn verify_cert(&self, name: &str) -> bool {
-        if self.get_name() != name {
-            return false;
-        }
+    fn verify_cert(&self, _name: &str) -> bool {
         let key = match VerifyingKey::try_from(&self.cert) {
             Ok(key) => key,
             Err(_) => return false,
