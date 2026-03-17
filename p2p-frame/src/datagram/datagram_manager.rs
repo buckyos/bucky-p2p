@@ -246,7 +246,7 @@ impl DatagramManager {
         &self,
         remote_pes: Vec<Endpoint>,
         purpose: TunnelPurpose,
-        remote_id: Option<P2pId>,
+        remote_id: &P2pId,
     ) -> P2pResult<DatagramWrite> {
         let tunnel = self
             .tunnel_manager

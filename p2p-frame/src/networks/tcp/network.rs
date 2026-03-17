@@ -1174,9 +1174,6 @@ mod tests {
             .add_server_identity(server_identity.clone())
             .await
             .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
-            .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
         let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
@@ -1241,9 +1238,6 @@ mod tests {
         resolver
             .add_server_identity(server_identity.clone())
             .await
-            .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
@@ -1329,9 +1323,6 @@ mod tests {
             .add_server_identity(server_identity.clone())
             .await
             .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
-            .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
         let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
@@ -1403,9 +1394,6 @@ mod tests {
         resolver
             .add_server_identity(server_identity.clone())
             .await
-            .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
@@ -1489,9 +1477,6 @@ mod tests {
             .add_server_identity(server_identity.clone())
             .await
             .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
-            .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
         let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
@@ -1550,9 +1535,6 @@ mod tests {
         resolver
             .add_server_identity(server_identity.clone())
             .await
-            .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
@@ -1856,9 +1838,6 @@ mod tests {
             .add_server_identity(server_identity.clone())
             .await
             .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
-            .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
         let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
@@ -2029,9 +2008,6 @@ mod tests {
             .add_server_identity(server_identity.clone())
             .await
             .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
-            .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
         let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
@@ -2128,9 +2104,6 @@ mod tests {
         resolver
             .add_server_identity(server_identity.clone())
             .await
-            .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
@@ -2229,9 +2202,6 @@ mod tests {
             .add_server_identity(server_identity.clone())
             .await
             .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
-            .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
         let listener = super::super::connection::bind_listener(loopback_tcp_ep(), false)
@@ -2328,9 +2298,6 @@ mod tests {
         resolver
             .add_server_identity(server_identity.clone())
             .await
-            .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());
@@ -2429,9 +2396,6 @@ mod tests {
         resolver
             .add_server_identity(server_identity.clone())
             .await
-            .unwrap();
-        resolver
-            .set_default_server_identity(&server_identity.get_id())
             .unwrap();
         let acceptor =
             super::super::connection::build_acceptor(resolver.clone(), cert_factory.clone());

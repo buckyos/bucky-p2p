@@ -341,10 +341,6 @@ mod tests {
         Arc::new(generate_ed25519_x509_identity(Some(name.to_owned())).unwrap())
     }
 
-    fn new_default_named_identity() -> P2pIdentityRef {
-        Arc::new(generate_x509_identity(None).unwrap())
-    }
-
     fn new_cert_cache() -> crate::p2p_identity::P2pIdentityCertCacheRef {
         Arc::new(DeviceCache::new(
             &DeviceCacheConfig {
@@ -366,17 +362,11 @@ mod tests {
     async fn register_listener_identity(
         resolver: &Arc<DefaultTlsServerCertResolver>,
         identity: P2pIdentityRef,
-        set_default: bool,
     ) {
         resolver
             .add_server_identity(identity.clone())
             .await
             .unwrap();
-        if set_default {
-            resolver
-                .set_default_server_identity(&identity.get_id())
-                .unwrap();
-        }
     }
 
     fn new_network() -> (QuicTunnelNetwork, Arc<DefaultTlsServerCertResolver>) {
@@ -404,8 +394,8 @@ mod tests {
         let client_identity = new_identity("quic-client");
         let server_identity = new_identity("quic-server");
 
-        register_listener_identity(&client_resolver, client_identity.clone(), true).await;
-        register_listener_identity(&server_resolver, server_identity.clone(), true).await;
+        register_listener_identity(&client_resolver, client_identity.clone()).await;
+        register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
             .listen(&loopback_quic_ep(), None, None)
@@ -459,8 +449,8 @@ mod tests {
         let client_identity = new_ed25519_identity("quic-client-ed25519");
         let server_identity = new_identity("quic-server-rsa");
 
-        register_listener_identity(&client_resolver, client_identity.clone(), true).await;
-        register_listener_identity(&server_resolver, server_identity.clone(), true).await;
+        register_listener_identity(&client_resolver, client_identity.clone()).await;
+        register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
             .listen(&loopback_quic_ep(), None, None)
@@ -506,9 +496,9 @@ mod tests {
         let server_identity_a = new_identity("quic-server-multi-identity-a");
         let server_identity_b = new_identity("quic-server-multi-identity-b");
 
-        register_listener_identity(&client_resolver, client_identity.clone(), true).await;
-        register_listener_identity(&server_resolver, server_identity_a.clone(), true).await;
-        register_listener_identity(&server_resolver, server_identity_b.clone(), false).await;
+        register_listener_identity(&client_resolver, client_identity.clone()).await;
+        register_listener_identity(&server_resolver, server_identity_a.clone()).await;
+        register_listener_identity(&server_resolver, server_identity_b.clone()).await;
 
         client_network
             .listen(&loopback_quic_ep(), None, None)
@@ -850,16 +840,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quic_tunnel_default_remote_id_resolves_from_peer_cert() {
+    async fn quic_tunnel_create_tunnel_with_local_ep_ok() {
         init_tls_once();
 
         let (client_network, client_resolver) = new_network();
         let (server_network, server_resolver) = new_network();
-        let client_identity = new_identity("quic-default-remote-client");
-        let server_identity = new_default_named_identity();
+        let client_identity = new_identity("quic-local-ep-client");
+        let server_identity = new_identity("quic-local-ep-server");
 
-        register_listener_identity(&client_resolver, client_identity.clone(), true).await;
-        register_listener_identity(&server_resolver, server_identity.clone(), true).await;
+        register_listener_identity(&client_resolver, client_identity.clone()).await;
+        register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
             .listen(&loopback_quic_ep(), None, None)
@@ -880,8 +870,8 @@ mod tests {
                 &client_identity,
                 &client_local_ep,
                 &server_local_ep,
-                &P2pId::default(),
-                None,
+                &server_identity.get_id(),
+                Some(server_identity.get_name()),
             )
             .await
             .unwrap();

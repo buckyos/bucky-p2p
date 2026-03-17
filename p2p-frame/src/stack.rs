@@ -372,12 +372,6 @@ impl P2pStack {
         &self.env.identity_cert_cache
     }
 
-    pub fn set_as_default(&self) {
-        self.env
-            .sever_cert_resolver
-            .set_default_server_identity(&self.local_identity.get_id());
-    }
-
     pub fn get_listen_eps(&self, protocol: Protocol) -> Option<Vec<(Endpoint, Option<u16>)>> {
         let listeners = self.net_manager.get_listener_info(protocol);
         if listeners.is_empty() {

@@ -1,14 +1,11 @@
 use bucky_crypto::PrivateKey;
-use bucky_objects::{
-    sign_and_push_named_object, Area, Device, DeviceCategory, Endpoint as CyfsEndpoint,
-    EndpointArea, Protocol as CyfsProtocol, RsaCPUObjectSigner, SignatureSource, UniqueId,
-    SIGNATURE_SOURCE_REFINDEX_SELF,
-};
+use bucky_objects::{sign_and_push_named_object, Area, Device, DeviceCategory, Endpoint as CyfsEndpoint, EndpointArea, NamedObject, ObjectDesc, Protocol as CyfsProtocol, RsaCPUObjectSigner, SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF};
 use clap::{App, Arg, SubCommand};
 use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
 use cyfs_p2p::{create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint};
 use p2p_frame::endpoint::{Endpoint as P2pEndpoint, Protocol as P2pProtocol};
 use p2p_frame::networks::TunnelPurpose;
+use p2p_frame::p2p_identity::P2pId;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -84,6 +81,7 @@ struct ClientOpts {
     parallel: usize,
     interval_secs: u64,
     protocol: TransportProtocol,
+    remote_id: P2pId,
 }
 
 enum Command {
@@ -200,6 +198,14 @@ fn parse_command() -> AppResult<Command> {
                         .takes_value(true)
                         .default_value("1")
                         .help("report interval in seconds"),
+                )
+                .arg(
+                    Arg::with_name("remote-id")
+                        .short("r")
+                        .long("remote-id")
+                        .takes_value(true)
+                        .required(true)
+                        .help("remote p2p identity id (base36)"),
                 ),
         );
 
@@ -236,6 +242,10 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
     let interval_secs = parse_u64("--interval", value_of(matches, "interval")?)?;
     let protocol = TransportProtocol::parse(value_of(matches, "protocol")?)?;
 
+    let remote_id = value_of(matches, "remote-id")?
+        .parse::<P2pId>()
+        .map_err(|e| format!("invalid remote-id: {}", e))?;
+
     if time_secs == 0 {
         return Err("--time must be > 0".to_string());
     }
@@ -257,6 +267,7 @@ fn parse_client_args(matches: &clap::ArgMatches<'_>) -> AppResult<ClientOpts> {
         parallel,
         interval_secs,
         protocol,
+        remote_id,
     })
 }
 
@@ -386,6 +397,7 @@ async fn create_stack(
     })?;
 
     let (device, key) = generate_runtime_identity(vec![local_ep]).await?;
+    println!("device_id:{}", P2pId::from(device.desc().object_id().as_slice()).to_string());
     let stack_config = create_cyfs_p2p_stack_config(env, device, key, vec![]);
     let stack = create_p2p_stack(stack_config).await.map_err(|e| {
         format!(
@@ -394,7 +406,6 @@ async fn create_stack(
             e.msg()
         )
     })?;
-    stack.set_as_default();
     Ok(stack)
 }
 
@@ -564,11 +575,16 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
         let payload = vec![0u8; opts.len];
         let stream_id = (index + 5).to_string();
         let interval = Duration::from_secs(opts.interval_secs);
+        let remote_id = opts.remote_id.clone();
 
         handles.push(tokio::task::spawn(async move {
             let (read, mut write) = stack
                 .stream_manager()
-                .connect_direct(vec![remote], tunnel_purpose(PERF_VPORT), None)
+                .connect_direct(
+                    vec![remote],
+                    tunnel_purpose(PERF_VPORT),
+                    &remote_id,
+                )
                 .await
                 .map_err(|e| {
                     format!(

@@ -309,7 +309,7 @@ impl StreamManager {
         &self,
         remote_eps: Vec<Endpoint>,
         purpose: TunnelPurpose,
-        remote_id: Option<P2pId>,
+        remote_id: &P2pId,
     ) -> P2pResult<(StreamRead, StreamWrite)> {
         let tunnel = self
             .tunnel_manager

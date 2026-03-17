@@ -960,7 +960,7 @@ async fn all_in_one() {
                             )),
                         ))],
                         tunnel_purpose(1234),
-                        None,
+                        &P2pId::default(),
                     )
                     .await?;
                 Ok(())

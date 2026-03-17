@@ -288,7 +288,7 @@ impl TunnelManager {
     pub async fn open_tunnel(&self, remote: &P2pIdentityCertRef) -> P2pResult<TunnelRef> {
         self.open_known_tunnel(
             remote.endpoints(),
-            Some(remote.get_id()),
+            &remote.get_id(),
             Some(remote.get_name()),
         )
         .await
@@ -305,12 +305,10 @@ impl TunnelManager {
     pub async fn open_direct_tunnel(
         &self,
         remote_eps: Vec<Endpoint>,
-        remote_id: Option<P2pId>,
+        remote_id: &P2pId,
     ) -> P2pResult<TunnelRef> {
-        if let Some(remote_id) = remote_id.as_ref() {
-            if let Some(tunnel) = self.get_tunnel(remote_id) {
-                return Ok(tunnel);
-            }
+        if let Some(tunnel) = self.get_tunnel(remote_id) {
+            return Ok(tunnel);
         }
         self.open_known_tunnel(remote_eps, remote_id, None).await
     }
@@ -359,15 +357,12 @@ impl TunnelManager {
     async fn open_known_tunnel(
         &self,
         remote_eps: Vec<Endpoint>,
-        remote_id: Option<P2pId>,
+        remote_id: &P2pId,
         remote_name: Option<String>,
     ) -> P2pResult<TunnelRef> {
         log::debug!(
             "open tunnel remote={} name={:?} eps_count={} eps={:?} has_sn={} has_pn={}",
-            remote_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "<unknown>".to_string()),
+            remote_id,
             remote_name,
             remote_eps.len(),
             remote_eps,
@@ -381,52 +376,23 @@ impl TunnelManager {
             ));
         }
 
-        let lock_name = format!(
-            "network-tunnel-{}",
-            remote_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| remote_eps[0].to_string())
-        );
+        let lock_name = format!("network-tunnel-{}", remote_id);
         let _guard = Locker::get_locker(lock_name).await;
         let logical_tunnel_id = self.gen_id.generate();
 
-        if let Some(remote_id) = remote_id.as_ref() {
-            if let Some(tunnel) = self.get_tunnel(remote_id) {
-                return Ok(tunnel);
-            }
+        if let Some(tunnel) = self.get_tunnel(remote_id) {
+            return Ok(tunnel);
         }
 
         let mut last_err = None;
         let mut tried_reverse = false;
-        if let Some(remote_id) = remote_id.as_ref() {
-            if let Some(info) = self.conn_info_cache.get(remote_id).await {
-                match info.direct {
-                    ConnectDirection::Direct => {
-                        if remote_eps.iter().any(|ep| ep == &info.remote_ep) {
-                            match self
-                                .open_direct_path(
-                                    vec![info.remote_ep],
-                                    Some(remote_id),
-                                    remote_name.clone(),
-                                    TunnelConnectIntent::active_logical(logical_tunnel_id),
-                                )
-                                .await
-                            {
-                                Ok(tunnel) => return Ok(tunnel),
-                                Err(err) => last_err = Some(err),
-                            }
-                        }
-                    }
-                    ConnectDirection::Reverse => {
-                        match self.open_reverse_path(remote_id, logical_tunnel_id).await {
-                            Ok(tunnel) => return Ok(tunnel),
-                            Err(err) => last_err = Some(err),
-                        }
-                    }
-                    ConnectDirection::Proxy => {
+        if let Some(info) = self.conn_info_cache.get(remote_id).await {
+            match info.direct {
+                ConnectDirection::Direct => {
+                    if remote_eps.iter().any(|ep| ep == &info.remote_ep) {
                         match self
-                            .open_proxy_path(
+                            .open_direct_path(
+                                vec![info.remote_ep],
                                 remote_id,
                                 remote_name.clone(),
                                 TunnelConnectIntent::active_logical(logical_tunnel_id),
@@ -438,90 +404,91 @@ impl TunnelManager {
                         }
                     }
                 }
+                ConnectDirection::Reverse => {
+                    match self.open_reverse_path(remote_id, logical_tunnel_id).await {
+                        Ok(tunnel) => return Ok(tunnel),
+                        Err(err) => last_err = Some(err),
+                    }
+                }
+                ConnectDirection::Proxy => {
+                    match self
+                        .open_proxy_path(
+                            remote_id,
+                            remote_name.clone(),
+                            TunnelConnectIntent::active_logical(logical_tunnel_id),
+                        )
+                        .await
+                    {
+                        Ok(tunnel) => return Ok(tunnel),
+                        Err(err) => last_err = Some(err),
+                    }
+                }
             }
         }
 
         let direct_eps = self
-            .preferred_direct_endpoints(remote_id.as_ref(), remote_eps.as_slice())
+            .preferred_direct_endpoints(Some(remote_id), remote_eps.as_slice())
             .await;
         log::debug!(
             "open tunnel remote={} preferred direct eps {:?}",
-            remote_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "<unknown>".to_string()),
+            remote_id,
             direct_eps
         );
-        if let Some(remote_id) = remote_id.as_ref() {
-            if !direct_eps.is_empty() && self.sn_service.is_some() {
-                tried_reverse = true;
-                log::debug!(
-                    "open tunnel remote={} tunnel_id={:?} start hedged direct+reverse delay_ms={}",
+        if !direct_eps.is_empty() && self.sn_service.is_some() {
+            tried_reverse = true;
+            log::debug!(
+                "open tunnel remote={} tunnel_id={:?} start hedged direct+reverse delay_ms={}",
+                remote_id,
+                logical_tunnel_id,
+                HEDGED_REVERSE_DELAY.as_millis()
+            );
+            let (result, direct_won) = race_with_delay(
+                self.open_direct_path(
+                    direct_eps.clone(),
                     remote_id,
-                    logical_tunnel_id,
-                    HEDGED_REVERSE_DELAY.as_millis()
-                );
-                let (result, direct_won) = race_with_delay(
-                    self.open_direct_path(
-                        direct_eps.clone(),
-                        Some(remote_id),
-                        remote_name.clone(),
-                        TunnelConnectIntent::active_logical(logical_tunnel_id),
-                    ),
-                    HEDGED_REVERSE_DELAY,
-                    self.open_reverse_path(remote_id, logical_tunnel_id),
-                )
-                .await;
-                match result {
-                    Ok(tunnel) => {
-                        log::debug!(
-                            "open tunnel remote={} hedged success winner={}",
-                            remote_id,
-                            if direct_won { "direct" } else { "reverse" }
-                        );
-                        return Ok(tunnel);
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "open tunnel remote={} hedged failed winner={} code={:?} msg={}",
-                            remote_id,
-                            if direct_won { "direct" } else { "reverse" },
-                            err.code(),
-                            err.msg()
-                        );
-                        last_err = Some(err);
-                        if direct_won {
-                            log::debug!(
-                                "hedged connect remote {} direct failed after reverse",
-                                remote_id
-                            );
-                        } else {
-                            log::debug!(
-                                "hedged connect remote {} reverse failed after direct",
-                                remote_id
-                            );
-                        }
-                    }
+                    remote_name.clone(),
+                    TunnelConnectIntent::active_logical(logical_tunnel_id),
+                ),
+                HEDGED_REVERSE_DELAY,
+                self.open_reverse_path(remote_id, logical_tunnel_id),
+            )
+            .await;
+            match result {
+                Ok(tunnel) => {
+                    log::debug!(
+                        "open tunnel remote={} hedged success winner={}",
+                        remote_id,
+                        if direct_won { "direct" } else { "reverse" }
+                    );
+                    return Ok(tunnel);
                 }
-            } else {
-                match self
-                    .open_direct_path(
-                        direct_eps.clone(),
-                        Some(remote_id),
-                        remote_name.clone(),
-                        TunnelConnectIntent::active_logical(logical_tunnel_id),
-                    )
-                    .await
-                {
-                    Ok(tunnel) => return Ok(tunnel),
-                    Err(err) => last_err = Some(err),
+                Err(err) => {
+                    log::warn!(
+                        "open tunnel remote={} hedged failed winner={} code={:?} msg={}",
+                        remote_id,
+                        if direct_won { "direct" } else { "reverse" },
+                        err.code(),
+                        err.msg()
+                    );
+                    last_err = Some(err);
+                    if direct_won {
+                        log::debug!(
+                            "hedged connect remote {} direct failed after reverse",
+                            remote_id
+                        );
+                    } else {
+                        log::debug!(
+                            "hedged connect remote {} reverse failed after direct",
+                            remote_id
+                        );
+                    }
                 }
             }
         } else {
             match self
                 .open_direct_path(
                     direct_eps.clone(),
-                    None,
+                    remote_id,
                     remote_name.clone(),
                     TunnelConnectIntent::active_logical(logical_tunnel_id),
                 )
@@ -532,25 +499,23 @@ impl TunnelManager {
             }
         }
 
-        if let Some(remote_id) = remote_id.as_ref() {
-            if !tried_reverse {
-                match self.open_reverse_path(remote_id, logical_tunnel_id).await {
-                    Ok(tunnel) => return Ok(tunnel),
-                    Err(err) => last_err = Some(err),
-                }
-            }
-
-            match self
-                .open_proxy_path(
-                    remote_id,
-                    remote_name,
-                    TunnelConnectIntent::active_logical(logical_tunnel_id),
-                )
-                .await
-            {
+        if !tried_reverse {
+            match self.open_reverse_path(remote_id, logical_tunnel_id).await {
                 Ok(tunnel) => return Ok(tunnel),
                 Err(err) => last_err = Some(err),
             }
+        }
+
+        match self
+            .open_proxy_path(
+                remote_id,
+                remote_name,
+                TunnelConnectIntent::active_logical(logical_tunnel_id),
+            )
+            .await
+        {
+            Ok(tunnel) => return Ok(tunnel),
+            Err(err) => last_err = Some(err),
         }
 
         Err(last_err
@@ -560,23 +525,19 @@ impl TunnelManager {
     async fn open_direct_path(
         &self,
         remote_eps: Vec<Endpoint>,
-        remote_id: Option<&P2pId>,
+        remote_id: &P2pId,
         remote_name: Option<String>,
         intent: TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
         let mut last_err = None;
         let local_identity = self.local_identity.clone();
-        let remote_id = remote_id.cloned();
-        let connect_remote_id = remote_id.clone().unwrap_or_default();
+        let connect_remote_id = remote_id.clone();
         let manager_weak = self.self_weak.clone();
         let mut connect_futures = FuturesUnordered::new();
 
         log::debug!(
             "direct path start remote={} tunnel_id={:?} reverse={} eps_count={} eps={:?}",
-            remote_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "<unknown>".to_string()),
+            remote_id,
             intent.tunnel_id,
             intent.is_reverse,
             remote_eps.len(),
@@ -624,19 +585,17 @@ impl TunnelManager {
                             let should_publish = manager.should_publish_tunnel(&tunnel);
                             match manager.register_tunnel(tunnel, true, should_publish).await {
                                 Ok(tunnel) => {
-                                    if let Some(remote_id) = remote_id.as_ref() {
-                                        manager
-                                            .conn_info_cache
-                                            .add(
-                                                remote_id.clone(),
-                                                P2pConnectionInfo {
-                                                    direct: ConnectDirection::Direct,
-                                                    local_ep: tunnel.local_ep().unwrap_or_default(),
-                                                    remote_ep,
-                                                },
-                                            )
-                                            .await;
-                                    }
+                                    manager
+                                        .conn_info_cache
+                                        .add(
+                                            remote_id,
+                                            P2pConnectionInfo {
+                                                direct: ConnectDirection::Direct,
+                                                local_ep: tunnel.local_ep().unwrap_or_default(),
+                                                remote_ep,
+                                            },
+                                        )
+                                        .await;
                                     log::debug!(
                                         "direct path success remote={} tunnel_id={:?} candidate_id={:?} ep={:?}",
                                         connect_remote_id,
@@ -679,10 +638,7 @@ impl TunnelManager {
                 Ok((remote_ep, tunnel)) => {
                     log::debug!(
                         "direct path selected remote={} ep={:?}",
-                        remote_id
-                            .as_ref()
-                            .map(|id| id.to_string())
-                            .unwrap_or_else(|| "<unknown>".to_string()),
+                        remote_id,
                         remote_ep
                     );
                     if !connect_futures.is_empty() {
@@ -966,7 +922,7 @@ impl TunnelManager {
         match self
             .open_direct_path(
                 eps,
-                Some(&remote_id),
+                &remote_id,
                 Some(cert.get_name()),
                 TunnelConnectIntent::reverse_logical(called.tunnel_id),
             )
@@ -2213,7 +2169,7 @@ mod tests {
 
         let started = Instant::now();
         let tunnel = manager
-            .open_direct_tunnel(vec![slow_ep, fast_ep], Some(remote_identity.get_id()))
+            .open_direct_tunnel(vec![slow_ep, fast_ep], &remote_identity.get_id())
             .await
             .unwrap();
 
@@ -2284,7 +2240,7 @@ mod tests {
         let manager = new_test_manager(new_identity("local-empty-eps"), HashMap::new(), None);
 
         let err = manager
-            .open_direct_tunnel(vec![], None)
+            .open_direct_tunnel(vec![], &P2pId::default())
             .await
             .err()
             .unwrap();
@@ -2329,7 +2285,7 @@ mod tests {
 
         let started = Instant::now();
         let tunnel = manager
-            .open_direct_tunnel(vec![fail_ep, success_ep], Some(remote_identity.get_id()))
+            .open_direct_tunnel(vec![fail_ep, success_ep], &remote_identity.get_id())
             .await
             .unwrap();
 
