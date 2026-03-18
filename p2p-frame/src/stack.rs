@@ -640,7 +640,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     }
     let tunnel_manager = NetworkTunnelManager::new(
         local_identity.clone(),
-        device_finder.clone(),
+        Some(device_finder.clone()),
         net_manager.clone(),
         Some(sn_service.clone()),
         cert_factory.clone(),

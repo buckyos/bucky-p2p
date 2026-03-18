@@ -107,7 +107,7 @@ struct ManagerState {
 pub struct TunnelManager {
     self_weak: std::sync::Weak<TunnelManager>,
     local_identity: P2pIdentityRef,
-    device_finder: DeviceFinderRef,
+    device_finder: Option<DeviceFinderRef>,
     net_manager: NetManagerRef,
     sn_service: Option<SNClientServiceRef>,
     cert_factory: P2pIdentityCertFactoryRef,
@@ -128,7 +128,7 @@ pub type TunnelManagerRef = Arc<TunnelManager>;
 impl TunnelManager {
     pub fn new(
         local_identity: P2pIdentityRef,
-        device_finder: DeviceFinderRef,
+        device_finder: Option<DeviceFinderRef>,
         net_manager: NetManagerRef,
         sn_service: Option<SNClientServiceRef>,
         cert_factory: P2pIdentityCertFactoryRef,
@@ -298,8 +298,26 @@ impl TunnelManager {
         if let Some(tunnel) = self.get_tunnel(remote_id) {
             return Ok(tunnel);
         }
-        let remote = self.device_finder.get_identity_cert(remote_id).await?;
-        self.open_tunnel(&remote).await
+
+        if let Some(device_finder) = self.device_finder.as_ref() {
+            match device_finder.get_identity_cert(remote_id).await {
+                Ok(remote) => return self.open_tunnel(&remote).await,
+                Err(e) => {
+                    log::warn!(
+                        "device_finder lookup failed for {}, try proxy: {}",
+                        remote_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        self.open_proxy_path(
+            remote_id,
+            None,
+            TunnelConnectIntent::active_logical(self.gen_id.generate()),
+        )
+        .await
     }
 
     pub async fn open_direct_tunnel(
@@ -1173,7 +1191,7 @@ mod tests {
     ) -> TunnelManagerRef {
         TunnelManager::new(
             local_identity,
-            Arc::new(StaticDeviceFinder { devices }),
+            Some(Arc::new(StaticDeviceFinder { devices })),
             crate::networks::NetManager::new(networks, DefaultTlsServerCertResolver::new())
                 .unwrap(),
             None,
@@ -1678,9 +1696,9 @@ mod tests {
 
         let callee_manager = TunnelManager::new(
             callee_identity.clone(),
-            Arc::new(StaticDeviceFinder {
+            Some(Arc::new(StaticDeviceFinder {
                 devices: HashMap::from([(caller_identity.get_id(), caller_cert.clone())]),
-            }),
+            })),
             callee_net_manager,
             None,
             Arc::new(X509IdentityCertFactory),
@@ -2637,20 +2655,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(err.code(), P2pErrorCode::NotSupport);
-    }
-
-    #[tokio::test]
-    async fn open_tunnel_empty_endpoints_rejected() {
-        init_tls_once();
-
-        let manager = new_test_manager(new_identity("local-empty"), HashMap::new(), None);
-
-        let err = manager
-            .open_tunnel_from_id(&P2pId::default())
-            .await
-            .err()
-            .unwrap();
-
-        assert_eq!(err.code(), P2pErrorCode::NotFound);
     }
 }
