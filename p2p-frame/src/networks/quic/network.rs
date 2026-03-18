@@ -309,7 +309,7 @@ mod tests {
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::x509::{
         X509IdentityCertFactory, X509IdentityFactory, generate_ed25519_x509_identity,
-        generate_x509_identity,
+        generate_rsa_x509_identity,
     };
     use std::sync::Arc;
     use std::sync::Once;
@@ -334,7 +334,7 @@ mod tests {
     }
 
     fn new_identity(name: &str) -> P2pIdentityRef {
-        Arc::new(generate_x509_identity(Some(name.to_owned())).unwrap())
+        Arc::new(generate_rsa_x509_identity(Some(name.to_owned())).unwrap())
     }
 
     fn new_ed25519_identity(name: &str) -> P2pIdentityRef {

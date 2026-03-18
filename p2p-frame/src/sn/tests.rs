@@ -12,7 +12,7 @@ use crate::sn::protocol::v0::{SnCalled, TunnelType};
 use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::TunnelId;
-use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
+use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
 
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,7 +31,7 @@ fn localhost_quic_endpoint(port: u16) -> Endpoint {
 }
 
 fn build_identity(name: &str, endpoint: Endpoint) -> P2pIdentityRef {
-    let identity = generate_x509_identity(Some(name.to_owned())).unwrap();
+    let identity = generate_rsa_x509_identity(Some(name.to_owned())).unwrap();
     let identity: P2pIdentityRef = Arc::new(identity);
     identity.update_endpoints(vec![endpoint])
 }

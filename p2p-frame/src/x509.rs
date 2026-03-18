@@ -23,7 +23,7 @@ pub use ed25519::generate_ed25519_x509_identity;
 
 const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 
-pub fn generate_x509_identity(name: Option<String>) -> P2pResult<X509Identity> {
+pub fn generate_rsa_x509_identity(name: Option<String>) -> P2pResult<X509Identity> {
     let key_pair = KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048)
         .map_err(into_p2p_err!(P2pErrorCode::CertError))?;
     generate_x509_identity_with_key_pair(name, key_pair)
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_x509_identity() {
-        let id = generate_x509_identity(None).unwrap();
+        let id = generate_rsa_x509_identity(None).unwrap();
         assert_identity_roundtrip(&id, P2pIdentitySignType::Rsa);
     }
 

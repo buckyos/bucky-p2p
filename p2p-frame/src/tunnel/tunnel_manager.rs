@@ -1117,7 +1117,7 @@ mod tests {
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::tunnel::DefaultP2pConnectionInfoCache;
     use crate::types::{TunnelCandidateId, TunnelIdGenerator};
-    use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_x509_identity};
+    use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
     use std::sync::Once;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1146,7 +1146,7 @@ mod tests {
     }
 
     fn new_identity(name: &str) -> P2pIdentityRef {
-        Arc::new(generate_x509_identity(Some(name.to_owned())).unwrap())
+        Arc::new(generate_rsa_x509_identity(Some(name.to_owned())).unwrap())
     }
 
     fn next_test_tunnel_id() -> TunnelId {
