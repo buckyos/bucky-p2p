@@ -224,7 +224,29 @@ pub struct TtpClient { ... }
 
 - `TtpClient` 同时实现 `TtpConnector` 与 `TtpPortListener`
 - 客户端既支持主动打开 `stream/datagram`，也支持监听入站 `stream/datagram`
-- 客户端监听范围是所有“由本客户端管理的已建立 tunnel”
+- 客户端监听范围是所有”由本客户端管理的已建立 tunnel”
+
+### 客户端服务器连接保活
+
+```rust
+impl TtpClient {
+    pub async fn connect_server(
+        self: &TtpClientRef,
+        target: TtpTarget,
+    ) -> P2pResult<()>;
+}
+```
+
+语义：
+
+- `connect_server()` 主动建立到指定服务器的 tunnel，并将该 target 纳入后台保活监控
+- 首次调用时启动单一后台监控任务，后续调用只追加 target 到监控列表
+- 后台任务每 60 秒遍历所有已注册的 target，调用 `get_or_create_tunnel()` 检查 tunnel 健康状态
+- 若 tunnel 已断开或异常，`get_or_create_tunnel()` 会自动创建新 tunnel 完成重连
+- 若重连失败，记录警告日志并在下一轮继续重试，不中断对其他 target 的检查
+- 所有 target 共用同一个后台任务，不为每个 target 单独创建监控协程
+- 后台任务持有 `Weak<TtpClient>`，当 `TtpClient` 被 drop 时自动退出
+- 同一 target（按 `remote_ep` + `remote_id` 判断）不会重复注册
 
 ### 服务端对象
 
@@ -299,6 +321,7 @@ pub struct TtpServer { ... }
 
 - `open_stream()` / `open_datagram()` 的 tunnel 选择、创建、复用
 - 客户端已建立 tunnel 的注册与回收
+- `connect_server()` 的 target 注册与后台保活监控任务
 - 对外实现 `TtpClient`
 
 ### `server.rs`
@@ -449,10 +472,11 @@ pub struct TtpServer { ... }
 ### 客户端生命周期
 
 - 创建 `TtpClient`
+- 可选调用 `connect_server(target)` 建立到服务器的持久连接，tunnel 断开后自动重连
 - 按需 `listen_stream(vport)` / `listen_datagram(vport)`
 - 按需 `open_stream(target, vport)` / `open_datagram(target, vport)`
 - `open_*()` 时自动建立或复用 tunnel
-- tunnel 关闭后自动从池中清理
+- tunnel 关闭后自动从池中清理；已通过 `connect_server()` 注册的 target 会由后台任务自动重建 tunnel
 
 ### 服务端生命周期
 

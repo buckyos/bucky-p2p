@@ -1227,6 +1227,89 @@ mod tests {
         }
     }
 
+    struct MockProxyNetwork {
+        local_id: P2pId,
+        result: Result<(), P2pErrorCode>,
+    }
+
+    impl MockProxyNetwork {
+        fn new(local_id: P2pId, result: Result<(), P2pErrorCode>) -> Arc<Self> {
+            Arc::new(Self { local_id, result })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TunnelNetwork for MockProxyNetwork {
+        fn protocol(&self) -> Protocol {
+            Protocol::Ext(255)
+        }
+
+        fn is_udp(&self) -> bool {
+            false
+        }
+
+        async fn listen(
+            &self,
+            _local: &Endpoint,
+            _out: Option<Endpoint>,
+            _mapping_port: Option<u16>,
+        ) -> P2pResult<crate::networks::TunnelListenerRef> {
+            Err(p2p_err!(
+                P2pErrorCode::NotSupport,
+                "mock proxy listen not supported"
+            ))
+        }
+
+        async fn close_all_listener(&self) -> P2pResult<()> {
+            Ok(())
+        }
+
+        fn listeners(&self) -> Vec<crate::networks::TunnelListenerRef> {
+            vec![]
+        }
+
+        fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
+            vec![]
+        }
+
+        async fn create_tunnel_with_intent(
+            &self,
+            _local_identity: &P2pIdentityRef,
+            _remote: &Endpoint,
+            remote_id: &P2pId,
+            _remote_name: Option<String>,
+            intent: TunnelConnectIntent,
+        ) -> P2pResult<TunnelRef> {
+            match self.result {
+                Ok(()) => Ok(Arc::new(MockTunnel {
+                    tunnel_id: intent.tunnel_id,
+                    candidate_id: intent.candidate_id,
+                    local_id: self.local_id.clone(),
+                    remote_id: remote_id.clone(),
+                    state: TunnelState::Connected,
+                    is_reverse: false,
+                })),
+                Err(code) => Err(P2pError::new(
+                    code,
+                    format!("mock proxy connect failed for {remote_id}"),
+                )),
+            }
+        }
+
+        async fn create_tunnel_with_local_ep_and_intent(
+            &self,
+            local_identity: &P2pIdentityRef,
+            local_ep: &Endpoint,
+            remote: &Endpoint,
+            remote_id: &P2pId,
+            remote_name: Option<String>,
+            intent: TunnelConnectIntent,
+        ) -> P2pResult<TunnelRef> {
+            self.create_tunnel_with_intent(local_identity, remote, remote_id, remote_name, intent)
+                .await
+        }
+    }
+
     #[async_trait::async_trait]
     impl TunnelNetwork for MockDialNetwork {
         fn protocol(&self) -> Protocol {
@@ -2370,5 +2453,204 @@ mod tests {
 
         assert_eq!(tunnel.close_count(), 1);
         assert!(tunnel.is_closed());
+    }
+
+    #[tokio::test]
+    async fn open_direct_tunnel_single_endpoint_success() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-direct-single");
+        let remote_identity = new_identity("remote-direct-single");
+        let remote_ep = Endpoint::from((Protocol::Ext(4), "127.0.0.1:14001".parse().unwrap()));
+        let network = MockDialNetwork::new(
+            Protocol::Ext(4),
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(10),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+
+        let tunnel = manager
+            .open_direct_tunnel(vec![remote_ep], &remote_identity.get_id())
+            .await
+            .unwrap();
+
+        assert_eq!(tunnel.remote_id(), remote_identity.get_id());
+
+        let info = manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .unwrap();
+        assert_eq!(info.direct, ConnectDirection::Direct);
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_fails_with_no_network_and_no_proxy() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-no-nets");
+        let remote_identity = new_identity("remote-no-nets");
+        
+        let manager = new_test_manager(
+            local_identity,
+            HashMap::new(),
+            None,
+        );
+
+        let err = manager
+            .open_proxy_path(
+                &remote_identity.get_id(),
+                None,
+                TunnelConnectIntent::active_logical(TunnelId::from(8888)),
+            )
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(err.code(), P2pErrorCode::NotSupport);
+    }
+
+    #[tokio::test]
+    async fn open_proxy_path_without_pn_network_fails() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-no-pn");
+        let remote_identity = new_identity("remote-no-pn");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+
+        let err = manager
+            .open_proxy_path(
+                &remote_identity.get_id(),
+                None,
+                TunnelConnectIntent::active_logical(TunnelId::from(999)),
+            )
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(err.code(), P2pErrorCode::NotSupport);
+    }
+
+    #[tokio::test]
+    async fn conn_info_cache_direct_preferred_on_reconnect() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-cache-reuse");
+        let remote_identity = new_identity("remote-cache-reuse");
+        let cached_ep = Endpoint::from((Protocol::Ext(8), "127.0.0.1:18001".parse().unwrap()));
+        let new_ep = Endpoint::from((Protocol::Ext(8), "127.0.0.1:18002".parse().unwrap()));
+        let network = MockDialNetwork::new(
+            Protocol::Ext(8),
+            local_identity.get_id(),
+            HashMap::from([
+                (
+                    cached_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(10),
+                        result: Ok(()),
+                    },
+                ),
+                (
+                    new_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(10),
+                        result: Ok(()),
+                    },
+                ),
+            ]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+
+        manager
+            .conn_info_cache
+            .add(
+                remote_identity.get_id(),
+                P2pConnectionInfo {
+                    direct: ConnectDirection::Direct,
+                    local_ep: loopback_tcp_ep(),
+                    remote_ep: cached_ep,
+                },
+            )
+            .await;
+
+        let tunnel = manager
+            .open_direct_tunnel(vec![cached_ep, new_ep], &remote_identity.get_id())
+            .await
+            .unwrap();
+
+        assert_eq!(tunnel.remote_id(), remote_identity.get_id());
+
+        let info = manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .unwrap();
+        assert_eq!(info.remote_ep, cached_ep);
+    }
+
+    #[tokio::test]
+    async fn reverse_path_fails_without_sn_service_when_cached() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-no-sn");
+        let remote_identity = new_identity("remote-no-sn");
+        let remote_ep = Endpoint::from((Protocol::Ext(9), "127.0.0.1:19001".parse().unwrap()));
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![],
+        );
+
+        manager
+            .conn_info_cache
+            .add(
+                remote_identity.get_id(),
+                P2pConnectionInfo {
+                    direct: ConnectDirection::Reverse,
+                    local_ep: loopback_tcp_ep(),
+                    remote_ep,
+                },
+            )
+            .await;
+
+        let err = manager
+            .open_direct_tunnel(vec![remote_ep], &remote_identity.get_id())
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(err.code(), P2pErrorCode::NotSupport);
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_empty_endpoints_rejected() {
+        init_tls_once();
+
+        let manager = new_test_manager(new_identity("local-empty"), HashMap::new(), None);
+
+        let err = manager
+            .open_tunnel_from_id(&P2pId::default())
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(err.code(), P2pErrorCode::NotFound);
     }
 }

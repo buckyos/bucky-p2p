@@ -4,7 +4,10 @@ use crate::networks::{
     TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
+use crate::runtime;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::listener::{TtpDatagramListenerRef, TtpListenerRef, TtpPortListener};
 use super::runtime::TtpRuntime;
@@ -29,6 +32,8 @@ pub struct TtpClient {
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
     tunnels: Mutex<Vec<TunnelRef>>,
+    maintained_targets: Mutex<Vec<TtpTarget>>,
+    maintain_started: AtomicBool,
 }
 
 pub type TtpClientRef = Arc<TtpClient>;
@@ -40,6 +45,8 @@ impl TtpClient {
             net_manager,
             runtime: TtpRuntime::new(),
             tunnels: Mutex::new(Vec::new()),
+            maintained_targets: Mutex::new(Vec::new()),
+            maintain_started: AtomicBool::new(false),
         })
     }
 
@@ -91,6 +98,50 @@ impl TtpClient {
             read,
             write,
         ))
+    }
+
+    pub async fn connect_server(self: &TtpClientRef, target: TtpTarget) -> P2pResult<()> {
+        self.get_or_create_tunnel(&target).await?;
+
+        {
+            let mut targets = self.maintained_targets.lock().unwrap();
+            let already_exists = targets
+                .iter()
+                .any(|t| t.remote_ep == target.remote_ep && t.remote_id == target.remote_id);
+            if !already_exists {
+                targets.push(target);
+            }
+        }
+
+        if !self.maintain_started.swap(true, Ordering::SeqCst) {
+            self.start_maintain_loop();
+        }
+
+        Ok(())
+    }
+
+    fn start_maintain_loop(self: &TtpClientRef) {
+        let client = Arc::downgrade(self);
+        runtime::task::spawn(async move {
+            loop {
+                runtime::sleep(Duration::from_secs(60)).await;
+
+                let Some(client) = client.upgrade() else {
+                    break;
+                };
+
+                let targets = client.maintained_targets.lock().unwrap().clone();
+                for target in &targets {
+                    if let Err(e) = client.get_or_create_tunnel(target).await {
+                        log::warn!(
+                            "maintain tunnel to {:?} failed: {}",
+                            target.remote_ep,
+                            e
+                        );
+                    }
+                }
+            }
+        });
     }
 
     async fn get_or_create_tunnel(&self, target: &TtpTarget) -> P2pResult<TunnelRef> {
