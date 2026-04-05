@@ -102,7 +102,7 @@ impl QuicTunnelNetwork {
         remote_name: Option<String>,
         intent: TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
-        let socket = connect_with_ep(
+        let socket = match connect_with_ep(
             listener.quic_ep(),
             local_identity.clone(),
             self.cert_factory.clone(),
@@ -113,7 +113,23 @@ impl QuicTunnelNetwork {
             self.timeout,
             self.idle_timeout,
         )
-        .await?;
+        .await
+        {
+            Ok(socket) => socket,
+            Err(err) => {
+                log::error!(
+                    "quic tunnel connect failed local_id={} local_ep={} remote={} remote_id={} remote_name={:?} code={:?} msg={}",
+                    local_identity.get_id(),
+                    listener.bound_local(),
+                    remote,
+                    remote_id,
+                    remote_name,
+                    err.code(),
+                    err
+                );
+                return Err(err);
+            }
+        };
         let local_ep = Endpoint::from((
             Protocol::Quic,
             listener
