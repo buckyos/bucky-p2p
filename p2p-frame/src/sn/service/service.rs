@@ -589,32 +589,58 @@ impl SnServer {
             )
             .is_err()
         {
+            log::debug!("sn server start skipped because already started");
             return Ok(());
         }
+
+        log::info!(
+            "sn server start begin local_id={}",
+            self.local_identity.get_id()
+        );
 
         if let Err(err) = self.start_inner().await {
             self.abort_accept_tasks();
             self.started.store(false, atomic::Ordering::SeqCst);
+            log::error!(
+                "sn server start failed local_id={} err={:?}",
+                self.local_identity.get_id(),
+                err
+            );
             return Err(err);
         }
 
+        log::info!("sn server start success local_id={}", self.local_identity.get_id());
         Ok(())
     }
 
     async fn start_inner(self: &Arc<Self>) -> P2pResult<()> {
+        log::debug!(
+            "sn server listen endpoints local_id={} endpoints={:?}",
+            self.local_identity.get_id(),
+            self.local_identity.endpoints()
+        );
         self.net_manager
             .listen(self.local_identity.endpoints().as_slice(), None)
             .await?;
+        log::debug!(
+            "sn server net_manager listen ready local_id={}",
+            self.local_identity.get_id()
+        );
         self.start_cmd_accept_loop().await?;
         Ok(())
     }
 
     async fn start_cmd_accept_loop(self: &Arc<Self>) -> P2pResult<()> {
+        let purpose =
+            crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap();
+        log::debug!(
+            "sn server start cmd accept loop local_id={} purpose={}",
+            self.local_identity.get_id(),
+            purpose
+        );
         let listener = self
             .ttp_server
-            .listen_stream(
-                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
-            )
+            .listen_stream(purpose)
             .await?;
         let server = self.clone();
         let task = Executor::spawn_with_handle(async move {
@@ -622,6 +648,10 @@ impl SnServer {
         })
         .unwrap();
         *self.cmd_accept_task.lock().unwrap() = Some(task);
+        log::debug!(
+            "sn server cmd accept loop started local_id={}",
+            self.local_identity.get_id()
+        );
         Ok(())
     }
 

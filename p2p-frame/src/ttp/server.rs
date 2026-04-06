@@ -56,10 +56,34 @@ impl TtpServer {
                     break;
                 };
 
+                log::debug!(
+                    "ttp server accepted incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
                 if let Err(err) = server.runtime.attach_tunnel(tunnel.clone()).await {
-                    log::warn!("ttp attach incoming tunnel failed: {:?}", err);
+                    log::warn!(
+                        "ttp attach incoming tunnel failed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} err={:?}",
+                        tunnel.local_id(),
+                        tunnel.remote_id(),
+                        tunnel.protocol(),
+                        tunnel.tunnel_id(),
+                        tunnel.candidate_id(),
+                        err
+                    );
                     continue;
                 }
+                log::debug!(
+                    "ttp attach incoming tunnel success local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
                 server.remember_tunnel(tunnel);
             }
         });

@@ -213,11 +213,13 @@ impl NetManager {
                 local_id
             ));
         }
+        log::debug!("register tunnel acceptor local_id={}", local_id);
         subscriptions.insert(local_id, tx);
         Ok(TunnelAcceptor { rx })
     }
 
     pub fn unregister_tunnel_acceptor(&self, local_id: &P2pId) {
+        log::debug!("unregister tunnel acceptor local_id={}", local_id);
         self.subscriptions.lock().unwrap().remove(local_id);
     }
 
@@ -247,6 +249,17 @@ impl NetManager {
 
     async fn dispatch_tunnel(&self, tunnel: super::TunnelRef) {
         let ctx = Self::build_validate_context(&tunnel);
+        log::debug!(
+            "dispatch incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} reverse={} local_ep={:?} remote_ep={:?}",
+            ctx.local_id,
+            ctx.remote_id,
+            ctx.protocol,
+            ctx.tunnel_id,
+            ctx.candidate_id,
+            ctx.is_reverse,
+            ctx.local_ep,
+            ctx.remote_ep
+        );
         match self.incoming_tunnel_validator.validate(&ctx).await {
             Ok(ValidateResult::Accept) => self.publish_tunnel(ctx.local_id, tunnel),
             Ok(ValidateResult::Reject(reason)) => {
@@ -293,9 +306,30 @@ impl NetManager {
     fn publish_tunnel(&self, local_id: P2pId, tunnel: super::TunnelRef) {
         let mut subscriptions = self.subscriptions.lock().unwrap();
         if let Some(subscriber) = subscriptions.get(&local_id) {
+            log::debug!(
+                "publish incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                local_id,
+                tunnel.remote_id(),
+                tunnel.protocol(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id()
+            );
             if subscriber.send(Ok(tunnel)).is_err() {
+                log::warn!(
+                    "publish incoming tunnel failed because subscriber closed local={}",
+                    local_id
+                );
                 subscriptions.remove(&local_id);
             }
+        } else {
+            log::warn!(
+                "drop incoming tunnel because no subscriber local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                local_id,
+                tunnel.remote_id(),
+                tunnel.protocol(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id()
+            );
         }
     }
 

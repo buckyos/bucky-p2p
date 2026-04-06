@@ -25,11 +25,13 @@ impl TtpRuntime {
     }
 
     pub(crate) fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef> {
+        log::debug!("ttp listen stream register purpose={}", purpose);
         let rx = self.stream_registry.register(purpose)?;
         Ok(QueueTtpListener::new(rx))
     }
 
     pub(crate) fn unlisten_stream(&self, purpose: &TunnelPurpose) {
+        log::debug!("ttp unlisten stream purpose={}", purpose);
         self.stream_registry.remove(purpose);
     }
 
@@ -37,16 +39,34 @@ impl TtpRuntime {
         &self,
         purpose: TunnelPurpose,
     ) -> P2pResult<TtpDatagramListenerRef> {
+        log::debug!("ttp listen datagram register purpose={}", purpose);
         let rx = self.datagram_registry.register(purpose)?;
         Ok(QueueTtpDatagramListener::new(rx))
     }
 
     pub(crate) fn unlisten_datagram(&self, purpose: &TunnelPurpose) {
+        log::debug!("ttp unlisten datagram purpose={}", purpose);
         self.datagram_registry.remove(purpose);
     }
 
     pub(crate) async fn attach_tunnel(self: &Arc<Self>, tunnel: TunnelRef) -> P2pResult<()> {
+        log::debug!(
+            "ttp attach tunnel start local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+            tunnel.local_id(),
+            tunnel.remote_id(),
+            tunnel.protocol(),
+            tunnel.tunnel_id(),
+            tunnel.candidate_id()
+        );
         if !self.try_mark_attached(&tunnel) {
+            log::debug!(
+                "ttp attach tunnel skip duplicated local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                tunnel.local_id(),
+                tunnel.remote_id(),
+                tunnel.protocol(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id()
+            );
             return Ok(());
         }
 
@@ -54,8 +74,26 @@ impl TtpRuntime {
             .listen_stream(self.stream_registry.as_listen_vports_ref())
             .await
         {
-            Ok(()) => {}
-            Err(err) if err.code() == P2pErrorCode::NotSupport => {}
+            Ok(()) => {
+                log::debug!(
+                    "ttp attach tunnel listen_stream ready local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
+            }
+            Err(err) if err.code() == P2pErrorCode::NotSupport => {
+                log::debug!(
+                    "ttp attach tunnel listen_stream not supported local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
+            }
             Err(err) => return Err(err),
         }
 
@@ -63,13 +101,39 @@ impl TtpRuntime {
             .listen_datagram(self.datagram_registry.as_listen_vports_ref())
             .await
         {
-            Ok(()) => {}
-            Err(err) if err.code() == P2pErrorCode::NotSupport => {}
+            Ok(()) => {
+                log::debug!(
+                    "ttp attach tunnel listen_datagram ready local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
+            }
+            Err(err) if err.code() == P2pErrorCode::NotSupport => {
+                log::debug!(
+                    "ttp attach tunnel listen_datagram not supported local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
+            }
             Err(err) => return Err(err),
         }
 
         self.spawn_stream_loop(tunnel.clone());
-        self.spawn_datagram_loop(tunnel);
+        self.spawn_datagram_loop(tunnel.clone());
+        log::debug!(
+            "ttp attach tunnel completed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+            tunnel.local_id(),
+            tunnel.remote_id(),
+            tunnel.protocol(),
+            tunnel.tunnel_id(),
+            tunnel.candidate_id()
+        );
         Ok(())
     }
 
