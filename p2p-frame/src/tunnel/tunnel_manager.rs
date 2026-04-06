@@ -2519,12 +2519,8 @@ mod tests {
 
         let local_identity = new_identity("local-no-nets");
         let remote_identity = new_identity("remote-no-nets");
-        
-        let manager = new_test_manager(
-            local_identity,
-            HashMap::new(),
-            None,
-        );
+
+        let manager = new_test_manager(local_identity, HashMap::new(), None);
 
         let err = manager
             .open_proxy_path(
@@ -2629,12 +2625,7 @@ mod tests {
         let local_identity = new_identity("local-no-sn");
         let remote_identity = new_identity("remote-no-sn");
         let remote_ep = Endpoint::from((Protocol::Ext(9), "127.0.0.1:19001".parse().unwrap()));
-        let manager = new_test_manager_with_networks(
-            local_identity,
-            HashMap::new(),
-            None,
-            vec![],
-        );
+        let manager = new_test_manager_with_networks(local_identity, HashMap::new(), None, vec![]);
 
         manager
             .conn_info_cache

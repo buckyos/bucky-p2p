@@ -47,14 +47,18 @@ impl TlsServerCertResolver for DefaultTlsServerCertResolver {
     async fn add_server_identity(&self, id: Arc<dyn P2pIdentity>) -> P2pResult<()> {
         let mut device_cache = self.device_cache.lock().unwrap();
         device_cache.device_cache.insert(id.get_name(), id.clone());
-        device_cache.device_cache.insert(id.get_id().to_string(), id);
+        device_cache
+            .device_cache
+            .insert(id.get_id().to_string(), id);
         Ok(())
     }
 
     async fn remove_server_identity(&self, device_id: &str) -> P2pResult<()> {
         let mut device_cache = self.device_cache.lock().unwrap();
         if let Some(device) = device_cache.device_cache.remove(device_id) {
-            device_cache.device_cache.remove(device.get_id().to_string().as_str());
+            device_cache
+                .device_cache
+                .remove(device.get_id().to_string().as_str());
             device_cache.device_cache.remove(device.get_name().as_str());
         }
         Ok(())

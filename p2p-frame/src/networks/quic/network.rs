@@ -654,6 +654,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quic_tunnel_open_stream_timeout_closes_tunnel() {
+        let pair = setup_network_pair().await;
+        let (opened, accepted) = pair.connect().await;
+
+        let err = timeout(
+            Duration::from_secs(12),
+            opened.open_stream(purpose_of(6101)),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), P2pErrorCode::Timeout);
+        assert!(opened.is_closed());
+        assert_eq!(opened.state(), crate::networks::TunnelState::Closed);
+
+        accepted.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn quic_tunnel_open_datagram_without_listen_stays_pending() {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
@@ -666,6 +686,26 @@ mod tests {
         assert!(result.is_err());
 
         opened.close().await.unwrap();
+        accepted.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn quic_tunnel_open_datagram_timeout_closes_tunnel() {
+        let pair = setup_network_pair().await;
+        let (opened, accepted) = pair.connect().await;
+
+        let err = timeout(
+            Duration::from_secs(12),
+            opened.open_datagram(purpose_of(6102)),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), P2pErrorCode::Timeout);
+        assert!(opened.is_closed());
+        assert_eq!(opened.state(), crate::networks::TunnelState::Closed);
+
         accepted.close().await.unwrap();
     }
 

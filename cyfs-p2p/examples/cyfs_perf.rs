@@ -1,5 +1,9 @@
 use bucky_crypto::PrivateKey;
-use bucky_objects::{sign_and_push_named_object, Area, Device, DeviceCategory, Endpoint as CyfsEndpoint, EndpointArea, NamedObject, ObjectDesc, Protocol as CyfsProtocol, RsaCPUObjectSigner, SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF};
+use bucky_objects::{
+    sign_and_push_named_object, Area, Device, DeviceCategory, Endpoint as CyfsEndpoint,
+    EndpointArea, NamedObject, ObjectDesc, Protocol as CyfsProtocol, RsaCPUObjectSigner,
+    SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF,
+};
 use clap::{App, Arg, SubCommand};
 use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
 use cyfs_p2p::{create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint};
@@ -397,7 +401,10 @@ async fn create_stack(
     })?;
 
     let (device, key) = generate_runtime_identity(vec![local_ep]).await?;
-    println!("device_id:{}", P2pId::from(device.desc().object_id().as_slice()).to_string());
+    println!(
+        "device_id:{}",
+        P2pId::from(device.desc().object_id().as_slice()).to_string()
+    );
     let stack_config = create_cyfs_p2p_stack_config(env, device, key, vec![]);
     let stack = create_p2p_stack(stack_config).await.map_err(|e| {
         format!(
@@ -580,11 +587,7 @@ async fn run_client(opts: ClientOpts) -> AppResult<()> {
         handles.push(tokio::task::spawn(async move {
             let (read, mut write) = stack
                 .stream_manager()
-                .connect_direct(
-                    vec![remote],
-                    tunnel_purpose(PERF_VPORT),
-                    &remote_id,
-                )
+                .connect_direct(vec![remote], tunnel_purpose(PERF_VPORT), &remote_id)
                 .await
                 .map_err(|e| {
                     format!(

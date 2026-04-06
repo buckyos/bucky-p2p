@@ -133,11 +133,7 @@ impl TtpClient {
                 let targets = client.maintained_targets.lock().unwrap().clone();
                 for target in &targets {
                     if let Err(e) = client.get_or_create_tunnel(target).await {
-                        log::warn!(
-                            "maintain tunnel to {:?} failed: {}",
-                            target.remote_ep,
-                            e
-                        );
+                        log::warn!("maintain tunnel to {:?} failed: {}", target.remote_ep, e);
                     }
                 }
             }

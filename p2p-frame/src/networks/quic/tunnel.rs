@@ -977,10 +977,33 @@ impl QuicTunnel {
         request_id: u64,
         rx: oneshot::Receiver<P2pResult<()>>,
     ) -> P2pResult<()> {
-        let result = runtime::timeout(COMMAND_REQUEST_TIMEOUT, async move { rx.await })
-            .await
-            .map_err(|_| p2p_err!(P2pErrorCode::Timeout, "quic open channel timeout"))?
-            .map_err(|_| p2p_err!(P2pErrorCode::Interrupted, "quic open channel interrupted"))??;
+        let result = match runtime::timeout(COMMAND_REQUEST_TIMEOUT, async move { rx.await }).await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .pending_open_requests
+                    .remove(&request_id);
+                return Err(p2p_err!(
+                    P2pErrorCode::Interrupted,
+                    "quic open channel interrupted"
+                ));
+            }
+            Err(_) => {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .pending_open_requests
+                    .remove(&request_id);
+                self.close_with_error(
+                    P2pErrorCode::Timeout,
+                    format!("quic open datagram timeout request {}", request_id),
+                );
+                return Err(p2p_err!(P2pErrorCode::Timeout, "quic open channel timeout"));
+            }
+        }?;
         self.state
             .lock()
             .unwrap()
@@ -1134,6 +1157,13 @@ impl Tunnel for QuicTunnel {
                 self.log_ctx(),
                 request_id,
                 purpose_for_log
+            );
+            self.close_with_error(
+                P2pErrorCode::Timeout,
+                format!(
+                    "quic open stream timeout request_id={} purpose={}",
+                    request_id, purpose_for_log
+                ),
             );
             p2p_err!(P2pErrorCode::Timeout, "quic open stream timeout")
         })??;

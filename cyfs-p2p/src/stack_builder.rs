@@ -7,7 +7,11 @@ use bucky_raw_codec::{CodecResult, RawConvertTo, RawDecode, RawEncode, RawFrom};
 use futures::executor::block_on;
 use p2p_frame::endpoint::EndpointArea;
 use p2p_frame::error::{into_p2p_err, P2pErrorCode, P2pResult};
-use p2p_frame::p2p_identity::{EncodedP2pIdentity, EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pIdentityCert, P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef, P2pIdentitySignType, P2pSignature, P2pSn};
+use p2p_frame::p2p_identity::{
+    EncodedP2pIdentity, EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pIdentityCert,
+    P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef,
+    P2pIdentitySignType, P2pSignature, P2pSn,
+};
 use p2p_frame::stack::{
     create_p2p_env, create_p2p_stack, P2pConfig, P2pEnvRef, P2pStackConfig, P2pStackRef,
 };
