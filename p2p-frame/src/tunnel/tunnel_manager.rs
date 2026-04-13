@@ -28,6 +28,13 @@ use crate::networks::{
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(2000);
 
+fn should_stop_accept_loop(err: &P2pError) -> bool {
+    matches!(
+        err.code(),
+        P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+    )
+}
+
 async fn race_with_delay<T, FD, FR>(
     direct_future: FD,
     reverse_delay: Duration,
@@ -217,8 +224,14 @@ impl TunnelManager {
                                     }
                                 }
                                 Err(err) => {
+                                    if should_stop_accept_loop(&err) {
+                                        log::debug!(
+                                            "receive incoming proxy tunnel stopped: {:?}",
+                                            err
+                                        );
+                                        break;
+                                    }
                                     log::warn!("receive incoming proxy tunnel failed: {:?}", err);
-                                    break;
                                 }
                             }
                         }

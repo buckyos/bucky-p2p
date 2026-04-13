@@ -238,8 +238,11 @@ impl NetManager {
                 match listener.accept_tunnel().await {
                     Ok(tunnel) => manager.dispatch_tunnel(tunnel).await,
                     Err(err) => {
+                        if should_stop_listener_loop(&err) {
+                            log::debug!("accept tunnel loop stopped: {:?}", err);
+                            break;
+                        }
                         log::warn!("accept tunnel failed: {:?}", err);
-                        break;
                     }
                 }
             }
@@ -360,9 +363,17 @@ fn take_mapping_port(port_mapping: &mut Vec<(Endpoint, u16)>, src: &Endpoint) ->
     Some(port_mapping.remove(index).1)
 }
 
+fn should_stop_listener_loop(err: &P2pError) -> bool {
+    matches!(
+        err.code(),
+        P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::Executor;
     use crate::networks::{
         IncomingTunnelValidator, ListenVPortsRef, Tunnel, TunnelDatagramRead, TunnelDatagramWrite,
         TunnelForm, TunnelPurpose, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
@@ -370,6 +381,7 @@ mod tests {
     use crate::tls::DefaultTlsServerCertResolver;
     use crate::types::{TunnelCandidateId, TunnelId};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex as AsyncMutex;
     use tokio::time::{Duration, timeout};
 
     enum TestDecision {
@@ -518,6 +530,20 @@ mod tests {
         }
     }
 
+    struct TestListener {
+        rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::networks::TunnelListener for TestListener {
+        async fn accept_tunnel(&self) -> P2pResult<TunnelRef> {
+            let mut rx = self.rx.lock().await;
+            rx.recv()
+                .await
+                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "test listener closed"))?
+        }
+    }
+
     fn test_id(seed: u8) -> P2pId {
         P2pId::from(vec![seed; 32])
     }
@@ -589,5 +615,52 @@ mod tests {
         assert!(Arc::ptr_eq(&accepted, &accepted_tunnel_ref));
         assert_eq!(failed_tunnel.close_count(), 1);
         assert_eq!(accepted_tunnel.close_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn listener_loop_continues_after_recoverable_accept_error() {
+        Executor::init();
+        let manager = new_test_manager(TestValidator::new(HashMap::new()));
+        let local_id = test_id(8);
+        let remote_id = test_id(9);
+        let mut acceptor = manager.register_tunnel_acceptor(local_id.clone()).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let listener: TunnelListenerRef = Arc::new(TestListener {
+            rx: AsyncMutex::new(rx),
+        });
+        let _task = manager.spawn_listener_loop(listener);
+        let accepted_tunnel = TestTunnel::new(local_id, remote_id, 5, 15);
+        let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
+
+        tx.send(Err(P2pError::new(
+            P2pErrorCode::QuicError,
+            "transient accept failure".to_owned(),
+        )))
+        .unwrap();
+        tx.send(Ok(accepted_tunnel_ref.clone())).unwrap();
+        drop(tx);
+
+        let accepted = timeout(Duration::from_secs(1), acceptor.accept_tunnel())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&accepted, &accepted_tunnel_ref));
+        assert_eq!(accepted_tunnel.close_count(), 0);
+    }
+
+    #[test]
+    fn listener_loop_stops_only_for_close_like_errors() {
+        assert!(!should_stop_listener_loop(&P2pError::new(
+            P2pErrorCode::QuicError,
+            "recoverable".to_owned(),
+        )));
+        assert!(should_stop_listener_loop(&P2pError::new(
+            P2pErrorCode::Interrupted,
+            "closed".to_owned(),
+        )));
+        assert!(should_stop_listener_loop(&P2pError::new(
+            P2pErrorCode::ErrorState,
+            "closed".to_owned(),
+        )));
     }
 }

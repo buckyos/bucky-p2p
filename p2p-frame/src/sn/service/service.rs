@@ -609,7 +609,10 @@ impl SnServer {
             return Err(err);
         }
 
-        log::info!("sn server start success local_id={}", self.local_identity.get_id());
+        log::info!(
+            "sn server start success local_id={}",
+            self.local_identity.get_id()
+        );
         Ok(())
     }
 
@@ -638,10 +641,7 @@ impl SnServer {
             self.local_identity.get_id(),
             purpose
         );
-        let listener = self
-            .ttp_server
-            .listen_stream(purpose)
-            .await?;
+        let listener = self.ttp_server.listen_stream(purpose).await?;
         let server = self.clone();
         let task = Executor::spawn_with_handle(async move {
             server.run_cmd_accept_loop(listener).await;
