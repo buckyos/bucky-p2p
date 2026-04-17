@@ -1,0 +1,46 @@
+# p2p-frame
+
+## 类型
+- 核心库
+
+## 职责
+- 负责传输/网络栈、tunnel 编排、PN/SN 协议行为、设备发现辅助能力、运行时抽象以及身份/TLS 支持。
+
+## 关键边界
+- 范围内：
+  - `src/networks/**`
+  - `src/tunnel/**`
+  - `src/ttp/**`
+  - `src/sn/**`
+  - `src/pn/**`
+  - `src/pn/client/**` for PN client, listener, and tunnel behavior
+  - `src/pn/service/**` for relay-side PN server, admission, and bridging behavior
+  - `src/finder/**`
+  - `src/datagram/**`
+  - `src/dht/**`
+  - `src/tls/**`
+  - `src/x509*`
+  - `src/stack.rs`
+  - `src/endpoint.rs`
+  - `src/error.rs`
+- 参考设计说明：
+  - `p2p-frame/docs/*.md`
+
+## 依赖
+- Rust 异步/网络/密码学相关 crate
+- runtime feature flags
+- 面向 CYFS 的适配层必须消费本 crate，而不是重新定义协议语义
+
+## 下游依赖
+- `cyfs-p2p`
+- `cyfs-p2p-test`
+- `sn-miner-rust`
+
+## 模块级别
+- Tier 0：耦合度最高、回归成本最高
+
+## 必需的验证倾向
+- 直接子模块必须具备 unit 覆盖。
+- DV 必须使用可运行场景，而不只是编译检查。
+- Integration 必须包含工作区级兼容性证据。
+- 协议、密码学、运行时和 tunnel 相关改动会触发额外检查。

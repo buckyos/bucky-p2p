@@ -1,0 +1,57 @@
+schema_version: 1
+version: v0.1
+module: desc-tool
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 工具本地验证
+    test_targets:
+      - desc-tool/src/main.rs
+      - desc-tool/src/create.rs
+      - desc-tool/src/modify.rs
+      - desc-tool/src/show.rs
+      - desc-tool/src/sign.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: desc-tool-unit
+        name: 运行 desc-tool crate 测试
+        run: ["cargo", "test", "-p", "desc-tool"]
+
+  dv:
+    mode: enabled
+    summary: 面向操作员的 CLI 探测
+    test_targets:
+      - desc-tool/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Help 模式是稳定且低成本的 DV 入口。
+    steps:
+      - id: desc-tool-dv
+        name: 运行 desc-tool help 入口
+        run: ["cargo", "run", "-p", "desc-tool", "--", "--help"]
+
+  integration:
+    mode: enabled
+    summary: 工作区兼容性
+    test_targets:
+      - workspace
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: desc-tool-integration
+        name: 运行工作区测试套件
+        run: ["cargo", "test", "--workspace"]

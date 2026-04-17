@@ -1,0 +1,81 @@
+# 工作区治理元数据。
+# 注意：键名、状态值、模块名、trigger_classes 枚举与命令数组会被脚本或流程引用，必须保持稳定。
+# trigger_classes 含义：
+# - contract-protocol: 协议/契约类变更
+# - runtime-integration: 运行时或集成类变更
+# - security-identity: 安全或身份类变更
+# - durable-artifact: 持久数据或制品类变更
+schema_version: 1
+workspace: p2p
+version: v0.1
+mode: strict
+acceptance_baseline: proposal-first
+implementation_gate:
+  # `approved` 为脚本依赖的固定状态值，不可翻译。
+  required_status: approved
+  required_documents:
+    - proposal.md
+    - design.md
+    - testing.md
+modules:
+  # 模块登记表：记录长期文档、模块数据包目录、统一测试入口和触发类别。
+  - name: p2p-frame
+    tier: 0
+    type: library
+    long_lived_doc: docs/modules/p2p-frame.md
+    packet_dir: docs/versions/v0.1/modules/p2p-frame
+    commands:
+      unit: ["python3", "./harness/scripts/test-run.py", "p2p-frame", "unit"]
+      dv: ["python3", "./harness/scripts/test-run.py", "p2p-frame", "dv"]
+      integration: ["python3", "./harness/scripts/test-run.py", "p2p-frame", "integration"]
+    trigger_classes:
+      - contract-protocol
+      - runtime-integration
+      - security-identity
+  - name: cyfs-p2p
+    tier: 1
+    type: library
+    long_lived_doc: docs/modules/cyfs-p2p.md
+    packet_dir: docs/versions/v0.1/modules/cyfs-p2p
+    commands:
+      unit: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p", "unit"]
+      dv: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p", "dv"]
+      integration: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p", "integration"]
+    trigger_classes:
+      - contract-protocol
+      - runtime-integration
+  - name: cyfs-p2p-test
+    tier: 1
+    type: binary
+    long_lived_doc: docs/modules/cyfs-p2p-test.md
+    packet_dir: docs/versions/v0.1/modules/cyfs-p2p-test
+    commands:
+      unit: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p-test", "unit"]
+      dv: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p-test", "dv"]
+      integration: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p-test", "integration"]
+    trigger_classes:
+      - runtime-integration
+  - name: sn-miner
+    tier: 1
+    type: binary
+    long_lived_doc: docs/modules/sn-miner.md
+    packet_dir: docs/versions/v0.1/modules/sn-miner
+    commands:
+      unit: ["python3", "./harness/scripts/test-run.py", "sn-miner", "unit"]
+      dv: ["python3", "./harness/scripts/test-run.py", "sn-miner", "dv"]
+      integration: ["python3", "./harness/scripts/test-run.py", "sn-miner", "integration"]
+    trigger_classes:
+      - runtime-integration
+      - durable-artifact
+  - name: desc-tool
+    tier: 2
+    type: binary
+    long_lived_doc: docs/modules/desc-tool.md
+    packet_dir: docs/versions/v0.1/modules/desc-tool
+    commands:
+      unit: ["python3", "./harness/scripts/test-run.py", "desc-tool", "unit"]
+      dv: ["python3", "./harness/scripts/test-run.py", "desc-tool", "dv"]
+      integration: ["python3", "./harness/scripts/test-run.py", "desc-tool", "integration"]
+    trigger_classes:
+      - durable-artifact
+      - security-identity

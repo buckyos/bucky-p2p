@@ -1,0 +1,56 @@
+schema_version: 1
+version: v0.1
+module: sn-miner
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 启动本地验证
+    test_targets:
+      - sn-miner-rust/src/main.rs
+      - sn-miner-rust/config/package.cfg
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 即便当前显式 unit 覆盖较少，该命令仍是规范入口。
+    steps:
+      - id: sn-miner-unit
+        name: 运行 sn-miner crate 测试
+        run: ["cargo", "test", "-p", "sn-miner"]
+
+  dv:
+    mode: enabled
+    summary: 面向操作员的二进制入口验证
+    test_targets:
+      - sn-miner-rust/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Help 模式是用于启动验证的最低成本稳定 DV 入口。
+    steps:
+      - id: sn-miner-dv
+        name: 运行 sn-miner help 入口
+        run: ["cargo", "run", "-p", "sn-miner", "--", "--help"]
+
+  integration:
+    mode: enabled
+    summary: 面向启动使用方的工作区兼容性验证
+    test_targets:
+      - cyfs-p2p
+      - p2p-frame
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: sn-miner-integration
+        name: 运行工作区测试套件
+        run: ["cargo", "test", "--workspace"]

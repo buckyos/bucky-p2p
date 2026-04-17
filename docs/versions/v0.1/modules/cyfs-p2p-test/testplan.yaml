@@ -1,0 +1,57 @@
+schema_version: 1
+version: v0.1
+module: cyfs-p2p-test
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: harness 本地验证
+    test_targets:
+      - cyfs-p2p-test/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 该 crate 当前可能只有少量或零 unit 覆盖，但该命令仍是规范入口。
+    steps:
+      - id: cyfs-p2p-test-unit
+        name: 运行 harness crate 测试
+        run: ["cargo", "test", "-p", "cyfs-p2p-test"]
+
+  dv:
+    mode: enabled
+    summary: 规范的本地运行时场景
+    test_targets:
+      - cyfs-p2p-test/src/main.rs
+      - devices/
+      - logs/
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 若要得到有意义的执行结果，可能需要本地制品。
+    steps:
+      - id: cyfs-p2p-test-dv
+        name: 运行 all-in-one 场景
+        run: ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]
+
+  integration:
+    mode: enabled
+    summary: 围绕运行时 harness 改动的工作区兼容性验证
+    test_targets:
+      - cyfs-p2p
+      - p2p-frame
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: cyfs-p2p-test-integration
+        name: 运行工作区测试套件
+        run: ["cargo", "test", "--workspace"]

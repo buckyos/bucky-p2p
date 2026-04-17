@@ -1,0 +1,56 @@
+schema_version: 1
+version: v0.1
+module: cyfs-p2p
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 适配层本地验证
+    test_targets:
+      - cyfs-p2p/src/lib.rs
+      - cyfs-p2p/src/stack_builder.rs
+      - cyfs-p2p/src/types.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: cyfs-p2p-unit
+        name: 运行适配层 crate 测试
+        run: ["cargo", "test", "-p", "cyfs-p2p"]
+
+  dv:
+    mode: enabled
+    summary: 通过现有测试 harness 执行本地运行时验证
+    test_targets:
+      - cyfs-p2p-test/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 适配层运行时行为通过 `cyfs-p2p-test` 进行验证。
+    steps:
+      - id: cyfs-p2p-dv
+        name: 运行 all-in-one 运行时场景
+        run: ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]
+
+  integration:
+    mode: enabled
+    summary: 面向适配层使用方的工作区兼容性验证
+    test_targets:
+      - cyfs-p2p-test
+      - sn-miner-rust
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: cyfs-p2p-integration
+        name: 运行工作区测试套件
+        run: ["cargo", "test", "--workspace"]

@@ -1,0 +1,52 @@
+schema_version: 1
+version: v0.1
+module: example-module
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: crate 内局部验证
+    test_targets:
+      - docs/versions/v0.1/modules/example-module/testing.md
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: example-unit
+        name: 运行模块 unit 测试
+        run: ["cargo", "test", "-p", "example-module"]
+
+  dv:
+    mode: enabled
+    summary: 单模块运行时验证
+    test_targets:
+      - docs/versions/v0.1/modules/example-module/testing.md
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: example-dv
+        name: 运行模块 DV 入口
+        run: ["<tool>", "<args>"]
+
+  integration:
+    mode: enabled
+    summary: 工作区或相邻模块验证
+    test_targets:
+      - docs/versions/v0.1/modules/example-module/testing.md
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: example-integration
+        name: 运行模块 integration 入口
+        run: ["<tool>", "<args>"]
