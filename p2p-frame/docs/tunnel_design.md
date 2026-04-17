@@ -66,7 +66,7 @@ Tunnel 的建立形式分为三种：
 
 ## 核心 Trait
 
-### Tunnel
+### `Tunnel` 接口
 
 ```rust
 use crate::endpoint::{Endpoint, Protocol};
@@ -294,7 +294,7 @@ pub trait TunnelNetwork: Send + Sync + 'static {
 - `TunnelListener` 不承担关闭、端口映射、本地 endpoint 查询等管理语义
 - `TunnelConnectIntent` 由上层显式传入逻辑 `tunnel_id`、具体 `candidate_id` 和 `is_reverse`，transport 负责把这些信息随建链 `hello` 发给对端
 
-### TunnelManager
+### `TunnelManager`
 
 ```rust
 use crate::endpoint::Endpoint;
@@ -415,7 +415,7 @@ pub trait TunnelManager: Send + Sync + 'static {
 
 ## 推荐的 Manager 职责划分
 
-### TunnelManager
+### `TunnelManager`
 
 - 对外提供 `subscribe`、`open_tunnel`、`open_tunnel_from_id`、`open_direct_tunnel`
 - 内部按 `remote_id -> tunnel_id -> candidate_id` 维护候选 tunnel 映射
@@ -425,7 +425,7 @@ pub trait TunnelManager: Send + Sync + 'static {
 - 将每一个新可用的非 reverse tunnel 发布给订阅者
 - 定时清理长期空闲、closed、error 的 tunnel
 
-### StreamManager
+### `StreamManager`
 
 - 维护 `ListenVPortRegistry<StreamListener>`
 - 订阅 tunnel 更新
@@ -435,7 +435,7 @@ pub trait TunnelManager: Send + Sync + 'static {
 - 若兜底阶段仍发现 `vport` 没有 listener，立即关闭/释放该 channel，而不是缓存或静默保留
 - 出站打开时根据场景调用 `open_tunnel(...)`、`open_tunnel_from_id(...)` 或 `open_direct_tunnel(...)`，然后执行 `.open_stream(vport)`
 
-### DatagramManager
+### `DatagramManager`
 
 - 维护 `ListenVPortRegistry<DatagramListener>`
 - 订阅 tunnel 更新

@@ -12,8 +12,9 @@ use tokio::io::{ReadBuf, copy_bidirectional};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
-    TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelStreamRead, TunnelStreamWrite,
-    read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
+    TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelPurpose, TunnelStreamRead,
+    TunnelStreamWrite, ValidateResult, read_tunnel_command_body, read_tunnel_command_header,
+    write_tunnel_command,
 };
 use crate::p2p_identity::P2pId;
 use crate::pn::{PROXY_SERVICE, ProxyOpenReq, ProxyOpenResp};
@@ -72,6 +73,35 @@ pub struct PnServer {
 pub type PnServerRef = Arc<PnServer>;
 pub type PnServiceRef = Arc<PnService>;
 
+#[derive(Clone, Debug)]
+pub struct PnConnectionValidateContext {
+    pub from: P2pId,
+    pub to: P2pId,
+    pub tunnel_id: crate::types::TunnelId,
+    pub kind: crate::pn::PnChannelKind,
+    pub purpose: TunnelPurpose,
+}
+
+#[async_trait::async_trait]
+pub trait PnConnectionValidator: Send + Sync + 'static {
+    async fn validate(&self, ctx: &PnConnectionValidateContext) -> P2pResult<ValidateResult>;
+}
+
+pub type PnConnectionValidatorRef = Arc<dyn PnConnectionValidator>;
+
+pub struct AllowAllPnConnectionValidator;
+
+#[async_trait::async_trait]
+impl PnConnectionValidator for AllowAllPnConnectionValidator {
+    async fn validate(&self, _ctx: &PnConnectionValidateContext) -> P2pResult<ValidateResult> {
+        Ok(ValidateResult::Accept)
+    }
+}
+
+pub fn allow_all_pn_connection_validator() -> PnConnectionValidatorRef {
+    Arc::new(AllowAllPnConnectionValidator)
+}
+
 #[async_trait::async_trait]
 pub trait PnTargetStreamFactory: Send + Sync + 'static {
     async fn open_target_stream(
@@ -101,13 +131,40 @@ impl PnTargetStreamFactory for TtpServer {
 
 pub struct PnService {
     target_stream_factory: PnTargetStreamFactoryRef,
+    connection_validator: PnConnectionValidatorRef,
 }
 
 impl PnService {
-    pub fn new(target_stream_factory: PnTargetStreamFactoryRef) -> PnServiceRef {
+    pub fn new(
+        target_stream_factory: PnTargetStreamFactoryRef,
+        connection_validator: PnConnectionValidatorRef,
+    ) -> PnServiceRef {
         Arc::new(Self {
             target_stream_factory,
+            connection_validator,
         })
+    }
+
+    async fn validate_proxy_open_req(&self, req: &ProxyOpenReq) -> P2pResult<()> {
+        let ctx = PnConnectionValidateContext {
+            from: req.from.clone(),
+            to: req.to.clone(),
+            tunnel_id: req.tunnel_id,
+            kind: req.kind,
+            purpose: req.purpose.clone(),
+        };
+        match self.connection_validator.validate(&ctx).await? {
+            ValidateResult::Accept => Ok(()),
+            ValidateResult::Reject(reason) => Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "pn connection validate failed from={} to={} kind={:?} purpose={} reason={}",
+                req.from,
+                req.to,
+                req.kind,
+                req.purpose,
+                reason
+            )),
+        }
     }
 
     async fn handle_proxy_open_req(
@@ -129,13 +186,16 @@ impl PnService {
         );
 
         let mut source_write = write;
-        let open_result = runtime::timeout(
-            PN_OPEN_TIMEOUT,
-            self.target_stream_factory.open_target_stream(&req.to),
-        )
-        .await
-        .map_err(into_p2p_err!(P2pErrorCode::Timeout, "pn open timeout"))
-        .and_then(|ret| ret);
+        let open_result = match self.validate_proxy_open_req(&req).await {
+            Ok(()) => runtime::timeout(
+                PN_OPEN_TIMEOUT,
+                self.target_stream_factory.open_target_stream(&req.to),
+            )
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::Timeout, "pn open timeout"))
+            .and_then(|ret| ret),
+            Err(err) => Err(err),
+        };
 
         let open_result = match open_result {
             Ok((mut target_read, mut target_write)) => {
@@ -295,8 +355,15 @@ impl PnService {
 
 impl PnServer {
     pub fn new(ttp_server: TtpServerRef) -> PnServerRef {
+        Self::new_with_connection_validator(ttp_server, allow_all_pn_connection_validator())
+    }
+
+    pub fn new_with_connection_validator(
+        ttp_server: TtpServerRef,
+        connection_validator: PnConnectionValidatorRef,
+    ) -> PnServerRef {
         let target_stream_factory: PnTargetStreamFactoryRef = ttp_server.clone();
-        let service = PnService::new(target_stream_factory);
+        let service = PnService::new(target_stream_factory, connection_validator);
         Arc::new(Self {
             ttp_server,
             service,
@@ -389,7 +456,9 @@ fn result_from_error(err: &P2pError) -> TunnelCommandResult {
         P2pErrorCode::PortNotListen => TunnelCommandResult::PortNotListen,
         P2pErrorCode::Timeout => TunnelCommandResult::Timeout,
         P2pErrorCode::Interrupted | P2pErrorCode::NotFound => TunnelCommandResult::Interrupted,
-        P2pErrorCode::InvalidParam => TunnelCommandResult::InvalidParam,
+        P2pErrorCode::InvalidParam | P2pErrorCode::PermissionDenied | P2pErrorCode::Reject => {
+            TunnelCommandResult::InvalidParam
+        }
         P2pErrorCode::InvalidData => TunnelCommandResult::ProtocolError,
         _ => TunnelCommandResult::InternalError,
     }
@@ -833,6 +902,35 @@ mod tests {
         }
     }
 
+    struct TestPnConnectionValidator {
+        decision: ValidateResult,
+        last_ctx: StdMutex<Option<PnConnectionValidateContext>>,
+    }
+
+    impl TestPnConnectionValidator {
+        fn new(decision: ValidateResult) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                last_ctx: StdMutex::new(None),
+            })
+        }
+
+        fn last_ctx(&self) -> Option<PnConnectionValidateContext> {
+            self.last_ctx.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PnConnectionValidator for TestPnConnectionValidator {
+        async fn validate(&self, ctx: &PnConnectionValidateContext) -> P2pResult<ValidateResult> {
+            *self.last_ctx.lock().unwrap() = Some(ctx.clone());
+            match &self.decision {
+                ValidateResult::Accept => Ok(ValidateResult::Accept),
+                ValidateResult::Reject(reason) => Ok(ValidateResult::Reject(reason.clone())),
+            }
+        }
+    }
+
     fn init_executor() {
         Executor::init_new_multi_thread(None);
     }
@@ -845,7 +943,10 @@ mod tests {
             make_stream_pair();
         let target_stream_factory =
             FakeTargetStreamFactory::new((service_target_read, service_target_write));
-        let service = PnService::new(target_stream_factory.clone());
+        let service = PnService::new(
+            target_stream_factory.clone(),
+            allow_all_pn_connection_validator(),
+        );
 
         let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
             make_stream_pair();
@@ -923,6 +1024,56 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pn_service_rejects_proxy_open_when_validator_rejects() {
+        let source_id = P2pId::from(vec![2u8; 32]);
+        let target_id = P2pId::from(vec![3u8; 32]);
+        let ((service_target_read, service_target_write), _) = make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let validator = TestPnConnectionValidator::new(ValidateResult::Reject(
+            "source peer is not allowed".to_owned(),
+        ));
+        let service = PnService::new(target_stream_factory.clone(), validator.clone());
+
+        let ((service_source_read, service_source_write), (mut source_read, _source_write)) =
+            make_stream_pair();
+        let req = ProxyOpenReq {
+            tunnel_id: TunnelId::from(25),
+            from: P2pId::default(),
+            to: target_id.clone(),
+            kind: PnChannelKind::Stream,
+            purpose: crate::networks::TunnelPurpose::from_value(&2001u16).unwrap(),
+        };
+
+        service
+            .handle_proxy_open_req(
+                source_id.clone(),
+                req.clone(),
+                service_source_read,
+                service_source_write,
+            )
+            .await;
+
+        assert_eq!(target_stream_factory.opened_target(), None);
+
+        let ctx = validator.last_ctx().unwrap();
+        assert_eq!(ctx.from, source_id);
+        assert_eq!(ctx.to, target_id);
+        assert_eq!(ctx.tunnel_id, req.tunnel_id);
+        assert_eq!(ctx.kind, req.kind);
+        assert_eq!(ctx.purpose, req.purpose);
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.tunnel_id, req.tunnel_id);
+        assert_eq!(source_resp.result, TunnelCommandResult::InvalidParam as u8);
     }
 
     #[tokio::test]

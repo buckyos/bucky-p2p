@@ -95,7 +95,7 @@ TCP tunnel 协议由四个串行子阶段组成：
 
 ## 术语
 
-### TcpTunnel
+### `TcpTunnel`
 
 设备 A 与设备 B 之间的一个逻辑 TCP tunnel 实例，上层感知为一个 `Tunnel`。
 
@@ -103,7 +103,7 @@ TCP tunnel 协议由四个串行子阶段组成：
 
 同一对设备之间是否只保留一个健康的 `TcpTunnel`，由更上层的 tunnel 管理策略决定，不由 `TcpTunnelNetwork` / `TcpTunnelListener` 在传输层内部强制裁决。
 
-### Control Connection
+### `Control Connection`
 
 TCP tunnel 的唯一控制连接。它负责：
 
@@ -116,11 +116,11 @@ TCP tunnel 的唯一控制连接。它负责：
 
 单个 `TcpTunnel` 实例在任意时刻必须只有一条 control connection。
 
-### Data Connection
+### `Data Connection`
 
 实际承载业务字节流的 TCP/TLS 连接。一个 data connection 在生命周期内可以多次被不同 channel 复用，但任意时刻只服务一个 channel。
 
-### Registered Data Connection
+### `Registered Data Connection`
 
 已经完成以下条件的 data connection：
 
@@ -138,7 +138,7 @@ registered 只表示这条连接已经完成注册握手，不表示双方已经
 
 除非特别说明，后文的 `registered data connection` 默认指第二层，也就是双方已经完成这一轮注册握手的全局条件。
 
-### Channel
+### `Channel`
 
 一次逻辑业务通道：
 
@@ -163,11 +163,11 @@ registered 只表示这条连接已经完成注册握手，不表示双方已经
 
 `form` 只描述 tunnel 的建立方向，不表示是否属于反连语义；一旦 tunnel 建立完成，双方都可以在协议允许的时机创建 data connection、发起 claim、接收对端 claim。
 
-### Lease
+### `Lease`
 
 同一条 data connection 在某一轮被某个 channel 占用的生命周期。lease 的唯一主键为 `(conn_id, lease_seq)`。
 
-### Retired
+### `Retired`
 
 本地已确认某条 data connection 不再可复用。进入 `Retired` 后：
 
@@ -258,7 +258,7 @@ enum ControlConnReadyResult {
 - 一条 control connection 在建连阶段只允许出现一次 `ControlConnReady`；重复或矛盾的 ready 都属于 `ProtocolError`
 - `TcpConnectionHello` 与 `ControlConnReady` 都必须遵循统一命令外壳的校验规则：`version`、`command_id`、`data_len` 必须与实际命令体一致
 
-### tunnel_id
+### `tunnel_id`
 
 `tunnel_id` 是 control connection 代表的逻辑 TCP tunnel ID，当前实现类型固定为 `u32`。
 
@@ -274,7 +274,7 @@ enum ControlConnReadyResult {
 
 更上层在一次逻辑建链里（多 endpoint 并发、direct+reverse hedged）必须复用同一个 `tunnel_id`；transport 首个 `hello` 必须显式携带这个 `tunnel_id`，这样接收侧才能把多条候选连接归并到同一次建链。
 
-### candidate_id
+### `candidate_id`
 
 `candidate_id` 是单次逻辑 `tunnel_id` 下某条具体 candidate tunnel 的实例标识。
 
@@ -410,7 +410,7 @@ struct PongCmd {
 
 ## 标识与约束
 
-### conn_id
+### `conn_id`
 
 物理 data connection 的唯一 ID。要求在单个 `Tunnel` 内唯一即可，类型为 `u64`。
 
@@ -424,7 +424,7 @@ struct PongCmd {
 
 只要双方都知道 control connection 的主被动方向，就必须能仅凭 `conn_id` 的分区规则，对“该 data connection 的创建方是谁”得出完全一致的结论；首轮 claim 权也完全由这个结论决定。
 
-### lease_seq
+### `lease_seq`
 
 同一条 `conn_id` 被第几次租用。
 
@@ -442,14 +442,14 @@ struct PongCmd {
 - 新一轮变成 `conn_id = 42, lease_seq = 2`
 - 这时旧的 `lease_seq = 1` 命令如果迟到，不能再影响当前连接状态
 
-### claim_nonce
+### `claim_nonce`
 
 双边同时争抢同一条 idle connection 时使用的随机数。类型固定为 `u64`。
 
 - `claim_nonce` 只在“双方都对同一个 `(conn_id, lease_seq)` 发起 claim”时参与决策
 - 它的目的不是表达连接优先级，而是为一次并发冲突提供稳定、可复现的胜负结果
 
-### channel_id
+### `channel_id`
 
 逻辑 channel 的唯一 ID。类型固定为 `u64`，并只要求在单个 `Tunnel` 内唯一。
 
@@ -459,7 +459,7 @@ struct PongCmd {
 - control 连接被动接受方生成的 `channel_id` 最高位恒为 `1`
 - 其余位在本端该 `Tunnel` 内按单调递增计数分配
 
-### request_id
+### `request_id`
 
 通过 control 请求对端反向创建 data connection 时使用的一次性 ID。类型固定为 `u64`。
 
@@ -671,7 +671,7 @@ enum DataConnReadyResult {
 - 但实现必须限制这类“晚到连接”在单个 `Tunnel` 下的积压数量；若本地 idle pool / 未 claim 连接预算已满，则应直接关闭该连接并标记为 `Retired`
 - 若这类晚到连接最终完成 `DataConnReady(Success)`，则它后续应与普通新建 data connection 完全一致：立即进入 `FirstClaimPending`，并仍由该 `conn_id` 的创建方拥有首轮 claim 权；协议不额外引入“冷却态”
 
-### FirstClaimPending
+### `FirstClaimPending`
 
 对初次建立的 data connection，首轮 `lease_seq = 1` 使用以下非对称规则：
 
@@ -1219,13 +1219,13 @@ control 与 data 是两条独立连接，因此仍然可能出现以下先后关
 
 ## 对 stream 与 datagram 的影响
 
-### stream
+### `stream`
 
 - 双向都有写入能力
 - 因此双方都可能发送 `WriteFin`
 - 回收连接时必须等待双向 `ReadDone`
 
-### datagram
+### `datagram`
 
 当前接口模型是：
 

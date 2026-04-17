@@ -153,7 +153,7 @@ pub struct ProxyOpenReq {
     pub from: P2pId,
     pub to: P2pId,
     pub kind: PnChannelKind,
-    pub vport: u16,
+    pub purpose: TunnelPurpose,
 }
 ```
 
@@ -163,13 +163,23 @@ pub struct ProxyOpenReq {
 - `from`：发起方 peer id
 - `to`：目标方 peer id
 - `kind`：请求打开的通道类型
-- `vport`：目标业务端口
+- `purpose`：目标侧 stream 要绑定的 `TunnelPurpose`
 
 说明：
 
 - `A -> S` 时，`S` 不能盲信请求里的 `from`
 - `S` 应以底层 tunnel/stream 的认证身份为准，必要时重写 `from`
 - `S -> B` 时，转发的是经 `S` 校正后的 `ProxyOpenReq`
+- relay 在打开目标侧前，会基于规范化后的 `{ from, to, tunnel_id, kind, purpose }` 执行一次准入校验
+
+### relay 侧新增准入校验
+
+当前 `PnServer` 在 relay 侧新增了显式的校验钩子：
+
+- `PnServer::new(...)` 默认安装 allow-all validator，保持既有行为不变
+- `PnServer::new_with_connection_validator(...)` 允许部署方注入自定义准入策略
+- validator 看到的是 relay 用已认证远端身份重写过 `from` 之后的请求上下文，而不是源端原始报文
+- validator 返回 `Reject`，或校验过程产生 `PermissionDenied` 时，对外握手结果统一映射为 `InvalidParam`
 
 ### 响应
 
@@ -268,19 +278,22 @@ pub struct ProxyOpenResp {
 
 它负责：
 
-1. 接收来自 `A` 的 `PN_PROXY_VPORT` stream
+1. 接收来自 `A` 的 `PROXY_SERVICE` stream
 2. 读取首个命令 `ProxyOpenReq`
-3. 在到 `B` 的既有 tunnel 上打开新的 `PN_PROXY_VPORT` stream
-4. 将 `ProxyOpenReq` 转发给 `B`
-5. 读取 `B` 返回的 `ProxyOpenResp`
-6. 将 `ProxyOpenResp` 转发给 `A`
-7. 若结果成功，则桥接两端 stream
+3. 用底层连接元数据中的已认证远端 peer id 重写 `req.from`
+4. 在打开目标侧前，对规范化后的 `ProxyOpenReq` 执行 relay 准入校验
+5. 在到 `B` 的既有 tunnel 上打开新的 `PROXY_SERVICE` stream
+6. 将 `ProxyOpenReq` 转发给 `B`
+7. 读取 `B` 返回的 `ProxyOpenResp`
+8. 检查响应里的 `tunnel_id` 是否与请求一致
+9. 将 `ProxyOpenResp` 转发给 `A`
+10. 仅当结果成功时桥接两端 stream
 
-`PnServer` 自己负责监听 `PN_PROXY_VPORT`、转发请求和 bridge 两端 stream。
+`PnServer` 自己负责监听 `PROXY_SERVICE`、执行 relay 准入校验、转发请求和 bridge 两端 stream。
 
 relay 不负责：
 
-- 判断 `vport` 是否监听
+- 判断目标侧业务 listener 是否接受该 `purpose`
 - 决定最终是 `stream` 还是 `datagram`
 - 解析后续业务 payload
 
@@ -294,20 +307,21 @@ relay 不负责：
 
 1. 上层通过 `PnClient.create_tunnel()` 得到 `PnTunnel(A->B)`
 2. 上层调用 `open_stream(vport)` 或 `open_datagram(vport)`
-3. `PnTunnel` 新建一条 `A -> S` 的 `PN_PROXY_VPORT` stream
-4. `PnTunnel` 发送 `ProxyOpenReq { tunnel_id, from, to, kind, vport }`
-5. `S` 读取请求后，在到 `B` 的既有 tunnel 上打开一条新的 `S -> B` channel stream
-6. `S` 将 `ProxyOpenReq` 转发给 `B`
-7. `B` 校验请求，返回 `ProxyOpenResp { tunnel_id, result }`
-8. `S` 将该响应转发给 `A`
-9. 若 `result == Success`，`S` 开始桥接 A/B 两条 stream
-10. `A` 收到成功响应后，代理通道建立完成
+3. `PnTunnel` 新建一条 `A -> S` 的 `PROXY_SERVICE` stream
+4. `PnTunnel` 发送 `ProxyOpenReq { tunnel_id, from, to, kind, purpose }`
+5. `S` 用已认证连接元数据规范化 `from`，并执行 relay 准入校验
+6. 若校验通过，`S` 才会在到 `B` 的既有 tunnel 上打开一条新的 `S -> B` channel stream
+7. `S` 将 `ProxyOpenReq` 转发给 `B`
+8. `B` 校验请求，返回 `ProxyOpenResp { tunnel_id, result }`
+9. `S` 校验响应 `tunnel_id`，再将该响应转发给 `A`
+10. 若 `result == Success`，`S` 开始桥接 A/B 两条 stream
+11. `A` 收到成功响应后，代理通道建立完成
 
 这个流程里，建链成功本身就意味着通道已可用，不再存在后续独立的 channel-open 阶段。
 
 ### 流程二：B 接收入站 PN tunnel
 
-1. `S` 在到 `B` 的既有 tunnel 上打开 `PN_PROXY_VPORT` stream
+1. `S` 在到 `B` 的既有 tunnel 上打开 `PROXY_SERVICE` stream
 2. `S` 将 `ProxyOpenReq` 写入这条 stream
 3. `B` 的 `PnListener` 通过 `TtpClient.listen_stream(PN_PROXY_VPORT)` 接收到这条 stream
 4. `PnListener` 读取完整 `ProxyOpenReq`
@@ -328,11 +342,13 @@ relay 侧逻辑被收敛为一个简单模型：
 
 1. 接收 `A -> S` channel stream
 2. 读取 `ProxyOpenReq`
-3. 新建 `S -> B` channel stream
-4. 转发 `ProxyOpenReq`
-5. 接收 `B -> S` 的 `ProxyOpenResp`
-6. 转发 `ProxyOpenResp` 给 `A`
-7. 若成功，则桥接两条 stream
+3. 用已认证来源规范化 `from`，并执行 relay 准入校验
+4. 新建 `S -> B` channel stream
+5. 转发 `ProxyOpenReq`
+6. 接收 `B -> S` 的 `ProxyOpenResp`
+7. 校验响应 `tunnel_id`
+8. 转发 `ProxyOpenResp` 给 `A`
+9. 若成功，则桥接两条 stream
 
 因此 relay 真正需要理解的只有一组建链命令：
 
@@ -341,14 +357,14 @@ relay 侧逻辑被收敛为一个简单模型：
 
 ## stream / datagram 语义
 
-### stream
+### `stream` 通道
 
 `stream` 语义保持直观：
 
 - `open_stream(vport)` 成功，表示远端已经确认该 `vport` 可接受 stream 通道
 - `accept_stream()` 成功，表示本地已经确认该请求合法并接受该 stream
 
-### datagram
+### `datagram` 通道
 
 当前 `PnTunnel` 上的 `datagram` 通道也直接使用底层 `stream` 来承载。
 
@@ -377,6 +393,13 @@ relay 侧逻辑被收敛为一个简单模型：
 - 若 `listen_*()` 注入与 `accept_*()` 存在初始化竞态，`PnTunnel` 仅在首次读取对应 kind 的监听状态时做一次短暂异步等待；`stream` 与 `datagram` 状态彼此独立
 - 若首次等待后仍未先 `listen_*()` 就调用 `accept_*()`，本地失败；目标侧看到的握手结果为 `ListenerClosed`
 - 失败的代理通道不应被发布为可用 tunnel
+
+relay 侧在打开目标流之前还会执行新增的前置校验：
+
+- 把 `ProxyOpenReq.from` 规范化为已认证的远端 peer id
+- 将 `{ from, to, tunnel_id, kind, purpose }` 传给 `PnConnectionValidator`
+- 默认构造器保持 allow-all，只有显式注入 validator 时才改变准入策略
+- `Reject` / `PermissionDenied` 对外统一表现为 `InvalidParam`
 
 目标侧 `B` 在返回 `ProxyOpenResp` 前需要完成：
 
