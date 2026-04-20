@@ -2,7 +2,7 @@
 
 ## 触发条件
 - 已批准的 proposal：`docs/versions/v0.1/modules/p2p-frame/proposal.md`
-- 用户启动确认：待定
+- 用户启动确认：已于 `2026-04-17` 确认，进入自动流水线
 
 ## 验收基线
 - 最终验收以下列文档为准：
@@ -11,34 +11,35 @@
 ## 阶段图
 | 任务 ID | 阶段 | 职责 | 范围 | 父任务 | 依赖项 | 输出 | 完成条件 |
 |---------|------|------|------|--------|--------|------|----------|
-| P-1 | planning | 创建阶段图与退回路由 | `p2p-frame` 数据包 | root | proposal 已批准 | `harness/pipeline-plan.md` | 计划完成 |
-| D-1 | design | 定义可执行结构与索引化设计证据 | 完整 `p2p-frame` 模块 | root | proposal 已批准 | `design.md` | design 完成 |
-| T-1 | testing | 定义验证面与机器可读计划 | 完整 `p2p-frame` 模块 | root | proposal 已批准，design 已批准 | `testing.md`、`testplan.yaml` | testing 计划完成 |
-| I-1 | implementation | 在已批准边界内交付代码与测试 | 完整 `p2p-frame` 模块 | root | proposal 已批准，design 已批准，testing 已批准 | code + tests | implementation 完成 |
-| A-1 | acceptance | 审计证据链并判断 proposal 是否满足 | 最终模块评审 | root | implementation 证据已就绪 | acceptance report | acceptance 通过 |
+| P-1 | planning | 创建本轮 `pn_server` 流量统计/限速阶段图与退回路由 | `p2p-frame` / `pn/service` | root | proposal 已批准 | `harness/pipeline-plan.md` | 计划完成 |
+| D-1 | design | 定义 relay 侧统计/限速的结构、身份归属和 `sfo-io` 接入边界 | `docs/versions/v0.1/modules/p2p-frame/design.md`、`design/pn-server.md` | root | proposal 已批准 | `design.md`、`design/pn-server.md` | 设计文档覆盖本轮目标且不越界 |
+| T-1 | testing | 把 relay 侧统计/限速设计映射为 unit/DV/integration 验证面 | `testing.md`、`testing/pn-server.md`、`testplan.yaml` | root | proposal 已批准，design 已批准 | `testing.md`、`testing/pn-server.md`、`testplan.yaml` | 测试文档与设计一致 |
+| I-1 | implementation | 在已批准边界内把 `sfo-io` 统计/限速能力装配进 `pn_server` bridge 路径 | `p2p-frame/src/pn/service/**` 及必要测试 | root | proposal 已批准，design 已批准，testing 已批准 | code + tests | 代码与测试完成并通过验证 |
+| A-1 | acceptance | 审计 proposal 到实现的证据链，确认统计口径、限速行为和验证结果一致 | `p2p-frame` 本轮交付 | root | implementation 证据已就绪 | acceptance report | acceptance 通过 |
 
 ## 子模块任务
 | 任务 ID | 阶段 | 职责 | 子模块 | 父任务 | 依赖项 | 输出 | 完成条件 |
 |---------|------|------|--------|--------|--------|------|----------|
-| D-1.1 | design | 细化传输与监听器边界 | `networks` | D-1 | proposal 已批准 | 设计说明索引更新 | 子模块设计清晰 |
-| D-1.2 | design | 细化 tunnel 生命周期边界 | `tunnel` | D-1 | proposal 已批准 | 设计说明索引更新 | 子模块设计清晰 |
-| D-1.3 | design | 细化协议/服务边界 | `ttp`/`sn`/`pn` | D-1 | proposal 已批准 | 设计说明索引更新 | 子模块设计清晰 |
-| T-1.1 | testing | 映射传输与 tunnel 覆盖 | `networks`/`tunnel` | T-1 | D-1 已完成 | 测试覆盖更新 | 已声明子模块测试 |
-| T-1.2 | testing | 映射协议/服务覆盖 | `ttp`/`sn`/`pn` | T-1 | D-1 已完成 | 测试覆盖更新 | 已声明子模块测试 |
-| I-1.1 | implementation | 仅在确有需要时修改传输/tunnel 代码 | `networks`/`tunnel` | I-1 | T-1 已完成 | code + tests | 验证通过 |
-| I-1.2 | implementation | 仅在确有需要时修改协议/服务代码 | `ttp`/`sn`/`pn` | I-1 | T-1 已完成 | code + tests | 验证通过 |
+| D-1.1 | design | 定义用户身份归属、统计口径和 bridge 计量挂点 | `pn/service/pn_server.rs` | D-1 | proposal 已批准 | `design/pn-server.md` 更新 | 统计边界清晰 |
+| D-1.2 | design | 定义 `sfo-io` 限速器装配、配置输入和失败处理 | `pn/service/pn_server.rs` | D-1 | proposal 已批准 | `design/pn-server.md` 更新 | 限速边界清晰 |
+| T-1.1 | testing | 补充 relay 统计准确性与串户防护验证 | `pn/service` unit | T-1 | D-1 已完成 | `testing/pn-server.md` 更新 | 已声明统计相关断言 |
+| T-1.2 | testing | 补充 relay 限速、背压和 `sfo-io` 集成验证 | `pn/service` unit + DV | T-1 | D-1 已完成 | `testing/pn-server.md`、`testplan.yaml` 更新 | 已声明限速相关断言 |
+| I-1.1 | implementation | 接入 `sfo-io` 统计实现并暴露最小可测观测点 | `pn/service` | I-1 | T-1 已完成 | code + tests | 统计行为通过验证 |
+| I-1.2 | implementation | 接入 `sfo-io` 限速实现并保证 bridge 透明转发契约 | `pn/service` | I-1 | T-1 已完成 | code + tests | 限速行为通过验证 |
 
 ## 退回规则
-- 如果 acceptance 发现 proposal 存在歧义：
+- 如果 `sfo-io` 能力边界、依赖版本或配置来源无法从 proposal 支撑：
   - 退回 proposal 澄清任务
-- 如果 acceptance 发现 design 不匹配：
+- 如果 relay 统计口径、身份归属或限速装配位置不明确：
   - 退回 design 任务
-- 如果 acceptance 发现 testing 存在缺口：
+- 如果缺少统计准确性、限速背压或 DV/integration 覆盖：
   - 退回 testing 任务
-- 如果 acceptance 发现 implementation 缺陷：
+- 如果实现未按 `sfo-io` 接入或改变了握手/bridge 契约：
   - 退回 implementation 任务
 
 ## 退出条件
 - [ ] 所有阻塞问题已关闭
 - [ ] 必需证据存在
+- [ ] relay 侧 `pn_server` 已按 proposal 完成用户流量统计与限速
+- [ ] 统计与限速均通过 `sfo-io` 接入实现
 - [ ] 已基于 `proposal.md` 通过最终验收

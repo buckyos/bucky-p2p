@@ -1,9 +1,9 @@
 ---
 module: p2p-frame
 version: v0.1
-status: draft
-approved_by:
-approved_at:
+status: approved
+approved_by: user
+approved_at: 2026-04-17
 ---
 
 # p2p-frame 设计
@@ -15,6 +15,7 @@ approved_at:
 - 让核心库边界足够明确，使未来工作可以按子模块拆分。
 - 复用现有协议说明，而不是重复编写设计内容。
 - 为 planning、testing 和 acceptance 定义具备阶段可执行性的子模块责任归属。
+- 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -55,10 +56,13 @@ approved_at:
 - async/runtime crates
 - crypto and TLS crates
 - CYFS-adjacent consumers through `cyfs-p2p`
+- `sfo-io` 提供的流量统计与限速实现，供 `pn/service` 在 bridge 数据路径中复用
 
 ### 运行约束
 - 传输和运行时行为必须能够通过日志进行诊断。
 - 影响协议的改动必须在代码改动开始前更新 design/testing 证据。
+- `pn_server` 的统计与限速不得改变现有 `ProxyOpenReq` / `ProxyOpenResp` 握手顺序和结果码映射。
+- `pn_server` 的统计与限速主体必须以 relay 已认证并规范化后的 peer 身份为准。
 
 ## 实现布局
 ```text
@@ -95,7 +99,7 @@ p2p-frame/src
 | 文档 | 主题 | 范围 |
 |------|------|------|
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
-| `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server 设计补充 | `pn/service` |
+| `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
 | `p2p-frame/docs/tunnel_design.md` | tunnel 概念 | tunnel |
 | `p2p-frame/docs/tunnel_command_protocol_design.md` | tunnel 命令协议 | tunnel/ttp |
 | `p2p-frame/docs/tcp_tunnel_protocol_design.md` | TCP tunnel 协议 | networks/tunnel |

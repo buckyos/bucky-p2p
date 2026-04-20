@@ -1,9 +1,9 @@
 ---
 module: p2p-frame
 version: v0.1
-status: draft
-approved_by:
-approved_at:
+status: approved
+approved_by: user
+approved_at: 2026-04-17
 ---
 
 # p2p-frame 测试
@@ -28,13 +28,13 @@ approved_at:
 | `tunnel` | tunnel 生命周期和 manager 行为 | none | active/passive/proxy tunnel 创建、状态迁移 | 同时存在多个 tunnel、选择回退、失败清理 | unit | `p2p-frame/src/tunnel/tunnel_manager.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client 协议交互 | 无效命令流、channel 关闭 | unit | `p2p-frame/src/ttp/tests.rs` |
 | `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md` | 注册、查询、呼叫路由 | 对端缺失、并发、陈旧状态 | unit + DV | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/service/*.rs` |
-| `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md` | PN tunnel relay、请求校验、响应转发以及 server bridge 行为 | relay 启动失败、validator 拒绝、target 打开失败、握手不匹配 | unit + DV | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
+| `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md` | PN tunnel relay、请求校验、响应转发、用户流量统计以及 server bridge 限速行为 | relay 启动失败、validator 拒绝、target 打开失败、握手不匹配、统计失真、限速背压异常 | unit + DV | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
 | `identity_tls` | 身份、TLS、X509 辅助逻辑 | none | 证书处理和身份正确性 | 无效证书、握手不匹配、feature-gated 路径 | unit | `p2p-frame/src/x509.rs`、`p2p-frame/src/tls/**` |
 
 ## 模块级测试
 | 测试项 | 覆盖边界 | 入口 | 预期结果 | 测试类型 | 测试文件/脚本 |
 |--------|----------|------|----------|----------|-----------------|
-| 核心库 unit 测试集 | `p2p-frame` 内部直接子模块 | `cargo test -p p2p-frame` | crate 测试通过 | unit | 源码内 `#[test]` 和 `#[tokio::test]` 测试集 |
+| 核心库 unit 测试集 | `p2p-frame` 内部直接子模块，包括 `pn_server` 的统计/限速桥接路径 | `cargo test -p p2p-frame` | crate 测试通过，且 relay 统计/限速断言成立 | unit | 源码内 `#[test]` 和 `#[tokio::test]` 测试集 |
 | All-in-one 运行时场景 | 带本地 signaling/proxy 流程的 stack runtime | `cargo run -p cyfs-p2p-test -- all-in-one` | 运行时场景能够启动并完成，且无协议/运行时失败 | DV | `cyfs-p2p-test/src/main.rs` |
 | 工作区兼容性 | 下游使用方仍能与核心库一起编译和测试 | `cargo test --workspace` | 工作区测试通过 | integration | workspace |
 
@@ -48,6 +48,7 @@ approved_at:
 - `p2p-frame/src/networks/tcp/network.rs` 拥有密集的异步测试覆盖，必须持续与协议说明保持一致。
 - `p2p-frame/src/tunnel/tunnel_manager.rs` 协调大量状态迁移，是行为回归的热点区域。
 - `p2p-frame/src/pn/service/pn_server.rs` 是 PN open-result 映射和双向 bridge 启动的 relay 侧瓶颈点。
+- `p2p-frame/src/pn/service/pn_server.rs` 新增 `sfo-io` 接入后，bridge 的计量口径、背压和关闭顺序会成为新的回归热点。
 - 密码学和 X509 路径改动频率较低，但一旦修改，风险更高。
 
 ## 完成定义
@@ -56,3 +57,4 @@ approved_at:
 - [ ] transport、tunnel、PN、SN 和 TTP 行为都声明了证据路径
 - [ ] 针对协议/运行时/密码学/配置改动记录了触发的额外检查
 - [ ] 跨 crate 边界的改动具备运行时场景证据
+- [ ] `pn_server` 的统计准确性和限速行为已映射到 unit/DV/integration 证据

@@ -1,4 +1,5 @@
 use std::io;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::{
     Arc, Mutex,
@@ -7,6 +8,10 @@ use std::sync::{
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use sfo_io::{
+    LimitStream, SfoSpeedStat, SpeedLimitSession, SpeedLimiter, SpeedLimiterRef, SpeedStat,
+    SpeedTracker, StatStream,
+};
 use tokio::io::{ReadBuf, copy_bidirectional};
 
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
@@ -23,42 +28,144 @@ use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-struct ProxyStream {
-    read: TunnelStreamRead,
-    write: TunnelStreamWrite,
+struct ProxyStream<R, W> {
+    read: R,
+    write: W,
 }
 
-impl ProxyStream {
-    fn new(read: TunnelStreamRead, write: TunnelStreamWrite) -> Self {
+impl<R, W> ProxyStream<R, W> {
+    fn new(read: R, write: W) -> Self {
         Self { read, write }
     }
 }
 
-impl tokio::io::AsyncRead for ProxyStream {
+impl<R, W> Unpin for ProxyStream<R, W>
+where
+    R: Unpin,
+    W: Unpin,
+{
+}
+
+impl<R, W> tokio::io::AsyncRead for ProxyStream<R, W>
+where
+    R: runtime::AsyncRead + Unpin,
+    W: Unpin,
+{
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        self.read.as_mut().poll_read(cx, buf)
+        Pin::new(&mut self.as_mut().get_mut().read).poll_read(cx, buf)
     }
 }
 
-impl tokio::io::AsyncWrite for ProxyStream {
+impl<R, W> tokio::io::AsyncWrite for ProxyStream<R, W>
+where
+    R: Unpin,
+    W: runtime::AsyncWrite + Unpin,
+{
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.write.as_mut().poll_write(cx, buf)
+        Pin::new(&mut self.as_mut().get_mut().write).poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.write.as_mut().poll_flush(cx)
+        Pin::new(&mut self.as_mut().get_mut().write).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.write.as_mut().poll_shutdown(cx)
+        Pin::new(&mut self.as_mut().get_mut().write).poll_shutdown(cx)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PnTrafficLimitConfig {
+    pub tx_rate: Option<NonZeroU32>,
+    pub tx_weight: Option<NonZeroU32>,
+    pub rx_rate: Option<NonZeroU32>,
+    pub rx_weight: Option<NonZeroU32>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PnUserTrafficSnapshot {
+    pub tx_bytes: u64,
+    pub tx_speed: u64,
+    pub rx_bytes: u64,
+    pub rx_speed: u64,
+}
+
+struct PnUserTrafficEntry {
+    tx_limiter: SpeedLimiterRef,
+    rx_limiter: SpeedLimiterRef,
+    stat: Arc<SfoSpeedStat>,
+}
+
+impl PnUserTrafficEntry {
+    fn new() -> Self {
+        Self {
+            tx_limiter: SpeedLimiter::new(None, None, None),
+            rx_limiter: SpeedLimiter::new(None, None, None),
+            stat: Arc::new(SfoSpeedStat::new()),
+        }
+    }
+
+    fn snapshot(&self) -> PnUserTrafficSnapshot {
+        PnUserTrafficSnapshot {
+            tx_bytes: self.stat.get_read_sum_size(),
+            tx_speed: self.stat.get_read_speed(),
+            rx_bytes: self.stat.get_write_sum_size(),
+            rx_speed: self.stat.get_write_speed(),
+        }
+    }
+}
+
+struct PnTrafficSession {
+    source_read_limit: SpeedLimitSession,
+    source_write_limit: SpeedLimitSession,
+    tracker: Arc<dyn SpeedTracker>,
+}
+
+struct PnTrafficManager {
+    users: Mutex<std::collections::HashMap<P2pId, Arc<PnUserTrafficEntry>>>,
+}
+
+impl PnTrafficManager {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            users: Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    fn user_entry(&self, user: &P2pId) -> Arc<PnUserTrafficEntry> {
+        let mut users = self.users.lock().unwrap();
+        users
+            .entry(user.clone())
+            .or_insert_with(|| Arc::new(PnUserTrafficEntry::new()))
+            .clone()
+    }
+
+    fn begin_session(&self, user: &P2pId) -> PnTrafficSession {
+        let entry = self.user_entry(user);
+        PnTrafficSession {
+            source_read_limit: entry.tx_limiter.new_limit_session(),
+            source_write_limit: entry.rx_limiter.new_limit_session(),
+            tracker: entry.stat.clone(),
+        }
+    }
+
+    fn set_user_limit(&self, user: P2pId, config: PnTrafficLimitConfig) {
+        let entry = self.user_entry(&user);
+        entry.tx_limiter.set_limit(config.tx_rate, config.tx_weight);
+        entry.rx_limiter.set_limit(config.rx_rate, config.rx_weight);
+    }
+
+    fn snapshot(&self, user: &P2pId) -> Option<PnUserTrafficSnapshot> {
+        let users = self.users.lock().unwrap();
+        users.get(user).map(|entry| entry.snapshot())
     }
 }
 
@@ -132,6 +239,7 @@ impl PnTargetStreamFactory for TtpServer {
 pub struct PnService {
     target_stream_factory: PnTargetStreamFactoryRef,
     connection_validator: PnConnectionValidatorRef,
+    traffic_manager: Arc<PnTrafficManager>,
 }
 
 impl PnService {
@@ -139,9 +247,22 @@ impl PnService {
         target_stream_factory: PnTargetStreamFactoryRef,
         connection_validator: PnConnectionValidatorRef,
     ) -> PnServiceRef {
+        Self::new_with_traffic_manager(
+            target_stream_factory,
+            connection_validator,
+            PnTrafficManager::new(),
+        )
+    }
+
+    fn new_with_traffic_manager(
+        target_stream_factory: PnTargetStreamFactoryRef,
+        connection_validator: PnConnectionValidatorRef,
+        traffic_manager: Arc<PnTrafficManager>,
+    ) -> PnServiceRef {
         Arc::new(Self {
             target_stream_factory,
             connection_validator,
+            traffic_manager,
         })
     }
 
@@ -316,9 +437,32 @@ impl PnService {
                 req.purpose,
                 PROXY_SERVICE
             );
-            let mut source_stream = ProxyStream::new(read, source_write);
-            let mut target_stream = ProxyStream::new(target_read, target_write);
+            let traffic_session = self.traffic_manager.begin_session(&req.from);
+            let source_stream = ProxyStream::new(read, source_write);
+            let source_stream = LimitStream::new(
+                source_stream,
+                traffic_session.source_read_limit,
+                traffic_session.source_write_limit,
+            );
+            let mut source_stream =
+                StatStream::new_with_tracker(source_stream, traffic_session.tracker);
+            let mut target_stream = ProxyStream::new(
+                target_read,
+                target_write,
+            );
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
+            if let Some(snapshot) = self.traffic_manager.snapshot(&req.from) {
+                log::debug!(
+                    "pn server bridge stop tunnel_id={:?} from={} to={} tx_bytes={} rx_bytes={} tx_speed={} rx_speed={}",
+                    req.tunnel_id,
+                    req.from,
+                    req.to,
+                    snapshot.tx_bytes,
+                    snapshot.rx_bytes,
+                    snapshot.tx_speed,
+                    snapshot.rx_speed
+                );
+            }
         }
     }
 
@@ -371,6 +515,14 @@ impl PnServer {
             stopped: AtomicBool::new(false),
             accept_task: Mutex::new(None),
         })
+    }
+
+    pub fn set_user_traffic_limit(&self, user: P2pId, config: PnTrafficLimitConfig) {
+        self.service.traffic_manager.set_user_limit(user, config);
+    }
+
+    pub fn get_user_traffic_snapshot(&self, user: &P2pId) -> Option<PnUserTrafficSnapshot> {
+        self.service.traffic_manager.snapshot(user)
     }
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
@@ -498,7 +650,9 @@ mod tests {
     use crate::tls::DefaultTlsServerCertResolver;
     use crate::ttp::TtpServer;
     use crate::types::{TunnelCandidateId, TunnelId};
+    use std::num::NonZeroU32;
     use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, split};
     use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
     use tokio::time::{Duration, timeout};
@@ -1074,6 +1228,211 @@ mod tests {
                 .body;
         assert_eq!(source_resp.tunnel_id, req.tunnel_id);
         assert_eq!(source_resp.result, TunnelCommandResult::InvalidParam as u8);
+    }
+
+    #[tokio::test]
+    async fn pn_service_tracks_user_traffic_with_normalized_source_id() {
+        let source_id = P2pId::from(vec![4u8; 32]);
+        let forged_source_id = P2pId::from(vec![9u8; 32]);
+        let target_id = P2pId::from(vec![5u8; 32]);
+        let ((service_target_read, service_target_write), (mut target_read, mut target_write)) =
+            make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let traffic_manager = PnTrafficManager::new();
+        let service = PnService::new_with_traffic_manager(
+            target_stream_factory,
+            allow_all_pn_connection_validator(),
+            traffic_manager.clone(),
+        );
+
+        let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
+            make_stream_pair();
+        let req = ProxyOpenReq {
+            tunnel_id: TunnelId::from(26),
+            from: forged_source_id.clone(),
+            to: target_id.clone(),
+            kind: PnChannelKind::Stream,
+            purpose: crate::networks::TunnelPurpose::from_value(&2002u16).unwrap(),
+        };
+
+        let service_task = tokio::spawn({
+            let service = service.clone();
+            let source_id = source_id.clone();
+            let req = req.clone();
+            async move {
+                service
+                    .handle_proxy_open_req(
+                        source_id,
+                        req,
+                        service_source_read,
+                        service_source_write,
+                    )
+                    .await;
+            }
+        });
+
+        let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
+        let target_req =
+            read_tunnel_command_body::<_, ProxyOpenReq>(&mut target_read, target_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(target_req.from, source_id);
+        assert_ne!(target_req.from, forged_source_id);
+
+        let resp = TunnelCommand::new(ProxyOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: TunnelCommandResult::Success as u8,
+        })
+        .unwrap();
+        write_tunnel_command(&mut target_write, &resp)
+            .await
+            .unwrap();
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
+
+        source_write.write_all(b"ping").await.unwrap();
+        let mut ping_buf = [0u8; 4];
+        target_read.read_exact(&mut ping_buf).await.unwrap();
+        assert_eq!(&ping_buf, b"ping");
+
+        target_write.write_all(b"pong").await.unwrap();
+        let mut pong_buf = [0u8; 4];
+        source_read.read_exact(&mut pong_buf).await.unwrap();
+        assert_eq!(&pong_buf, b"pong");
+
+        drop(source_write);
+        drop(target_write);
+        drop(source_read);
+        drop(target_read);
+        timeout(Duration::from_secs(1), service_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(
+            snapshot,
+            PnUserTrafficSnapshot {
+                tx_bytes: 4,
+                tx_speed: 0,
+                rx_bytes: 4,
+                rx_speed: 0,
+            }
+        );
+        assert_eq!(traffic_manager.snapshot(&forged_source_id), None);
+    }
+
+    #[tokio::test]
+    async fn pn_service_applies_user_rate_limit() {
+        let source_id = P2pId::from(vec![6u8; 32]);
+        let target_id = P2pId::from(vec![7u8; 32]);
+        let ((service_target_read, service_target_write), (mut target_read, mut target_write)) =
+            make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let traffic_manager = PnTrafficManager::new();
+        traffic_manager.set_user_limit(
+            source_id.clone(),
+            PnTrafficLimitConfig {
+                tx_rate: Some(NonZeroU32::new(10).unwrap()),
+                tx_weight: Some(NonZeroU32::new(1).unwrap()),
+                rx_rate: None,
+                rx_weight: None,
+            },
+        );
+        let service = PnService::new_with_traffic_manager(
+            target_stream_factory,
+            allow_all_pn_connection_validator(),
+            traffic_manager.clone(),
+        );
+
+        let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
+            make_stream_pair();
+        let req = ProxyOpenReq {
+            tunnel_id: TunnelId::from(27),
+            from: source_id.clone(),
+            to: target_id,
+            kind: PnChannelKind::Stream,
+            purpose: crate::networks::TunnelPurpose::from_value(&2003u16).unwrap(),
+        };
+
+        let service_task = tokio::spawn({
+            let service = service.clone();
+            let source_id = source_id.clone();
+            let req = req.clone();
+            async move {
+                service
+                    .handle_proxy_open_req(
+                        source_id,
+                        req,
+                        service_source_read,
+                        service_source_write,
+                    )
+                    .await;
+            }
+        });
+
+        let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
+        let _target_req =
+            read_tunnel_command_body::<_, ProxyOpenReq>(&mut target_read, target_header)
+                .await
+                .unwrap()
+                .body;
+
+        let resp = TunnelCommand::new(ProxyOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: TunnelCommandResult::Success as u8,
+        })
+        .unwrap();
+        write_tunnel_command(&mut target_write, &resp)
+            .await
+            .unwrap();
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
+
+        let payload = vec![b'x'; 20];
+        source_write.write_all(payload.as_slice()).await.unwrap();
+
+        let started_at = Instant::now();
+        let mut received = vec![0u8; payload.len()];
+        target_read
+            .read_exact(received.as_mut_slice())
+            .await
+            .unwrap();
+        let elapsed = started_at.elapsed();
+        assert_eq!(received, payload);
+        assert!(
+            elapsed >= Duration::from_millis(700),
+            "expected tx limit to delay bridge, got {:?}",
+            elapsed
+        );
+
+        drop(source_write);
+        drop(target_write);
+        drop(source_read);
+        drop(target_read);
+        timeout(Duration::from_secs(3), service_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(snapshot.tx_bytes, payload.len() as u64);
+        assert_eq!(snapshot.rx_bytes, 0);
     }
 
     #[tokio::test]

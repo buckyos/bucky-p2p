@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `pn_server` 的统计/限速桥接断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -23,6 +23,7 @@ levels:
       services: []
       notes:
         - 源码内的异步和同步测试是主要的 unit 验证面。
+        - `pn/service/pn_server.rs` 的 unit 测试必须覆盖成功转发字节统计、用户级限速和 `sfo-io` 集成失败路径。
     steps:
       - id: p2p-frame-unit
         name: 运行 p2p-frame unit 测试集
@@ -30,7 +31,7 @@ levels:
 
   dv:
     mode: enabled
-    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证
+    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认默认 `PnServer::new(...)` 路径在接入统计/限速后仍可启动
     test_targets:
       - cyfs-p2p-test/src/main.rs
       - devices/
@@ -41,6 +42,7 @@ levels:
       services: []
       notes:
         - 因为 `p2p-frame` 没有独立二进制入口，所以 DV 使用现有本地 all-in-one 场景。
+        - DV 关注 `cyfs-p2p-test` 现有 `PnServer::new(...)` 调用点是否保持兼容。
     steps:
       - id: p2p-frame-dv
         name: 运行本地 all-in-one 场景
@@ -48,7 +50,7 @@ levels:
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证
+    summary: 工作区级兼容性与下游使用方验证，确认 `pn_server` 新增统计/限速不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test
@@ -59,6 +61,7 @@ levels:
       services: []
       notes:
         - Integration 聚焦于核心 crate 的下游兼容性。
+        - 特别关注 `cyfs-p2p-test` 与 `sn-miner-rust` 的 `PnServer::new(...)` 调用点兼容性。
     steps:
       - id: p2p-frame-integration
         name: 运行工作区测试套件
