@@ -15,6 +15,7 @@ use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify as AsyncNotify;
 use tokio::sync::mpsc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -27,6 +28,9 @@ use crate::networks::{
 };
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(2000);
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(60);
+const PROXY_UPGRADE_INITIAL_INTERVAL: Duration = Duration::from_secs(300);
+const PROXY_UPGRADE_MAX_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 
 fn should_stop_accept_loop(err: &P2pError) -> bool {
     matches!(
@@ -106,9 +110,27 @@ struct EndpointScore {
 
 type ReverseWaitKey = (P2pId, TunnelId);
 
+#[derive(Clone, Copy)]
+struct ProxyUpgradeState {
+    next_attempt_at: Instant,
+    retry_interval: Duration,
+    in_progress: bool,
+}
+
+impl ProxyUpgradeState {
+    fn new(now: Instant, initial_interval: Duration) -> Self {
+        Self {
+            next_attempt_at: now + initial_interval,
+            retry_interval: initial_interval,
+            in_progress: false,
+        }
+    }
+}
+
 struct ManagerState {
     endpoint_scores: HashMap<Endpoint, EndpointScore>,
     pending_reverse_waiters: HashMap<ReverseWaitKey, Notify<P2pResult<TunnelRef>>>,
+    proxy_upgrade_states: HashMap<P2pId, ProxyUpgradeState>,
 }
 
 pub struct TunnelManager {
@@ -122,12 +144,15 @@ pub struct TunnelManager {
     conn_info_cache: P2pConnectionInfoCacheRef,
     gen_id: Arc<TunnelIdGenerator>,
     conn_timeout: Duration,
+    proxy_upgrade_initial_interval: Duration,
     tunnels: RwLock<HashMap<P2pId, TunnelEntries>>,
     state: Mutex<ManagerState>,
     subscriptions: Mutex<Vec<mpsc::UnboundedSender<P2pResult<TunnelRef>>>>,
     incoming_task: SpawnHandle<()>,
     proxy_incoming_task: Option<SpawnHandle<()>>,
     cleanup_task: SpawnHandle<()>,
+    proxy_upgrade_notify: Arc<AsyncNotify>,
+    proxy_upgrade_task: SpawnHandle<()>,
 }
 
 pub type TunnelManagerRef = Arc<TunnelManager>;
@@ -144,11 +169,13 @@ impl TunnelManager {
         gen_id: Arc<TunnelIdGenerator>,
         conn_timeout: Duration,
         idle_timeout: Duration,
+        proxy_upgrade_initial_interval: Duration,
     ) -> P2pResult<TunnelManagerRef> {
         let mut incoming_acceptor =
             net_manager.register_tunnel_acceptor(local_identity.get_id())?;
         let sn_service_for_listener = sn_service.clone();
         let pn_network_for_listener = pn_network.clone();
+        let proxy_upgrade_notify = Arc::new(AsyncNotify::new());
         let manager = Arc::new_cyclic(|weak: &std::sync::Weak<Self>| Self {
             self_weak: weak.clone(),
             local_identity: local_identity.clone(),
@@ -160,10 +187,12 @@ impl TunnelManager {
             conn_info_cache: conn_info_cache.clone(),
             gen_id: gen_id.clone(),
             conn_timeout,
+            proxy_upgrade_initial_interval,
             tunnels: RwLock::new(HashMap::new()),
             state: Mutex::new(ManagerState {
                 endpoint_scores: HashMap::new(),
                 pending_reverse_waiters: HashMap::new(),
+                proxy_upgrade_states: HashMap::new(),
             }),
             subscriptions: Mutex::new(Vec::new()),
             incoming_task: Executor::spawn_with_handle({
@@ -243,11 +272,41 @@ impl TunnelManager {
                 let weak = weak.clone();
                 async move {
                     loop {
-                        runtime::sleep(Duration::from_secs(120)).await;
+                        runtime::sleep(HOUSEKEEPING_INTERVAL).await;
                         let Some(manager) = weak.upgrade() else {
                             break;
                         };
                         manager.cleanup_closed_tunnels(idle_timeout).await;
+                    }
+                }
+            })
+            .unwrap(),
+            proxy_upgrade_notify: proxy_upgrade_notify.clone(),
+            proxy_upgrade_task: Executor::spawn_with_handle({
+                let weak = weak.clone();
+                async move {
+                    loop {
+                        let wait_duration = match weak.upgrade() {
+                            Some(manager) => manager.next_proxy_upgrade_wait(),
+                            None => break,
+                        };
+
+                        match wait_duration {
+                            Some(delay) => {
+                                tokio::select! {
+                                    _ = runtime::sleep(delay) => {}
+                                    _ = proxy_upgrade_notify.notified() => {}
+                                }
+                            }
+                            None => {
+                                proxy_upgrade_notify.notified().await;
+                            }
+                        }
+
+                        let Some(manager) = weak.upgrade() else {
+                            break;
+                        };
+                        manager.process_proxy_upgrade_attempts().await;
                     }
                 }
             })
@@ -279,14 +338,31 @@ impl TunnelManager {
     }
 
     pub fn get_tunnel(&self, remote_id: &P2pId) -> Option<TunnelRef> {
+        self.get_tunnel_with_filter(remote_id, |_| true)
+    }
+
+    fn get_non_proxy_tunnel(&self, remote_id: &P2pId) -> Option<TunnelRef> {
+        self.get_tunnel_with_filter(remote_id, |entry| entry.tunnel.form() != TunnelForm::Proxy)
+    }
+
+    fn get_tunnel_with_filter<F>(&self, remote_id: &P2pId, filter: F) -> Option<TunnelRef>
+    where
+        F: Fn(&TunnelEntry) -> bool,
+    {
         let mut tunnels = self.tunnels.write().unwrap();
         let entries = tunnels.get_mut(remote_id)?;
         entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
         let selected = entries
             .iter()
+            .filter(|entry| filter(entry))
             .filter(|entry| entry.published)
             .max_by_key(|entry| entry.updated_at)
-            .or_else(|| entries.iter().max_by_key(|entry| entry.updated_at))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .filter(|entry| filter(entry))
+                    .max_by_key(|entry| entry.updated_at)
+            })
             .map(|entry| entry.tunnel.clone());
         if entries.is_empty() {
             tunnels.remove(remote_id);
@@ -391,14 +467,30 @@ impl TunnelManager {
         remote_id: &P2pId,
         remote_name: Option<String>,
     ) -> P2pResult<TunnelRef> {
+        self.open_known_tunnel_with_options(remote_eps, remote_id, remote_name, true, true, false)
+            .await
+    }
+
+    async fn open_known_tunnel_with_options(
+        &self,
+        remote_eps: Vec<Endpoint>,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        reuse_existing_proxy: bool,
+        allow_proxy_fallback: bool,
+        publish_on_success: bool,
+    ) -> P2pResult<TunnelRef> {
         log::debug!(
-            "open tunnel remote={} name={:?} eps_count={} eps={:?} has_sn={} has_pn={}",
+            "open tunnel remote={} name={:?} eps_count={} eps={:?} has_sn={} has_pn={} reuse_existing_proxy={} allow_proxy_fallback={} publish_on_success={}",
             remote_id,
             remote_name,
             remote_eps.len(),
             remote_eps,
             self.sn_service.is_some(),
-            self.pn_network.is_some()
+            self.pn_network.is_some(),
+            reuse_existing_proxy,
+            allow_proxy_fallback,
+            publish_on_success
         );
         if remote_eps.is_empty() {
             return Err(p2p_err!(
@@ -411,7 +503,12 @@ impl TunnelManager {
         let _guard = Locker::get_locker(lock_name).await;
         let logical_tunnel_id = self.gen_id.generate();
 
-        if let Some(tunnel) = self.get_tunnel(remote_id) {
+        let existing_tunnel = if reuse_existing_proxy {
+            self.get_tunnel(remote_id)
+        } else {
+            self.get_non_proxy_tunnel(remote_id)
+        };
+        if let Some(tunnel) = existing_tunnel {
             return Ok(tunnel);
         }
 
@@ -442,16 +539,18 @@ impl TunnelManager {
                     }
                 }
                 ConnectDirection::Proxy => {
-                    match self
-                        .open_proxy_path(
-                            remote_id,
-                            remote_name.clone(),
-                            TunnelConnectIntent::active_logical(logical_tunnel_id),
-                        )
-                        .await
-                    {
-                        Ok(tunnel) => return Ok(tunnel),
-                        Err(err) => last_err = Some(err),
+                    if allow_proxy_fallback {
+                        match self
+                            .open_proxy_path(
+                                remote_id,
+                                remote_name.clone(),
+                                TunnelConnectIntent::active_logical(logical_tunnel_id),
+                            )
+                            .await
+                        {
+                            Ok(tunnel) => return Ok(tunnel),
+                            Err(err) => last_err = Some(err),
+                        }
                     }
                 }
             }
@@ -486,6 +585,9 @@ impl TunnelManager {
             .await;
             match result {
                 Ok(tunnel) => {
+                    if publish_on_success {
+                        self.publish_registered_tunnel(&tunnel);
+                    }
                     log::debug!(
                         "open tunnel remote={} hedged success winner={}",
                         remote_id,
@@ -525,28 +627,40 @@ impl TunnelManager {
                 )
                 .await
             {
-                Ok(tunnel) => return Ok(tunnel),
+                Ok(tunnel) => {
+                    if publish_on_success {
+                        self.publish_registered_tunnel(&tunnel);
+                    }
+                    return Ok(tunnel);
+                }
                 Err(err) => last_err = Some(err),
             }
         }
 
         if !tried_reverse {
             match self.open_reverse_path(remote_id, logical_tunnel_id).await {
-                Ok(tunnel) => return Ok(tunnel),
+                Ok(tunnel) => {
+                    if publish_on_success {
+                        self.publish_registered_tunnel(&tunnel);
+                    }
+                    return Ok(tunnel);
+                }
                 Err(err) => last_err = Some(err),
             }
         }
 
-        match self
-            .open_proxy_path(
-                remote_id,
-                remote_name,
-                TunnelConnectIntent::active_logical(logical_tunnel_id),
-            )
-            .await
-        {
-            Ok(tunnel) => return Ok(tunnel),
-            Err(err) => last_err = Some(err),
+        if allow_proxy_fallback {
+            match self
+                .open_proxy_path(
+                    remote_id,
+                    remote_name,
+                    TunnelConnectIntent::active_logical(logical_tunnel_id),
+                )
+                .await
+            {
+                Ok(tunnel) => return Ok(tunnel),
+                Err(err) => last_err = Some(err),
+            }
         }
 
         Err(last_err
@@ -892,6 +1006,153 @@ impl TunnelManager {
         !tunnel.is_reverse() || !self.has_reverse_waiter(&tunnel.remote_id(), &tunnel.tunnel_id())
     }
 
+    fn track_proxy_upgrade(&self, remote_id: &P2pId) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        state
+            .proxy_upgrade_states
+            .entry(remote_id.clone())
+            .and_modify(|entry| {
+                entry.next_attempt_at = now + self.proxy_upgrade_initial_interval;
+                entry.retry_interval = self.proxy_upgrade_initial_interval;
+            })
+            .or_insert_with(|| ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval));
+        drop(state);
+        self.proxy_upgrade_notify.notify_one();
+    }
+
+    fn clear_proxy_upgrade(&self, remote_id: &P2pId) {
+        self.state
+            .lock()
+            .unwrap()
+            .proxy_upgrade_states
+            .remove(remote_id);
+        self.proxy_upgrade_notify.notify_one();
+    }
+
+    fn next_proxy_upgrade_wait(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let state = self.state.lock().unwrap();
+        state
+            .proxy_upgrade_states
+            .values()
+            .filter(|upgrade| !upgrade.in_progress)
+            .map(|upgrade| upgrade.next_attempt_at.saturating_duration_since(now))
+            .min()
+    }
+
+    fn collect_due_proxy_upgrades(&self) -> Vec<P2pId> {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let mut due = Vec::new();
+        for (remote_id, upgrade) in state.proxy_upgrade_states.iter_mut() {
+            if !upgrade.in_progress && upgrade.next_attempt_at <= now {
+                upgrade.in_progress = true;
+                due.push(remote_id.clone());
+            }
+        }
+        due
+    }
+
+    fn on_proxy_upgrade_failed(&self, remote_id: &P2pId) -> Option<Duration> {
+        let mut state = self.state.lock().unwrap();
+        let upgrade = state.proxy_upgrade_states.get_mut(remote_id)?;
+        upgrade.in_progress = false;
+        upgrade.retry_interval = upgrade
+            .retry_interval
+            .saturating_mul(2)
+            .min(PROXY_UPGRADE_MAX_INTERVAL);
+        upgrade.next_attempt_at = Instant::now() + upgrade.retry_interval;
+        let next_interval = upgrade.retry_interval;
+        drop(state);
+        self.proxy_upgrade_notify.notify_one();
+        Some(next_interval)
+    }
+
+    async fn process_proxy_upgrade_attempts(&self) {
+        let due = self.collect_due_proxy_upgrades();
+        if due.is_empty() {
+            return;
+        }
+
+        for remote_id in due {
+            let weak = self.self_weak.clone();
+            Executor::spawn_ok(async move {
+                let Some(manager) = weak.upgrade() else {
+                    return;
+                };
+                manager.attempt_proxy_upgrade(remote_id).await;
+            });
+        }
+    }
+
+    async fn attempt_proxy_upgrade(&self, remote_id: P2pId) {
+        match self.try_upgrade_proxy_tunnel(&remote_id).await {
+            Ok(tunnel) => {
+                self.publish_registered_tunnel(&tunnel);
+                self.clear_proxy_upgrade(&remote_id);
+                log::info!(
+                    "proxy upgrade succeeded remote={} form={:?} protocol={:?}",
+                    remote_id,
+                    tunnel.form(),
+                    tunnel.protocol()
+                );
+            }
+            Err(err) => {
+                let next_interval = self.on_proxy_upgrade_failed(&remote_id);
+                log::warn!(
+                    "proxy upgrade failed remote={} code={:?} msg={} next_retry_secs={:?}",
+                    remote_id,
+                    err.code(),
+                    err.msg(),
+                    next_interval.map(|interval| interval.as_secs())
+                );
+            }
+        }
+    }
+
+    async fn try_upgrade_proxy_tunnel(&self, remote_id: &P2pId) -> P2pResult<TunnelRef> {
+        if let Some(tunnel) = self.get_non_proxy_tunnel(remote_id) {
+            return Ok(tunnel);
+        }
+
+        if let Some(device_finder) = self.device_finder.as_ref() {
+            match device_finder.get_identity_cert(remote_id).await {
+                Ok(remote) if !remote.endpoints().is_empty() => {
+                    return self
+                        .open_known_tunnel_with_options(
+                            remote.endpoints().clone(),
+                            remote_id,
+                            Some(remote.get_name()),
+                            false,
+                            false,
+                            true,
+                        )
+                        .await;
+                }
+                Ok(_) => {
+                    log::debug!(
+                        "proxy upgrade remote={} skipped direct path because endpoints are empty",
+                        remote_id
+                    );
+                }
+                Err(err) => {
+                    log::warn!(
+                        "proxy upgrade device lookup failed for {}: {}",
+                        remote_id,
+                        err
+                    );
+                }
+            }
+        }
+
+        let tunnel = self
+            .open_reverse_path(remote_id, self.gen_id.generate())
+            .await?;
+        self.publish_registered_tunnel(&tunnel);
+        Ok(tunnel)
+    }
+
     async fn on_sn_called(&self, called: SnCalled) -> P2pResult<()> {
         let cert = self.cert_factory.create(&called.peer_info)?;
         let remote_id = cert.get_id();
@@ -1002,6 +1263,9 @@ impl TunnelManager {
                 remote_id,
                 remote_id.is_default() || tunnel.form() == TunnelForm::Proxy
             );
+            if !remote_id.is_default() && tunnel.form() == TunnelForm::Proxy {
+                self.track_proxy_upgrade(&remote_id);
+            }
             if publish {
                 self.publish_tunnel(tunnel.clone());
             }
@@ -1055,6 +1319,11 @@ impl TunnelManager {
             tunnel.protocol(),
             publish
         );
+        if tunnel.form() == TunnelForm::Proxy {
+            self.track_proxy_upgrade(&remote_id_for_log);
+        } else {
+            self.clear_proxy_upgrade(&remote_id_for_log);
+        }
         if publish {
             self.publish_tunnel(tunnel.clone());
         }
@@ -1128,6 +1397,7 @@ impl Drop for TunnelManager {
             task.abort();
         }
         self.cleanup_task.abort();
+        self.proxy_upgrade_task.abort();
         for tunnel in tunnels {
             let _ = Executor::block_on(tunnel.close());
         }
@@ -1214,6 +1484,7 @@ mod tests {
             Arc::new(TunnelIdGenerator::new()),
             Duration::from_secs(1),
             Duration::from_secs(30),
+            PROXY_UPGRADE_INITIAL_INTERVAL,
         )
         .unwrap()
     }
@@ -1315,6 +1586,7 @@ mod tests {
                 Ok(()) => Ok(Arc::new(MockTunnel {
                     tunnel_id: intent.tunnel_id,
                     candidate_id: intent.candidate_id,
+                    form: TunnelForm::Proxy,
                     local_id: self.local_id.clone(),
                     remote_id: remote_id.clone(),
                     state: TunnelState::Connected,
@@ -1404,6 +1676,7 @@ mod tests {
                 Ok(()) => Ok(Arc::new(MockTunnel {
                     tunnel_id: intent.tunnel_id,
                     candidate_id: intent.candidate_id,
+                    form: TunnelForm::Active,
                     local_id: self.local_id.clone(),
                     remote_id: remote_id.clone(),
                     state: TunnelState::Connected,
@@ -1433,6 +1706,7 @@ mod tests {
     struct MockTunnel {
         tunnel_id: TunnelId,
         candidate_id: TunnelCandidateId,
+        form: TunnelForm,
         local_id: P2pId,
         remote_id: P2pId,
         state: TunnelState,
@@ -1450,7 +1724,7 @@ mod tests {
         }
 
         fn form(&self) -> TunnelForm {
-            TunnelForm::Active
+            self.form
         }
 
         fn is_reverse(&self) -> bool {
@@ -1720,6 +1994,7 @@ mod tests {
             Arc::new(TunnelIdGenerator::new()),
             Duration::from_secs(3),
             Duration::from_secs(30),
+            PROXY_UPGRADE_INITIAL_INTERVAL,
         )
         .unwrap();
         let mut callee_sub = callee_manager.subscribe();
@@ -1799,6 +2074,7 @@ mod tests {
         let tunnel: TunnelRef = Arc::new(MockTunnel {
             tunnel_id,
             candidate_id: TunnelCandidateId::from(1),
+            form: TunnelForm::Active,
             local_id: local_identity.get_id(),
             remote_id: remote_identity.get_id(),
             state: TunnelState::Connected,
@@ -1834,6 +2110,7 @@ mod tests {
         let tunnel: TunnelRef = Arc::new(MockTunnel {
             tunnel_id,
             candidate_id: TunnelCandidateId::from(2),
+            form: TunnelForm::Active,
             local_id: local_identity.get_id(),
             remote_id: remote_identity.get_id(),
             state: TunnelState::Connected,
@@ -2659,5 +2936,272 @@ mod tests {
             .unwrap();
 
         assert_eq!(err.code(), P2pErrorCode::NotSupport);
+    }
+
+    #[tokio::test]
+    async fn register_proxy_tunnel_tracks_upgrade_attempt() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-track");
+        let remote_identity = new_identity("remote-proxy-track");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager.register_tunnel(proxy, false, true).await.unwrap();
+
+        let state = manager.state.lock().unwrap();
+        let upgrade = state
+            .proxy_upgrade_states
+            .get(&remote_identity.get_id())
+            .copied()
+            .unwrap();
+        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_INITIAL_INTERVAL);
+        assert!(!upgrade.in_progress);
+        assert!(upgrade.next_attempt_at > Instant::now());
+    }
+
+    #[tokio::test]
+    async fn track_proxy_upgrade_uses_configured_initial_interval() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-track-custom");
+        let remote_identity = new_identity("remote-proxy-track-custom");
+        let configured_interval = Duration::from_secs(17);
+        let manager = TunnelManager::new(
+            local_identity.clone(),
+            Some(Arc::new(StaticDeviceFinder {
+                devices: HashMap::new(),
+            })),
+            crate::networks::NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
+            None,
+            Arc::new(X509IdentityCertFactory),
+            None,
+            DefaultP2pConnectionInfoCache::new(),
+            Arc::new(TunnelIdGenerator::new()),
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            configured_interval,
+        )
+        .unwrap();
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager.register_tunnel(proxy, false, true).await.unwrap();
+
+        let state = manager.state.lock().unwrap();
+        let upgrade = state
+            .proxy_upgrade_states
+            .get(&remote_identity.get_id())
+            .copied()
+            .unwrap();
+        assert_eq!(upgrade.retry_interval, configured_interval);
+        assert!(upgrade.next_attempt_at <= Instant::now() + configured_interval);
+    }
+
+    #[tokio::test]
+    async fn open_proxy_path_tracks_upgrade_attempt_for_stored_proxy() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-open-proxy-track");
+        let remote_identity = new_identity("remote-open-proxy-track");
+        let proxy_network = MockProxyNetwork::new(local_identity.get_id(), Ok(()))
+            as crate::networks::TunnelNetworkRef;
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), Some(proxy_network));
+
+        let proxy = manager
+            .open_proxy_path(
+                &remote_identity.get_id(),
+                None,
+                TunnelConnectIntent::active_logical(TunnelId::from(1201)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(proxy.form(), TunnelForm::Proxy);
+        assert_eq!(
+            manager
+                .get_tunnel(&remote_identity.get_id())
+                .unwrap()
+                .form(),
+            TunnelForm::Proxy
+        );
+        assert!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_proxy_upgrade_promotes_connection_to_direct() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-upgrade-success");
+        let remote_identity = new_identity("remote-proxy-upgrade-success");
+        let remote_ep = Endpoint::from((Protocol::Ext(10), "127.0.0.1:20001".parse().unwrap()));
+        let remote_cert = remote_identity
+            .get_identity_cert()
+            .unwrap()
+            .update_endpoints(vec![remote_ep]);
+        let network = MockDialNetwork::new(
+            Protocol::Ext(10),
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(10),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity.clone(),
+            HashMap::from([(remote_identity.get_id(), remote_cert)]),
+            None,
+            vec![network.clone()],
+        );
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager.register_tunnel(proxy, false, true).await.unwrap();
+        manager
+            .attempt_proxy_upgrade(remote_identity.get_id())
+            .await;
+
+        let info = manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .unwrap();
+        assert_eq!(info.direct, ConnectDirection::Direct);
+        assert_eq!(info.remote_ep, remote_ep);
+        assert!(manager.get_tunnel(&remote_identity.get_id()).is_some());
+        assert_eq!(network.call_count(), 1);
+        assert!(
+            !manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_proxy_upgrade_dials_direct_instead_of_reusing_proxy() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-stored-proxy-upgrade");
+        let remote_identity = new_identity("remote-stored-proxy-upgrade");
+        let remote_ep = Endpoint::from((Protocol::Ext(11), "127.0.0.1:20011".parse().unwrap()));
+        let remote_cert = remote_identity
+            .get_identity_cert()
+            .unwrap()
+            .update_endpoints(vec![remote_ep]);
+        let direct_network = MockDialNetwork::new(
+            Protocol::Ext(11),
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(10),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let proxy_network = MockProxyNetwork::new(local_identity.get_id(), Ok(()))
+            as crate::networks::TunnelNetworkRef;
+        let manager = new_test_manager_with_networks(
+            local_identity.clone(),
+            HashMap::from([(remote_identity.get_id(), remote_cert)]),
+            Some(proxy_network),
+            vec![direct_network.clone()],
+        );
+
+        manager
+            .open_proxy_path(
+                &remote_identity.get_id(),
+                None,
+                TunnelConnectIntent::active_logical(TunnelId::from(1202)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .get_tunnel(&remote_identity.get_id())
+                .unwrap()
+                .form(),
+            TunnelForm::Proxy
+        );
+
+        manager
+            .attempt_proxy_upgrade(remote_identity.get_id())
+            .await;
+
+        let info = manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .unwrap();
+        assert_eq!(info.direct, ConnectDirection::Direct);
+        assert_eq!(info.remote_ep, remote_ep);
+        assert_eq!(direct_network.call_count(), 1);
+        assert_eq!(
+            manager
+                .get_tunnel(&remote_identity.get_id())
+                .unwrap()
+                .form(),
+            TunnelForm::Active
+        );
+        assert!(
+            !manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_proxy_upgrade_uses_exponential_backoff_with_cap() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-upgrade-fail");
+        let remote_identity = new_identity("remote-proxy-upgrade-fail");
+        let manager = new_test_manager(local_identity, HashMap::new(), None);
+
+        manager.track_proxy_upgrade(&remote_identity.get_id());
+        for _ in 0..8 {
+            manager
+                .attempt_proxy_upgrade(remote_identity.get_id())
+                .await;
+        }
+
+        let state = manager.state.lock().unwrap();
+        let upgrade = state
+            .proxy_upgrade_states
+            .get(&remote_identity.get_id())
+            .copied()
+            .unwrap();
+        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_MAX_INTERVAL);
+        assert!(!upgrade.in_progress);
+        assert!(upgrade.next_attempt_at > Instant::now());
     }
 }

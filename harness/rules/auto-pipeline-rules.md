@@ -36,6 +36,8 @@
   - `proposal.md` 存在且 `status: approved`
   - `design.md` 存在且 `status: approved`
   - `testing.md` 存在且 `status: approved`
+- implementation 任务必须读取这些已批准文档，并确认当前任务范围能直接映射到 proposal、design 与 testing 的具体条目。
+- 若 `testplan.yaml` 缺失，或 testing 制品尚未声明当前任务的验证入口/缺口说明，implementation 任务不得启动。
 - 若 implementation 任务被阻塞，必须退回到对应的前置责任阶段，而不是在部分假设下继续推进。
 
 ## 退回路由规则

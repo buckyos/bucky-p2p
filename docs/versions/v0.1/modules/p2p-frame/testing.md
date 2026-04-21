@@ -26,7 +26,7 @@ approved_at: 2026-04-20
 | 子模块 | 职责 | 详细测试文档 | 必需行为 | 边界/失败场景 | 测试类型 | 测试文件 |
 |--------|------|--------------|----------|----------------|----------|----------|
 | `networks` | TCP/QUIC 传输和 listener 行为 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md` | 连接建立、复用、地址处理、network manager 行为 | listener 失败、连接复用边界、协议不匹配 | unit + DV | `p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs` |
-| `tunnel` | tunnel 生命周期和 manager 行为 | none | active/passive/proxy tunnel 创建、状态迁移 | 同时存在多个 tunnel、选择回退、失败清理 | unit | `p2p-frame/src/tunnel/tunnel_manager.rs` |
+| `tunnel` | tunnel 生命周期和 manager 行为 | none | active/passive/proxy tunnel 创建、状态迁移、proxy tunnel 发布后的后台 direct/reverse 升级重试 | 同时存在多个 tunnel、选择回退、失败清理、proxy 升级路径持续失败后的退避封顶，以及升级流程不得回退成 proxy | unit | `p2p-frame/src/tunnel/tunnel_manager.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client 协议交互 | 无效命令流、channel 关闭 | unit | `p2p-frame/src/ttp/tests.rs` |
 | `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md` | 注册、查询、呼叫路由 | 对端缺失、并发、陈旧状态 | unit + DV | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/service/*.rs` |
 | `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md` | PN tunnel relay、请求校验、响应转发、用户流量统计、server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照，以及 `datagram` 在 `TlsRequired` 下继续保持明文兼容 | relay 启动失败、validator 拒绝、target 打开失败、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、统计失真、限速背压异常 | unit + DV | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
@@ -48,6 +48,7 @@ approved_at: 2026-04-20
 ## 回归关注点
 - `p2p-frame/src/networks/tcp/network.rs` 拥有密集的异步测试覆盖，必须持续与协议说明保持一致。
 - `p2p-frame/src/tunnel/tunnel_manager.rs` 协调大量状态迁移，是行为回归的热点区域。
+- `p2p-frame/src/tunnel/tunnel_manager.rs` 新增 proxy tunnel 脱代理调度后，后台重试时序、成功切换后的 publish 行为，以及失败退避上限会成为新的回归热点。
 - `p2p-frame/src/pn/service/pn_server.rs` 是 PN open-result 映射和双向 bridge 启动的 relay 侧瓶颈点。
 - `p2p-frame/src/pn/service/pn_server.rs` 新增 `sfo-io` 接入后，bridge 的计量口径、背压和关闭顺序会成为新的回归热点。
 - `p2p-frame/src/pn/client/pn_tunnel.rs` 新增 TLS-over-proxy 后，会把 proxy stream 建链与 TLS client/server 握手串到一起；同时当前实现还支持 `PnClient` 级模式配置与 passive accept 快照继承，是新的回归热点。
@@ -62,3 +63,4 @@ approved_at: 2026-04-20
 - [ ] `pn_server` 的统计准确性和限速行为已映射到 unit/DV/integration 证据
 - [ ] proxy tunnel `stream` 的 TLS-over-proxy 成功、失败、双端约定错配与明文兼容路径已映射到 unit/DV/integration 证据
 - [ ] `datagram` 在 `TlsRequired` 下忽略 `stream` 加密模式并保持明文兼容的路径已映射到 unit/DV/integration 证据
+- [ ] proxy tunnel 发布后的 direct/reverse 升级重试、失败退避和 2 小时封顶行为已映射到 unit 证据

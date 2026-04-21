@@ -5,6 +5,14 @@ import sys
 
 
 REQUIRED_DOCS = ("proposal.md", "design.md", "testing.md")
+REQUIRED_APPROVAL_FIELDS = ("approved_by", "approved_at")
+REQUIRED_DIRECT_MAPPING_SECTIONS = {
+    "proposal.md": "## 验收锚点",
+    "design.md": "## 当前改动直接映射",
+    "testing.md": "## 当前改动直接验证",
+}
+# Temporary exemption for the legacy approved packet until it is refreshed in a doc-stage task.
+LEGACY_DIRECT_MAPPING_EXEMPT_MODULES = {"p2p-frame"}
 
 
 def parse_front_matter(path: pathlib.Path) -> dict[str, str]:
@@ -36,6 +44,7 @@ def main() -> int:
 
     missing = []
     draft = []
+    invalid = []
     for name in REQUIRED_DOCS:
         path = module_dir / name
         if not path.exists():
@@ -44,12 +53,27 @@ def main() -> int:
         metadata = parse_front_matter(path)
         if metadata.get("status") != "approved":
             draft.append(f"{path}: status={metadata.get('status', '<missing>')}")
+            continue
+        for field in REQUIRED_APPROVAL_FIELDS:
+            if not metadata.get(field, "").strip():
+                invalid.append(f"{path}: missing {field}")
+        if module not in LEGACY_DIRECT_MAPPING_EXEMPT_MODULES:
+            text = path.read_text(encoding="utf-8")
+            required_section = REQUIRED_DIRECT_MAPPING_SECTIONS[name]
+            if required_section not in text:
+                invalid.append(f"{path}: missing direct mapping section {required_section}")
 
-    if missing or draft:
+    testplan_path = module_dir / "testplan.yaml"
+    if not testplan_path.exists():
+        missing.append(str(testplan_path))
+
+    if missing or draft or invalid:
         for item in missing:
             print(f"missing: {item}", file=sys.stderr)
         for item in draft:
             print(f"not approved: {item}", file=sys.stderr)
+        for item in invalid:
+            print(f"invalid approval metadata: {item}", file=sys.stderr)
         return 1
 
     print(f"implementation admission passed for {module} {version}")

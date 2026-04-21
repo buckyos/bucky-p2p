@@ -9,6 +9,7 @@ levels:
   unit:
     mode: enabled
     summary: crate 内局部验证
+    gap_reason: ""
     test_targets:
       - docs/versions/v0.1/modules/example-module/testing.md
     preconditions:
@@ -24,6 +25,7 @@ levels:
   dv:
     mode: enabled
     summary: 单模块运行时验证
+    gap_reason: ""
     test_targets:
       - docs/versions/v0.1/modules/example-module/testing.md
     preconditions:
@@ -39,6 +41,7 @@ levels:
   integration:
     mode: enabled
     summary: 工作区或相邻模块验证
+    gap_reason: ""
     test_targets:
       - docs/versions/v0.1/modules/example-module/testing.md
     preconditions:

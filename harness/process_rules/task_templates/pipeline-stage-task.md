@@ -18,12 +18,17 @@
 - 相关文档：
 - 相关代码：
 - 约束：
+- 当前改动映射到的 proposal 条目：
+- 当前改动映射到的 design 条目：
+- 当前改动映射到的 testing 条目：
 
 ## 准入检查
 - [ ] 必需的上游制品存在
 - [ ] 必需的上游批准存在
 - [ ] 范围没有跨入其他阶段
 - [ ] 若为 implementation：`proposal.md`、`design.md` 与 `testing.md` 全部为 `approved`
+- [ ] 若为 implementation：`testplan.yaml` 已存在
+- [ ] 若为 implementation：当前改动已能映射到直接的 proposal/design/testing 条目
 
 ## 允许的改动
 - 可以修改：
@@ -32,6 +37,8 @@
 ## 必需输出
 - 输出 1：
 - 输出 2：
+- 若为 testing：当前改动的验证覆盖或明确缺口记录
+- 若为 implementation：是否运行验证，以及为何运行或未运行
 
 ## 完成条件
 - [ ] 必需输出存在

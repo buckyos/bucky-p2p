@@ -416,6 +416,7 @@ pub struct P2pStackConfig {
     sn_list: Vec<P2pSn>,
     conn_timeout: Duration,
     idle_timeout: Duration,
+    proxy_upgrade_initial_interval: Duration,
     sn_ping_interval: Duration,
     sn_call_timeout: Duration,
     sn_query_interval: Duration,
@@ -435,6 +436,7 @@ impl P2pStackConfig {
             sn_list: Vec::new(),
             conn_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(30),
+            proxy_upgrade_initial_interval: Duration::from_secs(300),
             sn_ping_interval: Duration::from_secs(30),
             sn_call_timeout: Duration::from_secs(10),
             sn_query_interval: Duration::from_secs(300),
@@ -480,6 +482,18 @@ impl P2pStackConfig {
 
     pub fn set_idle_timeout(mut self, idle_timeout: Duration) -> Self {
         self.idle_timeout = idle_timeout;
+        self
+    }
+
+    pub fn proxy_upgrade_initial_interval(&self) -> Duration {
+        self.proxy_upgrade_initial_interval
+    }
+
+    pub fn set_proxy_upgrade_initial_interval(
+        mut self,
+        proxy_upgrade_initial_interval: Duration,
+    ) -> Self {
+        self.proxy_upgrade_initial_interval = proxy_upgrade_initial_interval;
         self
     }
 
@@ -627,6 +641,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let sn_call_timeout = config.sn_call_timeout();
     let device_finder = config.device_finder().clone();
     let idle_timeout = config.idle_timeout();
+    let proxy_upgrade_initial_interval = config.proxy_upgrade_initial_interval();
     let sn_tunnel_count = config.sn_tunnel_count();
     let sn_query_interval = config.sn_query_interval();
     let support_proxy = config.support_proxy();
@@ -705,6 +720,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         Arc::new(TunnelIdGenerator::new()),
         conn_timeout,
         idle_timeout,
+        proxy_upgrade_initial_interval,
     )?;
     let _ = sn_service.start().await;
     let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());
@@ -905,5 +921,34 @@ mod tests {
 
         let config = P2pStackConfig::new(env, local_identity).set_proxy_stream_encrypted(true);
         assert!(config.proxy_stream_encrypted());
+    }
+
+    #[test]
+    fn stack_config_sets_proxy_upgrade_initial_interval() {
+        let identity_factory = Arc::new(TestIdentityFactory);
+        let cert_factory = Arc::new(TestIdentityCertFactory);
+        let env = P2pEnv::new(
+            NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
+            identity_factory,
+            cert_factory,
+            Arc::new(DeviceCache::new(
+                &DeviceCacheConfig {
+                    expire: Duration::from_secs(60),
+                    capacity: 8,
+                },
+                None,
+            )),
+            DefaultTlsServerCertResolver::new(),
+            DefaultP2pConnectionInfoCache::new(),
+            vec![],
+            None,
+        );
+        let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(10));
+        let interval = Duration::from_secs(19);
+
+        let config =
+            P2pStackConfig::new(env, local_identity).set_proxy_upgrade_initial_interval(interval);
+
+        assert_eq!(config.proxy_upgrade_initial_interval(), interval);
     }
 }

@@ -39,6 +39,12 @@ approved_at:
 | 操作员 CLI 边界 | 暴露稳定的调用模型 | 子命令能选择预期流程 | 缺少 flag、路径无效 | unit + DV | `cyfs-p2p-test/src/main.rs` |
 | 运行时制品边界 | 消费本地 desc/config/log 制品 | 预期的本地环境能工作 | 制品过期或缺失 | DV | 仓库本地运行时文件 |
 
+## 当前改动直接验证
+| Design 条目 | 验证层级 | 入口/步骤 ID | 覆盖说明 | 缺口/原因 |
+|-------------|----------|--------------|----------|-----------|
+| CLI / 配置 / 场景编排拆分 | unit / DV | `cargo test -p cyfs-p2p-test`、`cargo run -p cyfs-p2p-test -- all-in-one` | 验证 CLI、配置和场景入口仍可运行 | 无 |
+| DV 与 integration 证据职责 | integration | `cargo test --workspace` | 验证 harness 与工作区契约未漂移 | 无 |
+
 ## 回归关注点
 - 场景启动流程
 - 配置文件和 desc 加载

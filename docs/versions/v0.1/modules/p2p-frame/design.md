@@ -17,6 +17,7 @@ approved_at: 2026-04-20
 - 为 planning、testing 和 acceptance 定义具备阶段可执行性的子模块责任归属。
 - 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内。
 - 为本轮 proxy tunnel `stream` 路径的“可选 TLS-over-proxy 载荷加密、由使用者显式接口控制且由两端在 tunnel 外约定”需求建立可执行设计边界，并明确 `datagram` 路径继续保持明文兼容且忽略该 `stream` 加密模式，同时把加密接口限制在 PN 专有 API 内，而不是污染通用 `Tunnel` / `TunnelNetwork` trait。
+- 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -32,7 +33,7 @@ approved_at: 2026-04-20
 | 子模块 | 类型 | 职责 | 输入 | 输出 | 依赖 | 是否独立文档 |
 |--------|------|------|------|------|------|----------------|
 | `networks` | core transport | TCP/QUIC 监听器、endpoint、validator 和底层网络行为 | sockets、runtime、TLS | 传输事件和 tunnel plumbing | runtime、TLS | no |
-| `tunnel` | orchestration | tunnel 生命周期、连接选择和 manager 行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | no |
+| `tunnel` | orchestration | tunnel 生命周期、连接选择、proxy 回退与后续脱代理升级行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | no |
 | `ttp` | protocol | tunnel 上的命令和流复用协议 | tunnel IO | 带帧的命令/流行为 | `tunnel` | no |
 | `sn` | service | 对端注册、信令和调用转发 | tunnel/ttp、身份 | SN 服务行为 | `ttp`、`p2p_identity` | no |
 | `pn` | service | proxy-node 中继行为 | tunnel/ttp | 基于 relay 的连通性 | `tunnel`、`ttp` | yes |
@@ -69,6 +70,9 @@ approved_at: 2026-04-20
 - 是否启用 TLS 由 proxy tunnel 两端在 tunnel 外预先约定；PN open 控制流不额外承载 TLS 模式协商。
 - 若调用方显式选择加密，则失败路径必须直接失败，不允许静默回退到明文桥接。
 - 本轮加密设计只覆盖 proxy `stream`；proxy `datagram` 不进入 TLS-over-proxy 范围，但必须忽略 `stream` 加密模式并保持当前明文兼容语义。
+- 当某个远端当前只有 proxy tunnel 可用时，`TunnelManager` 必须在后台继续尝试 direct 或 reverse 建链，而不是无限期停留在 proxy 路径。
+- 上述脱代理尝试不得再次把“升级任务”回退成 proxy 建链；proxy 只作为对外可用的兜底连通性，而不是后台升级路径的成功条件。
+- 持续失败的脱代理尝试可以延长重试间隔，但必须有上限；当前实现约束为初始 5 分钟、失败后指数退避、最大不超过 2 小时。
 
 ## 实现布局
 ```text

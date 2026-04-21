@@ -37,9 +37,7 @@ impl PnShared {
     }
 
     pub(super) fn stream_security_mode(&self) -> PnProxyStreamSecurityMode {
-        PnProxyStreamSecurityMode::from_atomic(
-            self.stream_security_mode.load(Ordering::SeqCst),
-        )
+        PnProxyStreamSecurityMode::from_atomic(self.stream_security_mode.load(Ordering::SeqCst))
     }
 
     pub(super) fn set_stream_security_mode(&self, mode: PnProxyStreamSecurityMode) {

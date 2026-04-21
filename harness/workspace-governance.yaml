@@ -13,10 +13,27 @@ acceptance_baseline: proposal-first
 implementation_gate:
   # `approved` 为脚本依赖的固定状态值，不可翻译。
   required_status: approved
+  require_testplan: true
+  require_approval_metadata: true
+  require_direct_change_mapping: true
+  direct_change_mapping_policy:
+    required_sections:
+      proposal.md: "## 验收锚点"
+      design.md: "## 当前改动直接映射"
+      testing.md: "## 当前改动直接验证"
+    legacy_exempt_modules:
+      - p2p-frame
   required_documents:
     - proposal.md
     - design.md
     - testing.md
+    - testplan.yaml
+validation_policy:
+  implementation_mode: strict-no-proactive-validation
+  validation_runs_allowed_when:
+    - user-requested
+    - debugging-needs-evidence
+    - required-by-approved-testing-docs
 modules:
   # 模块登记表：记录长期文档、模块数据包目录、统一测试入口和触发类别。
   - name: p2p-frame

@@ -13,6 +13,13 @@ REQUIRED_PACKET_FILES = (
 )
 
 REQUIRED_METADATA = ("module", "version", "status", "approved_by", "approved_at")
+REQUIRED_TEST_LEVELS = ("unit", "dv", "integration")
+REQUIRED_DIRECT_MAPPING_SECTIONS = {
+    "proposal.md": "## 验收锚点",
+    "design.md": "## 当前改动直接映射",
+    "testing.md": "## 当前改动直接验证",
+}
+LEGACY_DIRECT_MAPPING_EXEMPT_MODULES = {"p2p-frame"}
 
 
 def parse_front_matter(path: pathlib.Path) -> dict[str, str]:
@@ -53,10 +60,28 @@ def main() -> int:
             errors.append(f"missing required file: {path}")
             continue
         if name.endswith(".md") and name != "acceptance.md":
+            text = path.read_text(encoding="utf-8")
             metadata = parse_front_matter(path)
             for key in REQUIRED_METADATA:
                 if key not in metadata:
                     errors.append(f"missing metadata {key} in {path}")
+            if metadata.get("module") not in ("", module):
+                errors.append(f"wrong module metadata in {path}: {metadata.get('module')}")
+            if metadata.get("version") not in ("", version):
+                errors.append(f"wrong version metadata in {path}: {metadata.get('version')}")
+            if metadata.get("status") == "approved":
+                for key in ("approved_by", "approved_at"):
+                    if not metadata.get(key, "").strip():
+                        errors.append(f"approved document missing {key} in {path}")
+            if name in REQUIRED_DIRECT_MAPPING_SECTIONS and module not in LEGACY_DIRECT_MAPPING_EXEMPT_MODULES:
+                required_section = REQUIRED_DIRECT_MAPPING_SECTIONS[name]
+                if required_section not in text:
+                    errors.append(f"missing section {required_section} in {path}")
+        elif name == "testplan.yaml":
+            text = path.read_text(encoding="utf-8")
+            for level in REQUIRED_TEST_LEVELS:
+                if f"{level}:" not in text:
+                    errors.append(f"missing test level {level} in {path}")
 
     if not module_doc.exists():
         errors.append(f"missing long-lived module doc: {module_doc}")

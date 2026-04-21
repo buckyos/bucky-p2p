@@ -23,16 +23,22 @@
 - Design 参考：
 - Testing 参考：
 - 上游输出：
+- 当前子模块映射到的 proposal 条目：
+- 当前子模块映射到的 design 条目：
+- 当前子模块映射到的 testing 条目：
 
 ## 准入检查
 - [ ] 必需的上游制品存在
 - [ ] 必需的上游批准存在
 - [ ] 范围保持在该直接子模块内
 - [ ] 若为 implementation：该子模块的 proposal、design、testing 输入均已批准
+- [ ] 若为 implementation：`testplan.yaml` 已覆盖该子模块的验证入口或缺口说明
+- [ ] 若为 implementation：当前子模块改动已能映射到直接的 proposal/design/testing 条目
 
 ## 必需输出
 - 输出文件：
 - 证据：
+- 若为 implementation：验证是否执行，以及依据是什么
 
 ## 完成条件
 - [ ] 子模块输出完整

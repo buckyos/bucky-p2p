@@ -336,10 +336,13 @@ pub trait TunnelManager: Send + Sync + 'static {
 - `subscribe()` 在建立后应先回放当前已经可用的 tunnel，再继续接收后续新增或替换后的 tunnel
 - 所有新变为可用的 tunnel 都应该广播给订阅者，包括入站 tunnel、新创建的出站 tunnel、以及替换旧主 tunnel 的新 tunnel
 - `TunnelManager` 需要后台定时清理长期空闲的 tunnel；“空闲”定义为一段时间内没有活跃 channel，且没有新的 open/accept 活动
+- 同一个后台 housekeeping 循环还需要负责“proxy 已连通后的脱代理升级”调度：当某个远端当前只有 proxy tunnel 可用时，继续周期性尝试 direct 或 reverse
 - 一次逻辑建链（多 endpoint 并发、direct+reverse hedged）必须共享同一个 `tunnel_id`
 - 同一次逻辑建链里的每条具体候选 tunnel 必须拥有不同的 `candidate_id`
 - 反连 waiter 需要按 `(remote_id, tunnel_id)` 匹配，不能只按 `remote_id`
 - `reverse` 候选是否 publish，不由 `is_reverse` 单独决定，而由本地是否仍持有对应 `(remote_id, tunnel_id)` 的 `reverse_waiter` 决定
+- 脱代理升级的目标是把“当前仅依赖 proxy 的可用连接”切换回 direct/reverse；升级路径本身不得再次把 proxy 视为成功结果
+- 持续失败的脱代理升级允许采用指数退避，但需要显式上限；当前约束为初始 5 分钟、失败后退避增长、最大不超过 2 小时
 
 ## Tunnel 候选与发布规则
 
@@ -349,6 +352,8 @@ pub trait TunnelManager: Send + Sync + 'static {
 - 对同一个 `(remote_id, tunnel_id)`，一旦本地已经没有 waiter，后续成功的 `reverse` 候选也会正常 publish
 - `TunnelManager::get_tunnel(remote_id)` 默认优先返回已 publish 的健康候选；若没有已 publish 候选，再回退到隐藏的 reverse 候选
 - 候选是否被长期保留，不由建链阶段 winner 选择决定，而由后续实际使用和空闲清理自然收敛
+- proxy tunnel 允许作为“立即可用”的兜底连通性被 publish，但对于已知 `remote_id` 的远端，不应成为长期唯一状态；manager 需要为其登记后续脱代理尝试
+- 一旦 direct/reverse 脱代理成功，新得到的非 proxy tunnel 应像其他健康候选一样进入正常 publish/复用路径，并清除对应远端的 proxy 升级状态
 
 ## StreamManager 和 DatagramManager 如何感知新的 Channel
 

@@ -39,6 +39,12 @@ approved_at:
 | 操作员启动边界 | 暴露稳定的启动入口 | 默认/帮助路径工作正常 | desc 路径缺失、制品错误 | DV | `sn-miner-rust/src/main.rs` |
 | 适配层边界 | 正确消费 `cyfs-p2p` 的启动路径 | 可以编译并集成 | 适配层假设变化导致启动失效 | integration | workspace |
 
+## 当前改动直接验证
+| Design 条目 | 验证层级 | 入口/步骤 ID | 覆盖说明 | 缺口/原因 |
+|-------------|----------|--------------|----------|-----------|
+| CLI、制品加载和服务启动拆分 | unit / DV | `cargo test -p sn-miner`、`cargo run -p sn-miner -- --help` | 验证本地逻辑和操作入口仍可执行 | 无 |
+| 配置和默认值风险面 | integration | `cargo test --workspace` | 验证与适配层和工作区契约兼容 | 无 |
+
 ## 回归关注点
 - 默认制品创建
 - endpoint 规范化
