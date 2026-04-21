@@ -27,6 +27,7 @@
 | 目标流获取通过注入的 factory 进行委派 | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `pn_service_uses_injected_target_stream_factory` | relay 打开请求的目标，重写 `from`，转发 `ProxyOpenReq`，转发成功响应，并在双向上传输字节 |
 | validator 拒绝会短路目标打开 | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `pn_service_rejects_proxy_open_when_validator_rejects` | validator 能看到规范化上下文，不会打开目标流，源端收到 `InvalidParam` |
 | 通过 `PnServer.start()` 完成 listener 注册和端到端 bridge | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `pn_server_listens_and_bridges_proxy_stream` | relay 在 `PROXY_SERVICE` 上监听，接收来流，转发握手，并桥接 payload |
+| TLS-over-proxy 不要求 relay 理解模式字段 | 待补 `pn_server` TLS 透明桥接测试 | relay 不终止 TLS，也不携带 TLS 模式字段；两端在 open 成功后进入 TLS 时，relay 只继续桥接握手字节和密文 |
 | 成功 bridge 会按规范化后的 `from` 记账 | 待补 `pn_server` 统计测试 | 只统计成功转发的 payload 字节；控制帧不入账；统计主体等于已认证远端 peer id |
 | 同一用户多条 bridge 共享限速预算 | 待补 `pn_server` 限速测试 | 多条来自同一规范化 `from` 的 bridge 会观察到共享背压，而不是按连接各自无限速 |
 | 默认构造路径保持兼容 | 待补 `PnServer::new(...)` 兼容性测试 | 未显式注入限速配置时，现有调用点仍能启动并桥接，且不要求外部立即提供 `sfo-io` 细节 |
@@ -42,6 +43,7 @@
 ## 统计与限速特定预期
 
 - 流量统计只覆盖成功握手之后的 payload bridge，不统计 `ProxyOpenReq` / `ProxyOpenResp`。
+- 若请求选择 TLS-over-proxy，relay 统计口径切换为成功转发的 TLS record 字节数，而不是应用明文字节数。
 - 统计口径基于“relay 成功写到对端”的字节数；读到但未成功写出的字节不得入账。
 - 限速只作用于成功握手后的 bridge 数据路径，不改变 open-result 映射。
 - `sfo-io` 集成失败若发生在 bridge 前，测试应断言源端看到 `InternalError` 或文档声明的等价内部错误结果。
@@ -67,7 +69,7 @@
 
 ## DV 与 Integration 继承
 
-- DV 证据仍然是模块级 all-in-one 运行时场景。对于 `pn_server`，成功意味着 PN relay 启动和 proxy 流不会阻塞场景完成，并且默认构造路径在接入 `sfo-io` 后仍能正常工作。
+- DV 证据仍然是模块级 all-in-one 运行时场景。对于 `pn_server`，成功意味着 PN relay 启动和 proxy 流不会阻塞场景完成，并且默认构造路径在接入 `sfo-io` 后仍能正常工作；若场景显式启用 TLS-over-proxy，relay 仍应只桥接 TLS 字节而不终止 TLS。
 - Integration 证据仍然是工作区级测试套件。对于 `pn_server`，成功意味着 relay 侧 PN 改动不会破坏 `cyfs-p2p`、`cyfs-p2p-test` 或 `sn-miner-rust` 的兼容性，尤其不能要求现有 `PnServer::new(...)` 调用点立即理解新的限速配置细节。
 
 ## `pn_server` 的完成定义

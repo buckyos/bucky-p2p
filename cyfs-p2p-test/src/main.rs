@@ -896,7 +896,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_direct_success failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "stream_wrong_port_fail_expected",
@@ -914,7 +914,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case stream_wrong_port_fail_expected failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "datagram_direct_success",
@@ -941,7 +941,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case datagram_direct_success failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "direct_bad_endpoint_fail_expected",
@@ -971,7 +971,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case direct_bad_endpoint_fail_expected failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "reverse_connect_case",
@@ -1006,7 +1006,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reverse_connect_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "reverse_fail_case",
@@ -1082,7 +1082,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_datagram_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "proxy_fail_case",
@@ -1100,7 +1100,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case proxy_fail_case failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "reconnect_stability",
@@ -1134,7 +1134,7 @@ async fn all_in_one() {
             log::error!("all-in-one stop: case reconnect_stability failed");
             return;
         }
-
+        
         if !run_case(
             &mut stats,
             "concurrent_stream_burst",
@@ -1167,14 +1167,14 @@ async fn all_in_one() {
                     });
                     tasks.push(task);
                 }
-
+        
                 for task in tasks {
                     let ret = task.await.map_err(|e| {
                         P2pError::from((P2pErrorCode::Failed, "join task failed".to_string(), e))
                     })?;
                     ret?;
                 }
-
+        
                 Ok(())
             },
         )
@@ -1188,7 +1188,7 @@ async fn all_in_one() {
             _ = stat_tick.tick() => {
                 print_case_stats(round, &stats);
             }
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
         }
     }
 }
@@ -1247,7 +1247,7 @@ async fn create_stack_with_device_finder(
     };
 
     let mut config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list)
-        .set_support_proxy(true);
+        .set_support_proxy(true).set_proxy_stream_encrypted(true);
     if let Some(device_finder) = device_finder {
         config = config.set_device_finder(device_finder);
     }

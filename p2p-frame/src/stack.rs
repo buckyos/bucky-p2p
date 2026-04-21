@@ -1,6 +1,6 @@
 use crate::datagram::{DatagramManager, DatagramManagerRef};
 use crate::endpoint::{Endpoint, Protocol};
-use crate::error::P2pResult;
+use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
@@ -13,7 +13,7 @@ use crate::p2p_identity::{
     P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef,
     P2pIdentityRef, P2pSn,
 };
-use crate::pn::{PnClient, pn_virtual_endpoint};
+use crate::pn::{PnClient, PnProxyStreamSecurityMode, pn_virtual_endpoint};
 use crate::sn::client::{SNClientService, SNClientServiceRef, SnLocalIpProviderRef};
 use crate::stream::{StreamManager, StreamManagerRef};
 use crate::tls::{
@@ -422,6 +422,7 @@ pub struct P2pStackConfig {
     device_finder: Option<DeviceFinderRef>,
     sn_tunnel_count: u16,
     support_proxy: bool,
+    proxy_stream_encrypted: bool,
     proxy_client: Option<TunnelNetworkRef>,
     local_ip_provider: Option<SnLocalIpProviderRef>,
 }
@@ -440,6 +441,7 @@ impl P2pStackConfig {
             device_finder: None,
             sn_tunnel_count: 5,
             support_proxy: false,
+            proxy_stream_encrypted: false,
             proxy_client: None,
             local_ip_provider: None,
         }
@@ -533,6 +535,15 @@ impl P2pStackConfig {
         self
     }
 
+    pub fn proxy_stream_encrypted(&self) -> bool {
+        self.proxy_stream_encrypted
+    }
+
+    pub fn set_proxy_stream_encrypted(mut self, proxy_stream_encrypted: bool) -> Self {
+        self.proxy_stream_encrypted = proxy_stream_encrypted;
+        self
+    }
+
     pub fn proxy_client(&self) -> &Option<TunnelNetworkRef> {
         &self.proxy_client
     }
@@ -552,6 +563,58 @@ impl P2pStackConfig {
     }
 }
 
+fn proxy_stream_security_mode(proxy_stream_encrypted: bool) -> PnProxyStreamSecurityMode {
+    if proxy_stream_encrypted {
+        PnProxyStreamSecurityMode::TlsRequired
+    } else {
+        PnProxyStreamSecurityMode::Disabled
+    }
+}
+
+fn create_default_proxy_client(
+    ttp_client: crate::ttp::TtpClientRef,
+    local_identity: P2pIdentityRef,
+    cert_factory: P2pIdentityCertFactoryRef,
+    proxy_stream_encrypted: bool,
+) -> Arc<PnClient> {
+    let stream_security_mode = proxy_stream_security_mode(proxy_stream_encrypted);
+    let client = if proxy_stream_encrypted {
+        PnClient::new_with_tls_material(ttp_client, local_identity, cert_factory)
+    } else {
+        PnClient::new(ttp_client)
+    };
+    client.set_stream_security_mode(stream_security_mode);
+    client
+}
+
+fn build_proxy_client(
+    config: &P2pStackConfig,
+    sn_service: &SNClientServiceRef,
+    cert_factory: P2pIdentityCertFactoryRef,
+) -> P2pResult<Option<TunnelNetworkRef>> {
+    if !config.support_proxy() {
+        return Ok(None);
+    }
+
+    if let Some(proxy_client) = config.proxy_client().clone() {
+        if config.proxy_stream_encrypted() {
+            return Err(p2p_err!(
+                P2pErrorCode::NotSupport,
+                "proxy stream encryption requires default pn client"
+            ));
+        }
+        return Ok(Some(proxy_client));
+    }
+
+    let proxy_client: TunnelNetworkRef = create_default_proxy_client(
+        sn_service.get_ttp_client(),
+        config.local_identity().clone(),
+        cert_factory,
+        config.proxy_stream_encrypted(),
+    );
+    Ok(Some(proxy_client))
+}
+
 pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> {
     let gen_id = Arc::new(TunnelIdGenerator::new());
     let gen_seq = Arc::new(SequenceGenerator::new());
@@ -567,7 +630,6 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let sn_tunnel_count = config.sn_tunnel_count();
     let sn_query_interval = config.sn_query_interval();
     let support_proxy = config.support_proxy();
-    let proxy_client = config.proxy_client().clone();
 
     let sn_service = if let Some(local_ip_provider) = config.local_ip_provider.clone() {
         SNClientService::new_with_local_ip_provider(
@@ -599,13 +661,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     };
 
     let proxy_client = if support_proxy {
-        let proxy_client = if let Some(proxy_client) = proxy_client {
-            proxy_client
-        } else {
-            let default = PnClient::new(sn_service.get_ttp_client());
-            default as TunnelNetworkRef
-        };
-        Some(proxy_client)
+        build_proxy_client(&config, &sn_service, cert_factory.clone())?
     } else {
         None
     };
@@ -665,4 +721,189 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         )
         .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoint::Protocol;
+    use crate::networks::{NetManager, TunnelConnectIntent, TunnelPurpose};
+    use crate::p2p_identity::{
+        EncodedP2pIdentity, EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pIdentityCert,
+        P2pIdentityCertFactory, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactory,
+        P2pIdentityRef, P2pIdentitySignType, P2pSignature,
+    };
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct TestIdentity {
+        id: P2pId,
+    }
+
+    impl TestIdentity {
+        fn new(byte: u8) -> Self {
+            Self {
+                id: P2pId::from(vec![byte; 32]),
+            }
+        }
+    }
+
+    impl P2pIdentity for TestIdentity {
+        fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
+            Ok(Arc::new(TestIdentityCert {
+                id: self.id.clone(),
+            }))
+        }
+
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            self.id.to_string()
+        }
+
+        fn sign_type(&self) -> P2pIdentitySignType {
+            P2pIdentitySignType::Ed25519
+        }
+
+        fn sign(&self, _message: &[u8]) -> P2pResult<P2pSignature> {
+            Ok(vec![1, 2, 3, 4])
+        }
+
+        fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
+            Ok(self.id.as_slice().to_vec())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            vec![]
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityRef {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestIdentityCert {
+        id: P2pId,
+    }
+
+    impl P2pIdentityCert for TestIdentityCert {
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            self.id.to_string()
+        }
+
+        fn sign_type(&self) -> P2pIdentitySignType {
+            P2pIdentitySignType::Ed25519
+        }
+
+        fn verify(&self, _message: &[u8], _sign: &P2pSignature) -> bool {
+            true
+        }
+
+        fn verify_cert(&self, _name: &str) -> bool {
+            true
+        }
+
+        fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
+            Ok(self.id.as_slice().to_vec())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            vec![]
+        }
+
+        fn sn_list(&self) -> Vec<P2pSn> {
+            vec![]
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityCertRef {
+            Arc::new(self.clone())
+        }
+    }
+
+    struct TestIdentityFactory;
+
+    impl P2pIdentityFactory for TestIdentityFactory {
+        fn create(&self, id: &EncodedP2pIdentity) -> P2pResult<P2pIdentityRef> {
+            Ok(Arc::new(TestIdentity {
+                id: P2pId::from(id.clone()),
+            }))
+        }
+    }
+
+    struct TestIdentityCertFactory;
+
+    impl P2pIdentityCertFactory for TestIdentityCertFactory {
+        fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
+            Ok(Arc::new(TestIdentityCert {
+                id: P2pId::from(cert.clone()),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn create_default_proxy_client_enables_tls_for_proxy_streams() {
+        let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(7));
+        let cert_factory: P2pIdentityCertFactoryRef = Arc::new(TestIdentityCertFactory);
+        let net_manager = NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
+        let pn_client =
+            create_default_proxy_client(ttp_client, local_identity.clone(), cert_factory, true);
+
+        assert_eq!(
+            pn_client.stream_security_mode(),
+            PnProxyStreamSecurityMode::TlsRequired
+        );
+
+        let remote = Endpoint::from((Protocol::Ext(1), "0.0.0.0:0".parse().unwrap()));
+        let tunnel = pn_client
+            .create_tunnel_with_intent(
+                &local_identity,
+                &remote,
+                &P2pId::from(vec![8; 32]),
+                None,
+                TunnelConnectIntent::default(),
+            )
+            .await
+            .unwrap();
+        let datagram_purpose = "stack-test".to_owned();
+        if let Err(err) = tunnel
+            .open_datagram(TunnelPurpose::from_value(&datagram_purpose).unwrap())
+            .await
+        {
+            assert_ne!(err.code(), P2pErrorCode::NotSupport);
+        }
+    }
+
+    #[test]
+    fn stack_config_sets_proxy_stream_encryption_flag() {
+        let identity_factory = Arc::new(TestIdentityFactory);
+        let cert_factory = Arc::new(TestIdentityCertFactory);
+        let env = P2pEnv::new(
+            NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
+            identity_factory,
+            cert_factory,
+            Arc::new(DeviceCache::new(
+                &DeviceCacheConfig {
+                    expire: Duration::from_secs(60),
+                    capacity: 8,
+                },
+                None,
+            )),
+            DefaultTlsServerCertResolver::new(),
+            DefaultP2pConnectionInfoCache::new(),
+            vec![],
+            None,
+        );
+        let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(9));
+
+        let config = P2pStackConfig::new(env, local_identity).set_proxy_stream_encrypted(true);
+        assert!(config.proxy_stream_encrypted());
+    }
 }

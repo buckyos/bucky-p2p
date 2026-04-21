@@ -1,21 +1,21 @@
 use crate::error::P2pResult;
 use crate::networks::{TunnelListener, TunnelRef};
-use crate::p2p_identity::P2pId;
 use crate::pn::ProxyOpenReq;
 use crate::ttp::TtpListenerRef;
 
+use super::pn_client::PnShared;
 use super::pn_client::read_pn_command;
 use super::pn_tunnel::PnTunnel;
 
 pub struct PnListener {
-    local_id: P2pId,
+    shared: std::sync::Arc<PnShared>,
     ttp_listener: TtpListenerRef,
 }
 
 impl PnListener {
-    pub(super) fn new(local_id: P2pId, ttp_listener: TtpListenerRef) -> Self {
+    pub(super) fn new(shared: std::sync::Arc<PnShared>, ttp_listener: TtpListenerRef) -> Self {
         Self {
-            local_id,
+            shared,
             ttp_listener,
         }
     }
@@ -28,14 +28,21 @@ impl TunnelListener for PnListener {
         let req = read_pn_command::<_, ProxyOpenReq>(&mut read).await?;
         log::debug!(
             "pn listener accept local={} from={} to={} kind={:?} purpose={} tunnel_id={:?}",
-            self.local_id,
+            self.shared.local_id(),
             req.from,
             req.to,
             req.kind,
             req.purpose,
             req.tunnel_id
         );
-        let tunnel: TunnelRef = PnTunnel::new_passive(self.local_id.clone(), req, read, write);
+        let tunnel: TunnelRef = PnTunnel::new_passive(
+            self.shared.local_id(),
+            req,
+            read,
+            write,
+            self.shared.tls_context(),
+            self.shared.stream_security_mode(),
+        );
         Ok(tunnel)
     }
 }

@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-17
+approved_at: 2026-04-20
 ---
 
 # p2p-frame 设计
@@ -16,6 +16,7 @@ approved_at: 2026-04-17
 - 复用现有协议说明，而不是重复编写设计内容。
 - 为 planning、testing 和 acceptance 定义具备阶段可执行性的子模块责任归属。
 - 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内。
+- 为本轮 proxy tunnel `stream` 路径的“可选 TLS-over-proxy 载荷加密、由使用者显式接口控制且由两端在 tunnel 外约定”需求建立可执行设计边界，并明确 `datagram` 路径继续保持明文兼容且忽略该 `stream` 加密模式，同时把加密接口限制在 PN 专有 API 内，而不是污染通用 `Tunnel` / `TunnelNetwork` trait。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -57,12 +58,17 @@ approved_at: 2026-04-17
 - crypto and TLS crates
 - CYFS-adjacent consumers through `cyfs-p2p`
 - `sfo-io` 提供的流量统计与限速实现，供 `pn/service` 在 bridge 数据路径中复用
+- `rustls`、`tokio-rustls` 以及现有 `p2p-frame/src/tls/**` 组件，供 proxy tunnel 在成功建链后复用 TLS 握手与身份校验
 
 ### 运行约束
 - 传输和运行时行为必须能够通过日志进行诊断。
 - 影响协议的改动必须在代码改动开始前更新 design/testing 证据。
 - `pn_server` 的统计与限速不得改变现有 `ProxyOpenReq` / `ProxyOpenResp` 握手顺序和结果码映射。
 - `pn_server` 的统计与限速主体必须以 relay 已认证并规范化后的 peer 身份为准。
+- proxy tunnel 的“是否加密”必须通过 PN 专有显式入口或显式的 client/stack 配置决定；通用 `TunnelNetwork` / `Tunnel` trait 不新增 TLS 参数。未显式配置的 `PnClient` 上，`create_tunnel*` 与 `open_*` 默认保持当前明文兼容语义；若调用方先显式设置 `PnClient::set_stream_security_mode(...)` 或 `P2pStackConfig::set_proxy_stream_encrypted(true)`，则该 `PnClient` 后续通过通用 trait 创建的 proxy tunnel，以及同一 listener 被动接受到的 `PnTunnel`，都会继承当时的 TLS 模式快照。
+- 是否启用 TLS 由 proxy tunnel 两端在 tunnel 外预先约定；PN open 控制流不额外承载 TLS 模式协商。
+- 若调用方显式选择加密，则失败路径必须直接失败，不允许静默回退到明文桥接。
+- 本轮加密设计只覆盖 proxy `stream`；proxy `datagram` 不进入 TLS-over-proxy 范围，但必须忽略 `stream` 加密模式并保持当前明文兼容语义。
 
 ## 实现布局
 ```text
@@ -99,6 +105,7 @@ p2p-frame/src
 | 文档 | 主题 | 范围 |
 |------|------|------|
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
+| `docs/versions/v0.1/modules/p2p-frame/design/pn-proxy-encryption.md` | PN client / tunnel 侧可选端到端载荷加密、显式接口和 TLS 叠加设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
 | `p2p-frame/docs/tunnel_design.md` | tunnel 概念 | tunnel |
 | `p2p-frame/docs/tunnel_command_protocol_design.md` | tunnel 命令协议 | tunnel/ttp |

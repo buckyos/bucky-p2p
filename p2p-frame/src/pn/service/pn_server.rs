@@ -348,12 +348,12 @@ impl PnService {
                             resp.result
                         )
                     })?;
-                    Ok((result, target_read, target_write))
+                    Ok((result, resp, target_read, target_write))
                 }
                 .await;
 
                 match bridge_ready {
-                    Ok((result, target_read, target_write)) => {
+                    Ok((result, resp, target_read, target_write)) => {
                         log::debug!(
                             "pn server open upstream resp tunnel_id={:?} target={} kind={:?} requested_purpose={} proxy_service={} result={:?}",
                             req.tunnel_id,
@@ -446,10 +446,7 @@ impl PnService {
             );
             let mut source_stream =
                 StatStream::new_with_tracker(source_stream, traffic_session.tracker);
-            let mut target_stream = ProxyStream::new(
-                target_read,
-                target_write,
-            );
+            let mut target_stream = ProxyStream::new(target_read, target_write);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
             if let Some(snapshot) = self.traffic_manager.snapshot(&req.from) {
                 log::debug!(

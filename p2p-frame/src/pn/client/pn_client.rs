@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,25 +9,42 @@ use crate::networks::{
     TunnelNetwork, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite,
     read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
-use crate::p2p_identity::{P2pId, P2pIdentityRef};
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{PROXY_SERVICE, PnChannelKind, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
 use crate::ttp::{TtpClientRef, TtpPortListener};
 use crate::types::TunnelIdGenerator;
 
 use super::pn_listener::PnListener;
-use super::pn_tunnel::PnTunnel;
+use super::pn_tunnel::{PnProxyStreamSecurityMode, PnTlsContext, PnTunnel, PnTunnelOptions};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct PnShared {
     ttp_client: TtpClientRef,
     gen_id: Arc<TunnelIdGenerator>,
+    tls_context: Option<PnTlsContext>,
+    stream_security_mode: AtomicU8,
 }
 
 impl PnShared {
     pub(super) fn local_id(&self) -> P2pId {
         self.ttp_client.local_id()
+    }
+
+    pub(super) fn tls_context(&self) -> Option<PnTlsContext> {
+        self.tls_context.clone()
+    }
+
+    pub(super) fn stream_security_mode(&self) -> PnProxyStreamSecurityMode {
+        PnProxyStreamSecurityMode::from_atomic(
+            self.stream_security_mode.load(Ordering::SeqCst),
+        )
+    }
+
+    pub(super) fn set_stream_security_mode(&self, mode: PnProxyStreamSecurityMode) {
+        self.stream_security_mode
+            .store(mode.to_atomic(), Ordering::SeqCst);
     }
 
     pub(super) async fn open_channel(
@@ -101,7 +119,6 @@ impl PnShared {
                 kind, purpose
             )));
         }
-
         Ok((read, write))
     }
 
@@ -122,10 +139,21 @@ pub struct PnClient {
 
 impl PnClient {
     pub fn new(ttp_client: TtpClientRef) -> Arc<Self> {
+        Self::new_with_tls_context(ttp_client, None)
+    }
+
+    fn new_with_tls_context(
+        ttp_client: TtpClientRef,
+        tls_context: Option<PnTlsContext>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             shared: Arc::new(PnShared {
                 ttp_client,
                 gen_id: Arc::new(TunnelIdGenerator::new()),
+                tls_context,
+                stream_security_mode: AtomicU8::new(
+                    PnProxyStreamSecurityMode::Disabled.to_atomic(),
+                ),
             }),
             listener: Mutex::new(None),
             listener_infos: Mutex::new(vec![TunnelListenerInfo {
@@ -133,6 +161,57 @@ impl PnClient {
                 mapping_port: None,
             }]),
         })
+    }
+
+    pub fn new_with_tls_material(
+        ttp_client: TtpClientRef,
+        local_identity: P2pIdentityRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+    ) -> Arc<Self> {
+        Self::new_with_tls_context(
+            ttp_client,
+            Some(PnTlsContext {
+                local_identity,
+                cert_factory,
+            }),
+        )
+    }
+
+    pub async fn create_tunnel_with_options(
+        &self,
+        _local_identity: &P2pIdentityRef,
+        _remote: &Endpoint,
+        remote_id: &P2pId,
+        _remote_name: Option<String>,
+        intent: crate::networks::TunnelConnectIntent,
+        options: PnTunnelOptions,
+    ) -> P2pResult<Arc<PnTunnel>> {
+        let tunnel_id = if intent.tunnel_id == crate::types::TunnelId::default() {
+            self.shared.gen_id.generate()
+        } else {
+            intent.tunnel_id
+        };
+        let candidate_id = if intent.candidate_id == crate::types::TunnelCandidateId::default() {
+            crate::types::TunnelCandidateId::from(tunnel_id.value())
+        } else {
+            intent.candidate_id
+        };
+        Ok(PnTunnel::new_active(
+            tunnel_id,
+            candidate_id,
+            self.shared.local_id(),
+            remote_id.clone(),
+            self.shared.clone(),
+            options.stream_security_mode,
+        ))
+    }
+
+    pub fn set_stream_security_mode(&self, mode: PnProxyStreamSecurityMode) {
+        self.shared.set_stream_security_mode(mode);
+    }
+
+    pub fn stream_security_mode(&self) -> PnProxyStreamSecurityMode {
+        self.shared.stream_security_mode()
     }
 }
 
@@ -178,7 +257,7 @@ impl TunnelNetwork for PnClient {
             .listen_stream(TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
             .await?;
         let listener: TunnelListenerRef =
-            Arc::new(PnListener::new(self.shared.local_id(), ttp_listener));
+            Arc::new(PnListener::new(self.shared.clone(), ttp_listener));
         *self.listener_infos.lock().unwrap() = vec![TunnelListenerInfo {
             local: *local,
             mapping_port,
@@ -252,6 +331,7 @@ impl TunnelNetwork for PnClient {
             self.shared.local_id(),
             remote_id.clone(),
             self.shared.clone(),
+            self.shared.stream_security_mode(),
         );
         Ok(tunnel)
     }

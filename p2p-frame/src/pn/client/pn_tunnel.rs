@@ -1,5 +1,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use tokio::sync::Notify;
 
@@ -8,11 +13,16 @@ use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
     ListenVPortsRef, Tunnel, TunnelCommandResult, TunnelDatagramRead, TunnelDatagramWrite,
     TunnelForm, TunnelPurpose, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    validate_server_name,
 };
-use crate::p2p_identity::P2pId;
+use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{PnChannelKind, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
+use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::types::{TunnelCandidateId, TunnelId};
+use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::version::TLS13;
 
 use super::pn_client::{PnShared, read_pn_command, write_pn_command};
 
@@ -20,6 +30,86 @@ const FIRST_LISTEN_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from
 const FIRST_LISTEN_WAIT_NOT_STARTED: u8 = 0;
 const FIRST_LISTEN_WAIT_IN_PROGRESS: u8 = 1;
 const FIRST_LISTEN_WAIT_DONE: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PnProxyStreamSecurityMode {
+    Disabled,
+    TlsRequired,
+}
+
+impl PnProxyStreamSecurityMode {
+    pub(super) fn to_atomic(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::TlsRequired => 1,
+        }
+    }
+
+    pub(super) fn from_atomic(value: u8) -> Self {
+        match value {
+            1 => Self::TlsRequired,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PnTunnelOptions {
+    pub stream_security_mode: PnProxyStreamSecurityMode,
+}
+
+impl Default for PnTunnelOptions {
+    fn default() -> Self {
+        Self {
+            stream_security_mode: PnProxyStreamSecurityMode::Disabled,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct PnTlsContext {
+    pub(super) local_identity: P2pIdentityRef,
+    pub(super) cert_factory: P2pIdentityCertFactoryRef,
+}
+
+struct ProxyTlsIo {
+    read: TunnelStreamRead,
+    write: TunnelStreamWrite,
+}
+
+impl ProxyTlsIo {
+    fn new(read: TunnelStreamRead, write: TunnelStreamWrite) -> Self {
+        Self { read, write }
+    }
+}
+
+impl tokio::io::AsyncRead for ProxyTlsIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.read).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for ProxyTlsIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.write).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.write).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.write).poll_shutdown(cx)
+    }
+}
 
 struct PassivePnTunnel {
     request: ProxyOpenReq,
@@ -38,6 +128,8 @@ pub struct PnTunnel {
     local_id: P2pId,
     remote_id: P2pId,
     role: PnTunnelRole,
+    tls_context: Option<PnTlsContext>,
+    stream_security_mode: PnProxyStreamSecurityMode,
     stream_vports: RwLock<Option<ListenVPortsRef>>,
     stream_first_listen_wait_state: AtomicU8,
     stream_vports_notify: Notify,
@@ -54,12 +146,15 @@ impl PnTunnel {
         local_id: P2pId,
         remote_id: P2pId,
         network: Arc<PnShared>,
+        stream_security_mode: PnProxyStreamSecurityMode,
     ) -> Arc<Self> {
         Arc::new(Self {
             tunnel_id,
             candidate_id,
             local_id,
             remote_id,
+            tls_context: network.tls_context(),
+            stream_security_mode,
             role: PnTunnelRole::Active { network },
             stream_vports: RwLock::new(None),
             stream_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
@@ -76,12 +171,16 @@ impl PnTunnel {
         request: ProxyOpenReq,
         read: TunnelStreamRead,
         write: TunnelStreamWrite,
+        tls_context: Option<PnTlsContext>,
+        stream_security_mode: PnProxyStreamSecurityMode,
     ) -> Arc<Self> {
         Arc::new(Self {
             tunnel_id: request.tunnel_id,
             candidate_id: TunnelCandidateId::from(request.tunnel_id.value()),
             local_id,
             remote_id: request.from.clone(),
+            tls_context,
+            stream_security_mode,
             role: PnTunnelRole::Passive(PassivePnTunnel {
                 request,
                 read: Mutex::new(Some(read)),
@@ -109,6 +208,10 @@ impl PnTunnel {
             PnTunnelRole::Active { .. } => "active",
             PnTunnelRole::Passive(_) => "passive",
         }
+    }
+
+    pub fn stream_security_mode(&self) -> PnProxyStreamSecurityMode {
+        self.stream_security_mode
     }
 
     async fn wait_first_listen_if_needed(&self, kind: PnChannelKind) {
@@ -244,12 +347,23 @@ impl PnTunnel {
             ));
         }
 
+        let stream_tls_required = expected_kind == PnChannelKind::Stream
+            && self.stream_security_mode == PnProxyStreamSecurityMode::TlsRequired;
+
         let (result, post_error) = if passive.request.to != self.local_id {
             (
                 TunnelCommandResult::InvalidParam,
                 Some(p2p_err!(
                     P2pErrorCode::InvalidParam,
                     "pn request target mismatch"
+                )),
+            )
+        } else if stream_tls_required && self.tls_context.is_none() {
+            (
+                TunnelCommandResult::InternalError,
+                Some(p2p_err!(
+                    P2pErrorCode::NotSupport,
+                    "pn tunnel tls context unavailable"
                 )),
             )
         } else {
@@ -325,13 +439,24 @@ impl PnTunnel {
         }
 
         log::debug!(
-            "pn passive accept success local={} remote={} kind={:?} purpose={}",
+            "pn passive accept success local={} remote={} kind={:?} purpose={} tls_mode={:?}",
             self.local_id,
             self.remote_id,
             req.kind,
-            req.purpose
+            req.purpose,
+            self.stream_security_mode
         );
-        Ok((req, read, write))
+        if stream_tls_required {
+            let tls_context = self
+                .tls_context
+                .clone()
+                .ok_or_else(|| p2p_err!(P2pErrorCode::NotSupport, "pn tunnel tls unavailable"))?;
+            let (read, write) =
+                wrap_stream_with_server_tls(read, write, &tls_context, &req.from).await?;
+            Ok((req, read, write))
+        } else {
+            Ok((req, read, write))
+        }
     }
 }
 
@@ -434,14 +559,23 @@ impl Tunnel for PnTunnel {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "pn tunnel closed"));
         }
 
-        network
+        let (read, write) = network
             .open_channel(
                 self.tunnel_id,
                 self.remote_id.clone(),
                 PnChannelKind::Stream,
                 purpose,
             )
-            .await
+            .await?;
+        if self.stream_security_mode == PnProxyStreamSecurityMode::TlsRequired {
+            let tls_context = self
+                .tls_context
+                .clone()
+                .ok_or_else(|| p2p_err!(P2pErrorCode::NotSupport, "pn tunnel tls unavailable"))?;
+            wrap_stream_with_client_tls(read, write, &tls_context, &self.remote_id).await
+        } else {
+            Ok((read, write))
+        }
     }
 
     async fn accept_stream(
@@ -461,7 +595,6 @@ impl Tunnel for PnTunnel {
         if self.closed.load(Ordering::SeqCst) {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "pn tunnel closed"));
         }
-
         let (_read, write) = network
             .open_channel(
                 self.tunnel_id,
@@ -479,12 +612,112 @@ impl Tunnel for PnTunnel {
     }
 }
 
+async fn wrap_stream_with_client_tls(
+    read: TunnelStreamRead,
+    write: TunnelStreamWrite,
+    tls_context: &PnTlsContext,
+    remote_id: &P2pId,
+) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+    let client_config = rustls::ClientConfig::builder_with_provider(crate::tls::provider().into())
+        .with_protocol_versions(&[&TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(crate::tls::TlsServerCertVerifier::new(
+            tls_context.cert_factory.clone(),
+            remote_id.clone(),
+        )))
+        .with_client_auth_cert(
+            vec![CertificateDer::from(
+                tls_context
+                    .local_identity
+                    .get_identity_cert()?
+                    .get_encoded_cert()?,
+            )],
+            PrivatePkcs8KeyDer::from(tls_context.local_identity.get_encoded_identity()?).into(),
+        )
+        .map_err(crate::error::into_p2p_err!(P2pErrorCode::TlsError))?;
+    let tls_connector = runtime::TlsConnector::from(Arc::new(client_config));
+    let stream = ProxyTlsIo::new(read, write);
+    let tls_stream = tls_connector
+        .connect(
+            validate_server_name(remote_id.to_string())
+                .try_into()
+                .unwrap(),
+            stream,
+        )
+        .await
+        .map_err(crate::error::into_p2p_err!(
+            P2pErrorCode::TlsError,
+            "pn proxy tls client handshake failed"
+        ))?;
+    let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
+    Ok((Box::pin(read), Box::pin(write)))
+}
+
+async fn wrap_stream_with_server_tls(
+    read: TunnelStreamRead,
+    write: TunnelStreamWrite,
+    tls_context: &PnTlsContext,
+    remote_id: &P2pId,
+) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+    let resolver = DefaultTlsServerCertResolver::new();
+    resolver
+        .add_server_identity(tls_context.local_identity.clone())
+        .await?;
+    let mut server_config = ServerConfig::builder_with_provider(crate::tls::provider().into())
+        .with_protocol_versions(&[&TLS13])
+        .unwrap()
+        .with_client_cert_verifier(Arc::new(crate::tls::TlsClientCertVerifier::new(
+            tls_context.cert_factory.clone(),
+        )))
+        .with_cert_resolver(resolver.clone().get_resolves_server_cert());
+    server_config.key_log = Arc::new(rustls::KeyLogFile::new());
+    let acceptor = runtime::TlsAcceptor::from(Arc::new(server_config));
+    let stream = ProxyTlsIo::new(read, write);
+    let tls_stream = acceptor
+        .accept(stream)
+        .await
+        .map_err(crate::error::into_p2p_err!(
+            P2pErrorCode::TlsError,
+            "pn proxy tls server handshake failed"
+        ))?;
+    let (_, tls_conn) = tls_stream.get_ref();
+    let cert = tls_conn
+        .peer_certificates()
+        .ok_or_else(|| p2p_err!(P2pErrorCode::CertError, "no cert"))?;
+    if cert.is_empty() {
+        return Err(p2p_err!(P2pErrorCode::CertError, "no cert"));
+    }
+    let remote_cert = tls_context
+        .cert_factory
+        .create(&cert[0].as_ref().to_vec())?;
+    if remote_cert.get_id() != *remote_id {
+        return Err(p2p_err!(
+            P2pErrorCode::CertError,
+            "pn proxy tls client id mismatch expected={} actual={}",
+            remote_id,
+            remote_cert.get_id()
+        ));
+    }
+    let (read, write) = runtime::split(runtime::TlsStream::from(tls_stream));
+    Ok((Box::pin(read), Box::pin(write)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::networks::ListenVPortRegistry;
+    use crate::networks::NetManager;
     use crate::networks::allow_all_listen_vports;
+    use crate::p2p_identity::{
+        EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
+        P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef,
+        P2pSignature, P2pSn,
+    };
+    use crate::tls::{DefaultTlsServerCertResolver, init_tls};
     use crate::types::TunnelId;
+    use sha2::{Digest, Sha256};
+    use std::sync::Once;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, split};
     use tokio::time::timeout;
 
@@ -496,9 +729,163 @@ mod tests {
         TunnelPurpose::from_value(&vport).unwrap()
     }
 
+    static INIT_TLS_ONCE: Once = Once::new();
+
+    #[derive(Clone)]
+    struct FakeTlsIdentity {
+        key: Vec<u8>,
+    }
+
+    impl FakeTlsIdentity {
+        fn new(key: Vec<u8>) -> Self {
+            Self { key }
+        }
+
+        fn id(&self) -> P2pId {
+            P2pId::from(self.key.clone())
+        }
+
+        fn name(&self) -> String {
+            self.id().to_string()
+        }
+    }
+
+    struct FakeTlsCert {
+        key: Vec<u8>,
+    }
+
+    impl FakeTlsCert {
+        fn new(key: Vec<u8>) -> Self {
+            Self { key }
+        }
+
+        fn id(&self) -> P2pId {
+            P2pId::from(self.key.clone())
+        }
+
+        fn name(&self) -> String {
+            self.id().to_string()
+        }
+    }
+
+    struct FakeTlsIdentityFactory;
+
+    impl P2pIdentityFactory for FakeTlsIdentityFactory {
+        fn create(&self, id: &EncodedP2pIdentity) -> P2pResult<P2pIdentityRef> {
+            Ok(Arc::new(FakeTlsIdentity::new(id.clone())))
+        }
+    }
+
+    struct FakeTlsCertFactory;
+
+    impl P2pIdentityCertFactory for FakeTlsCertFactory {
+        fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
+            Ok(Arc::new(FakeTlsCert::new(cert.clone())))
+        }
+    }
+
+    fn fake_signature(key: &[u8], message: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(key);
+        hasher.update(message);
+        hasher.finalize().to_vec()
+    }
+
+    impl P2pIdentity for FakeTlsIdentity {
+        fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
+            Ok(Arc::new(FakeTlsCert::new(self.key.clone())))
+        }
+
+        fn get_id(&self) -> P2pId {
+            self.id()
+        }
+
+        fn get_name(&self) -> String {
+            self.name()
+        }
+
+        fn sign_type(&self) -> crate::p2p_identity::P2pIdentitySignType {
+            crate::p2p_identity::P2pIdentitySignType::Ed25519
+        }
+
+        fn sign(&self, message: &[u8]) -> P2pResult<P2pSignature> {
+            Ok(fake_signature(self.key.as_slice(), message))
+        }
+
+        fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
+            Ok(self.key.clone())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            vec![]
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityRef {
+            Arc::new(self.clone())
+        }
+    }
+
+    impl P2pIdentityCert for FakeTlsCert {
+        fn get_id(&self) -> P2pId {
+            self.id()
+        }
+
+        fn get_name(&self) -> String {
+            self.name()
+        }
+
+        fn sign_type(&self) -> crate::p2p_identity::P2pIdentitySignType {
+            crate::p2p_identity::P2pIdentitySignType::Ed25519
+        }
+
+        fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool {
+            fake_signature(self.key.as_slice(), message) == *sign
+        }
+
+        fn verify_cert(&self, name: &str) -> bool {
+            crate::networks::parse_server_name(name) == self.name()
+        }
+
+        fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
+            Ok(self.key.clone())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            vec![]
+        }
+
+        fn sn_list(&self) -> Vec<P2pSn> {
+            vec![]
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityCertRef {
+            Arc::new(Self::new(self.key.clone()))
+        }
+    }
+
+    fn init_fake_tls() {
+        INIT_TLS_ONCE.call_once(|| {
+            init_tls(Arc::new(FakeTlsIdentityFactory));
+        });
+    }
+
+    fn tls_context(byte: u8) -> (P2pIdentityRef, PnTlsContext) {
+        init_fake_tls();
+        let identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![byte; 32]));
+        let cert_factory: P2pIdentityCertFactoryRef = Arc::new(FakeTlsCertFactory);
+        (
+            identity.clone(),
+            PnTlsContext {
+                local_identity: identity,
+                cert_factory,
+            },
+        )
+    }
+
     fn passive_tunnel(
         kind: PnChannelKind,
         vport: u16,
+        stream_security_mode: PnProxyStreamSecurityMode,
     ) -> (Arc<PnTunnel>, TunnelStreamRead, TunnelStreamWrite) {
         let local_id = test_p2p_id(1);
         let remote_id = test_p2p_id(2);
@@ -518,6 +905,8 @@ mod tests {
                 request,
                 Box::pin(local_read),
                 Box::pin(local_write),
+                None,
+                stream_security_mode,
             ),
             Box::pin(remote_read),
             Box::pin(remote_write),
@@ -526,7 +915,11 @@ mod tests {
 
     #[tokio::test]
     async fn passive_stream_accept_returns_channel_and_success_response() {
-        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(PnChannelKind::Stream, 1001);
+        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(
+            PnChannelKind::Stream,
+            1001,
+            PnProxyStreamSecurityMode::Disabled,
+        );
         tunnel
             .listen_stream(allow_all_listen_vports())
             .await
@@ -554,7 +947,11 @@ mod tests {
 
     #[tokio::test]
     async fn passive_datagram_accept_returns_read_and_success_response() {
-        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(PnChannelKind::Datagram, 2002);
+        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(
+            PnChannelKind::Datagram,
+            2002,
+            PnProxyStreamSecurityMode::Disabled,
+        );
         tunnel
             .listen_datagram(allow_all_listen_vports())
             .await
@@ -577,7 +974,11 @@ mod tests {
 
     #[tokio::test]
     async fn passive_stream_accept_rejects_unlistened_port() {
-        let (tunnel, mut peer_read, _peer_write) = passive_tunnel(PnChannelKind::Stream, 3003);
+        let (tunnel, mut peer_read, _peer_write) = passive_tunnel(
+            PnChannelKind::Stream,
+            3003,
+            PnProxyStreamSecurityMode::Disabled,
+        );
         let empty_vports = ListenVPortRegistry::<()>::new();
         tunnel
             .listen_stream(empty_vports.as_listen_vports_ref())
@@ -595,7 +996,11 @@ mod tests {
 
     #[tokio::test]
     async fn passive_stream_accept_requires_listen_first() {
-        let (tunnel, mut peer_read, _peer_write) = passive_tunnel(PnChannelKind::Stream, 4004);
+        let (tunnel, mut peer_read, _peer_write) = passive_tunnel(
+            PnChannelKind::Stream,
+            4004,
+            PnProxyStreamSecurityMode::Disabled,
+        );
 
         let err = tunnel.accept_stream().await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
@@ -608,7 +1013,11 @@ mod tests {
 
     #[tokio::test]
     async fn passive_stream_accept_waits_for_late_listen() {
-        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(PnChannelKind::Stream, 5005);
+        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(
+            PnChannelKind::Stream,
+            5005,
+            PnProxyStreamSecurityMode::Disabled,
+        );
 
         let mut pending_accept = Box::pin({
             let tunnel = tunnel.clone();
@@ -647,7 +1056,11 @@ mod tests {
 
     #[tokio::test]
     async fn passive_stream_wait_is_independent_from_datagram_listen() {
-        let (tunnel, mut peer_read, _peer_write) = passive_tunnel(PnChannelKind::Stream, 5006);
+        let (tunnel, mut peer_read, _peer_write) = passive_tunnel(
+            PnChannelKind::Stream,
+            5006,
+            PnProxyStreamSecurityMode::Disabled,
+        );
 
         let mut pending_accept = Box::pin({
             let tunnel = tunnel.clone();
@@ -677,5 +1090,161 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.result, TunnelCommandResult::Success as u8);
+    }
+
+    #[tokio::test]
+    async fn passive_stream_accept_wraps_stream_with_tls_when_requested() {
+        let (server_identity, server_tls) = tls_context(11);
+        let (client_identity, client_tls) = tls_context(12);
+        let request = ProxyOpenReq {
+            tunnel_id: TunnelId::from(52),
+            from: client_identity.get_id(),
+            to: server_identity.get_id(),
+            kind: PnChannelKind::Stream,
+            purpose: purpose_of(6001),
+        };
+        let (local, remote) = tokio::io::duplex(4096);
+        let (local_read, local_write) = split(local);
+        let (remote_read, remote_write) = split(remote);
+        let tunnel = PnTunnel::new_passive(
+            server_identity.get_id(),
+            request.clone(),
+            Box::pin(local_read),
+            Box::pin(local_write),
+            Some(server_tls),
+            PnProxyStreamSecurityMode::TlsRequired,
+        );
+        tunnel
+            .listen_stream(allow_all_listen_vports())
+            .await
+            .unwrap();
+
+        let accept_task = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move { tunnel.accept_stream().await }
+        });
+
+        let mut peer_read = Box::pin(remote_read) as TunnelStreamRead;
+        let peer_write = Box::pin(remote_write) as TunnelStreamWrite;
+
+        let resp = read_pn_command::<_, ProxyOpenResp>(&mut peer_read)
+            .await
+            .unwrap();
+        assert_eq!(resp.result, TunnelCommandResult::Success as u8);
+
+        let (mut client_read, mut client_write) = wrap_stream_with_client_tls(
+            peer_read,
+            peer_write,
+            &client_tls,
+            &server_identity.get_id(),
+        )
+        .await
+        .unwrap();
+
+        let (purpose, mut server_read, mut server_write) = accept_task.await.unwrap().unwrap();
+        assert_eq!(purpose, purpose_of(6001));
+
+        client_write.write_all(b"ping").await.unwrap();
+        let mut ping_buf = [0u8; 4];
+        server_read.read_exact(&mut ping_buf).await.unwrap();
+        assert_eq!(&ping_buf, b"ping");
+
+        server_write.write_all(b"pong").await.unwrap();
+        let mut pong_buf = [0u8; 4];
+        client_read.read_exact(&mut pong_buf).await.unwrap();
+        assert_eq!(&pong_buf, b"pong");
+    }
+
+    #[tokio::test]
+    async fn client_tls_wrapper_rejects_wrong_remote_identity() {
+        let (server_identity, server_tls) = tls_context(21);
+        let (client_identity, client_tls) = tls_context(22);
+        let wrong_remote_id = test_p2p_id(23);
+        let (server_side, client_side) = tokio::io::duplex(4096);
+        let (server_read, server_write) = split(server_side);
+        let (client_read, client_write) = split(client_side);
+
+        let server_task = tokio::spawn(async move {
+            wrap_stream_with_server_tls(
+                Box::pin(server_read),
+                Box::pin(server_write),
+                &server_tls,
+                &client_identity.get_id(),
+            )
+            .await
+        });
+
+        let client_result = wrap_stream_with_client_tls(
+            Box::pin(client_read),
+            Box::pin(client_write),
+            &client_tls,
+            &wrong_remote_id,
+        )
+        .await;
+        assert!(client_result.is_err());
+
+        let server_result = server_task.await.unwrap();
+        assert!(server_result.is_err());
+        assert_ne!(server_identity.get_id(), wrong_remote_id);
+    }
+
+    #[tokio::test]
+    async fn passive_datagram_ignores_tls_mode_and_returns_read_and_success_response() {
+        let (tunnel, mut peer_read, mut peer_write) = passive_tunnel(
+            PnChannelKind::Datagram,
+            6002,
+            PnProxyStreamSecurityMode::TlsRequired,
+        );
+        tunnel
+            .listen_datagram(allow_all_listen_vports())
+            .await
+            .unwrap();
+
+        let (purpose, mut read) = tunnel.accept_datagram().await.unwrap();
+        assert_eq!(purpose, purpose_of(6002));
+
+        let resp = read_pn_command::<_, ProxyOpenResp>(&mut peer_read)
+            .await
+            .unwrap();
+        assert_eq!(resp.result, TunnelCommandResult::Success as u8);
+
+        peer_write.write_all(b"data").await.unwrap();
+        let mut buf = [0u8; 4];
+        read.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"data");
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_with_options_sets_tls_mode_without_local_datagram_rejection() {
+        let (local_identity, _tls) = tls_context(41);
+        let net_manager = NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
+        let pn_client = super::super::pn_client::PnClient::new_with_tls_material(
+            ttp_client,
+            local_identity.clone(),
+            Arc::new(FakeTlsCertFactory),
+        );
+        let remote = Endpoint::from((Protocol::Ext(1), "0.0.0.0:0".parse().unwrap()));
+        let tunnel = pn_client
+            .create_tunnel_with_options(
+                &local_identity,
+                &remote,
+                &test_p2p_id(42),
+                None,
+                crate::networks::TunnelConnectIntent::default(),
+                PnTunnelOptions {
+                    stream_security_mode: PnProxyStreamSecurityMode::TlsRequired,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tunnel.stream_security_mode(),
+            PnProxyStreamSecurityMode::TlsRequired
+        );
+        if let Err(err) = tunnel.open_datagram(purpose_of(6003)).await {
+            assert_ne!(err.code(), P2pErrorCode::NotSupport);
+        }
     }
 }
