@@ -17,6 +17,7 @@
   - implementation 负责代码与测试
   - acceptance 负责审计结果
 - 除非版本化规则发布了更窄的例外，否则始终执行硬性的 implementation admission。
+- 若版本化规则为某个模块发布了更窄的文档豁免，则该豁免只能缩窄该模块自身的数据包要求，不能替代受影响相邻模块的数据包与验证责任。
 - 验收遵循 proposal-first。已批准的 proposal 是最终成功基线。
 
 ## 架构倾向

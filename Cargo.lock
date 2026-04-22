@@ -3379,9 +3379,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-io"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a8d690300f2d0d04c43ec9c645a193143b4ab1a65beb3d5c0fde7004a3aa046"
+checksum = "a052cd1dddabbee80496925279c95dd48ca271bbfa8e83ab323450cec8c26f1e"
 dependencies = [
  "async-recursion",
  "async-trait",

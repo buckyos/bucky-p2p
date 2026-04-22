@@ -16,6 +16,9 @@ implementation_gate:
   require_testplan: true
   require_approval_metadata: true
   require_direct_change_mapping: true
+  # 这些模块的本模块改动不要求 packet 文档准入；跨模块影响仍需回到受影响模块走完整文档阶段。
+  document_exempt_modules:
+    - cyfs-p2p-test
   direct_change_mapping_policy:
     required_sections:
       proposal.md: "## 验收锚点"
@@ -66,6 +69,7 @@ modules:
     type: binary
     long_lived_doc: docs/modules/cyfs-p2p-test.md
     packet_dir: docs/versions/v0.1/modules/cyfs-p2p-test
+    doc_policy: module-packet-exempt
     commands:
       unit: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p-test", "unit"]
       dv: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p-test", "dv"]

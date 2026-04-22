@@ -24,6 +24,7 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("harness/rules/design-doc-rules.md"),
     pathlib.Path("harness/rules/direct-change-mapping-rules.md"),
     pathlib.Path("harness/rules/implementation-admission-rules.md"),
+    pathlib.Path("harness/rules/module-doc-exception-rules.md"),
     pathlib.Path("harness/rules/proposal-first-acceptance-rules.md"),
     pathlib.Path("harness/rules/testing-doc-rules.md"),
     pathlib.Path("harness/rules/trigger-rules.md"),

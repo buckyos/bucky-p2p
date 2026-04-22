@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-20
+approved_at: 2026-04-22
 ---
 
 # p2p-frame 设计
@@ -18,6 +18,7 @@ approved_at: 2026-04-20
 - 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内。
 - 为本轮 proxy tunnel `stream` 路径的“可选 TLS-over-proxy 载荷加密、由使用者显式接口控制且由两端在 tunnel 外约定”需求建立可执行设计边界，并明确 `datagram` 路径继续保持明文兼容且忽略该 `stream` 加密模式，同时把加密接口限制在 PN 专有 API 内，而不是污染通用 `Tunnel` / `TunnelNetwork` trait。
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
+- 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -33,7 +34,7 @@ approved_at: 2026-04-20
 | 子模块 | 类型 | 职责 | 输入 | 输出 | 依赖 | 是否独立文档 |
 |--------|------|------|------|------|------|----------------|
 | `networks` | core transport | TCP/QUIC 监听器、endpoint、validator 和底层网络行为 | sockets、runtime、TLS | 传输事件和 tunnel plumbing | runtime、TLS | no |
-| `tunnel` | orchestration | tunnel 生命周期、连接选择、proxy 回退与后续脱代理升级行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | no |
+| `tunnel` | orchestration | tunnel 生命周期、连接选择、统一 register/publish 生命周期、proxy 回退与后续脱代理升级行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | yes |
 | `ttp` | protocol | tunnel 上的命令和流复用协议 | tunnel IO | 带帧的命令/流行为 | `tunnel` | no |
 | `sn` | service | 对端注册、信令和调用转发 | tunnel/ttp、身份 | SN 服务行为 | `ttp`、`p2p_identity` | no |
 | `pn` | service | proxy-node 中继行为 | tunnel/ttp | 基于 relay 的连通性 | `tunnel`、`ttp` | yes |
@@ -73,6 +74,10 @@ approved_at: 2026-04-20
 - 当某个远端当前只有 proxy tunnel 可用时，`TunnelManager` 必须在后台继续尝试 direct 或 reverse 建链，而不是无限期停留在 proxy 路径。
 - 上述脱代理尝试不得再次把“升级任务”回退成 proxy 建链；proxy 只作为对外可用的兜底连通性，而不是后台升级路径的成功条件。
 - 持续失败的脱代理尝试可以延长重试间隔，但必须有上限；当前实现约束为初始 5 分钟、失败后指数退避、最大不超过 2 小时。
+- 对外可用的新 tunnel 必须先进入 `TunnelManager` 候选注册，再进入统一 publish 路径；除 `remote_id` 未知的临时 wrapper 外，不允许存在“只广播不登记”的长期语义分支。
+- `TunnelManager` 的 publish 可见性决策必须收敛到单一生命周期模型：默认“register 后立即 publish”，唯一允许的延后场景是命中本地 `(remote_id, tunnel_id)` `reverse_waiter` 的 reverse tunnel。
+- 上述延后 publish 只影响时机，不改变规则：reverse tunnel 一旦完成本地 waiter 交付，就必须通过与 direct/proxy 相同的 publish 入口变为可见候选。
+- reverse 建链若在等待期间超时、取消或失败，相关 waiter 必须被清理；该 waiter 之后才到达的同 `(remote_id, tunnel_id)` reverse tunnel 不得继续隐藏，而必须按普通新 tunnel 进入 publish 路径。
 
 ## 实现布局
 ```text
@@ -109,6 +114,7 @@ p2p-frame/src
 | 文档 | 主题 | 范围 |
 |------|------|------|
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
+| `docs/versions/v0.1/modules/p2p-frame/design/tunnel-publish-lifecycle.md` | `TunnelManager` 新 tunnel 注册/发布生命周期与 reverse 延后 publish 规则补充 | `tunnel` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-proxy-encryption.md` | PN client / tunnel 侧可选端到端载荷加密、显式接口和 TLS 叠加设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
 | `p2p-frame/docs/tunnel_design.md` | tunnel 概念 | tunnel |
@@ -118,6 +124,11 @@ p2p-frame/src
 | `p2p-frame/docs/sn_design.md` | SN 行为 | sn |
 | `p2p-frame/docs/pn_design.md` | PN 协议以及 client/server 参考说明 | pn |
 | `p2p-frame/docs/ttp_module_design.md` | TTP 模块行为 | ttp |
+
+## 当前改动直接映射
+| Proposal 条目 | 设计对象 | 代码路径/接口 | 风险/回滚备注 |
+|---------------|----------|---------------|----------------|
+| 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。

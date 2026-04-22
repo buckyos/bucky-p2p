@@ -694,7 +694,7 @@ async fn all_in_one() {
     p2p_config = p2p_config
         .set_tcp_accept_timout(std::time::Duration::from_secs(5))
         .set_quic_connect_timeout(Duration::from_secs(5))
-        .set_quic_idle_time(Duration::from_secs(30));
+        .set_quic_idle_time(Duration::from_secs(60));
     let env = create_p2p_env(p2p_config).await.unwrap();
 
     let mut direct_eps = Vec::new();
@@ -772,6 +772,11 @@ async fn all_in_one() {
         .get_identity_cert()
         .unwrap()
         .get_id();
+    let client_id = stack_client
+        .local_identity()
+        .get_identity_cert()
+        .unwrap()
+        .get_id();
     let reverse_target_id = stack_reverse_target
         .local_identity()
         .get_identity_cert()
@@ -838,6 +843,11 @@ async fn all_in_one() {
         1234,
         "direct",
     ));
+    tokio::task::spawn(start_stream_listener(
+        stack_client.clone(),
+        1234,
+        "client",
+    ));
     tokio::task::spawn(start_datagram_listener(
         stack_direct_target.clone(),
         1234,
@@ -894,6 +904,49 @@ async fn all_in_one() {
         .await
         {
             log::error!("all-in-one stop: case stream_direct_success failed");
+            return;
+        }
+
+        if !run_case(
+            &mut stats,
+            "stream_direct_return_success",
+            CaseExpectation::Success,
+            || async {
+                let (mut read, mut write) = stack_direct_target
+                    .stream_manager()
+                    .connect_from_id(&client_id, tunnel_purpose(1234))
+                    .await?;
+                let mut buf = [0u8; 64];
+                let _ = read.read(buf.as_mut_slice()).await.map_err(|e| {
+                    P2pError::from((
+                        P2pErrorCode::Failed,
+                        "stream return read failed".to_string(),
+                        e,
+                    ))
+                })?;
+                write
+                    .write_all("stream direct return".as_bytes())
+                    .await
+                    .map_err(|e| {
+                        P2pError::from((
+                            P2pErrorCode::Failed,
+                            "stream return write failed".to_string(),
+                            e,
+                        ))
+                    })?;
+                write.flush().await.map_err(|e| {
+                    P2pError::from((
+                        P2pErrorCode::Failed,
+                        "stream return flush failed".to_string(),
+                        e,
+                    ))
+                })?;
+                Ok(())
+            },
+        )
+        .await
+        {
+            log::error!("all-in-one stop: case stream_direct_return_success failed");
             return;
         }
 

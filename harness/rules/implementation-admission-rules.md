@@ -9,19 +9,24 @@
 - 某个版本化模块中的代码与测试代码变更
 
 ## 必需输入
-- `docs/versions/<version>/modules/<module>/proposal.md`
-- `docs/versions/<version>/modules/<module>/design.md`
-- `docs/versions/<version>/modules/<module>/testing.md`
-- `docs/versions/<version>/modules/<module>/testplan.yaml`
+- 对默认模块：
+  - `docs/versions/<version>/modules/<module>/proposal.md`
+  - `docs/versions/<version>/modules/<module>/design.md`
+  - `docs/versions/<version>/modules/<module>/testing.md`
+  - `docs/versions/<version>/modules/<module>/testplan.yaml`
+- 对 `harness/rules/module-doc-exception-rules.md` 中列出的模块：
+  - 机器可读治理中已登记该豁免
+  - 当前改动确属该模块自身的本地 harness/工具改动，而不是跨模块契约变更
 
 ## 准入规则
-- 在所有必需输入存在之前，implementation 不得开始。
-- 在这三个输入全部为 `status: approved` 之前，implementation 不得开始。
-- `status: approved` 不是充分条件；implementation 与 bugfix 任务必须读取这些已批准文档，并确认当前改动能直接映射到 proposal、design 与 testing 中的具体条目。
+- 对默认模块，在所有必需输入存在之前，implementation 不得开始。
+- 对默认模块，在这三个输入全部为 `status: approved` 之前，implementation 不得开始。
+- 对默认模块，`status: approved` 不是充分条件；implementation 与 bugfix 任务必须读取这些已批准文档，并确认当前改动能直接映射到 proposal、design 与 testing 中的具体条目。
 - bugfix 任务遵循同样规则，除非仓库在版本化规则中发布了更窄的例外路径。
 - 如果当前改动无法映射到直接的 proposal、design 或 testing 条目，implementation 与 bugfix 不得只依赖模块总览、历史设计说明、聊天说明或口头解释启动。
 - 如果问题相关的已批准文档未定义实现所需的逻辑、约束、接口或流程，implementation 与 bugfix 不得以对话中的用户直接说明替代文档依据。
-- 如果 `testplan.yaml` 缺失，或当前改动对应的验证入口/缺口说明未在 testing 制品中声明，implementation 不得开始。
+- 对默认模块，如果 `testplan.yaml` 缺失，或当前改动对应的验证入口/缺口说明未在 testing 制品中声明，implementation 不得开始。
+- 对 `cyfs-p2p-test`，若改动仅限本模块运行时 harness，不要求 proposal/design/testing/testplan 准入；但一旦改动同时改变相邻模块契约、默认值、验证语义或长期边界，必须回到受影响模块的文档阶段。
 - 遇到上述缺口时，必须退回对应的 proposal、design 或 testing 阶段补齐文档，并在文档成为实现依据后再继续代码修改。
 
 ## 允许的改动
@@ -57,4 +62,5 @@
 - proposal 缺少当前改动的直接目标或约束锚点：退回 proposal
 - design 缺少当前改动的结构、接口或边界映射：退回 design
 - testing 缺少当前改动的直接验证覆盖或明确缺口记录：退回 testing
+- `cyfs-p2p-test` 改动实际影响到相邻模块契约，却试图走文档豁免：退回受影响模块的 proposal/design/testing
 - 实现期间发现上游矛盾：退回对应的上游责任阶段，而不是就地修补文档

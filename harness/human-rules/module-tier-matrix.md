@@ -4,7 +4,7 @@
 |------|------|------|--------------|
 | `p2p-frame` | Tier 0 | 核心传输/协议库，影响面最大 | 已批准的 proposal/design/testing，unit，DV，integration，触发项审查，验收报告 |
 | `cyfs-p2p` | Tier 1 | 适配层，会影响下游运行时行为 | 已批准的 proposal/design/testing，unit，integration，验收报告 |
-| `cyfs-p2p-test` | Tier 1 | 对验证至关重要的运行时 harness | 已批准的 proposal/design/testing，DV，语义变化时的 integration，验收报告 |
+| `cyfs-p2p-test` | Tier 1 | 对验证至关重要的运行时 harness，但已发布模块级文档豁免 | DV，语义变化时的 integration；若影响相邻模块契约，则仍需回到受影响模块补齐文档与验收 |
 | `sn-miner` | Tier 1 | 负责运行时启动的二进制，具有操作副作用 | 已批准的 proposal/design/testing，DV，验收报告 |
 | `desc-tool` | Tier 2 | 相对独立的工具，但输出具备安全敏感性 | 已批准的 proposal/design/testing，unit，行为变化时面向操作员的 DV，验收报告 |
 

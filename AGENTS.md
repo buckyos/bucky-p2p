@@ -27,11 +27,11 @@
 - Acceptance 职责：独立审计 proposal、design、testing、implementation、测试与结果是否仍然一致。Acceptance 任务只写评审报告。
 
 ## 硬门禁
-- 在 `proposal.md`、`design.md` 与 `testing.md` 全部存在且标记为 `status: approved` 之前，implementation 和 bugfix 工作都不得开始。
+- 除 `harness/rules/module-doc-exception-rules.md` 中显式列出的模块级文档豁免外，在 `proposal.md`、`design.md` 与 `testing.md` 全部存在且标记为 `status: approved` 之前，implementation 和 bugfix 工作都不得开始。
 - 下游文档不得静默缩窄、扩展或违背已批准的 proposal。
 - 后续阶段如果发现上游问题，必须把工作退回责任阶段，而不是就地修改上游制品。
-- 如果问题相关文档已为 `status: approved`，实现前仍必须核对文档中是否已经定义相关逻辑；如果没有，必须先退回相应文档阶段补齐并重新以文档为依据，禁止仅依据用户在对话中的直接说明实现。
-- 最终验收以已批准的 `proposal.md` 为准，而不是以实现便利性为准。
+- 如果问题相关文档已为 `status: approved`，实现前仍必须核对文档中是否已经定义相关逻辑；如果没有，必须先退回相应文档阶段补齐并重新以文档为依据，禁止仅依据用户在对话中的直接说明实现；模块级文档豁免仅适用于规则中显式声明的模块。
+- 最终验收以已批准的 `proposal.md` 为准，而不是以实现便利性为准；模块级文档豁免按 `harness/rules/module-doc-exception-rules.md` 执行。
 
 ## 必需路径
 - 项目约束：
@@ -62,6 +62,7 @@
 
 ## 治理索引
 - 硬规则：`harness/rules/`
+  - 模块级文档豁免：`harness/rules/module-doc-exception-rules.md`
 - 阶段执行指南：`harness/process_rules/`
 - 评审清单：`harness/checklists/`
 - 人类治理规则：`harness/human-rules/`

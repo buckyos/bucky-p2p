@@ -716,6 +716,10 @@ mod tests {
     };
     use crate::tls::{DefaultTlsServerCertResolver, init_tls};
     use crate::types::TunnelId;
+    #[cfg(feature = "x509")]
+    use crate::x509::{
+        X509IdentityCertFactory, X509IdentityFactory, generate_ed25519_x509_identity,
+    };
     use sha2::{Digest, Sha256};
     use std::sync::Once;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, split};
@@ -863,15 +867,34 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "x509"))]
     fn init_fake_tls() {
         INIT_TLS_ONCE.call_once(|| {
             init_tls(Arc::new(FakeTlsIdentityFactory));
         });
     }
 
+    #[cfg(feature = "x509")]
     fn tls_context(byte: u8) -> (P2pIdentityRef, PnTlsContext) {
+        INIT_TLS_ONCE.call_once(|| {
+            init_tls(Arc::new(X509IdentityFactory));
+        });
+        let identity: P2pIdentityRef =
+            Arc::new(generate_ed25519_x509_identity(Some(format!("pn-tls-{byte}"))).unwrap());
+        let cert_factory: P2pIdentityCertFactoryRef = Arc::new(X509IdentityCertFactory);
+        (
+            identity.clone(),
+            PnTlsContext {
+                local_identity: identity,
+                cert_factory,
+            },
+        )
+    }
+
+    #[cfg(not(feature = "x509"))]
+    fn tls_context(_byte: u8) -> (P2pIdentityRef, PnTlsContext) {
         init_fake_tls();
-        let identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![byte; 32]));
+        let identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![42; 32]));
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(FakeTlsCertFactory);
         (
             identity.clone(),

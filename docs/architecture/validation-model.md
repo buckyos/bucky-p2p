@@ -26,8 +26,8 @@
 
 ## 阶段门禁
 - 在 implementation 之前：
-  - `proposal.md`、`design.md` 与 `testing.md` 全部存在
-  - 且每个文档都为 `status: approved`
+  - 若模块未命中 `harness/rules/module-doc-exception-rules.md`，则 `proposal.md`、`design.md` 与 `testing.md` 全部存在
+  - 若模块未命中 `harness/rules/module-doc-exception-rules.md`，则每个文档都为 `status: approved`
 - 在 DV 之前：
   - 模块数据包存在
   - unit 计划存在

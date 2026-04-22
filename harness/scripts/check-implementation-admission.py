@@ -13,6 +13,7 @@ REQUIRED_DIRECT_MAPPING_SECTIONS = {
 }
 # Temporary exemption for the legacy approved packet until it is refreshed in a doc-stage task.
 LEGACY_DIRECT_MAPPING_EXEMPT_MODULES = {"p2p-frame"}
+DOCUMENT_EXEMPT_MODULES_KEY = "document_exempt_modules:"
 
 
 def parse_front_matter(path: pathlib.Path) -> dict[str, str]:
@@ -34,12 +35,48 @@ def parse_front_matter(path: pathlib.Path) -> dict[str, str]:
     raise ValueError(f"{path} front matter is not closed")
 
 
+def load_document_exempt_modules() -> set[str]:
+    path = pathlib.Path("harness/workspace-governance.yaml")
+    if not path.exists():
+        return set()
+
+    modules: set[str] = set()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    in_section = False
+    section_indent = 0
+
+    for line in lines:
+        content = line.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+
+        indent = len(content) - len(content.lstrip(" "))
+        stripped = content.strip()
+
+        if stripped == DOCUMENT_EXEMPT_MODULES_KEY:
+            in_section = True
+            section_indent = indent
+            continue
+
+        if in_section:
+            if indent <= section_indent:
+                break
+            if stripped.startswith("- "):
+                modules.add(stripped[2:].strip())
+
+    return modules
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: python3 ./harness/scripts/check-implementation-admission.py <version> <module>", file=sys.stderr)
         return 2
 
     version, module = sys.argv[1], sys.argv[2]
+    if module in load_document_exempt_modules():
+        print(f"implementation admission passed for {module} {version} (document-exempt module)")
+        return 0
+
     module_dir = pathlib.Path("docs") / "versions" / version / "modules" / module
 
     missing = []

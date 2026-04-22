@@ -110,6 +110,43 @@ struct EndpointScore {
 
 type ReverseWaitKey = (P2pId, TunnelId);
 
+struct ReverseWaitRegistration<'a> {
+    manager: &'a TunnelManager,
+    remote_id: P2pId,
+    tunnel_id: TunnelId,
+    active: bool,
+}
+
+impl<'a> ReverseWaitRegistration<'a> {
+    fn register(
+        manager: &'a TunnelManager,
+        remote_id: P2pId,
+        tunnel_id: TunnelId,
+        waiter: Notify<P2pResult<TunnelRef>>,
+    ) -> Self {
+        manager.add_reverse_waiter(remote_id.clone(), tunnel_id, waiter);
+        Self {
+            manager,
+            remote_id,
+            tunnel_id,
+            active: true,
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ReverseWaitRegistration<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.manager
+                .take_reverse_waiter(&self.remote_id, &self.tunnel_id);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ProxyUpgradeState {
     next_attempt_at: Instant,
@@ -244,7 +281,7 @@ impl TunnelManager {
                                         break;
                                     };
                                     if let Err(err) =
-                                        manager.register_tunnel(tunnel, false, true).await
+                                        manager.register_tunnel_and_publish(tunnel, false).await
                                     {
                                         log::warn!(
                                             "register incoming proxy tunnel failed: {:?}",
@@ -338,26 +375,63 @@ impl TunnelManager {
     }
 
     pub fn get_tunnel(&self, remote_id: &P2pId) -> Option<TunnelRef> {
-        self.get_tunnel_with_filter(remote_id, |_| true)
+        self.get_tunnel_with_filter(remote_id, |_| true, true)
     }
 
     fn get_non_proxy_tunnel(&self, remote_id: &P2pId) -> Option<TunnelRef> {
-        self.get_tunnel_with_filter(remote_id, |entry| entry.tunnel.form() != TunnelForm::Proxy)
+        self.get_tunnel_with_filter(
+            remote_id,
+            |entry| entry.tunnel.form() != TunnelForm::Proxy,
+            false,
+        )
     }
 
-    fn get_tunnel_with_filter<F>(&self, remote_id: &P2pId, filter: F) -> Option<TunnelRef>
+    fn get_tunnel_with_filter<F>(
+        &self,
+        remote_id: &P2pId,
+        filter: F,
+        allow_hidden_fallback: bool,
+    ) -> Option<TunnelRef>
     where
         F: Fn(&TunnelEntry) -> bool,
     {
         let mut tunnels = self.tunnels.write().unwrap();
         let entries = tunnels.get_mut(remote_id)?;
-        entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
+        let mut removed_unavailable = Vec::new();
+        entries.retain(|entry| {
+            let keep = is_tunnel_available(entry.tunnel.as_ref());
+            if !keep {
+                removed_unavailable.push(format!(
+                    "tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} published={} state={:?} is_closed={}",
+                    entry.tunnel.tunnel_id(),
+                    entry.tunnel.candidate_id(),
+                    entry.tunnel.form(),
+                    entry.tunnel.protocol(),
+                    entry.tunnel.is_reverse(),
+                    entry.published,
+                    entry.tunnel.state(),
+                    entry.tunnel.is_closed()
+                ));
+            }
+            keep
+        });
+        if !removed_unavailable.is_empty() {
+            log::warn!(
+                "get tunnel local={} remote={} dropped unavailable entries [{}]",
+                self.local_identity.get_id(),
+                remote_id,
+                removed_unavailable.join("; ")
+            );
+        }
         let selected = entries
             .iter()
             .filter(|entry| filter(entry))
             .filter(|entry| entry.published)
             .max_by_key(|entry| entry.updated_at)
             .or_else(|| {
+                if !allow_hidden_fallback {
+                    return None;
+                }
                 entries
                     .iter()
                     .filter(|entry| filter(entry))
@@ -433,7 +507,7 @@ impl TunnelManager {
             tunnel.local_ep(),
             tunnel.remote_ep()
         );
-        let tunnel = self.register_tunnel(tunnel, false, false).await?;
+        let tunnel = self.register_tunnel(tunnel, false).await?;
         if !tunnel.is_reverse() {
             self.publish_registered_tunnel(&tunnel);
             log::debug!(
@@ -467,7 +541,7 @@ impl TunnelManager {
         remote_id: &P2pId,
         remote_name: Option<String>,
     ) -> P2pResult<TunnelRef> {
-        self.open_known_tunnel_with_options(remote_eps, remote_id, remote_name, true, true, false)
+        self.open_known_tunnel_with_options(remote_eps, remote_id, remote_name, true, true)
             .await
     }
 
@@ -478,10 +552,9 @@ impl TunnelManager {
         remote_name: Option<String>,
         reuse_existing_proxy: bool,
         allow_proxy_fallback: bool,
-        publish_on_success: bool,
     ) -> P2pResult<TunnelRef> {
         log::debug!(
-            "open tunnel remote={} name={:?} eps_count={} eps={:?} has_sn={} has_pn={} reuse_existing_proxy={} allow_proxy_fallback={} publish_on_success={}",
+            "open tunnel remote={} name={:?} eps_count={} eps={:?} has_sn={} has_pn={} reuse_existing_proxy={} allow_proxy_fallback={}",
             remote_id,
             remote_name,
             remote_eps.len(),
@@ -489,8 +562,7 @@ impl TunnelManager {
             self.sn_service.is_some(),
             self.pn_network.is_some(),
             reuse_existing_proxy,
-            allow_proxy_fallback,
-            publish_on_success
+            allow_proxy_fallback
         );
         if remote_eps.is_empty() {
             return Err(p2p_err!(
@@ -585,9 +657,6 @@ impl TunnelManager {
             .await;
             match result {
                 Ok(tunnel) => {
-                    if publish_on_success {
-                        self.publish_registered_tunnel(&tunnel);
-                    }
                     log::debug!(
                         "open tunnel remote={} hedged success winner={}",
                         remote_id,
@@ -627,24 +696,14 @@ impl TunnelManager {
                 )
                 .await
             {
-                Ok(tunnel) => {
-                    if publish_on_success {
-                        self.publish_registered_tunnel(&tunnel);
-                    }
-                    return Ok(tunnel);
-                }
+                Ok(tunnel) => return Ok(tunnel),
                 Err(err) => last_err = Some(err),
             }
         }
 
         if !tried_reverse {
             match self.open_reverse_path(remote_id, logical_tunnel_id).await {
-                Ok(tunnel) => {
-                    if publish_on_success {
-                        self.publish_registered_tunnel(&tunnel);
-                    }
-                    return Ok(tunnel);
-                }
+                Ok(tunnel) => return Ok(tunnel),
                 Err(err) => last_err = Some(err),
             }
         }
@@ -727,8 +786,7 @@ impl TunnelManager {
                     Ok(tunnel) => {
                         if let Some(manager) = manager_weak.upgrade() {
                             manager.on_direct_connect_result(&remote_ep, true);
-                            let should_publish = manager.should_publish_tunnel(&tunnel);
-                            match manager.register_tunnel(tunnel, true, should_publish).await {
+                            match manager.register_tunnel_and_publish(tunnel, true).await {
                                 Ok(tunnel) => {
                                     manager
                                         .conn_info_cache
@@ -820,12 +878,13 @@ impl TunnelManager {
             .as_ref()
             .ok_or_else(|| p2p_err!(P2pErrorCode::NotSupport, "sn service not configured"))?;
         let (notify, waiter) = Notify::new();
+        let mut waiter_registration =
+            ReverseWaitRegistration::register(self, remote_id.clone(), tunnel_id, notify);
         log::debug!(
             "reverse path start remote={} tunnel_id={:?} add waiter",
             remote_id,
             tunnel_id
         );
-        self.add_reverse_waiter(remote_id.clone(), tunnel_id, notify);
         let call_result = sn_service
             .call(tunnel_id, None, remote_id, TunnelType::Stream, vec![])
             .await;
@@ -837,7 +896,6 @@ impl TunnelManager {
                 err.code(),
                 err.msg()
             );
-            self.take_reverse_waiter(remote_id, &tunnel_id);
             return Err(err);
         }
 
@@ -854,9 +912,10 @@ impl TunnelManager {
                 remote_id,
                 tunnel_id
             );
-            self.take_reverse_waiter(remote_id, &tunnel_id);
         }
         let tunnel = tunnel.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
+        waiter_registration.dismiss();
+        self.publish_registered_tunnel(&tunnel);
         log::debug!(
             "reverse path remote={} tunnel_id={:?} incoming tunnel ready local_ep={:?} remote_ep={:?}",
             remote_id,
@@ -896,8 +955,7 @@ impl TunnelManager {
                 intent,
             )
             .await?;
-        let should_publish = self.should_publish_tunnel(&tunnel);
-        let tunnel = self.register_tunnel(tunnel, true, should_publish).await?;
+        let tunnel = self.register_tunnel_and_publish(tunnel, true).await?;
         self.conn_info_cache
             .add(
                 remote_id.clone(),
@@ -1002,10 +1060,6 @@ impl TunnelManager {
             .contains_key(&(remote_id.clone(), *tunnel_id))
     }
 
-    fn should_publish_tunnel(&self, tunnel: &TunnelRef) -> bool {
-        !tunnel.is_reverse() || !self.has_reverse_waiter(&tunnel.remote_id(), &tunnel.tunnel_id())
-    }
-
     fn track_proxy_upgrade(&self, remote_id: &P2pId) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
@@ -1089,7 +1143,6 @@ impl TunnelManager {
     async fn attempt_proxy_upgrade(&self, remote_id: P2pId) {
         match self.try_upgrade_proxy_tunnel(&remote_id).await {
             Ok(tunnel) => {
-                self.publish_registered_tunnel(&tunnel);
                 self.clear_proxy_upgrade(&remote_id);
                 log::info!(
                     "proxy upgrade succeeded remote={} form={:?} protocol={:?}",
@@ -1126,7 +1179,6 @@ impl TunnelManager {
                             Some(remote.get_name()),
                             false,
                             false,
-                            true,
                         )
                         .await;
                 }
@@ -1149,7 +1201,6 @@ impl TunnelManager {
         let tunnel = self
             .open_reverse_path(remote_id, self.gen_id.generate())
             .await?;
-        self.publish_registered_tunnel(&tunnel);
         Ok(tunnel)
     }
 
@@ -1240,11 +1291,10 @@ impl TunnelManager {
         &self,
         tunnel: TunnelRef,
         close_replaced: bool,
-        publish: bool,
     ) -> P2pResult<TunnelRef> {
         let remote_id = tunnel.remote_id();
         log::debug!(
-            "register tunnel local={:?} remote={} tunnel_id={:?} candidate_id={:?} form={:?} reverse={} protocol={:?} close_replaced={} publish={} local_ep={:?} remote_ep={:?}",
+            "register tunnel local={:?} remote={} tunnel_id={:?} candidate_id={:?} form={:?} reverse={} protocol={:?} close_replaced={} local_ep={:?} remote_ep={:?}",
             self.local_identity.get_id(),
             remote_id,
             tunnel.tunnel_id(),
@@ -1253,22 +1303,14 @@ impl TunnelManager {
             tunnel.is_reverse(),
             tunnel.protocol(),
             close_replaced,
-            publish,
             tunnel.local_ep(),
             tunnel.remote_ep()
         );
-        if remote_id.is_default() || (!close_replaced && tunnel.form() == TunnelForm::Proxy) {
+        if remote_id.is_default() {
             log::debug!(
-                "register tunnel remote={} publish-only default_or_proxy={} ",
+                "register tunnel remote={} publish-only default_remote=true",
                 remote_id,
-                remote_id.is_default() || tunnel.form() == TunnelForm::Proxy
             );
-            if !remote_id.is_default() && tunnel.form() == TunnelForm::Proxy {
-                self.track_proxy_upgrade(&remote_id);
-            }
-            if publish {
-                self.publish_tunnel(tunnel.clone());
-            }
             return Ok(tunnel);
         }
 
@@ -1284,13 +1326,12 @@ impl TunnelManager {
             }) {
                 let replaced = std::mem::replace(&mut entry.tunnel, tunnel.clone());
                 entry.updated_at = Instant::now();
-                entry.published |= publish;
                 Some(replaced)
             } else {
                 entries.push(TunnelEntry {
                     tunnel: tunnel.clone(),
                     updated_at: Instant::now(),
-                    published: publish,
+                    published: false,
                 });
                 None
             }
@@ -1298,12 +1339,23 @@ impl TunnelManager {
 
         if let Some(old) = replaced {
             log::debug!(
-                "register tunnel remote={} replaced old tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?}",
+                "register tunnel local={} remote={} replacing old tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} state={:?} is_closed={} with new tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} state={:?} is_closed={}",
+                self.local_identity.get_id(),
                 remote_id_for_log,
                 old.tunnel_id(),
                 old.candidate_id(),
                 old.form(),
-                old.protocol()
+                old.protocol(),
+                old.is_reverse(),
+                old.state(),
+                old.is_closed(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id(),
+                tunnel.form(),
+                tunnel.protocol(),
+                tunnel.is_reverse(),
+                tunnel.state(),
+                tunnel.is_closed()
             );
             if !Arc::ptr_eq(&old, &tunnel) {
                 let _ = old.close().await;
@@ -1317,16 +1369,23 @@ impl TunnelManager {
             tunnel.candidate_id(),
             tunnel.form(),
             tunnel.protocol(),
-            publish
+            false
         );
         if tunnel.form() == TunnelForm::Proxy {
             self.track_proxy_upgrade(&remote_id_for_log);
         } else {
             self.clear_proxy_upgrade(&remote_id_for_log);
         }
-        if publish {
-            self.publish_tunnel(tunnel.clone());
-        }
+        Ok(tunnel)
+    }
+
+    async fn register_tunnel_and_publish(
+        &self,
+        tunnel: TunnelRef,
+        close_replaced: bool,
+    ) -> P2pResult<TunnelRef> {
+        let tunnel = self.register_tunnel(tunnel, close_replaced).await?;
+        self.publish_registered_tunnel(&tunnel);
         Ok(tunnel)
     }
 
@@ -2046,10 +2105,11 @@ mod tests {
             .unwrap();
 
         let accepted = server_listener.accept_tunnel().await.unwrap();
-        callee_manager
-            .register_tunnel(accepted, false, true)
+        let accepted = callee_manager
+            .register_tunnel(accepted, false)
             .await
             .unwrap();
+        callee_manager.publish_registered_tunnel(&accepted);
 
         let subscribed = callee_sub.accept_tunnel().await.unwrap();
         assert_eq!(subscribed.remote_id(), caller_identity.get_id());
@@ -2130,6 +2190,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reverse_wait_registration_drop_cleans_up_waiter() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-reverse-wait-drop");
+        let remote_identity = new_identity("remote-reverse-wait-drop");
+        let manager = new_test_manager(local_identity, HashMap::new(), None);
+        let tunnel_id = TunnelId::from(44);
+        let (notify, _waiter) = Notify::new();
+
+        let registration = ReverseWaitRegistration::register(
+            manager.as_ref(),
+            remote_identity.get_id(),
+            tunnel_id,
+            notify,
+        );
+        assert!(manager.has_reverse_waiter(&remote_identity.get_id(), &tunnel_id));
+
+        drop(registration);
+
+        assert!(!manager.has_reverse_waiter(&remote_identity.get_id(), &tunnel_id));
+    }
+
+    #[tokio::test]
     async fn get_tunnel_removes_unavailable_entry() {
         init_tls_once();
 
@@ -2180,7 +2263,7 @@ mod tests {
         );
         let existing_ref: TunnelRef = existing.clone();
         manager
-            .register_tunnel(existing_ref.clone(), false, true)
+            .register_tunnel_and_publish(existing_ref.clone(), false)
             .await
             .unwrap();
 
@@ -2196,7 +2279,7 @@ mod tests {
         let replacement_ref: TunnelRef = replacement.clone();
 
         let returned = manager
-            .register_tunnel(replacement_ref.clone(), true, true)
+            .register_tunnel_and_publish(replacement_ref.clone(), true)
             .await
             .unwrap();
 
@@ -2248,11 +2331,11 @@ mod tests {
         );
 
         manager
-            .register_tunnel(first.clone(), false, true)
+            .register_tunnel_and_publish(first.clone(), false)
             .await
             .unwrap();
         manager
-            .register_tunnel(second.clone(), false, true)
+            .register_tunnel_and_publish(second.clone(), false)
             .await
             .unwrap();
 
@@ -2295,14 +2378,12 @@ mod tests {
         );
 
         let reverse_ref: TunnelRef = reverse.clone();
-        let should_publish = manager.should_publish_tunnel(&reverse_ref);
         let returned = manager
-            .register_tunnel(reverse_ref.clone(), false, should_publish)
+            .register_tunnel_and_publish(reverse_ref.clone(), false)
             .await
             .unwrap();
         let published = sub.accept_tunnel().await.unwrap();
 
-        assert!(should_publish);
         assert!(Arc::ptr_eq(&returned, &reverse_ref));
         assert!(Arc::ptr_eq(&published, &reverse_ref));
     }
@@ -2370,6 +2451,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reverse_tunnel_is_published_after_waiter_completion() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-reverse-waiter-publish");
+        let remote_identity = new_identity("remote-reverse-waiter-publish");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let mut sub = manager.subscribe();
+        let logical_tunnel_id = TunnelId::from(711);
+        let reverse = TrackableTunnel::new_with_ids(
+            logical_tunnel_id,
+            TunnelCandidateId::from(33),
+            TunnelForm::Passive,
+            true,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        let (notify, waiter) = Notify::new();
+        manager.add_reverse_waiter(remote_identity.get_id(), logical_tunnel_id, notify);
+
+        manager.on_incoming_tunnel(reverse.clone()).await.unwrap();
+        let notified = runtime::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        manager.publish_registered_tunnel(&notified);
+
+        let published = sub.accept_tunnel().await.unwrap();
+        let reverse_ref: TunnelRef = reverse.clone();
+        assert!(Arc::ptr_eq(&published, &reverse_ref));
+    }
+
+    #[tokio::test]
     async fn get_tunnel_prefers_latest_live_tunnel_for_same_remote() {
         init_tls_once();
 
@@ -2390,13 +2505,10 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager
-            .register_tunnel(first.clone(), false, false)
-            .await
-            .unwrap();
+        manager.register_tunnel(first.clone(), false).await.unwrap();
         runtime::sleep(Duration::from_millis(1)).await;
         manager
-            .register_tunnel(second.clone(), false, false)
+            .register_tunnel(second.clone(), false)
             .await
             .unwrap();
 
@@ -2443,11 +2555,11 @@ mod tests {
         );
 
         manager
-            .register_tunnel(reverse_hidden.clone(), false, false)
+            .register_tunnel(reverse_hidden.clone(), false)
             .await
             .unwrap();
         manager
-            .register_tunnel(published.clone(), false, true)
+            .register_tunnel_and_publish(published.clone(), false)
             .await
             .unwrap();
 
@@ -2457,7 +2569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_tunnel_proxy_without_replacement_is_only_published() {
+    async fn register_tunnel_proxy_without_replacement_is_registered_and_published() {
         init_tls_once();
 
         let local_identity = new_identity("local-register-proxy");
@@ -2473,15 +2585,56 @@ mod tests {
         let proxy_ref: TunnelRef = proxy.clone();
 
         let returned = manager
-            .register_tunnel(proxy_ref, false, true)
+            .register_tunnel_and_publish(proxy_ref, false)
             .await
             .unwrap();
         let published = sub.accept_tunnel().await.unwrap();
 
         assert_eq!(returned.form(), TunnelForm::Proxy);
         assert_eq!(published.remote_id(), remote_identity.get_id());
-        assert!(manager.get_tunnel(&remote_identity.get_id()).is_none());
+        assert!(manager.get_tunnel(&remote_identity.get_id()).is_some());
+        assert_eq!(
+            manager
+                .tunnels
+                .read()
+                .unwrap()
+                .get(&remote_identity.get_id())
+                .map(|entries| entries.len()),
+            Some(1)
+        );
         assert_eq!(proxy.close_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn publish_registered_tunnel_is_idempotent() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-publish-idempotent");
+        let remote_identity = new_identity("remote-publish-idempotent");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let mut sub = manager.subscribe();
+        let tunnel = TrackableTunnel::new(
+            TunnelForm::Active,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        let tunnel_ref: TunnelRef = tunnel.clone();
+
+        manager
+            .register_tunnel(tunnel_ref.clone(), false)
+            .await
+            .unwrap();
+        manager.publish_registered_tunnel(&tunnel_ref);
+        manager.publish_registered_tunnel(&tunnel_ref);
+
+        let published = sub.accept_tunnel().await.unwrap();
+        assert!(Arc::ptr_eq(&published, &tunnel_ref));
+        assert!(
+            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2753,7 +2906,7 @@ mod tests {
         );
 
         manager
-            .register_tunnel(tunnel.clone(), false, true)
+            .register_tunnel_and_publish(tunnel.clone(), false)
             .await
             .unwrap();
 
@@ -2952,7 +3105,10 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager.register_tunnel(proxy, false, true).await.unwrap();
+        manager
+            .register_tunnel_and_publish(proxy, false)
+            .await
+            .unwrap();
 
         let state = manager.state.lock().unwrap();
         let upgrade = state
@@ -2995,7 +3151,10 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager.register_tunnel(proxy, false, true).await.unwrap();
+        manager
+            .register_tunnel_and_publish(proxy, false)
+            .await
+            .unwrap();
 
         let state = manager.state.lock().unwrap();
         let upgrade = state
@@ -3079,7 +3238,10 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager.register_tunnel(proxy, false, true).await.unwrap();
+        manager
+            .register_tunnel_and_publish(proxy, false)
+            .await
+            .unwrap();
         manager
             .attempt_proxy_upgrade(remote_identity.get_id())
             .await;

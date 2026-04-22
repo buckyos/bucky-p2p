@@ -4,7 +4,8 @@
 - 让已批准的 proposal 成为每个受治理模块的最终验收基线。
 
 ## 规则
-- 已批准的 `proposal.md` 是最终的意图声明。
+- 对默认模块，已批准的 `proposal.md` 是最终的意图声明。
+- 对 `harness/rules/module-doc-exception-rules.md` 中列出的模块，最终意图声明退回到用户明确要求、长期模块边界和触发规则，不再强制依赖模块 packet proposal。
 - `design.md`、`testing.md` 与 `acceptance.md` 负责把该意图落地，但不能覆盖它。
 - 如果下游制品与 proposal 冲突，验收必须失败并把工作退回上游。
 
