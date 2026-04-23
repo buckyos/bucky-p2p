@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-22
+approved_at: 2026-04-23
 ---
 
 # p2p-frame 设计
@@ -15,7 +15,7 @@ approved_at: 2026-04-22
 - 让核心库边界足够明确，使未来工作可以按子模块拆分。
 - 复用现有协议说明，而不是重复编写设计内容。
 - 为 planning、testing 和 acceptance 定义具备阶段可执行性的子模块责任归属。
-- 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内。
+- 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内，包括 source/target 双边独立统计视图与 source 单边限速的区分。
 - 为本轮 proxy tunnel `stream` 路径的“可选 TLS-over-proxy 载荷加密、由使用者显式接口控制且由两端在 tunnel 外约定”需求建立可执行设计边界，并明确 `datagram` 路径继续保持明文兼容且忽略该 `stream` 加密模式，同时把加密接口限制在 PN 专有 API 内，而不是污染通用 `Tunnel` / `TunnelNetwork` trait。
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
@@ -66,7 +66,7 @@ approved_at: 2026-04-22
 - 传输和运行时行为必须能够通过日志进行诊断。
 - 影响协议的改动必须在代码改动开始前更新 design/testing 证据。
 - `pn_server` 的统计与限速不得改变现有 `ProxyOpenReq` / `ProxyOpenResp` 握手顺序和结果码映射。
-- `pn_server` 的统计与限速主体必须以 relay 已认证并规范化后的 peer 身份为准。
+- `pn_server` 的统计主体必须分别锚定到 relay 已认证并规范化后的 source 身份与已打开的 target 身份；限速主体仍只使用 source 侧身份。
 - proxy tunnel 的“是否加密”必须通过 PN 专有显式入口或显式的 client/stack 配置决定；通用 `TunnelNetwork` / `Tunnel` trait 不新增 TLS 参数。未显式配置的 `PnClient` 上，`create_tunnel*` 与 `open_*` 默认保持当前明文兼容语义；若调用方先显式设置 `PnClient::set_stream_security_mode(...)` 或 `P2pStackConfig::set_proxy_stream_encrypted(true)`，则该 `PnClient` 后续通过通用 trait 创建的 proxy tunnel，以及同一 listener 被动接受到的 `PnTunnel`，都会继承当时的 TLS 模式快照。
 - 是否启用 TLS 由 proxy tunnel 两端在 tunnel 外预先约定；PN open 控制流不额外承载 TLS 模式协商。
 - 若调用方显式选择加密，则失败路径必须直接失败，不允许静默回退到明文桥接。
@@ -128,6 +128,8 @@ p2p-frame/src
 ## 当前改动直接映射
 | Proposal 条目 | 设计对象 | 代码路径/接口 | 风险/回滚备注 |
 |---------------|----------|---------------|----------------|
+| relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户统计的流量计量 | relay bridge 上的 source/target 双边独立统计视图 | `p2p-frame/src/pn/service/pn_server.rs`、`PnTrafficManager`、统计查询接口 | 若实现阶段无法在不改变握手与 bridge 契约的前提下同时暴露 source/target 视图，应先退回 design 重新澄清统计模型，而不是把 target 统计挤进 source 视图。 |
+| relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户生效的限速能力 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs`、限速配置/查询接口 | 若实现阶段发现 target 统计可见性会迫使限速扩展成双边模型，应先退回 proposal，而不是静默扩大限速范围。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 
 ## 风险与回滚

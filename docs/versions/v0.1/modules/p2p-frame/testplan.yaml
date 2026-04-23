@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `TunnelManager` 的统一 publish 生命周期断言、`pn_server` 的统计/限速桥接断言和 proxy stream 的 TLS-over-proxy 断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `TunnelManager` 的统一 publish 生命周期断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言，以及 proxy stream 的 TLS-over-proxy 断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -25,7 +25,7 @@ levels:
         - 源码内的异步和同步测试是主要的 unit 验证面。
         - `tunnel/tunnel_manager.rs` 的 unit 测试必须覆盖 direct/proxy/普通 incoming 的 register 后立即 publish、reverse waiter 命中时的延后 publish、waiter 完成后的统一 publish 路径，以及 waiter 清理后的 later-arriving reverse 不再隐藏。
         - `tunnel/tunnel_manager.rs` 的 unit 测试还必须覆盖统一 publish 入口的幂等性，以及 published candidate 相对 hidden reverse candidate 的选择优先级。
-        - `pn/service/pn_server.rs` 的 unit 测试必须覆盖成功转发字节统计、用户级限速和 `sfo-io` 集成失败路径。
+        - `pn/service/pn_server.rs` 的 unit 测试必须覆盖 source/target 双边成功转发字节统计、仅 source 侧生效的用户级限速，以及 `sfo-io` 集成失败路径。
         - 当前 `pn/client/pn_tunnel.rs` 的 unit 测试已直接覆盖 passive 明文兼容、`TlsRequired` 成功、TLS 身份校验失败、`datagram` 忽略 `stream` 模式，以及 `create_tunnel_with_options(...)` / client 级模式配置下 datagram 不被本地拒绝。
         - active `PnTunnel::open_stream()` 的默认明文兼容、双端模式错配和真实 TLS client 握手失败路径仍应继续补足 direct unit 证据。
     steps:
@@ -35,7 +35,7 @@ levels:
 
   dv:
     mode: enabled
-    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认默认 `PnServer::new(...)` 路径在接入统计/限速后仍可启动，且当前显式启用的 proxy stream TLS-over-proxy 配置不破坏场景运行
+    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认默认 `PnServer::new(...)` 路径在接入 source/target 双边统计与 source 单边限速后仍可启动，且当前显式启用的 proxy stream TLS-over-proxy 配置不破坏场景运行
     test_targets:
       - cyfs-p2p-test/src/main.rs
       - devices/
@@ -56,7 +56,7 @@ levels:
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证，确认 `pn_server` 新增统计/限速和 proxy stream TLS-over-proxy 能力不会破坏现有调用方
+    summary: 工作区级兼容性与下游使用方验证，确认 `pn_server` 新增 source/target 双边统计、source 单边限速和 proxy stream TLS-over-proxy 能力不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test

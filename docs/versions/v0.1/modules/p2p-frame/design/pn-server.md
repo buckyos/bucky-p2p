@@ -30,7 +30,7 @@
 | `PnService` | 负责单连接级请求处理 | `handle_proxy_connection`、`handle_proxy_open_req` | 已转发的 open 请求、已转发的 open 响应、字节 bridge |
 | `PnConnectionValidator` | 在打开目标侧之前允许或拒绝一个已规范化的 relay 请求 | `validate` | `ValidateResult::Accept` 或 `ValidateResult::Reject` |
 | `PnTargetStreamFactory` | 打开下游 `S -> B` 流，避免测试与具体 `TtpServer` 耦合 | `open_target_stream` | 目标侧 `(read, write)` 流对 |
-| `PnTrafficAccountant` | 把 relay bridge 中成功转发的上下行字节归属到一个已认证用户 | bridge 装配点 | 与 `sfo-io` 对齐的统计更新 |
+| `PnTrafficAccountant` | 把 relay bridge 中成功转发的上下行字节分别归属到 source 与 target 两个用户视图 | bridge 装配点 | 与 `sfo-io` 对齐的双边统计更新 |
 | `PnRateLimiter` | 在 relay bridge 数据路径上对已认证用户施加收发背压 | bridge 装配点 | 被整形后的读写节奏 |
 
 ## 构造与默认值
@@ -62,18 +62,19 @@
 
 ### 用户身份归属
 
-- relay 侧统计与限速主体使用已规范化后的 `req.from`，即底层连接元数据中的已认证远端 peer id。
-- `req.to`、`tunnel_id`、`kind` 和 `purpose` 作为统计标签或限速决策的上下文，但不替代主体身份。
-- 这样做要求统计主体与 `PnConnectionValidator` 看到的身份完全一致，避免把源端原始报文中未被 relay 信任的 `from` 用作记账键。
-- 若未来需要双边配额或 `(from, to)` 组合配额，应通过新的 proposal 扩展；本轮不把统计主体扩展为多维配额模型。
+- relay 侧 source 统计与限速主体使用已规范化后的 `req.from`，即底层连接元数据中的已认证远端 peer id。
+- relay 侧 target 统计主体使用 relay 成功打开的目标用户 `req.to`；它可以与 source 统计共享同一 bridge 生命周期，但必须是独立可查询的用户视图。
+- `tunnel_id`、`kind` 和 `purpose` 作为统计标签或限速决策的上下文，但不替代主体身份。
+- 这样做要求 source 统计主体与 `PnConnectionValidator` 看到的身份完全一致，避免把源端原始报文中未被 relay 信任的 `from` 用作记账键；同时 target 统计主体必须锚定到 relay 已成功打开的 target，而不是任何业务载荷中的未认证字段。
+- 本轮只把统计主体扩展为 source/target 两个独立用户视图；限速主体仍保持 source 单边模型。若未来需要 target 限速或 `(from, to)` 组合配额，应通过新的 proposal 扩展。
 
 ### 统计口径
 
 - 统计对象仅限成功握手之后的透明 bridge payload，不包含 `ProxyOpenReq`、`ProxyOpenResp` 控制帧。
-- 上行字节口径是 relay 从源端读出并成功写入目标端的数据字节数。
-- 下行字节口径是 relay 从目标端读出并成功写入源端的数据字节数。
+- source 视图中的上行字节口径是 relay 从 source 读出并成功写入 target 的数据字节数；source 视图中的下行字节口径是 relay 从 target 读出并成功写回 source 的数据字节数。
+- target 视图中的上行/下行字节口径与 target 自身观察方向一致：当 relay 成功把 source 数据写入 target 时，target 视图累计其入向字节；当 relay 成功把 target 数据写回 source 时，target 视图累计其出向字节。
 - 仅已被底层 writer 确认成功写出的字节可计入统计；停留在用户态缓冲或因错误回滚的字节不得提前入账。
-- 若 bridge 在任一方向异常退出，统计保持“已成功转发多少记多少”的单调累加语义，不因连接提前关闭而回滚。
+- 若 bridge 在任一方向异常退出，source 与 target 两个统计视图都保持“已成功转发多少记多少”的单调累加语义，不因连接提前关闭而回滚。
 - 当请求选择 TLS-over-proxy 时，relay 的统计口径默认切换为“成功转发的 TLS record 字节数”；除非后续 proposal 另行扩展，relay 不尝试恢复或估算明文字节数。
 
 ## `sfo-io` 接入边界
@@ -82,6 +83,7 @@
 - `p2p-frame` 不实现新的令牌桶、统计器或周期聚合器；它只负责把 `ProxyStream` 包装为 `sfo-io` 可消费的 I/O 端点，或把 `copy_bidirectional` 替换为等价的、基于 `sfo-io` 的双向 pump。
 - 由于当前 `pn_server` 直接调用 `tokio::io::copy_bidirectional`，实现阶段允许把这一步替换为“先装配 `sfo-io` 统计/限速，再执行等价 bridge”的结构，只要保持现有握手成功后的透明转发契约不变。
 - 若 `sfo-io` 提供的是 `AsyncRead`/`AsyncWrite` wrapper，优先通过 wrapper 装配；若 `sfo-io` 只能通过显式 pump API 计量/限速，则由 `pn/service` 层实现最小适配，而不是把 `sfo-io` 逻辑散落到调用点。
+- source 与 target 的双边统计视图必须尽量复用同一套 `sfo-io` tracker / wrapper 体系，通过装配和映射区分归属；不得为了 target 可查询视图再复制一套平行统计实现。
 - 当请求选择 TLS-over-proxy 时，`sfo-io` 看到的仍是 relay bridge 上的 TLS 握手字节和后续密文 I/O；统计和限速都基于该密文路径执行，不要求 `sfo-io` 理解端点侧的 TLS 语义。
 
 ## 配置与装配模型
@@ -90,6 +92,7 @@
 - 配置输入应由部署方在构造 `PnServer` 时提供，避免在 bridge 热路径中查找全局配置。
 - 对于未显式开启限速的部署，bridge 路径应保持当前吞吐行为，除统计开销外不引入新的等待。
 - 对于显式开启限速的部署，限速应按“每个已认证 `from` 用户”生效；同一用户同时发起多条 PN bridge 时，共享同一用户速率预算。
+- target 侧统计视图必须有可查询入口，但该入口只暴露统计结果，不引入新的 target 侧限速配置面。
 - 如果 `sfo-io` 需要额外 runtime 组件或后台清理器，应由 `PnServer` 外围装配并作为依赖注入，避免 `pn/service` 自行创建隐式后台任务。
 - 对于显式开启 TLS-over-proxy 的端点，relay 不新增单独的部署配置；它只继续桥接 open 成功后的 TLS 握手字节和后续密文。
 
@@ -103,7 +106,7 @@
 6. 如果校验通过，relay 会在 `PN_OPEN_TIMEOUT` 限制下，通过 `PnTargetStreamFactory` 打开目标侧流。
 7. relay 将 `ProxyOpenReq` 原样转发到目标流，等待 `ProxyOpenResp`，并检查返回的 `tunnel_id` 是否与请求一致。
 8. relay 再把得到的 `ProxyOpenResp` 写回源端。
-9. 只有在 `TunnelCommandResult::Success` 时，relay 才会根据规范化后的 `req.from` 创建用户级统计/限速上下文。
+9. 只有在 `TunnelCommandResult::Success` 时，relay 才会根据规范化后的 `req.from` 和已确认打开的 `req.to` 创建双边统计上下文，并只为 source 侧创建限速上下文。
 10. relay 将源端与目标端 stream 装配进 `sfo-io` 的统计/限速路径，再启动双向 bridge；若端点在 open 成功后显式进入 TLS-over-proxy，bridge 上流经 relay 的将是 TLS 握手流量和后续密文，而不是业务明文。
 11. 任何失败都会在 bridge 启动前终止，两端只完成 open-result 交换。
 12. bridge 退出时，relay 只结束当前连接，不在退出路径中补发额外协议命令。
@@ -118,7 +121,7 @@
 | 身份来源 | relay 使用已接收流的已认证 peer id 作为 `from` |
 | 安全元数据 | relay 不携带额外 TLS 模式字段；TLS 仅在 open 成功后的字节流上叠加 |
 | bridge 启动条件 | `ProxyOpenResp.result == TunnelCommandResult::Success` |
-| 成功后的数据路径 | 透明字节转发；明文模式下 relay 看到业务 payload，启用 TLS-over-proxy 后 relay 只转发 TLS 握手流量和密文，但都会在 bridge 路径上执行 `sfo-io` 统计与限速 |
+| 成功后的数据路径 | 透明字节转发；明文模式下 relay 看到业务 payload，启用 TLS-over-proxy 后 relay 只转发 TLS 握手流量和密文，但都会在 bridge 路径上执行 `sfo-io` 统计与 source 单边限速，并同时沉淀 source/target 两个统计视图 |
 
 旧版 PN 说明仍然使用 `vport` 描述服务选择。当前 relay 实现则把下游服务选择放在 `ProxyOpenReq.purpose: TunnelPurpose` 中。这是一个显式、与实现对齐的差异，在参考 PN 说明完成统一前，必须持续留在证据链中。
 
@@ -126,7 +129,7 @@
 
 - `PnServer` 依赖 `TtpServer` 完成 listener 注册和按 peer id 打开目标流。
 - `PnService` 依赖网络命令辅助逻辑来解析和发送 PN 控制帧。
-- `PnService` 依赖 `sfo-io` 适配层完成用户级统计与限速装配。
+- `PnService` 依赖 `sfo-io` 适配层完成 source/target 双边统计装配，以及 source 单边限速装配。
 - relay 可以在打开目标侧之前拒绝请求，但在目标侧接收到请求之后，它不负责做最终业务接受判定。
 - bridge 成功启动后，relay 只承担传输职责，不再检查应用 payload，也不会在初始 `kind` 之外区分 `Stream` 与 `Datagram` 语义。
 - `cyfs-p2p-test` 与 `sn-miner-rust` 现有 `PnServer::new(...)` 调用点是兼容性边界；新增依赖不得要求这些调用点立刻理解 `sfo-io` 细节。
@@ -165,6 +168,7 @@
 - 参考 PN 说明与实现对 `vport` 和 `purpose` 的使用尚未完全对齐；acceptance 必须把这一差异视为可审计的设计偏差。
 - 当前工作区尚未显式引入 `sfo-io`；具体依赖版本和适配方式若与当前 runtime 特征不兼容，需要退回 design。
 - 直接替换 `copy_bidirectional` 可能改变 bridge 关闭顺序；实现必须用测试锁住既有成功/失败语义。
-- 如果错误地以源报文 `from` 而不是规范化后的认证身份做记账键，会直接破坏用户统计和限速隔离。
+- 如果错误地以源报文 `from` 而不是规范化后的认证身份做 source 记账键，或错误地把 target 视图挂到未经确认的身份上，会直接破坏双边统计隔离。
+- 如果实现把 target 统计查询与 target 限速绑定在一起，会静默扩大 proposal 范围并改变现有配额模型。
 - 若两端对 TLS 模式的 tunnel 外约定不一致，错误会延后到 TLS 建立阶段才暴露；relay 无法替端点提前发现这类错配。
 - 回滚应优先撤销 `pn_server.rs` 中的 relay 实现改动，同时保留本补充文档作为下一轮迭代的设计基线。

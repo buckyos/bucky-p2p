@@ -126,7 +126,8 @@ impl PnUserTrafficEntry {
 struct PnTrafficSession {
     source_read_limit: SpeedLimitSession,
     source_write_limit: SpeedLimitSession,
-    tracker: Arc<dyn SpeedTracker>,
+    source_tracker: Arc<dyn SpeedTracker>,
+    target_tracker: Arc<dyn SpeedTracker>,
 }
 
 struct PnTrafficManager {
@@ -148,12 +149,14 @@ impl PnTrafficManager {
             .clone()
     }
 
-    fn begin_session(&self, user: &P2pId) -> PnTrafficSession {
-        let entry = self.user_entry(user);
+    fn begin_session(&self, source_user: &P2pId, target_user: &P2pId) -> PnTrafficSession {
+        let source_entry = self.user_entry(source_user);
+        let target_entry = self.user_entry(target_user);
         PnTrafficSession {
-            source_read_limit: entry.tx_limiter.new_limit_session(),
-            source_write_limit: entry.rx_limiter.new_limit_session(),
-            tracker: entry.stat.clone(),
+            source_read_limit: source_entry.tx_limiter.new_limit_session(),
+            source_write_limit: source_entry.rx_limiter.new_limit_session(),
+            source_tracker: source_entry.stat.clone(),
+            target_tracker: target_entry.stat.clone(),
         }
     }
 
@@ -437,7 +440,7 @@ impl PnService {
                 req.purpose,
                 PROXY_SERVICE
             );
-            let traffic_session = self.traffic_manager.begin_session(&req.from);
+            let traffic_session = self.traffic_manager.begin_session(&req.from, &req.to);
             let source_stream = ProxyStream::new(read, source_write);
             let source_stream = LimitStream::new(
                 source_stream,
@@ -445,14 +448,27 @@ impl PnService {
                 traffic_session.source_write_limit,
             );
             let mut source_stream =
-                StatStream::new_with_tracker(source_stream, traffic_session.tracker);
-            let mut target_stream = ProxyStream::new(target_read, target_write);
+                StatStream::new_with_tracker(source_stream, traffic_session.source_tracker);
+            let target_stream = ProxyStream::new(target_read, target_write);
+            let mut target_stream =
+                StatStream::new_with_tracker(target_stream, traffic_session.target_tracker);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
             if let Some(snapshot) = self.traffic_manager.snapshot(&req.from) {
                 log::debug!(
                     "pn server bridge stop tunnel_id={:?} from={} to={} tx_bytes={} rx_bytes={} tx_speed={} rx_speed={}",
                     req.tunnel_id,
                     req.from,
+                    req.to,
+                    snapshot.tx_bytes,
+                    snapshot.rx_bytes,
+                    snapshot.tx_speed,
+                    snapshot.rx_speed
+                );
+            }
+            if let Some(snapshot) = self.traffic_manager.snapshot(&req.to) {
+                log::debug!(
+                    "pn server bridge target stop tunnel_id={:?} target={} tx_bytes={} rx_bytes={} tx_speed={} rx_speed={}",
+                    req.tunnel_id,
                     req.to,
                     snapshot.tx_bytes,
                     snapshot.rx_bytes,
@@ -1295,15 +1311,17 @@ mod tests {
                 .body;
         assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
 
-        source_write.write_all(b"ping").await.unwrap();
+        let source_payload = b"ping";
+        source_write.write_all(source_payload).await.unwrap();
         let mut ping_buf = [0u8; 4];
         target_read.read_exact(&mut ping_buf).await.unwrap();
-        assert_eq!(&ping_buf, b"ping");
+        assert_eq!(&ping_buf, source_payload);
 
-        target_write.write_all(b"pong").await.unwrap();
-        let mut pong_buf = [0u8; 4];
+        let target_payload = b"answer";
+        target_write.write_all(target_payload).await.unwrap();
+        let mut pong_buf = [0u8; 6];
         source_read.read_exact(&mut pong_buf).await.unwrap();
-        assert_eq!(&pong_buf, b"pong");
+        assert_eq!(&pong_buf, target_payload);
 
         drop(source_write);
         drop(target_write);
@@ -1319,6 +1337,16 @@ mod tests {
             snapshot,
             PnUserTrafficSnapshot {
                 tx_bytes: 4,
+                tx_speed: 0,
+                rx_bytes: 6,
+                rx_speed: 0,
+            }
+        );
+        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
+        assert_eq!(
+            target_snapshot,
+            PnUserTrafficSnapshot {
+                tx_bytes: 6,
                 tx_speed: 0,
                 rx_bytes: 4,
                 rx_speed: 0,
@@ -1430,6 +1458,117 @@ mod tests {
         let snapshot = traffic_manager.snapshot(&source_id).unwrap();
         assert_eq!(snapshot.tx_bytes, payload.len() as u64);
         assert_eq!(snapshot.rx_bytes, 0);
+        let target_snapshot = traffic_manager.snapshot(&req.to).unwrap();
+        assert_eq!(target_snapshot.tx_bytes, 0);
+        assert_eq!(target_snapshot.rx_bytes, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn pn_service_target_user_limit_does_not_throttle_bridge() {
+        let source_id = P2pId::from(vec![8u8; 32]);
+        let target_id = P2pId::from(vec![9u8; 32]);
+        let ((service_target_read, service_target_write), (mut target_read, mut target_write)) =
+            make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let traffic_manager = PnTrafficManager::new();
+        traffic_manager.set_user_limit(
+            target_id.clone(),
+            PnTrafficLimitConfig {
+                tx_rate: Some(NonZeroU32::new(10).unwrap()),
+                tx_weight: Some(NonZeroU32::new(1).unwrap()),
+                rx_rate: None,
+                rx_weight: None,
+            },
+        );
+        let service = PnService::new_with_traffic_manager(
+            target_stream_factory,
+            allow_all_pn_connection_validator(),
+            traffic_manager.clone(),
+        );
+
+        let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
+            make_stream_pair();
+        let req = ProxyOpenReq {
+            tunnel_id: TunnelId::from(28),
+            from: source_id.clone(),
+            to: target_id.clone(),
+            kind: PnChannelKind::Stream,
+            purpose: crate::networks::TunnelPurpose::from_value(&2004u16).unwrap(),
+        };
+
+        let service_task = tokio::spawn({
+            let service = service.clone();
+            let source_id = source_id.clone();
+            let req = req.clone();
+            async move {
+                service
+                    .handle_proxy_open_req(
+                        source_id,
+                        req,
+                        service_source_read,
+                        service_source_write,
+                    )
+                    .await;
+            }
+        });
+
+        let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
+        let _target_req =
+            read_tunnel_command_body::<_, ProxyOpenReq>(&mut target_read, target_header)
+                .await
+                .unwrap()
+                .body;
+
+        let resp = TunnelCommand::new(ProxyOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: TunnelCommandResult::Success as u8,
+        })
+        .unwrap();
+        write_tunnel_command(&mut target_write, &resp)
+            .await
+            .unwrap();
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
+
+        let payload = vec![b'y'; 20];
+        target_write.write_all(payload.as_slice()).await.unwrap();
+
+        let started_at = Instant::now();
+        let mut received = vec![0u8; payload.len()];
+        source_read
+            .read_exact(received.as_mut_slice())
+            .await
+            .unwrap();
+        let elapsed = started_at.elapsed();
+        assert_eq!(received, payload);
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "target user limit should not throttle bridge, got {:?}",
+            elapsed
+        );
+
+        drop(source_write);
+        drop(target_write);
+        drop(source_read);
+        drop(target_read);
+        timeout(Duration::from_secs(1), service_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let source_snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(source_snapshot.tx_bytes, 0);
+        assert_eq!(source_snapshot.rx_bytes, payload.len() as u64);
+        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
+        assert_eq!(target_snapshot.tx_bytes, payload.len() as u64);
+        assert_eq!(target_snapshot.rx_bytes, 0);
     }
 
     #[tokio::test]
