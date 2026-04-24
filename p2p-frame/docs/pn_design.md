@@ -235,13 +235,16 @@ pub struct ProxyOpenResp {
 它接收到 relay 转发来的新 stream 后：
 
 1. 读取首个 `ProxyOpenReq`
-2. 根据请求中的 `from` / `to` / `kind` / `vport` 构造一个被动状态的 `PnTunnel`
-3. 将这条 `PnTunnel` 交给上层
+2. 根据请求中的 `from` / `to` / `tunnel_id` 查找已有逻辑 `PnTunnel`，包括本端主动创建的 active tunnel 和此前被动接受的 passive tunnel
+3. 若已有同一逻辑 tunnel，则把这条 channel 投递给已有 `PnTunnel` 的待接收队列，不再次触发 `accept_tunnel()`
+4. 若没有同一逻辑 tunnel，则构造一个被动状态的 `PnTunnel`，把首条 channel 放入其待接收队列，并将这条 `PnTunnel` 交给上层
 
 也就是说：
 
 - 被动侧不再先收一条通知命令
 - 收到的第一个命令本身就是完整建链请求
+- `ProxyOpenReq` 是同一逻辑 PN tunnel 上的 channel-open 事件，而不是每次都创建新 tunnel candidate
+- 明确双向语义：`A` 建立 `PnTunnel(A->B)` 后，若 `B` 使用对应逻辑 tunnel 反向调用 `open_stream()`，`A` 必须能在原来的 active `PnTunnel(A->B)` 上通过 `accept_stream()` 收到该 stream，而不是必须从 `accept_tunnel()` 再拿一个新的 passive tunnel
 
 ### `PnTunnel`
 
@@ -250,7 +253,7 @@ pub struct ProxyOpenResp {
 它可以处于两类内部状态：
 
 - 主动状态：由 `PnClient.create_tunnel()` 创建，用于向远端发起代理建链
-- 被动状态：由 `PnListener.accept_tunnel()` 创建，已经持有 relay 转发过来的 channel stream 和 `ProxyOpenReq`
+- 每个 `PnTunnel` 都持有一个按 `kind` 分流的待接收 channel 队列；主动创建的 tunnel 可以接收远端反向打开的 channel，被动创建的 tunnel 的第一条队列项来自触发该 tunnel 创建的 `ProxyOpenReq`
 
 其行为约定如下：
 
@@ -260,7 +263,8 @@ pub struct ProxyOpenResp {
   - 等待 `ProxyOpenResp`
   - 成功后直接返回 `(read, write)`
 - `accept_stream()`
-  - 基于收到的 `ProxyOpenReq` 进行本地校验
+  - 从待接收 stream 队列中取出下一条 `ProxyOpenReq`
+  - 基于该 `ProxyOpenReq` 进行本地校验
   - 返回 `ProxyOpenResp`
   - 成功后把当前 stream 作为 `(read, write)` 交给上层
 - `open_datagram(vport)`
@@ -268,7 +272,8 @@ pub struct ProxyOpenResp {
   - 底层仍建立并桥接 stream
   - 成功后只返回 `write`
 - `accept_datagram()`
-  - 基于收到的 `ProxyOpenReq { kind=Datagram }` 完成校验
+  - 从待接收 datagram 队列中取出下一条 `ProxyOpenReq { kind=Datagram }`
+  - 基于该请求完成校验
   - 底层仍使用当前 stream
   - 成功后只返回 `read`
 
@@ -325,16 +330,19 @@ relay 不负责：
 2. `S` 将 `ProxyOpenReq` 写入这条 stream
 3. `B` 的 `PnListener` 通过 `TtpClient.listen_stream(PN_PROXY_VPORT)` 接收到这条 stream
 4. `PnListener` 读取完整 `ProxyOpenReq`
-5. `PnListener` 构造一个被动状态的 `PnTunnel`
-6. 上层通过 `accept_tunnel()` 得到这条 `PnTunnel`
-7. 当上层调用 `accept_stream()` 或 `accept_datagram()` 时，`PnTunnel` 执行本地校验并写回 `ProxyOpenResp`
-8. 若校验通过，该通道建立完成并交给上层
+5. `PnListener` 查找同一 `(from, tunnel_id)` 的已有逻辑 `PnTunnel`
+6. 如果已有 tunnel，则直接把 channel 投递给该 tunnel 的待接收队列，并唤醒其 `accept_stream()` 或 `accept_datagram()`
+7. 如果没有 tunnel，则构造一个被动状态的 `PnTunnel`，把当前 channel 放入队列，并通过 `accept_tunnel()` 返回给上层
+8. 当上层调用 `accept_stream()` 或 `accept_datagram()` 时，`PnTunnel` 从对应队列取出请求，执行本地校验并写回 `ProxyOpenResp`
+9. 若校验通过，该通道建立完成并交给上层
 
 这里的关键点是：
 
 - 入站 `PnTunnel` 一开始就已经拿到了完整建链请求
 - 不需要额外的通知命令
 - 不需要第二阶段的 channel-open 命令
+- 同一逻辑 PN tunnel 的后续入站 channel 不应再次触发 `accept_tunnel()`，而应作为同一个 tunnel 上的 `accept_stream()` / `accept_datagram()` 事件；如果本端已经有 active tunnel，也应投递到这个 active tunnel，而不是额外创建 passive tunnel
+- 因此，`A` 已持有 active `PnTunnel(A->B)` 时，`B` 反向 `open_stream()` 产生的入站 channel 是 `A` 侧该 active tunnel 的 `accept_stream()` 事件，不是新的 tunnel 发现事件
 
 ### 流程三：relay 配对与桥接
 
@@ -505,9 +513,9 @@ PN 还没有独立的 relay 发现与维护机制，仍依赖共享 `TtpClient` 
 
 当前 `open_datagram()` / `accept_datagram()` 只是以 stream 作为承载，并在接口层裁剪返回值。
 
-### 4. 被动侧实例通常仍是一条待消费通道
+### 4. 被动侧实例是逻辑 tunnel，入站请求是待消费 channel
 
-虽然对外统一为 `PnTunnel`，但由 `PnListener.accept_tunnel()` 返回的实例通常仍对应一条已到达的入站代理请求，最终会被一次 `accept_*()` 消费。
+`PnTunnel` 实例代表一个逻辑 PN tunnel。若该实例由 `PnListener.accept_tunnel()` 返回，触发它创建的第一条 `ProxyOpenReq` 会作为待消费 channel 进入该 tunnel 的队列；若本端已经通过 `PnClient.create_tunnel()` 拥有同一 `(remote_id, tunnel_id)` 的 active tunnel，后续相同 `(from, tunnel_id)` 的 `ProxyOpenReq` 应直接投递到该 active tunnel。无论 active 还是 passive，入站 channel 都由 `accept_stream()` / `accept_datagram()` 逐条消费。
 
 ## 历史方案说明
 

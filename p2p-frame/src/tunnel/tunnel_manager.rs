@@ -378,6 +378,21 @@ impl TunnelManager {
         self.get_tunnel_with_filter(remote_id, |_| true, true)
     }
 
+    fn has_available_tunnel_id(&self, remote_id: &P2pId, tunnel_id: TunnelId) -> bool {
+        let mut tunnels = self.tunnels.write().unwrap();
+        let Some(entries) = tunnels.get_mut(remote_id) else {
+            return false;
+        };
+        entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
+        let exists = entries
+            .iter()
+            .any(|entry| entry.tunnel.tunnel_id() == tunnel_id);
+        if entries.is_empty() {
+            tunnels.remove(remote_id);
+        }
+        exists
+    }
+
     fn get_non_proxy_tunnel(&self, remote_id: &P2pId) -> Option<TunnelRef> {
         self.get_tunnel_with_filter(
             remote_id,
@@ -1215,11 +1230,13 @@ impl TunnelManager {
             called.reverse_endpoint_array,
             cert.endpoints()
         );
-        if let Some(tunnel) = self.get_tunnel(&remote_id) {
-            if is_tunnel_available(tunnel.as_ref()) {
-                log::debug!("sn called remote={} reuse existing tunnel", remote_id);
-                return Ok(());
-            }
+        if self.has_available_tunnel_id(&remote_id, called.tunnel_id) {
+            log::debug!(
+                "sn called remote={} tunnel_id={:?} already exists, skip reverse dial",
+                remote_id,
+                called.tunnel_id
+            );
+            return Ok(());
         }
 
         let mut eps = if self
@@ -1253,14 +1270,13 @@ impl TunnelManager {
             eps
         );
         let _guard = Locker::get_locker(format!("network-tunnel-{}", remote_id)).await;
-        if let Some(tunnel) = self.get_tunnel(&remote_id) {
-            if is_tunnel_available(tunnel.as_ref()) {
-                log::debug!(
-                    "sn called remote={} tunnel became available before dial",
-                    remote_id
-                );
-                return Ok(());
-            }
+        if self.has_available_tunnel_id(&remote_id, called.tunnel_id) {
+            log::debug!(
+                "sn called remote={} tunnel_id={:?} became available before dial",
+                remote_id,
+                called.tunnel_id
+            );
+            return Ok(());
         }
         match self
             .open_direct_path(
@@ -1324,8 +1340,12 @@ impl TunnelManager {
                 entry.tunnel.tunnel_id() == tunnel.tunnel_id()
                     && entry.tunnel.candidate_id() == tunnel.candidate_id()
             }) {
+                let same_tunnel = Arc::ptr_eq(&entry.tunnel, &tunnel);
                 let replaced = std::mem::replace(&mut entry.tunnel, tunnel.clone());
                 entry.updated_at = Instant::now();
+                if !same_tunnel {
+                    entry.published = false;
+                }
                 Some(replaced)
             } else {
                 entries.push(TunnelEntry {
@@ -1369,7 +1389,7 @@ impl TunnelManager {
             tunnel.candidate_id(),
             tunnel.form(),
             tunnel.protocol(),
-            false
+            self.is_registered_tunnel_published(&remote_id_for_log, &tunnel)
         );
         if tunnel.form() == TunnelForm::Proxy {
             self.track_proxy_upgrade(&remote_id_for_log);
@@ -1417,6 +1437,21 @@ impl TunnelManager {
         );
         let mut subscriptions = self.subscriptions.lock().unwrap();
         subscriptions.retain(|tx| tx.send(Ok(tunnel.clone())).is_ok());
+    }
+
+    fn is_registered_tunnel_published(&self, remote_id: &P2pId, tunnel: &TunnelRef) -> bool {
+        self.tunnels
+            .read()
+            .unwrap()
+            .get(remote_id)
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.tunnel.tunnel_id() == tunnel.tunnel_id()
+                        && entry.tunnel.candidate_id() == tunnel.candidate_id()
+                })
+            })
+            .map(|entry| entry.published)
+            .unwrap_or(false)
     }
 
     async fn cleanup_closed_tunnels(&self, _idle_timeout: Duration) {
@@ -1474,9 +1509,10 @@ mod tests {
     use crate::executor::Executor;
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
     use crate::networks::{TunnelListener, TunnelListenerInfo, TunnelNetwork};
+    use crate::sn::protocol::v0::{SnCalled, TunnelType};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::tunnel::DefaultP2pConnectionInfoCache;
-    use crate::types::{TunnelCandidateId, TunnelIdGenerator};
+    use crate::types::{Sequence, TunnelCandidateId, TunnelIdGenerator};
     use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
     use std::sync::Once;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1517,6 +1553,10 @@ mod tests {
         Endpoint::from((Protocol::Tcp, "127.0.0.1:0".parse().unwrap()))
     }
 
+    fn ext_ep(protocol: u8, port: u16) -> Endpoint {
+        Endpoint::from((Protocol::Ext(protocol), ([127, 0, 0, 1], port).into()))
+    }
+
     fn new_test_manager(
         local_identity: P2pIdentityRef,
         devices: HashMap<P2pId, P2pIdentityCertRef>,
@@ -1546,6 +1586,29 @@ mod tests {
             PROXY_UPGRADE_INITIAL_INTERVAL,
         )
         .unwrap()
+    }
+
+    fn make_sn_called(
+        remote_identity: &P2pIdentityRef,
+        tunnel_id: TunnelId,
+        reverse_endpoint_array: Vec<Endpoint>,
+    ) -> SnCalled {
+        SnCalled {
+            seq: Sequence::from(1),
+            sn_peer_id: P2pId::default(),
+            to_peer_id: P2pId::default(),
+            reverse_endpoint_array,
+            active_pn_list: vec![],
+            peer_info: remote_identity
+                .get_identity_cert()
+                .unwrap()
+                .get_encoded_cert()
+                .unwrap(),
+            tunnel_id,
+            call_send_time: 0,
+            call_type: TunnelType::Stream,
+            payload: vec![],
+        }
     }
 
     #[derive(Clone)]
@@ -2635,6 +2698,154 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn replacing_published_candidate_republishes_new_tunnel() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-republish-replacement");
+        let remote_identity = new_identity("remote-republish-replacement");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let mut sub = manager.subscribe();
+        let tunnel_id = TunnelId::from(901);
+        let candidate_id = TunnelCandidateId::from(1);
+        let first = TrackableTunnel::new_with_ids(
+            tunnel_id,
+            candidate_id,
+            TunnelForm::Proxy,
+            false,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        let replacement = TrackableTunnel::new_with_ids(
+            tunnel_id,
+            candidate_id,
+            TunnelForm::Proxy,
+            false,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager
+            .register_tunnel_and_publish(first.clone(), false)
+            .await
+            .unwrap();
+        let first_published = sub.accept_tunnel().await.unwrap();
+        let first_ref: TunnelRef = first.clone();
+        assert!(Arc::ptr_eq(&first_published, &first_ref));
+
+        manager
+            .register_tunnel_and_publish(replacement.clone(), false)
+            .await
+            .unwrap();
+        let replacement_published = runtime::timeout(Duration::from_secs(1), sub.accept_tunnel())
+            .await
+            .unwrap()
+            .unwrap();
+        let replacement_ref: TunnelRef = replacement.clone();
+        assert!(Arc::ptr_eq(&replacement_published, &replacement_ref));
+    }
+
+    #[tokio::test]
+    async fn sn_called_skips_reverse_dial_when_tunnel_id_exists() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-sn-called-existing-id");
+        let remote_identity = new_identity("remote-sn-called-existing-id");
+        let remote_ep = ext_ep(11, 18011);
+        let network = MockDialNetwork::new(
+            Protocol::Ext(11),
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(1),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity.clone(),
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+        let tunnel_id = TunnelId::from(901);
+        let existing = TrackableTunnel::new_with_ids(
+            tunnel_id,
+            TunnelCandidateId::from(1),
+            TunnelForm::Active,
+            false,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        manager
+            .register_tunnel_and_publish(existing, false)
+            .await
+            .unwrap();
+
+        manager
+            .on_sn_called(make_sn_called(&remote_identity, tunnel_id, vec![remote_ep]))
+            .await
+            .unwrap();
+
+        assert_eq!(network.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn sn_called_dials_reverse_when_existing_tunnel_has_different_id() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-sn-called-new-id");
+        let remote_identity = new_identity("remote-sn-called-new-id");
+        let remote_ep = ext_ep(12, 18012);
+        let network = MockDialNetwork::new(
+            Protocol::Ext(12),
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(1),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity.clone(),
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+        let existing = TrackableTunnel::new_with_ids(
+            TunnelId::from(902),
+            TunnelCandidateId::from(1),
+            TunnelForm::Active,
+            false,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        manager
+            .register_tunnel_and_publish(existing, false)
+            .await
+            .unwrap();
+
+        let new_tunnel_id = TunnelId::from(903);
+        manager
+            .on_sn_called(make_sn_called(
+                &remote_identity,
+                new_tunnel_id,
+                vec![remote_ep],
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(network.call_count(), 1);
+        assert!(manager.has_available_tunnel_id(&remote_identity.get_id(), new_tunnel_id));
     }
 
     #[tokio::test]

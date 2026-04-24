@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-23
+approved_at: 2026-04-24
 ---
 
 # p2p-frame 设计
@@ -17,6 +17,7 @@ approved_at: 2026-04-23
 - 为 planning、testing 和 acceptance 定义具备阶段可执行性的子模块责任归属。
 - 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内，包括 source/target 双边独立统计视图与 source 单边限速的区分。
 - 为本轮 proxy tunnel `stream` 路径的“可选 TLS-over-proxy 载荷加密、由使用者显式接口控制且由两端在 tunnel 外约定”需求建立可执行设计边界，并明确 `datagram` 路径继续保持明文兼容且忽略该 `stream` 加密模式，同时把加密接口限制在 PN 专有 API 内，而不是污染通用 `Tunnel` / `TunnelNetwork` trait。
+- 为本轮 `PnTunnel` idle timeout 生命周期关闭需求建立可执行设计边界，明确 channel lease 计数、原子关闭、accept/open 失败和关闭后重新创建语义。
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
 
@@ -71,6 +72,9 @@ approved_at: 2026-04-23
 - 是否启用 TLS 由 proxy tunnel 两端在 tunnel 外预先约定；PN open 控制流不额外承载 TLS 模式协商。
 - 若调用方显式选择加密，则失败路径必须直接失败，不允许静默回退到明文桥接。
 - 本轮加密设计只覆盖 proxy `stream`；proxy `datagram` 不进入 TLS-over-proxy 范围，但必须忽略 `stream` 加密模式并保持当前明文兼容语义。
+- `PnTunnel` idle close 必须按本地生命周期关闭建模，不引入可靠远端 close 通知；触发后 tunnel 状态进入 `Closed` 或等价错误终态，并复用普通 close 的本地效果。
+- `PnTunnel` 必须在统一状态临界区内维护 channel lease 计数、pending inbound queue 计数、idle deadline 和 close reason；本地 open、inbound 投递、channel drop 与 idle sweeper 都必须通过该状态执行竞态判定。
+- `PnShared` 必须在 tunnel 关闭后移除 live registry 中的旧对象，确保后续同 `(remote_id, tunnel_id)` inbound `ProxyOpenReq` 不会投递到已关闭 tunnel，而是创建新的 passive tunnel。
 - 当某个远端当前只有 proxy tunnel 可用时，`TunnelManager` 必须在后台继续尝试 direct 或 reverse 建链，而不是无限期停留在 proxy 路径。
 - 上述脱代理尝试不得再次把“升级任务”回退成 proxy 建链；proxy 只作为对外可用的兜底连通性，而不是后台升级路径的成功条件。
 - 持续失败的脱代理尝试可以延长重试间隔，但必须有上限；当前实现约束为初始 5 分钟、失败后指数退避、最大不超过 2 小时。
@@ -116,6 +120,7 @@ p2p-frame/src
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
 | `docs/versions/v0.1/modules/p2p-frame/design/tunnel-publish-lifecycle.md` | `TunnelManager` 新 tunnel 注册/发布生命周期与 reverse 延后 publish 规则补充 | `tunnel` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-proxy-encryption.md` | PN client / tunnel 侧可选端到端载荷加密、显式接口和 TLS 叠加设计补充 | `pn/client` |
+| `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-idle-close.md` | `PnTunnel` idle timeout 生命周期关闭、channel lease 计数和关闭后重新创建设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
 | `p2p-frame/docs/tunnel_design.md` | tunnel 概念 | tunnel |
 | `p2p-frame/docs/tunnel_command_protocol_design.md` | tunnel 命令协议 | tunnel/ttp |
@@ -130,6 +135,7 @@ p2p-frame/src
 |---------------|----------|---------------|----------------|
 | relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户统计的流量计量 | relay bridge 上的 source/target 双边独立统计视图 | `p2p-frame/src/pn/service/pn_server.rs`、`PnTrafficManager`、统计查询接口 | 若实现阶段无法在不改变握手与 bridge 契约的前提下同时暴露 source/target 视图，应先退回 design 重新澄清统计模型，而不是把 target 统计挤进 source 视图。 |
 | relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户生效的限速能力 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs`、限速配置/查询接口 | 若实现阶段发现 target 统计可见性会迫使限速扩展成双边模型，应先退回 proposal，而不是静默扩大限速范围。 |
+| `PnTunnel` idle timeout 生命周期关闭 | `PnTunnel` 本地状态机、channel lease 计数、idle sweeper 和关闭后重新创建 | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs` | 若实现阶段无法可靠追踪已返回给上层的 channel 生命周期，应先退回 design 重新划分 lease wrapper，而不是只统计 inbound queue。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 
 ## 风险与回滚

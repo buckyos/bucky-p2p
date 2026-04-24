@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use crate::endpoint::{Endpoint, Protocol};
@@ -13,7 +14,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{PROXY_SERVICE, PnChannelKind, ProxyOpenReq, ProxyOpenResp};
 use crate::runtime;
 use crate::ttp::{TtpClientRef, TtpPortListener};
-use crate::types::TunnelIdGenerator;
+use crate::types::{TunnelId, TunnelIdGenerator};
 
 use super::pn_listener::PnListener;
 use super::pn_tunnel::{PnProxyStreamSecurityMode, PnTlsContext, PnTunnel, PnTunnelOptions};
@@ -25,6 +26,8 @@ pub(super) struct PnShared {
     gen_id: Arc<TunnelIdGenerator>,
     tls_context: Option<PnTlsContext>,
     stream_security_mode: AtomicU8,
+    tunnel_idle_timeout: Mutex<Option<Duration>>,
+    tunnels: Mutex<HashMap<PnTunnelKey, Weak<PnTunnel>>>,
 }
 
 impl PnShared {
@@ -43,6 +46,119 @@ impl PnShared {
     pub(super) fn set_stream_security_mode(&self, mode: PnProxyStreamSecurityMode) {
         self.stream_security_mode
             .store(mode.to_atomic(), Ordering::SeqCst);
+    }
+
+    pub(super) fn tunnel_idle_timeout(&self) -> Option<Duration> {
+        *self.tunnel_idle_timeout.lock().unwrap()
+    }
+
+    pub(super) fn set_tunnel_idle_timeout(&self, timeout: Option<Duration>) {
+        *self.tunnel_idle_timeout.lock().unwrap() = timeout;
+    }
+
+    pub(super) fn tunnel_key(remote_id: P2pId, tunnel_id: TunnelId) -> PnTunnelKey {
+        PnTunnelKey {
+            remote_id,
+            tunnel_id,
+        }
+    }
+
+    pub(super) fn get_tunnel(&self, key: &PnTunnelKey) -> Option<Arc<PnTunnel>> {
+        let mut tunnels = self.tunnels.lock().unwrap();
+        match tunnels.get(key).and_then(Weak::upgrade) {
+            Some(tunnel) if !tunnel.is_closed_flag() => Some(tunnel),
+            _ => {
+                tunnels.remove(key);
+                None
+            }
+        }
+    }
+
+    pub(super) fn unregister_tunnel(&self, key: &PnTunnelKey, tunnel: &PnTunnel) {
+        let mut tunnels = self.tunnels.lock().unwrap();
+        let should_remove = match tunnels.get(key).and_then(Weak::upgrade) {
+            Some(current) => std::ptr::eq(Arc::as_ptr(&current), tunnel as *const PnTunnel),
+            None => true,
+        };
+        if should_remove {
+            tunnels.remove(key);
+        }
+    }
+
+    pub(super) fn register_tunnel(&self, key: PnTunnelKey, tunnel: &Arc<PnTunnel>) {
+        self.tunnels
+            .lock()
+            .unwrap()
+            .insert(key, Arc::downgrade(tunnel));
+    }
+
+    pub(super) fn dispatch_or_create_passive_tunnel(
+        self: &Arc<Self>,
+        key: PnTunnelKey,
+        req: ProxyOpenReq,
+        read: TunnelStreamRead,
+        write: TunnelStreamWrite,
+    ) -> PassiveTunnelDispatch {
+        let mut tunnels = self.tunnels.lock().unwrap();
+        if let Some(tunnel) = tunnels.get(&key).and_then(Weak::upgrade) {
+            if !tunnel.is_closed_flag() {
+                match tunnel.push_passive_channel(req, read, write) {
+                    Ok(()) => return PassiveTunnelDispatch::Dispatched,
+                    Err(rejected) => {
+                        if tunnels
+                            .get(&key)
+                            .and_then(Weak::upgrade)
+                            .is_none_or(|current| Arc::ptr_eq(&current, &tunnel))
+                        {
+                            tunnels.remove(&key);
+                        }
+                        let tunnel = PnTunnel::new_passive(
+                            self.local_id(),
+                            rejected.request,
+                            rejected.read,
+                            rejected.write,
+                            Some(self.clone()),
+                            self.tls_context(),
+                            self.stream_security_mode(),
+                        );
+                        tunnels.insert(key, Arc::downgrade(&tunnel));
+                        return PassiveTunnelDispatch::Created(tunnel);
+                    }
+                }
+            }
+            tunnels.remove(&key);
+        } else {
+            tunnels.remove(&key);
+        }
+
+        let tunnel = PnTunnel::new_passive(
+            self.local_id(),
+            req,
+            read,
+            write,
+            Some(self.clone()),
+            self.tls_context(),
+            self.stream_security_mode(),
+        );
+        tunnels.insert(key, Arc::downgrade(&tunnel));
+        PassiveTunnelDispatch::Created(tunnel)
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_for_test(local_identity: P2pIdentityRef) -> Arc<Self> {
+        let net_manager = crate::networks::NetManager::new(
+            vec![],
+            crate::tls::DefaultTlsServerCertResolver::new(),
+        )
+        .unwrap();
+        Arc::new(Self {
+            ttp_client: crate::ttp::TtpClient::new(local_identity, net_manager),
+            gen_id: Arc::new(TunnelIdGenerator::new()),
+            tls_context: None,
+            stream_security_mode: AtomicU8::new(PnProxyStreamSecurityMode::Disabled.to_atomic()),
+            tunnel_idle_timeout: Mutex::new(Some(super::pn_tunnel::DEFAULT_PN_TUNNEL_IDLE_TIMEOUT)),
+            tunnels: Mutex::new(HashMap::new()),
+        })
     }
 
     pub(super) async fn open_channel(
@@ -129,6 +245,11 @@ impl PnShared {
     }
 }
 
+pub(super) enum PassiveTunnelDispatch {
+    Dispatched,
+    Created(Arc<PnTunnel>),
+}
+
 pub struct PnClient {
     shared: Arc<PnShared>,
     listener: Mutex<Option<TunnelListenerRef>>,
@@ -152,6 +273,10 @@ impl PnClient {
                 stream_security_mode: AtomicU8::new(
                     PnProxyStreamSecurityMode::Disabled.to_atomic(),
                 ),
+                tunnel_idle_timeout: Mutex::new(Some(
+                    super::pn_tunnel::DEFAULT_PN_TUNNEL_IDLE_TIMEOUT,
+                )),
+                tunnels: Mutex::new(HashMap::new()),
             }),
             listener: Mutex::new(None),
             listener_infos: Mutex::new(vec![TunnelListenerInfo {
@@ -194,14 +319,17 @@ impl PnClient {
         } else {
             intent.candidate_id
         };
-        Ok(PnTunnel::new_active(
+        let tunnel = PnTunnel::new_active(
             tunnel_id,
             candidate_id,
             self.shared.local_id(),
             remote_id.clone(),
             self.shared.clone(),
             options.stream_security_mode,
-        ))
+        );
+        self.shared
+            .register_tunnel(PnShared::tunnel_key(remote_id.clone(), tunnel_id), &tunnel);
+        Ok(tunnel)
     }
 
     pub fn set_stream_security_mode(&self, mode: PnProxyStreamSecurityMode) {
@@ -210,6 +338,24 @@ impl PnClient {
 
     pub fn stream_security_mode(&self) -> PnProxyStreamSecurityMode {
         self.shared.stream_security_mode()
+    }
+
+    pub fn set_tunnel_idle_timeout(&self, timeout: Option<Duration>) {
+        self.shared.set_tunnel_idle_timeout(timeout);
+    }
+
+    pub fn tunnel_idle_timeout(&self) -> Option<Duration> {
+        self.shared.tunnel_idle_timeout()
+    }
+
+    #[cfg(test)]
+    pub(super) fn get_tunnel_for_test(
+        &self,
+        remote_id: &P2pId,
+        tunnel_id: TunnelId,
+    ) -> Option<Arc<PnTunnel>> {
+        self.shared
+            .get_tunnel(&PnShared::tunnel_key(remote_id.clone(), tunnel_id))
     }
 }
 
@@ -323,7 +469,7 @@ impl TunnelNetwork for PnClient {
         } else {
             intent.candidate_id
         };
-        let tunnel: TunnelRef = PnTunnel::new_active(
+        let tunnel = PnTunnel::new_active(
             tunnel_id,
             candidate_id,
             self.shared.local_id(),
@@ -331,6 +477,9 @@ impl TunnelNetwork for PnClient {
             self.shared.clone(),
             self.shared.stream_security_mode(),
         );
+        self.shared
+            .register_tunnel(PnShared::tunnel_key(remote_id.clone(), tunnel_id), &tunnel);
+        let tunnel: TunnelRef = tunnel;
         Ok(tunnel)
     }
 
@@ -346,6 +495,12 @@ impl TunnelNetwork for PnClient {
         self.create_tunnel_with_intent(local_identity, remote, remote_id, remote_name, intent)
             .await
     }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(super) struct PnTunnelKey {
+    remote_id: P2pId,
+    tunnel_id: TunnelId,
 }
 
 pub(super) async fn write_pn_command<W, T>(write: &mut W, body: T) -> P2pResult<()>

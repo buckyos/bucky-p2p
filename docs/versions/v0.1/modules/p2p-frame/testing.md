@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-23
+approved_at: 2026-04-24
 ---
 
 # p2p-frame 测试
@@ -14,6 +14,7 @@ approved_at: 2026-04-23
 | `testing.md` | 模块级验证基线 | 完整模块 |
 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-publish-lifecycle.md` | `TunnelManager` 新 tunnel register/publish 生命周期验证补充 | `tunnel` |
 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md` | proxy tunnel `stream` 的 TLS-over-proxy 验证补充 | `pn/client` |
+| `docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md` | `PnTunnel` idle timeout 生命周期关闭验证补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md` | relay 侧 PN server 验证补充 | `pn/service` |
 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md` | TCP tunnel 协议用例 | transport/tunnel |
 
@@ -30,13 +31,13 @@ approved_at: 2026-04-23
 | `tunnel` | tunnel 生命周期和 manager 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-publish-lifecycle.md` | active/passive/proxy tunnel 创建、统一 register/publish 生命周期、reverse waiter 交付后的 publish、proxy tunnel 发布后的后台 direct/reverse 升级重试 | 同时存在多个 tunnel、选择回退、reverse waiter 命中时的延后 publish、waiter 清理后的 later-arriving reverse publish、失败清理、proxy 升级路径持续失败后的退避封顶，以及升级流程不得回退成 proxy | unit | `p2p-frame/src/tunnel/tunnel_manager.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client 协议交互 | 无效命令流、channel 关闭 | unit | `p2p-frame/src/ttp/tests.rs` |
 | `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md` | 注册、查询、呼叫路由 | 对端缺失、并发、陈旧状态 | unit + DV | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/service/*.rs` |
-| `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md` | PN tunnel relay、请求校验、响应转发、source/target 双边用户流量统计、仅 source 侧生效的 server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照，以及 `datagram` 在 `TlsRequired` 下继续保持明文兼容 | relay 启动失败、validator 拒绝、target 打开失败、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、统计失真、source/target 串户、target 统计错误触发限速、限速背压异常 | unit + DV | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
+| `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md` | PN tunnel relay、请求校验、响应转发、source/target 双边用户流量统计、仅 source 侧生效的 server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照、`datagram` 在 `TlsRequired` 下继续保持明文兼容，以及 `PnTunnel` idle timeout 本地关闭 | relay 启动失败、validator 拒绝、target 打开失败、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、idle close 误关闭 active channel、idle close 后 accept 不醒、open 继续等待 timeout、迟到 inbound open 被错误投递到 closed tunnel、统计失真、source/target 串户、target 统计错误触发限速、限速背压异常 | unit + DV | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
 | `identity_tls` | 身份、TLS、X509 辅助逻辑 | none | 证书处理和身份正确性 | 无效证书、握手不匹配、feature-gated 路径 | unit | `p2p-frame/src/x509.rs`、`p2p-frame/src/tls/**` |
 
 ## 模块级测试
 | 测试项 | 覆盖边界 | 入口 | 预期结果 | 测试类型 | 测试文件/脚本 |
 |--------|----------|------|----------|----------|-----------------|
-| 核心库 unit 测试集 | `p2p-frame` 内部直接子模块，包括 `TunnelManager` 的统一 publish 生命周期、`pn_server` 的统计/限速桥接路径和 proxy stream 的 TLS-over-proxy 行为 | `cargo test -p p2p-frame` | crate 测试通过，且 tunnel publish 生命周期断言、relay 统计/限速断言与 proxy TLS 断言成立 | unit | 源码内 `#[test]` 和 `#[tokio::test]` 测试集 |
+| 核心库 unit 测试集 | `p2p-frame` 内部直接子模块，包括 `TunnelManager` 的统一 publish 生命周期、`pn_server` 的统计/限速桥接路径、proxy stream 的 TLS-over-proxy 行为和 `PnTunnel` idle close 状态机 | `cargo test -p p2p-frame` | crate 测试通过，且 tunnel publish 生命周期断言、relay 统计/限速断言、proxy TLS 断言与 `PnTunnel` idle close 断言成立 | unit | 源码内 `#[test]` 和 `#[tokio::test]` 测试集 |
 | All-in-one 运行时场景 | 带本地 signaling/proxy 流程的 stack runtime | `cargo run -p cyfs-p2p-test -- all-in-one` | 运行时场景能够在当前显式启用 `proxy_stream_encrypted` 的 stack 配置下启动并完成，且无协议/运行时失败 | DV | `cyfs-p2p-test/src/main.rs` |
 | 工作区兼容性 | 下游使用方仍能与核心库一起编译和测试 | `cargo test --workspace` | 工作区测试通过 | integration | workspace |
 
@@ -54,6 +55,7 @@ approved_at: 2026-04-23
 - `p2p-frame/src/pn/service/pn_server.rs` 是 PN open-result 映射和双向 bridge 启动的 relay 侧瓶颈点。
 - `p2p-frame/src/pn/service/pn_server.rs` 新增 `sfo-io` 接入后，bridge 的计量口径、source/target 双边统计映射、背压和关闭顺序会成为新的回归热点。
 - `p2p-frame/src/pn/client/pn_tunnel.rs` 新增 TLS-over-proxy 后，会把 proxy stream 建链与 TLS client/server 握手串到一起；同时当前实现还支持 `PnClient` 级模式配置与 passive accept 快照继承，是新的回归热点。
+- `p2p-frame/src/pn/client/pn_tunnel.rs` 新增 idle close 后，会把 channel lease drop、pending/queued 计数、accept 唤醒、local open 拒绝和关闭后重新创建串到一起，是新的并发回归热点。
 - 密码学和 X509 路径改动频率较低，但一旦修改，风险更高。
 
 ## 当前改动直接验证
@@ -62,6 +64,8 @@ approved_at: 2026-04-23
 | relay bridge 上的 source/target 双边独立统计视图 | `p2p-frame/src/pn/service/pn_server.rs` 的统计查询与 bridge 计量路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能分别断言 source 与 target 两侧查询结果存在、互不覆盖、且只统计成功写出的 payload 字节 |
 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs` 的限速配置与 bridge 背压路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 source 侧限速仍生效，而 target 侧新增统计查询不会引入新的限速行为 |
 | 双边统计对默认构造路径和下游调用方保持兼容 | `PnServer::new(...)` 调用点与运行时场景 | dv: `python3 ./harness/scripts/test-run.py p2p-frame dv`；integration: `python3 ./harness/scripts/test-run.py p2p-frame integration` | all-in-one 与 workspace 入口继续可运行，不要求下游立刻理解新的 target 统计查询接口细节 |
+| `PnTunnel` idle timeout 生命周期关闭 | `p2p-frame/src/pn/client/pn_tunnel.rs` 的状态机、channel lease、idle sweeper 和 close notify 路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 channel 计数归零并超过 idle timeout 后 tunnel 进入 closed/error 终态，pending `accept_*` 被唤醒并失败，后续 `open_*` 立即失败 |
+| `PnTunnel` 关闭后重新创建 | `p2p-frame/src/pn/client/pn_client.rs` 与 `p2p-frame/src/pn/client/pn_listener.rs` 的 inbound 分发路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 idle close 后同 `(remote_id, tunnel_id)` 的后续 inbound `ProxyOpenReq` 不会投递到已关闭对象，而是能创建新的 passive tunnel |
 
 ## 完成定义
 - [ ] 直接子模块至少映射到一个验证面
@@ -75,3 +79,4 @@ approved_at: 2026-04-23
 - [ ] `TunnelManager` 中 direct/proxy/普通 incoming 的“register 后立即 publish”、reverse waiter 命中时的延后 publish、以及 waiter 释放后的统一 publish 路径已映射到 unit 证据
 - [ ] `reverse_waiter` 超时、取消或失败后的清理，以及清理后 reverse tunnel 到达时不再隐藏的路径已映射到 unit 证据
 - [ ] proxy tunnel 发布后的 direct/reverse 升级重试、失败退避和 2 小时封顶行为已映射到 unit 证据
+- [ ] `PnTunnel` idle close 的 channel lease 计数、accept 唤醒、open 立即失败、active channel 未归零不触发 idle，以及关闭后重新创建已映射到 unit 证据

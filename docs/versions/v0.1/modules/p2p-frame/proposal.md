@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-23
+approved_at: 2026-04-24
 ---
 
 # p2p-frame 提案
@@ -12,6 +12,7 @@ approved_at: 2026-04-23
 - `p2p-frame` 是整个工作区的核心传输和 tunnel 库。
 - 这个数据包当前的直接目标，是为未来核心网络栈的改动建立一个严格、可评审的基线，确保协议、传输和运行时改动无法绕过 proposal、design、testing 和 acceptance。
 - 当前待落地的直接需求，是在 relay 侧 `pn/service/pn_server.rs` 增加用户流量统计与限速能力，并让经过 proxy server 的 proxy tunnel 支持由使用者显式控制的可选端到端载荷加密；其中 `stream` 路径可显式启用 TLS-over-proxy，而 `datagram` 路径继续保持明文兼容并忽略该加密模式，要求继续复用 `sfo-io` 中已有的统计/限速实现，同时避免在 `p2p-frame` 内重复实现一套新的字节整形逻辑或把业务明文暴露给 relay。本轮新增澄清是：relay 侧统计不再只提供单边 `from` 视图，而是要求 source 和 target 都能独立查询属于自己的桥接流量统计数据；限速仍只按 source 侧用户生效，不因 target 侧统计可见性而扩展成双边限速。
+- 本轮新增需求是为 `PnTunnel` 定义本地 idle 生命周期关闭语义：当 tunnel 上无 active、pending 或 queued channel 且持续达到配置的 idle timeout（默认 30 分钟）时，本端必须按与普通 tunnel close 一致的路径原子关闭该 `PnTunnel`，让该对象上的 `accept_*` 等待者出错、后续 `open_*` 被拒绝；若之后又收到同一 `(remote_id, tunnel_id)` 的 inbound open，本端必须按现有 listener 流程重新创建新的 passive `PnTunnel`。
 
 ## 范围
 ### 范围内
@@ -30,6 +31,10 @@ approved_at: 2026-04-23
 - 定义 proxy tunnel 的显式策略输入和调用接口，使使用者可以自行选择启用或关闭加密
 - 约束“未开启加密”和“外部约定启用加密但 TLS 建立失败”时的行为，避免把明文 fallback 伪装成具备 confidentiality 的安全通道
 - 明确 proxy tunnel 的 `datagram` 路径不承载 TLS-over-proxy 语义，即使同一 tunnel 选择了 `stream` 加密模式也继续按明文 datagram 行为工作，而不是返回 `NotSupport`
+- 为 `PnTunnel` 增加本地 idle timeout 生命周期语义：在 channel 计数为 0 且持续超过可配置阈值后，将 tunnel 原子切换到 `Closed` 或等价错误终态
+- idle close 必须复用普通 tunnel close 的本地效果，包括唤醒并失败 `accept_stream()` / `accept_datagram()`、拒绝后续 `open_stream()` / `open_datagram()`、清理待接收队列和保持 close 幂等
+- idle 判断的 channel 计数必须覆盖已返回给上层的 stream/datagram、正在 open/accept 握手中的 channel，以及已进入 inbound queue 但尚未被消费的 channel
+- 关闭后的同一 `(remote_id, tunnel_id)` 不应继续投递到已关闭对象；后续 inbound `ProxyOpenReq` 必须创建新的 passive `PnTunnel`
 
 ### 范围外
 - 重写当前协议实现
@@ -42,6 +47,8 @@ approved_at: 2026-04-23
 - 为 `pn` 之外的 active/reverse/direct tunnel 一次性引入同级别的业务载荷加密改造
 - 为 proxy tunnel 的 `datagram` 路径在本轮同时引入 TLS 等价的载荷加密
 - 借本轮需求重写整套 PN 协议
+- 为 idle close 引入可靠的远端关闭通知协议、全局租约心跳或 relay 侧长期 session 存活模型
+- 因 idle timeout 关闭本端 `PnTunnel` 时强制中断已经交给上层并仍在活动的 channel；这些 channel 必须先通过正常生命周期让计数归零，idle 才能触发
 
 ### 与相邻模块的边界
 - `cyfs-p2p` 可以适配 `p2p-frame`，但不拥有 `p2p-frame` 的协议语义。
@@ -81,6 +88,9 @@ approved_at: 2026-04-23
 - 使用者必须能通过显式接口或配置为单条 proxy tunnel、单个调用点或明确的构造路径选择“加密”或“不加密”，而不是依赖全局隐式副作用
 - TLS 是否启用由 proxy tunnel 两端在 tunnel 外通过配置、调用约定或同一构造路径显式决定；relay 不负责为此增加额外协商语义
 - `stream` 加密模式只约束 `stream` channel；`datagram` channel 在本轮必须忽略该模式并保持当前明文兼容语义，不能因为 `TlsRequired` 而被本地或对端 open/accept 路径拒绝
+- `PnTunnel` idle close 是本地生命周期管理，不提供可靠远端关闭通知；远端只能通过后续 channel open/I/O 失败或自身 idle 策略收敛
+- `PnTunnel` 的 idle 关闭判定必须在统一状态临界区内完成，避免 channel 计数归零、超时扫描、inbound open 投递和本地 open 之间出现误关闭或向已关闭对象投递的竞态
+- `tunnel_id` 与 `candidate_id` 在 `PnTunnel` 生命周期内保持稳定；idle close 不得在同一对象上更换身份，也不得把已关闭对象重新打开
 
 ## 高层结果
 - 未来的 `p2p-frame` 改动必须通过显式模块数据包进入流程。
@@ -92,6 +102,7 @@ approved_at: 2026-04-23
 - proxy tunnel 能由使用者显式选择是否启用端到端载荷加密；启用后 relay/proxy server 只暴露完成路由、控制流和配额所需的最小元数据。
 - 本轮 proxy tunnel 加密能力以 `stream` 路径上的 TLS-over-proxy 为交付目标；`datagram` 不提供 TLS 语义，但在 `TlsRequired` 场景下仍保持明文兼容并忽略该模式。
 - proxy tunnel 的加密能力具有显式的策略边界，不会把未加密路径误报为具备 confidentiality 的安全通道。
+- `PnTunnel` 能在无 active/pending/queued channel 并持续空闲超过配置阈值后进入本地关闭终态，释放本地 tunnel 资源并让等待中的 accept/open 路径获得明确错误，而不是无限期挂起或依赖不可靠的远端 close 通知。
 
 ## 风险
 - 旧设计说明与未来实现之间的协议漂移
@@ -106,6 +117,9 @@ approved_at: 2026-04-23
 - relay 统计/限速在加密模式下可能只能看到密文字节和密文时序，这会改变口径认知、调试方式和运维诊断习惯
 - 若加密模式与 passive `PnTunnel`/listener 接口装配顺序处理不当，可能破坏现有 open/accept 时序或导致隐性明文窗口
 - 若 `datagram` 继续错误继承 `stream` 加密模式，现有依赖明文 datagram 的调用点会在显式开启 `TlsRequired` 后出现非预期拒绝，形成兼容性回归
+- 若 channel 计数没有覆盖所有 active、pending 和 queued 状态，idle timeout 可能误关闭仍有业务活动的 tunnel，或永远无法释放空闲 tunnel
+- 若 idle close 与 inbound `ProxyOpenReq` 分发没有共享状态约束，后续 channel 可能被错误投递到已关闭对象，而不是重新创建 tunnel
+- 若已返回给上层的 stream/datagram 没有可靠的 lease/drop 计数路径，`PnTunnel` 无法判断 channel 数量是否真正归零
 
 ## 验收锚点
 - source 侧用户能够通过 `pn_server` 的查询入口看到属于自己这条 bridge 的累计统计，且记账主体使用 relay 规范化后的已认证 `req.from`，不受源端伪造 `from` 影响。
@@ -113,3 +127,6 @@ approved_at: 2026-04-23
 - source 与 target 的统计视图都只统计成功握手后的 bridge payload，不统计 `ProxyOpenReq` / `ProxyOpenResp`，并且只在成功写出后入账。
 - target 侧统计能力的引入不得把限速主体从 source 扩展成双边限速；现有用户级限速仍只按 source 侧用户生效。
 - 双边统计在 TLS-over-proxy 场景下继续以 relay 实际成功转发的 TLS record / 密文字节为口径，而不是尝试恢复业务明文大小。
+- `PnTunnel` 在 channel 数量归零并持续超过 idle timeout 后必须进入 `Closed` 或等价错误终态，`accept_stream()` / `accept_datagram()` 必须被唤醒并返回错误。
+- idle close 后，本地对同一 `PnTunnel` 的后续 `open_stream()` / `open_datagram()` 必须立即失败，不得重新激活该对象或等待 PN open timeout。
+- idle close 后，迟到或后续的同一 `(remote_id, tunnel_id)` inbound open 不得投递给已关闭对象；必须重新创建新的 passive `PnTunnel`。

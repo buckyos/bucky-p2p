@@ -5,6 +5,7 @@
 
 ## 职责
 - 负责传输/网络栈、tunnel 编排、PN/SN 协议行为、设备发现辅助能力、运行时抽象以及身份/TLS 支持。
+- `src/pn/client/**` 负责 `PnTunnel` 本地生命周期、proxy channel open/accept、idle timeout 关闭，以及关闭后同一 logical tunnel 后续 open 触发重新创建的语义。
 - `src/tunnel/**` 负责 tunnel 候选选择、proxy 兜底连通性，以及 proxy 已连通后的 direct/reverse 脱代理升级策略。
 
 ## 关键边界
