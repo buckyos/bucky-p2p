@@ -15,6 +15,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
+fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
+    matches!(err.code(), P2pErrorCode::PortNotListen)
+}
+
 pub struct StreamRead {
     read: TunnelStreamRead,
     session_id: SessionId,
@@ -416,6 +420,14 @@ impl StreamManager {
                         }
                     }
                     Err(err) => {
+                        if should_continue_accept_loop(&err) {
+                            log::debug!(
+                                "stream accept loop continue remote {} err {:?}",
+                                tunnel.remote_id(),
+                                err
+                            );
+                            continue;
+                        }
                         log::debug!(
                             "stream accept loop ended remote {} err {:?}",
                             tunnel.remote_id(),

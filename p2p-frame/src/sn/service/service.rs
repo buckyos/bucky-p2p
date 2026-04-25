@@ -183,6 +183,26 @@ impl SnService {
         &self.peer_mgr
     }
 
+    fn push_unique_endpoint(endpoints: &mut Vec<Endpoint>, endpoint: Endpoint) {
+        if !endpoints.contains(&endpoint) {
+            endpoints.push(endpoint);
+        }
+    }
+
+    fn extend_unique_endpoints(endpoints: &mut Vec<Endpoint>, extras: &[Endpoint]) {
+        for endpoint in extras {
+            Self::push_unique_endpoint(endpoints, *endpoint);
+        }
+    }
+
+    fn dedup_endpoints(endpoints: &mut Vec<Endpoint>) {
+        let mut unique = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints.drain(..) {
+            Self::push_unique_endpoint(&mut unique, endpoint);
+        }
+        *endpoints = unique;
+    }
+
     async fn handle_call(
         &self,
         mut call_req: SnCall,
@@ -250,9 +270,11 @@ impl SnService {
                             if let Some(pn_list) = call_req.active_pn_list.as_mut() {
                                 std::mem::swap(pn_list, &mut called_req.active_pn_list);
                             }
-                            called_req
-                                .reverse_endpoint_array
-                                .extend_from_slice(reverse_eps.as_slice());
+                            Self::dedup_endpoints(&mut called_req.reverse_endpoint_array);
+                            Self::extend_unique_endpoints(
+                                &mut called_req.reverse_endpoint_array,
+                                reverse_eps.as_slice(),
+                            );
 
                             let called_log =
                                 format!("{} called-req seq({})", log_key, called_seq.value());
@@ -378,14 +400,14 @@ impl SnService {
         for ep in remote_ep.iter() {
             for (protocol, port) in map_ports.iter() {
                 let mut map_ep = Endpoint::from((*protocol, ep.addr().ip(), *port));
-                if map_eps.contains(&map_ep) {
+                if remote_ep.contains(&map_ep) || map_eps.contains(&map_ep) {
                     continue;
                 }
                 map_ep.set_area(EndpointArea::Wan);
                 map_eps.push(map_ep);
             }
         }
-        remote_ep.extend_from_slice(map_eps.as_slice());
+        Self::extend_unique_endpoints(&mut remote_ep, map_eps.as_slice());
         remote_ep
     }
 
@@ -1109,6 +1131,27 @@ mod tests {
 
     fn init_executor() {
         Executor::init_new_multi_thread(None);
+    }
+
+    #[test]
+    fn reverse_endpoint_array_dedup_preserves_first_seen_endpoint() {
+        let mut wan_ep = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+        wan_ep.set_area(EndpointArea::Wan);
+        let mut mapped_same_addr = wan_ep;
+        mapped_same_addr.set_area(EndpointArea::Mapped);
+        let local_ep = Endpoint::from((Protocol::Quic, "192.168.3.137:3622".parse().unwrap()));
+        let ipv6_ep = Endpoint::from((
+            Protocol::Quic,
+            "[240e:3b1:d003:70a0:7817:42c0:a827:56b]:3622"
+                .parse()
+                .unwrap(),
+        ));
+
+        let mut endpoints = vec![wan_ep, wan_ep, local_ep];
+        SnService::dedup_endpoints(&mut endpoints);
+        SnService::extend_unique_endpoints(&mut endpoints, &[mapped_same_addr, ipv6_ep]);
+
+        assert_eq!(endpoints, vec![wan_ep, local_ep, ipv6_ep]);
     }
 
     #[tokio::test]

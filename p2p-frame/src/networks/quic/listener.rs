@@ -3,7 +3,9 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::finder::DeviceCache;
-use crate::networks::{QuicCongestionAlgorithm, TunnelForm, TunnelListener, TunnelRef};
+use crate::networks::{
+    QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelListener, TunnelRef,
+};
 use crate::p2p_identity::{
     P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
 };
@@ -16,13 +18,30 @@ use rustls::version::TLS13;
 use socket2::{Domain, Protocol as SocketProtocol, SockAddr, Socket, Type};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{Notify, mpsc};
+
+const UDP_PUNCH_MAGIC: &[u8; 8] = b"P2PPNCH1";
+const UDP_PUNCH_ACTIVE_PACKET_OFFSETS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_millis(300),
+    Duration::from_millis(390),
+    Duration::from_millis(500),
+];
+const UDP_PUNCH_REVERSE_PACKET_OFFSETS: [Duration; 4] = [
+    Duration::from_millis(0),
+    Duration::from_millis(30),
+    Duration::from_millis(90),
+    Duration::from_millis(200),
+];
 
 struct QuicTunnelListenerState {
     local: Option<Endpoint>,
     outer: Option<Endpoint>,
     socket: Option<quinn::Endpoint>,
+    punch_socket: Option<Arc<UdpSocket>>,
     mapping_port: Option<u16>,
 }
 
@@ -56,6 +75,7 @@ impl QuicTunnelListener {
                 local: None,
                 outer: None,
                 socket: None,
+                punch_socket: None,
                 mapping_port: None,
             }),
             accepted: AsyncMutex::new(accepted_rx),
@@ -86,6 +106,56 @@ impl QuicTunnelListener {
         self.state.read().unwrap().socket.clone().unwrap()
     }
 
+    pub(crate) fn start_udp_punch_burst(
+        &self,
+        remote: Endpoint,
+        intent: TunnelConnectIntent,
+        max_duration: Duration,
+    ) {
+        if !udp_punch_enabled_for_endpoint(&remote) {
+            return;
+        }
+        let offsets = udp_punch_offsets_for_deadline(intent, max_duration);
+        if offsets.is_empty() {
+            return;
+        }
+        let punch_socket = {
+            let state = self.state.read().unwrap();
+            state.punch_socket.clone()
+        };
+        let Some(punch_socket) = punch_socket else {
+            log::trace!(
+                "quic udp punch skipped remote={} because sender missing",
+                remote
+            );
+            return;
+        };
+        let payload = udp_punch_payload(intent);
+        Executor::spawn_ok(async move {
+            let mut last_offset = Duration::ZERO;
+            for (index, offset) in offsets.into_iter().enumerate() {
+                let sleep_duration = offset.saturating_sub(last_offset);
+                if !sleep_duration.is_zero() {
+                    runtime::sleep(sleep_duration).await;
+                }
+                let sent = try_send_udp_punch_packet(
+                    punch_socket.as_ref(),
+                    *remote.addr(),
+                    payload.as_slice(),
+                )
+                .await;
+                if !sent {
+                    log::trace!(
+                        "quic udp punch send failed remote={} index={}",
+                        remote,
+                        index
+                    );
+                }
+                last_offset = offset;
+            }
+        });
+    }
+
     pub(crate) fn close(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
@@ -97,6 +167,7 @@ impl QuicTunnelListener {
         }
         let ep = {
             let mut state = self.state.write().unwrap();
+            state.punch_socket.take();
             state.socket.take()
         };
         if let Some(ep) = ep {
@@ -188,6 +259,14 @@ impl QuicTunnelListener {
 
             std::net::UdpSocket::from_raw_socket(socket.into_raw_socket())
         };
+        let punch_socket = socket.try_clone().map_err(into_p2p_err!(
+            P2pErrorCode::QuicError,
+            "clone quic punch socket failed"
+        ))?;
+        let punch_socket = Arc::new(UdpSocket::from_std(punch_socket).map_err(into_p2p_err!(
+            P2pErrorCode::QuicError,
+            "create quic punch socket failed"
+        ))?);
         let endpoint = quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
             Some(server_config),
@@ -203,6 +282,7 @@ impl QuicTunnelListener {
         state.local = Some(local);
         state.outer = out;
         state.socket = Some(endpoint);
+        state.punch_socket = Some(punch_socket);
         state.mapping_port = mapping_port;
 
         Ok(())
@@ -288,6 +368,58 @@ impl QuicTunnelListener {
         })
         .unwrap();
         *self.accept_task.lock().unwrap() = Some(handle);
+    }
+}
+
+fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
+    remote.protocol() == Protocol::Quic
+        && remote.get_area() != crate::endpoint::EndpointArea::Wan
+        && remote.addr().port() != 0
+}
+
+fn udp_punch_payload(intent: TunnelConnectIntent) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(18);
+    payload.extend_from_slice(UDP_PUNCH_MAGIC);
+    payload.push(if intent.is_reverse { 1 } else { 0 });
+    payload.push(0);
+    payload.extend_from_slice(&intent.tunnel_id.value().to_be_bytes());
+    payload.extend_from_slice(&intent.candidate_id.value().to_be_bytes());
+    payload
+}
+
+fn udp_punch_packet_offsets(intent: TunnelConnectIntent) -> &'static [Duration] {
+    if intent.is_reverse {
+        &UDP_PUNCH_REVERSE_PACKET_OFFSETS
+    } else {
+        &UDP_PUNCH_ACTIVE_PACKET_OFFSETS
+    }
+}
+
+pub(crate) fn udp_punch_burst_window(intent: TunnelConnectIntent) -> Duration {
+    *udp_punch_packet_offsets(intent)
+        .last()
+        .unwrap_or(&Duration::ZERO)
+}
+
+fn udp_punch_offsets_for_deadline(
+    intent: TunnelConnectIntent,
+    max_duration: Duration,
+) -> Vec<Duration> {
+    udp_punch_packet_offsets(intent)
+        .iter()
+        .copied()
+        .take_while(|offset| *offset <= max_duration)
+        .collect()
+}
+
+async fn try_send_udp_punch_packet(
+    socket: &UdpSocket,
+    remote: std::net::SocketAddr,
+    payload: &[u8],
+) -> bool {
+    match socket.send_to(payload, remote).await {
+        Ok(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -406,4 +538,118 @@ pub(crate) async fn connect_with_ep(
         "quic to {} connect failed",
         remote
     ))
+}
+
+#[cfg(test)]
+mod udp_punch_tests {
+    use super::*;
+    use crate::endpoint::EndpointArea;
+    use crate::types::{TunnelCandidateId, TunnelId};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
+
+    fn endpoint(protocol: Protocol, port: u16, area: EndpointArea) -> Endpoint {
+        let mut ep = Endpoint::from((
+            protocol,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+        ));
+        ep.set_area(area);
+        ep
+    }
+
+    #[test]
+    fn udp_punch_policy_only_enables_quic_non_static_wan_candidates() {
+        let lan_quic = endpoint(Protocol::Quic, 10001, EndpointArea::Lan);
+        let mapped_quic = endpoint(Protocol::Quic, 10002, EndpointArea::Mapped);
+        let static_wan_quic = endpoint(Protocol::Quic, 10003, EndpointArea::Wan);
+        let tcp = endpoint(Protocol::Tcp, 10004, EndpointArea::Lan);
+        let zero_port_quic = endpoint(Protocol::Quic, 0, EndpointArea::Lan);
+
+        assert!(udp_punch_enabled_for_endpoint(&lan_quic));
+        assert!(udp_punch_enabled_for_endpoint(&mapped_quic));
+        assert!(!udp_punch_enabled_for_endpoint(&static_wan_quic));
+        assert!(!udp_punch_enabled_for_endpoint(&tcp));
+        assert!(!udp_punch_enabled_for_endpoint(&zero_port_quic));
+    }
+
+    #[test]
+    fn udp_punch_payload_has_private_magic_and_tunnel_ids() {
+        let intent = TunnelConnectIntent::reverse(
+            TunnelId::from(0x0102_0304),
+            TunnelCandidateId::from(0x0506_0708),
+        );
+        let payload = udp_punch_payload(intent);
+
+        assert_eq!(&payload[..UDP_PUNCH_MAGIC.len()], UDP_PUNCH_MAGIC);
+        assert_eq!(payload[UDP_PUNCH_MAGIC.len()], 1);
+        assert_eq!(
+            &payload[UDP_PUNCH_MAGIC.len() + 2..UDP_PUNCH_MAGIC.len() + 6],
+            &0x0102_0304u32.to_be_bytes()
+        );
+        assert_eq!(
+            &payload[UDP_PUNCH_MAGIC.len() + 6..UDP_PUNCH_MAGIC.len() + 10],
+            &0x0506_0708u32.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn udp_punch_schedule_delays_active_and_starts_reverse_immediately() {
+        let active = TunnelConnectIntent::active_logical(TunnelId::from(7));
+        let reverse = TunnelConnectIntent::reverse_logical(TunnelId::from(8));
+
+        assert_eq!(udp_punch_burst_window(active), Duration::from_millis(500));
+        assert_eq!(udp_punch_burst_window(reverse), Duration::from_millis(200));
+        assert_eq!(
+            udp_punch_offsets_for_deadline(active, Duration::from_secs(3)),
+            vec![
+                Duration::from_millis(250),
+                Duration::from_millis(300),
+                Duration::from_millis(390),
+                Duration::from_millis(500),
+            ]
+        );
+        assert_eq!(
+            udp_punch_offsets_for_deadline(active, Duration::from_millis(300)),
+            vec![Duration::from_millis(250), Duration::from_millis(300)]
+        );
+        assert_eq!(
+            udp_punch_offsets_for_deadline(reverse, Duration::from_secs(3)),
+            vec![
+                Duration::from_millis(0),
+                Duration::from_millis(30),
+                Duration::from_millis(90),
+                Duration::from_millis(200),
+            ]
+        );
+        assert_eq!(
+            udp_punch_offsets_for_deadline(reverse, Duration::from_millis(100)),
+            vec![
+                Duration::from_millis(0),
+                Duration::from_millis(30),
+                Duration::from_millis(90),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_punch_async_socket_preserves_listener_local_port() {
+        let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let punch_socket = UdpSocket::from_std(socket.try_clone().unwrap()).unwrap();
+
+        assert_eq!(
+            socket.local_addr().unwrap(),
+            punch_socket.local_addr().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_punch_send_failure_is_best_effort() {
+        let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let socket = UdpSocket::from_std(socket).unwrap();
+        let invalid_remote = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
+        let payload = udp_punch_payload(TunnelConnectIntent::active_logical(TunnelId::from(7)));
+
+        assert!(!try_send_udp_punch_packet(&socket, invalid_remote, payload.as_slice()).await);
+    }
 }

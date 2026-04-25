@@ -843,11 +843,7 @@ async fn all_in_one() {
         1234,
         "direct",
     ));
-    tokio::task::spawn(start_stream_listener(
-        stack_client.clone(),
-        1234,
-        "client",
-    ));
+    tokio::task::spawn(start_stream_listener(stack_client.clone(), 1234, "client"));
     tokio::task::spawn(start_datagram_listener(
         stack_direct_target.clone(),
         1234,

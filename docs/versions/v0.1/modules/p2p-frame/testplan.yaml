@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `TunnelManager` 的统一 publish 生命周期断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 状态机断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `TunnelManager` 的统一 publish 生命周期断言、单 SN NAT 打洞调度和 SN 存在时开启的同源 UDP punch 断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 状态机断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -25,6 +25,9 @@ levels:
         - 源码内的异步和同步测试是主要的 unit 验证面。
         - `tunnel/tunnel_manager.rs` 的 unit 测试必须覆盖 direct/proxy/普通 incoming 的 register 后立即 publish、reverse waiter 命中时的延后 publish、waiter 完成后的统一 publish 路径，以及 waiter 清理后的 later-arriving reverse 不再隐藏。
         - `tunnel/tunnel_manager.rs` 的 unit 测试还必须覆盖统一 publish 入口的幂等性，以及 published candidate 相对 hidden reverse candidate 的选择优先级。
+        - `tunnel/tunnel_manager.rs` 的 unit 测试必须覆盖 reverse 统一 300ms 延迟、direct/reverse 共享同一 logical tunnel、proxy 新建后进入 15s/30s/60s/120s 短窗口脱代理、短窗口后回到 2 小时封顶退避，以及 endpoint 评分按协议隔离失败。
+        - `TunnelConnectIntent`、`networks/quic/listener.rs` 与 `networks/quic/network.rs` 的 unit 测试必须覆盖 UDP punch 默认关闭、`TunnelManager` 只在 SN service 存在且候选符合策略时为单次 candidate intent 开启，且开启后同源 UDP punch 只从 QUIC listener 同一本地端口发送、只对非 WAN UDP 候选启用、有发送次数/间隔上限、发送失败不改变 QUIC 建链结果，且不新增 raw UDP 接收解析或业务载荷路径。
+        - `sn/client/sn_service.rs` 与 `sn/service/service.rs` 的 unit 测试必须覆盖 `SnCall` 携带本次建链的 `reverse_endpoint_array`，SN called 保留调用方候选并扩展单 SN 观察候选，且不引入多 SN fanout。
         - `pn/service/pn_server.rs` 的 unit 测试必须覆盖 source/target 双边成功转发字节统计、仅 source 侧生效的用户级限速，以及 `sfo-io` 集成失败路径。
         - 当前 `pn/client/pn_tunnel.rs` 的 unit 测试已直接覆盖 passive 明文兼容、`TlsRequired` 成功、TLS 身份校验失败、`datagram` 忽略 `stream` 模式，以及 `create_tunnel_with_options(...)` / client 级模式配置下 datagram 不被本地拒绝。
         - active `PnTunnel::open_stream()` 的默认明文兼容、双端模式错配和真实 TLS client 握手失败路径仍应继续补足 direct unit 证据。
@@ -36,7 +39,7 @@ levels:
 
   dv:
     mode: enabled
-    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认默认 `PnServer::new(...)` 路径在接入 source/target 双边统计与 source 单边限速后仍可启动，当前显式启用的 proxy stream TLS-over-proxy 配置不破坏场景运行，且默认 30 分钟 `PnTunnel` idle timeout 不影响短时场景
+    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认 NAT-aware tunnel 调度、默认关闭且仅 SN 存在时开启的同源 UDP punch、默认 `PnServer::new(...)` 路径、当前显式启用的 proxy stream TLS-over-proxy 配置和默认 30 分钟 `PnTunnel` idle timeout 不破坏短时场景
     test_targets:
       - cyfs-p2p-test/src/main.rs
       - devices/
@@ -51,6 +54,8 @@ levels:
         - 当前 DV 场景已显式启用 `set_proxy_stream_encrypted(true)`；它验证的是 stack 默认 proxy client 的 client 级 TLS 模式配置路径。
         - relay 只能桥接 TLS 握手字节和密文，不能成为 TLS 终止点，也不需要理解 TLS 模式字段。
         - idle close 的精确时间和竞态验证由 unit 承担；DV 只验证默认 idle 配置不会破坏正常短时 proxy 场景。
+        - NAT 打洞成功率受真实网络环境影响；DV 只验证 all-in-one 场景仍可运行，不把公网 NAT 成功率作为自动断言。
+        - 同源 UDP punch 的真实公网效果不作为 DV 自动断言；DV 只确认默认关闭不破坏本地 QUIC/PN 流程，SN 存在且开启时不要求额外服务。
     steps:
       - id: p2p-frame-dv
         name: 运行本地 all-in-one 场景
@@ -58,7 +63,7 @@ levels:
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证，确认 `pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力和 `PnTunnel` idle close 内部状态不会破坏现有调用方
+    summary: 工作区级兼容性与下游使用方验证，确认单 SN NAT 打洞优化和默认关闭、仅 SN 存在时开启的同源 UDP punch、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力和 `PnTunnel` idle close 内部状态不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test
@@ -72,6 +77,8 @@ levels:
         - 特别关注 `cyfs-p2p-test` 与 `sn-miner-rust` 的 `PnServer::new(...)` 调用点兼容性。
         - 现有未显式启用 TLS-over-proxy 的调用方必须保持明文兼容，不得因新增 PN 专有 API 扩展而回归。
         - `PnTunnel` idle close 的新配置和 wrapper 类型不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名。
+        - NAT 打洞优化不得要求下游实现多 SN、STUN/TURN 或新的 `TunnelNetwork` trait 参数。
+        - 同源 UDP punch 不得要求下游处理 raw UDP payload、暴露新业务接口或修改 `TunnelNetwork` trait 参数；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选符合策略时才为本次 `TunnelConnectIntent` 开启。
     steps:
       - id: p2p-frame-integration
         name: 运行工作区测试套件

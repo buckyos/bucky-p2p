@@ -13,6 +13,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
+fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
+    matches!(err.code(), P2pErrorCode::PortNotListen)
+}
+
 pub struct DatagramRead {
     read: TunnelDatagramRead,
     session_id: SessionId,
@@ -351,6 +355,14 @@ impl DatagramManager {
                         }
                     }
                     Err(err) => {
+                        if should_continue_accept_loop(&err) {
+                            log::debug!(
+                                "datagram accept loop continue remote {} err {:?}",
+                                tunnel.remote_id(),
+                                err
+                            );
+                            continue;
+                        }
                         log::debug!(
                             "datagram accept loop ended remote {} err {:?}",
                             tunnel.remote_id(),

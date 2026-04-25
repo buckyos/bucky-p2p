@@ -1,4 +1,4 @@
-use crate::endpoint::Endpoint;
+use crate::endpoint::{Endpoint, EndpointArea, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
@@ -12,6 +12,7 @@ use bucky_time::bucky_time_now;
 use notify_future::Notify;
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -23,14 +24,21 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use super::{ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionInfoCacheRef};
 use crate::networks::{
     ListenVPortsRef, NetManagerRef, TunnelCommandResult, TunnelConnectIntent, TunnelDatagramRead,
-    TunnelDatagramWrite, TunnelForm, TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead,
-    TunnelStreamWrite,
+    TunnelDatagramWrite, TunnelForm, TunnelListenerInfo, TunnelNetworkRef, TunnelRef, TunnelState,
+    TunnelStreamRead, TunnelStreamWrite,
 };
 
-const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(2000);
+const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
+const NAT_HEDGED_REVERSE_DELAY: Duration = HEDGED_REVERSE_DELAY;
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(60);
 const PROXY_UPGRADE_INITIAL_INTERVAL: Duration = Duration::from_secs(300);
 const PROXY_UPGRADE_MAX_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
+const PROXY_UPGRADE_SHORT_INTERVALS: [Duration; 4] = [
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+];
 
 fn should_stop_accept_loop(err: &P2pError) -> bool {
     matches!(
@@ -108,6 +116,21 @@ struct EndpointScore {
     fail_count: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct EndpointScoreKey {
+    protocol: crate::endpoint::Protocol,
+    addr: SocketAddr,
+}
+
+impl EndpointScoreKey {
+    fn new(ep: &Endpoint) -> Self {
+        Self {
+            protocol: ep.protocol(),
+            addr: *ep.addr(),
+        }
+    }
+}
+
 type ReverseWaitKey = (P2pId, TunnelId);
 
 struct ReverseWaitRegistration<'a> {
@@ -151,21 +174,43 @@ impl Drop for ReverseWaitRegistration<'_> {
 struct ProxyUpgradeState {
     next_attempt_at: Instant,
     retry_interval: Duration,
+    short_retry_index: usize,
     in_progress: bool,
 }
 
 impl ProxyUpgradeState {
-    fn new(now: Instant, initial_interval: Duration) -> Self {
+    fn new(now: Instant, _initial_interval: Duration) -> Self {
+        let retry_interval = PROXY_UPGRADE_SHORT_INTERVALS[0];
         Self {
-            next_attempt_at: now + initial_interval,
-            retry_interval: initial_interval,
+            next_attempt_at: now + retry_interval,
+            retry_interval,
+            short_retry_index: 0,
             in_progress: false,
         }
     }
 }
 
+fn advance_proxy_upgrade_retry(
+    upgrade: &mut ProxyUpgradeState,
+    initial_interval: Duration,
+) -> Duration {
+    if upgrade.short_retry_index + 1 < PROXY_UPGRADE_SHORT_INTERVALS.len() {
+        upgrade.short_retry_index += 1;
+        upgrade.retry_interval = PROXY_UPGRADE_SHORT_INTERVALS[upgrade.short_retry_index];
+    } else if upgrade.short_retry_index + 1 == PROXY_UPGRADE_SHORT_INTERVALS.len() {
+        upgrade.short_retry_index += 1;
+        upgrade.retry_interval = initial_interval;
+    } else {
+        upgrade.retry_interval = upgrade
+            .retry_interval
+            .saturating_mul(2)
+            .min(PROXY_UPGRADE_MAX_INTERVAL);
+    }
+    upgrade.retry_interval
+}
+
 struct ManagerState {
-    endpoint_scores: HashMap<Endpoint, EndpointScore>,
+    endpoint_scores: HashMap<EndpointScoreKey, EndpointScore>,
     pending_reverse_waiters: HashMap<ReverseWaitKey, Notify<P2pResult<TunnelRef>>>,
     proxy_upgrade_states: HashMap<P2pId, ProxyUpgradeState>,
 }
@@ -653,11 +698,12 @@ impl TunnelManager {
         );
         if !direct_eps.is_empty() && self.sn_service.is_some() {
             tried_reverse = true;
+            let reverse_delay = Self::hedged_reverse_delay_for_endpoints(direct_eps.as_slice());
             log::debug!(
                 "open tunnel remote={} tunnel_id={:?} start hedged direct+reverse delay_ms={}",
                 remote_id,
                 logical_tunnel_id,
-                HEDGED_REVERSE_DELAY.as_millis()
+                reverse_delay.as_millis()
             );
             let (result, direct_won) = race_with_delay(
                 self.open_direct_path(
@@ -666,7 +712,7 @@ impl TunnelManager {
                     remote_name.clone(),
                     TunnelConnectIntent::active_logical(logical_tunnel_id),
                 ),
-                HEDGED_REVERSE_DELAY,
+                reverse_delay,
                 self.open_reverse_path(remote_id, logical_tunnel_id),
             )
             .await;
@@ -776,10 +822,14 @@ impl TunnelManager {
             let remote_name = remote_name.clone();
             let remote_id = remote_id.clone();
             let manager_weak = manager_weak.clone();
-            let intent = TunnelConnectIntent {
-                candidate_id: self.next_candidate_id(),
-                ..intent
-            };
+            let intent = Self::intent_for_candidate(
+                &remote_ep,
+                TunnelConnectIntent {
+                    candidate_id: self.next_candidate_id(),
+                    ..intent
+                },
+                self.sn_service.is_some(),
+            );
             connect_futures.push(Box::pin(async move {
                 log::debug!(
                     "direct path attempt remote={} tunnel_id={:?} candidate_id={:?} ep={:?}",
@@ -883,6 +933,76 @@ impl TunnelManager {
             .unwrap_or_else(|| p2p_err!(P2pErrorCode::ConnectFailed, "direct connect failed")))
     }
 
+    fn hedged_reverse_delay_for_endpoints(_endpoints: &[Endpoint]) -> Duration {
+        HEDGED_REVERSE_DELAY
+    }
+
+    fn udp_punch_enabled_for_candidate(endpoint: &Endpoint) -> bool {
+        endpoint.protocol() == Protocol::Quic
+            && endpoint.get_area() != EndpointArea::Wan
+            && endpoint.addr().port() != 0
+    }
+
+    fn intent_for_candidate(
+        endpoint: &Endpoint,
+        intent: TunnelConnectIntent,
+        sn_service_available: bool,
+    ) -> TunnelConnectIntent {
+        if sn_service_available && Self::udp_punch_enabled_for_candidate(endpoint) {
+            intent.set_udp_punch_enabled(true)
+        } else {
+            intent
+        }
+    }
+
+    fn push_unique_endpoint(endpoints: &mut Vec<Endpoint>, ep: Endpoint) {
+        if !endpoints.contains(&ep) {
+            endpoints.push(ep);
+        }
+    }
+
+    fn collect_reverse_endpoints_from_sources(
+        listener_entries: Vec<(crate::endpoint::Protocol, Vec<TunnelListenerInfo>)>,
+        wan_endpoints: Vec<Endpoint>,
+    ) -> Vec<Endpoint> {
+        let mut endpoints = Vec::new();
+        let mut mapping_ports = Vec::new();
+
+        for (protocol, listeners) in listener_entries {
+            for listener in listeners {
+                if !listener.local.addr().ip().is_unspecified() {
+                    Self::push_unique_endpoint(&mut endpoints, listener.local);
+                }
+                if let Some(port) = listener.mapping_port {
+                    mapping_ports.push((protocol, port));
+                }
+            }
+        }
+
+        for wan_ep in wan_endpoints {
+            Self::push_unique_endpoint(&mut endpoints, wan_ep);
+            for (protocol, port) in mapping_ports.iter() {
+                let mut mapped = Endpoint::from((*protocol, wan_ep.addr().ip(), *port));
+                mapped.set_area(crate::endpoint::EndpointArea::Wan);
+                Self::push_unique_endpoint(&mut endpoints, mapped);
+            }
+        }
+
+        endpoints
+    }
+
+    fn reverse_endpoints(&self) -> Vec<Endpoint> {
+        let wan_endpoints = self
+            .sn_service
+            .as_ref()
+            .map(|sn_service| sn_service.get_wan_ip_list())
+            .unwrap_or_default();
+        Self::collect_reverse_endpoints_from_sources(
+            self.net_manager.listener_info_entries(),
+            wan_endpoints,
+        )
+    }
+
     async fn open_reverse_path(
         &self,
         remote_id: &P2pId,
@@ -900,8 +1020,20 @@ impl TunnelManager {
             remote_id,
             tunnel_id
         );
+        let reverse_endpoints = self.reverse_endpoints();
+        let reverse_endpoint_arg = if reverse_endpoints.is_empty() {
+            None
+        } else {
+            Some(reverse_endpoints.as_slice())
+        };
         let call_result = sn_service
-            .call(tunnel_id, None, remote_id, TunnelType::Stream, vec![])
+            .call(
+                tunnel_id,
+                reverse_endpoint_arg,
+                remote_id,
+                TunnelType::Stream,
+                vec![],
+            )
             .await;
         if let Err(err) = call_result {
             log::warn!(
@@ -1012,7 +1144,7 @@ impl TunnelManager {
                 if ep.is_static_wan() {
                     score += 500;
                 }
-                if let Some(stat) = state.endpoint_scores.get(ep) {
+                if let Some(stat) = state.endpoint_scores.get(&EndpointScoreKey::new(ep)) {
                     if stat.last_success_at > 0 {
                         score += 2_000;
                     }
@@ -1029,7 +1161,7 @@ impl TunnelManager {
         let mut state = self.state.lock().unwrap();
         let stat = state
             .endpoint_scores
-            .entry(*endpoint)
+            .entry(EndpointScoreKey::new(endpoint))
             .or_insert(EndpointScore {
                 last_success_at: 0,
                 fail_count: 0,
@@ -1082,8 +1214,7 @@ impl TunnelManager {
             .proxy_upgrade_states
             .entry(remote_id.clone())
             .and_modify(|entry| {
-                entry.next_attempt_at = now + self.proxy_upgrade_initial_interval;
-                entry.retry_interval = self.proxy_upgrade_initial_interval;
+                *entry = ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval);
             })
             .or_insert_with(|| ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval));
         drop(state);
@@ -1127,10 +1258,7 @@ impl TunnelManager {
         let mut state = self.state.lock().unwrap();
         let upgrade = state.proxy_upgrade_states.get_mut(remote_id)?;
         upgrade.in_progress = false;
-        upgrade.retry_interval = upgrade
-            .retry_interval
-            .saturating_mul(2)
-            .min(PROXY_UPGRADE_MAX_INTERVAL);
+        advance_proxy_upgrade_retry(upgrade, self.proxy_upgrade_initial_interval);
         upgrade.next_attempt_at = Instant::now() + upgrade.retry_interval;
         let next_interval = upgrade.retry_interval;
         drop(state);
@@ -1502,10 +1630,135 @@ fn is_tunnel_available(tunnel: &dyn crate::networks::Tunnel) -> bool {
     !tunnel.is_closed() && tunnel.state() == TunnelState::Connected
 }
 
+#[cfg(test)]
+mod nat_strategy_tests {
+    use super::*;
+    use crate::endpoint::{EndpointArea, Protocol};
+
+    fn endpoint(protocol: Protocol, port: u16) -> Endpoint {
+        Endpoint::from((protocol, ([127, 0, 0, 1], port).into()))
+    }
+
+    #[test]
+    fn nat_udp_candidates_use_short_reverse_delay_by_default() {
+        let ep = endpoint(Protocol::Quic, 22000);
+
+        assert_eq!(
+            TunnelManager::hedged_reverse_delay_for_endpoints(&[ep]),
+            NAT_HEDGED_REVERSE_DELAY
+        );
+    }
+
+    #[test]
+    fn static_wan_candidates_use_same_reverse_delay() {
+        let mut ep = endpoint(Protocol::Quic, 22001);
+        ep.set_area(EndpointArea::Wan);
+
+        assert_eq!(
+            TunnelManager::hedged_reverse_delay_for_endpoints(&[ep]),
+            HEDGED_REVERSE_DELAY
+        );
+    }
+
+    #[test]
+    fn endpoint_score_key_isolated_by_protocol() {
+        let tcp = endpoint(Protocol::Tcp, 22002);
+        let quic = endpoint(Protocol::Quic, 22002);
+
+        assert_ne!(EndpointScoreKey::new(&tcp), EndpointScoreKey::new(&quic));
+    }
+
+    #[test]
+    fn udp_punch_candidate_policy_requires_quic_non_wan_endpoint() {
+        let lan_quic = endpoint(Protocol::Quic, 22003);
+        let tcp = endpoint(Protocol::Tcp, 22004);
+        let mut wan_quic = endpoint(Protocol::Quic, 22005);
+        wan_quic.set_area(EndpointArea::Wan);
+        let zero_port_quic = endpoint(Protocol::Quic, 0);
+
+        assert!(TunnelManager::udp_punch_enabled_for_candidate(&lan_quic));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(&tcp));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(&wan_quic));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(
+            &zero_port_quic
+        ));
+    }
+
+    #[test]
+    fn quic_nat_candidate_enables_udp_punch_only_when_sn_is_available() {
+        let lan_quic = endpoint(Protocol::Quic, 22006);
+        let active = TunnelConnectIntent::active_logical(TunnelId::from(31));
+        let reverse = TunnelConnectIntent::reverse_logical(TunnelId::from(32));
+
+        let no_sn = TunnelManager::intent_for_candidate(&lan_quic, active, false);
+        assert!(!no_sn.udp_punch_enabled);
+
+        let active = TunnelManager::intent_for_candidate(&lan_quic, active, true);
+        assert_eq!(active.tunnel_id, TunnelId::from(31));
+        assert!(!active.is_reverse);
+        assert!(active.udp_punch_enabled);
+
+        let reverse = TunnelManager::intent_for_candidate(&lan_quic, reverse, true);
+        assert_eq!(reverse.tunnel_id, TunnelId::from(32));
+        assert!(reverse.is_reverse);
+        assert!(reverse.udp_punch_enabled);
+    }
+
+    #[test]
+    fn proxy_upgrade_short_window_falls_back_to_capped_backoff() {
+        let mut upgrade = ProxyUpgradeState::new(Instant::now(), PROXY_UPGRADE_INITIAL_INTERVAL);
+        let mut intervals = Vec::new();
+        for _ in 0..5 {
+            intervals.push(advance_proxy_upgrade_retry(
+                &mut upgrade,
+                PROXY_UPGRADE_INITIAL_INTERVAL,
+            ));
+        }
+
+        assert_eq!(
+            &intervals[..4],
+            &[
+                PROXY_UPGRADE_SHORT_INTERVALS[1],
+                PROXY_UPGRADE_SHORT_INTERVALS[2],
+                PROXY_UPGRADE_SHORT_INTERVALS[3],
+                PROXY_UPGRADE_INITIAL_INTERVAL,
+            ]
+        );
+        assert_eq!(
+            intervals[4],
+            PROXY_UPGRADE_INITIAL_INTERVAL.saturating_mul(2)
+        );
+    }
+
+    #[test]
+    fn reverse_endpoint_collection_includes_listener_wan_and_mapped_candidates() {
+        let local = endpoint(Protocol::Quic, 4433);
+        let mut wan = endpoint(Protocol::Quic, 55000);
+        wan.set_area(EndpointArea::Wan);
+
+        let endpoints = TunnelManager::collect_reverse_endpoints_from_sources(
+            vec![(
+                Protocol::Quic,
+                vec![TunnelListenerInfo {
+                    local,
+                    mapping_port: Some(7000),
+                }],
+            )],
+            vec![wan],
+        );
+        let mut mapped = Endpoint::from((Protocol::Quic, wan.addr().ip(), 7000));
+        mapped.set_area(EndpointArea::Wan);
+
+        assert!(endpoints.contains(&local));
+        assert!(endpoints.contains(&wan));
+        assert!(endpoints.contains(&mapped));
+    }
+}
+
 #[cfg(all(test, feature = "x509"))]
 mod tests {
     use super::*;
-    use crate::endpoint::Protocol;
+    use crate::endpoint::{EndpointArea, Protocol};
     use crate::executor::Executor;
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
     use crate::networks::{TunnelListener, TunnelListenerInfo, TunnelNetwork};
@@ -1555,6 +1808,12 @@ mod tests {
 
     fn ext_ep(protocol: u8, port: u16) -> Endpoint {
         Endpoint::from((Protocol::Ext(protocol), ([127, 0, 0, 1], port).into()))
+    }
+
+    fn static_wan_ext_ep(protocol: u8, port: u16) -> Endpoint {
+        let mut ep = ext_ep(protocol, port);
+        ep.set_area(EndpointArea::Wan);
+        ep
     }
 
     fn new_test_manager(
@@ -1623,6 +1882,7 @@ mod tests {
         behaviors: Mutex<HashMap<Endpoint, MockDialBehavior>>,
         started_at: Instant,
         start_offsets: Mutex<HashMap<Endpoint, Duration>>,
+        intents: Mutex<HashMap<Endpoint, TunnelConnectIntent>>,
         call_count: AtomicUsize,
     }
 
@@ -1638,6 +1898,7 @@ mod tests {
                 behaviors: Mutex::new(behaviors),
                 started_at: Instant::now(),
                 start_offsets: Mutex::new(HashMap::new()),
+                intents: Mutex::new(HashMap::new()),
                 call_count: AtomicUsize::new(0),
             })
         }
@@ -1648,6 +1909,10 @@ mod tests {
 
         fn call_count(&self) -> usize {
             self.call_count.load(Ordering::SeqCst)
+        }
+
+        fn intent_for(&self, endpoint: &Endpoint) -> Option<TunnelConnectIntent> {
+            self.intents.lock().unwrap().get(endpoint).copied()
         }
     }
 
@@ -1782,6 +2047,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(*remote, self.started_at.elapsed());
+            self.intents.lock().unwrap().insert(*remote, intent);
 
             let behavior = self
                 .behaviors
@@ -2849,6 +3115,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sn_called_reverse_quic_candidate_keeps_udp_punch_disabled_without_sn_service() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-sn-called-quic-punch");
+        let remote_identity = new_identity("remote-sn-called-quic-punch");
+        let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:18013".parse().unwrap()));
+        let network = MockDialNetwork::new(
+            Protocol::Quic,
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(1),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity.clone(),
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+
+        let tunnel_id = TunnelId::from(904);
+        manager
+            .on_sn_called(make_sn_called(&remote_identity, tunnel_id, vec![remote_ep]))
+            .await
+            .unwrap();
+
+        let intent = network.intent_for(&remote_ep).unwrap();
+        assert_eq!(intent.tunnel_id, tunnel_id);
+        assert!(intent.is_reverse);
+        assert!(!intent.udp_punch_enabled);
+    }
+
+    #[tokio::test]
     async fn hedged_race_prefers_reverse_when_direct_is_slow() {
         init_tls_once();
 
@@ -3327,7 +3630,8 @@ mod tests {
             .get(&remote_identity.get_id())
             .copied()
             .unwrap();
-        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_INITIAL_INTERVAL);
+        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_SHORT_INTERVALS[0]);
+        assert_eq!(upgrade.short_retry_index, 0);
         assert!(!upgrade.in_progress);
         assert!(upgrade.next_attempt_at > Instant::now());
     }
@@ -3373,8 +3677,9 @@ mod tests {
             .get(&remote_identity.get_id())
             .copied()
             .unwrap();
-        assert_eq!(upgrade.retry_interval, configured_interval);
-        assert!(upgrade.next_attempt_at <= Instant::now() + configured_interval);
+        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_SHORT_INTERVALS[0]);
+        assert_eq!(upgrade.short_retry_index, 0);
+        assert!(upgrade.next_attempt_at <= Instant::now() + PROXY_UPGRADE_SHORT_INTERVALS[0]);
     }
 
     #[tokio::test]
@@ -3561,7 +3866,7 @@ mod tests {
         let manager = new_test_manager(local_identity, HashMap::new(), None);
 
         manager.track_proxy_upgrade(&remote_identity.get_id());
-        for _ in 0..8 {
+        for _ in 0..12 {
             manager
                 .attempt_proxy_upgrade(remote_identity.get_id())
                 .await;
@@ -3576,5 +3881,138 @@ mod tests {
         assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_MAX_INTERVAL);
         assert!(!upgrade.in_progress);
         assert!(upgrade.next_attempt_at > Instant::now());
+    }
+
+    #[tokio::test]
+    async fn nat_quic_candidates_use_short_reverse_delay() {
+        init_tls_once();
+
+        let nat_ep = ext_ep(12, 21001);
+
+        assert_eq!(
+            TunnelManager::hedged_reverse_delay_for_endpoints(&[nat_ep]),
+            NAT_HEDGED_REVERSE_DELAY
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_quic_nat_candidate_keeps_udp_punch_disabled_without_sn_service() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-direct-quic-punch");
+        let remote_identity = new_identity("remote-direct-quic-punch");
+        let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:21021".parse().unwrap()));
+        let network = MockDialNetwork::new(
+            Protocol::Quic,
+            local_identity.get_id(),
+            HashMap::from([(
+                remote_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(1),
+                    result: Ok(()),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+
+        manager
+            .open_direct_path(
+                vec![remote_ep],
+                &remote_identity.get_id(),
+                None,
+                TunnelConnectIntent::active_logical(TunnelId::from(1203)),
+            )
+            .await
+            .unwrap();
+
+        let intent = network.intent_for(&remote_ep).unwrap();
+        assert!(!intent.is_reverse);
+        assert!(!intent.udp_punch_enabled);
+    }
+
+    #[tokio::test]
+    async fn static_wan_direct_uses_same_reverse_delay() {
+        init_tls_once();
+
+        let wan_ep = static_wan_ext_ep(13, 21011);
+
+        assert_eq!(
+            TunnelManager::hedged_reverse_delay_for_endpoints(&[wan_ep]),
+            HEDGED_REVERSE_DELAY
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_score_isolated_by_protocol() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-score-protocol");
+        let manager = new_test_manager(local_identity, HashMap::new(), None);
+        let tcp_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:22001".parse().unwrap()));
+        let quic_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:22001".parse().unwrap()));
+
+        manager.on_direct_connect_result(&tcp_ep, false);
+        let preferred = manager
+            .preferred_direct_endpoints(None, &[tcp_ep, quic_ep])
+            .await;
+
+        assert_eq!(preferred[0], quic_ep);
+    }
+
+    #[tokio::test]
+    async fn proxy_upgrade_starts_with_short_nat_retry_window() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-short-window");
+        let remote_identity = new_identity("remote-proxy-short-window");
+        let manager = new_test_manager(local_identity, HashMap::new(), None);
+
+        manager.track_proxy_upgrade(&remote_identity.get_id());
+
+        let state = manager.state.lock().unwrap();
+        let upgrade = state
+            .proxy_upgrade_states
+            .get(&remote_identity.get_id())
+            .copied()
+            .unwrap();
+        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_SHORT_INTERVALS[0]);
+        assert!(upgrade.next_attempt_at <= Instant::now() + PROXY_UPGRADE_SHORT_INTERVALS[0]);
+    }
+
+    #[tokio::test]
+    async fn proxy_upgrade_short_window_falls_back_to_capped_backoff() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-short-to-backoff");
+        let remote_identity = new_identity("remote-proxy-short-to-backoff");
+        let manager = new_test_manager(local_identity, HashMap::new(), None);
+
+        manager.track_proxy_upgrade(&remote_identity.get_id());
+        let mut intervals = Vec::new();
+        for _ in 0..5 {
+            let interval = manager
+                .on_proxy_upgrade_failed(&remote_identity.get_id())
+                .unwrap();
+            intervals.push(interval);
+        }
+
+        assert_eq!(
+            &intervals[..4],
+            &[
+                PROXY_UPGRADE_SHORT_INTERVALS[1],
+                PROXY_UPGRADE_SHORT_INTERVALS[2],
+                PROXY_UPGRADE_SHORT_INTERVALS[3],
+                PROXY_UPGRADE_INITIAL_INTERVAL,
+            ]
+        );
+        assert_eq!(
+            intervals[4],
+            PROXY_UPGRADE_INITIAL_INTERVAL.saturating_mul(2)
+        );
     }
 }

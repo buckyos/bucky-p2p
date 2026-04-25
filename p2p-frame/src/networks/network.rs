@@ -17,6 +17,7 @@ pub struct TunnelConnectIntent {
     pub tunnel_id: TunnelId,
     pub candidate_id: TunnelCandidateId,
     pub is_reverse: bool,
+    pub udp_punch_enabled: bool,
 }
 
 impl TunnelConnectIntent {
@@ -29,6 +30,7 @@ impl TunnelConnectIntent {
             tunnel_id,
             candidate_id,
             is_reverse: false,
+            udp_punch_enabled: false,
         }
     }
 
@@ -41,7 +43,13 @@ impl TunnelConnectIntent {
             tunnel_id,
             candidate_id,
             is_reverse: true,
+            udp_punch_enabled: false,
         }
+    }
+
+    pub fn set_udp_punch_enabled(mut self, udp_punch_enabled: bool) -> Self {
+        self.udp_punch_enabled = udp_punch_enabled;
+        self
     }
 }
 
@@ -119,3 +127,19 @@ pub trait TunnelNetwork: Send + Sync + 'static {
 }
 
 pub type TunnelNetworkRef = Arc<dyn TunnelNetwork>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_connect_intent_controls_udp_punch_per_connection_with_default_off() {
+        let intent = TunnelConnectIntent::active_logical(TunnelId::from(7));
+        assert!(!intent.udp_punch_enabled);
+
+        let intent = intent.set_udp_punch_enabled(true);
+        assert!(intent.udp_punch_enabled);
+        assert_eq!(intent.tunnel_id, TunnelId::from(7));
+        assert!(!intent.is_reverse);
+    }
+}

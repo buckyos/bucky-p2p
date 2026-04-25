@@ -1,4 +1,4 @@
-use super::listener::{QuicTunnelListener, connect_with_ep};
+use super::listener::{QuicTunnelListener, connect_with_ep, udp_punch_burst_window};
 use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
@@ -14,7 +14,9 @@ use crate::types::{TunnelCandidateId, TunnelId, TunnelIdGenerator};
 use rustls::pki_types::CertificateDer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const UDP_PUNCH_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct QuicTunnelNetwork {
     listeners: Mutex<Vec<Arc<QuicTunnelListener>>>,
@@ -26,6 +28,29 @@ pub struct QuicTunnelNetwork {
     congestion_algorithm: QuicCongestionAlgorithm,
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
+}
+
+fn connect_timeout_for_intent(base_timeout: Duration, intent: TunnelConnectIntent) -> Duration {
+    if intent.udp_punch_enabled {
+        base_timeout.max(udp_punch_burst_window(intent))
+    } else {
+        base_timeout
+    }
+}
+
+fn udp_punch_retry_delay_after_error(
+    elapsed: Duration,
+    connect_timeout: Duration,
+    intent: TunnelConnectIntent,
+) -> Option<Duration> {
+    if !intent.udp_punch_enabled {
+        return None;
+    }
+    let min_failure_window = udp_punch_burst_window(intent).min(connect_timeout);
+    if elapsed >= min_failure_window {
+        return None;
+    }
+    Some((min_failure_window - elapsed).min(UDP_PUNCH_CONNECT_RETRY_INTERVAL))
 }
 
 impl QuicTunnelNetwork {
@@ -102,32 +127,72 @@ impl QuicTunnelNetwork {
         remote_name: Option<String>,
         intent: TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
-        let socket = match connect_with_ep(
-            listener.quic_ep(),
-            local_identity.clone(),
-            self.cert_factory.clone(),
-            remote_id.clone(),
-            remote_name.clone(),
-            *remote,
-            self.congestion_algorithm,
-            self.timeout,
-            self.idle_timeout,
-        )
-        .await
-        {
-            Ok(socket) => socket,
-            Err(err) => {
-                log::error!(
-                    "quic tunnel connect failed local_id={} local_ep={} remote={} remote_id={} remote_name={:?} code={:?} msg={}",
-                    local_identity.get_id(),
-                    listener.bound_local(),
-                    remote,
-                    remote_id,
-                    remote_name,
-                    err.code(),
-                    err
-                );
-                return Err(err);
+        let connect_timeout = connect_timeout_for_intent(self.timeout, intent);
+        if intent.udp_punch_enabled {
+            listener.start_udp_punch_burst(*remote, intent, connect_timeout);
+        }
+        let connect_started_at = Instant::now();
+        let socket = loop {
+            let elapsed = connect_started_at.elapsed();
+            let Some(attempt_timeout) = connect_timeout.checked_sub(elapsed) else {
+                return Err(p2p_err!(
+                    P2pErrorCode::ConnectFailed,
+                    "quic to {} connect failed",
+                    remote
+                ));
+            };
+            if attempt_timeout.is_zero() {
+                return Err(p2p_err!(
+                    P2pErrorCode::ConnectFailed,
+                    "quic to {} connect failed",
+                    remote
+                ));
+            }
+            match connect_with_ep(
+                listener.quic_ep(),
+                local_identity.clone(),
+                self.cert_factory.clone(),
+                remote_id.clone(),
+                remote_name.clone(),
+                *remote,
+                self.congestion_algorithm,
+                attempt_timeout,
+                self.idle_timeout,
+            )
+            .await
+            {
+                Ok(socket) => break socket,
+                Err(err) => {
+                    if let Some(delay) = udp_punch_retry_delay_after_error(
+                        connect_started_at.elapsed(),
+                        connect_timeout,
+                        intent,
+                    ) {
+                        log::trace!(
+                            "quic tunnel connect early failure during udp punch window local_id={} local_ep={} remote={} remote_id={} retry_delay_ms={} code={:?} msg={}",
+                            local_identity.get_id(),
+                            listener.bound_local(),
+                            remote,
+                            remote_id,
+                            delay.as_millis(),
+                            err.code(),
+                            err
+                        );
+                        crate::runtime::sleep(delay).await;
+                        continue;
+                    }
+                    log::error!(
+                        "quic tunnel connect failed local_id={} local_ep={} remote={} remote_id={} remote_name={:?} code={:?} msg={}",
+                        local_identity.get_id(),
+                        listener.bound_local(),
+                        remote,
+                        remote_id,
+                        remote_name,
+                        err.code(),
+                        err
+                    );
+                    return Err(err);
+                }
             }
         };
         let local_ep = Endpoint::from((
@@ -311,6 +376,78 @@ impl TunnelNetwork for QuicTunnelNetwork {
             "no listener found for local ep: {}",
             local_ep
         ))
+    }
+}
+
+#[cfg(test)]
+mod udp_punch_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn udp_punch_intent_extends_connect_timeout_to_punch_window() {
+        let base_timeout = Duration::from_millis(100);
+        let no_punch = TunnelConnectIntent::active_logical(crate::types::TunnelId::from(11));
+        let active_punch = no_punch.set_udp_punch_enabled(true);
+        let reverse_punch = TunnelConnectIntent::reverse_logical(crate::types::TunnelId::from(12))
+            .set_udp_punch_enabled(true);
+
+        assert_eq!(
+            connect_timeout_for_intent(base_timeout, no_punch),
+            base_timeout
+        );
+        assert_eq!(
+            connect_timeout_for_intent(base_timeout, active_punch),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            connect_timeout_for_intent(base_timeout, reverse_punch),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            connect_timeout_for_intent(Duration::from_secs(3), active_punch),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn udp_punch_early_error_retries_until_punch_window_is_covered() {
+        let no_punch = TunnelConnectIntent::active_logical(crate::types::TunnelId::from(12));
+        let active_punch = no_punch.set_udp_punch_enabled(true);
+        let reverse_punch = TunnelConnectIntent::reverse_logical(crate::types::TunnelId::from(13))
+            .set_udp_punch_enabled(true);
+
+        assert_eq!(
+            udp_punch_retry_delay_after_error(
+                Duration::from_millis(100),
+                Duration::from_secs(3),
+                no_punch,
+            ),
+            None
+        );
+        assert_eq!(
+            udp_punch_retry_delay_after_error(
+                Duration::from_millis(100),
+                Duration::from_secs(3),
+                active_punch,
+            ),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            udp_punch_retry_delay_after_error(
+                Duration::from_millis(200),
+                Duration::from_secs(3),
+                reverse_punch,
+            ),
+            None
+        );
+        assert_eq!(
+            udp_punch_retry_delay_after_error(
+                Duration::from_millis(100),
+                Duration::from_secs(3),
+                reverse_punch,
+            ),
+            Some(Duration::from_millis(50))
+        );
     }
 }
 

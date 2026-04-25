@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-24
+approved_at: 2026-04-25
 ---
 
 # p2p-frame 设计
@@ -20,10 +20,13 @@ approved_at: 2026-04-24
 - 为本轮 `PnTunnel` idle timeout 生命周期关闭需求建立可执行设计边界，明确 channel lease 计数、原子关闭、accept/open 失败和关闭后重新创建语义。
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
+- 为本轮单 SN NAT 打洞优化建立可执行设计边界，包括 direct/reverse 统一 300ms 短延迟竞速、`SnCall` 本次反连候选、QUIC listener 同源 UDP punch burst、proxy 短窗口脱代理升级，以及按协议拆分的 endpoint 评分。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
 - 在 harness 启动改造阶段重组源码文件
+- 引入多 SN fanout、跨 SN NAT 类型推断、完整 STUN/TURN 协议栈或二层虚拟局域网语义
+- 引入可被上层消费的原生 UDP tunnel、UDP payload 业务协议、raw UDP 接收解析器或独立于 QUIC listener 端口的新 UDP 打洞 socket
 
 ## 总体方案
 - 将 `p2p-frame` 视为 Tier 0 核心模块。
@@ -34,7 +37,7 @@ approved_at: 2026-04-24
 ## 模块拆分
 | 子模块 | 类型 | 职责 | 输入 | 输出 | 依赖 | 是否独立文档 |
 |--------|------|------|------|------|------|----------------|
-| `networks` | core transport | TCP/QUIC 监听器、endpoint、validator 和底层网络行为 | sockets、runtime、TLS | 传输事件和 tunnel plumbing | runtime、TLS | no |
+| `networks` | core transport | TCP/QUIC 监听器、endpoint、validator、QUIC listener 同源 UDP punch burst 和底层网络行为 | sockets、runtime、TLS | 传输事件和 tunnel plumbing | runtime、TLS | no |
 | `tunnel` | orchestration | tunnel 生命周期、连接选择、统一 register/publish 生命周期、proxy 回退与后续脱代理升级行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | yes |
 | `ttp` | protocol | tunnel 上的命令和流复用协议 | tunnel IO | 带帧的命令/流行为 | `tunnel` | no |
 | `sn` | service | 对端注册、信令和调用转发 | tunnel/ttp、身份 | SN 服务行为 | `ttp`、`p2p_identity` | no |
@@ -77,11 +80,21 @@ approved_at: 2026-04-24
 - `PnShared` 必须在 tunnel 关闭后移除 live registry 中的旧对象，确保后续同 `(remote_id, tunnel_id)` inbound `ProxyOpenReq` 不会投递到已关闭 tunnel，而是创建新的 passive tunnel。
 - 当某个远端当前只有 proxy tunnel 可用时，`TunnelManager` 必须在后台继续尝试 direct 或 reverse 建链，而不是无限期停留在 proxy 路径。
 - 上述脱代理尝试不得再次把“升级任务”回退成 proxy 建链；proxy 只作为对外可用的兜底连通性，而不是后台升级路径的成功条件。
-- 持续失败的脱代理尝试可以延长重试间隔，但必须有上限；当前实现约束为初始 5 分钟、失败后指数退避、最大不超过 2 小时。
+- 持续失败的脱代理尝试可以延长重试间隔，但必须有上限；默认常规约束为初始 5 分钟、失败后指数退避、最大不超过 2 小时。本轮 NAT 打洞优化对新建 proxy candidate 额外引入短窗口升级调度：先按短间隔探测 direct/reverse，再回到有上限的指数退避。
 - 对外可用的新 tunnel 必须先进入 `TunnelManager` 候选注册，再进入统一 publish 路径；除 `remote_id` 未知的临时 wrapper 外，不允许存在“只广播不登记”的长期语义分支。
 - `TunnelManager` 的 publish 可见性决策必须收敛到单一生命周期模型：默认“register 后立即 publish”，唯一允许的延后场景是命中本地 `(remote_id, tunnel_id)` `reverse_waiter` 的 reverse tunnel。
 - 上述延后 publish 只影响时机，不改变规则：reverse tunnel 一旦完成本地 waiter 交付，就必须通过与 direct/proxy 相同的 publish 入口变为可见候选。
 - reverse 建链若在等待期间超时、取消或失败，相关 waiter 必须被清理；该 waiter 之后才到达的同 `(remote_id, tunnel_id)` reverse tunnel 不得继续隐藏，而必须按普通新 tunnel 进入 publish 路径。
+- direct 与 reverse 必须使用同一个 logical `tunnel_id` 进行 hedged 建链；reverse 的启动延迟统一为 300ms，而不是固定等待 direct 路径 2 秒。
+- QUIC/UDP NAT 候选场景下，可以在 direct/reverse 建链窗口内发送少量 best-effort 原生 UDP punch 包；该机制必须使用与 QUIC listener 相同的本地 UDP socket/端口或该 socket 的 send-only clone，不得新建不同源端口的 UDP socket 伪装成同一路径打洞。
+- UDP punch 只允许在 SN service 存在时面向非 WAN QUIC/UDP 候选启用；WAN、TCP 和 proxy fallback 路径不得因为该机制改变原有建链语义。映射端点在当前实现中按 WAN endpoint 处理。
+- UDP punch 必须通过本次连接的 `TunnelConnectIntent` 启用，默认不发送；`TunnelManager` 只有在存在 SN service 且候选符合策略时才为本次 candidate intent 开启该开关。该开关只控制这一次 QUIC 建链的 punch 调度，不改变 `TunnelNetwork` trait 参数或 tunnel 成功条件。
+- UDP punch 包必须是本地实现私有的短探测载荷，至少包含固定 magic/version 和当前 logical `tunnel_id` / candidate 关联信息；接收侧不解析、不确认、不投递给上层，QUIC listener 继续把这些非 QUIC datagram 作为无效输入丢弃。
+- UDP punch 发送失败、被丢包或被远端忽略不得直接判定 tunnel 成败；真正的成功条件仍是后续 QUIC handshake 和 `TunnelManager` register/publish 生命周期完成。
+- UDP punch burst 必须有严格上限，默认建议每个候选 2-4 包、20-50ms 间隔，并受 NAT hedged window 约束，避免在弱网或 proxy 脱代理重试中形成发送风暴。
+- `SNClientService::call(...)` 必须支持调用方传入本次建链的 `reverse_endpoint_array`；若调用方不传，仍保持现有兼容语义。候选来源和去重由 `tunnel` / `sn/client` 设计补充文档定义。
+- endpoint 评分必须按协议和端点来源记录历史结果；TCP 失败不得降低同一远端 QUIC/UDP 候选的打洞优先级。
+- 本轮保持单 SN 信令模型。SN 服务端只转发单 SN 观察到的公网端点、客户端上报的映射端口和本次 `SnCall` 候选，不承担多 SN 汇总或最终连通性判定。
 
 ## 实现布局
 ```text
@@ -119,6 +132,7 @@ p2p-frame/src
 |------|------|------|
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
 | `docs/versions/v0.1/modules/p2p-frame/design/tunnel-publish-lifecycle.md` | `TunnelManager` 新 tunnel 注册/发布生命周期与 reverse 延后 publish 规则补充 | `tunnel` |
+| `docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 单 SN NAT 打洞优化、direct/reverse 竞速、QUIC listener 同源 UDP punch、候选刷新、proxy 短窗口脱代理和 endpoint 评分补充 | `tunnel`、`networks/quic`、`sn/client`、必要 `sn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-proxy-encryption.md` | PN client / tunnel 侧可选端到端载荷加密、显式接口和 TLS 叠加设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-idle-close.md` | `PnTunnel` idle timeout 生命周期关闭、channel lease 计数和关闭后重新创建设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
@@ -137,6 +151,7 @@ p2p-frame/src
 | relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户生效的限速能力 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs`、限速配置/查询接口 | 若实现阶段发现 target 统计可见性会迫使限速扩展成双边模型，应先退回 proposal，而不是静默扩大限速范围。 |
 | `PnTunnel` idle timeout 生命周期关闭 | `PnTunnel` 本地状态机、channel lease 计数、idle sweeper 和关闭后重新创建 | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs` | 若实现阶段无法可靠追踪已返回给上层的 channel 生命周期，应先退回 design 重新划分 lease wrapper，而不是只统计 inbound queue。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
+| 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。
