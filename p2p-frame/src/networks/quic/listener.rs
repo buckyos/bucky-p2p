@@ -26,6 +26,7 @@ use tokio::sync::{Notify, mpsc};
 
 const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
 const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
+const UDP_PUNCH_NON_QUIC_FIXED_BIT: u8 = 0x40;
 const UDP_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 const UDP_PUNCH_ACTIVE_START_OFFSET: Duration = Duration::from_millis(250);
 const UDP_PUNCH_REVERSE_START_OFFSET: Duration = Duration::ZERO;
@@ -377,7 +378,9 @@ fn udp_punch_payload(intent: TunnelConnectIntent) -> Vec<u8> {
     let _ = intent;
     let payload_len =
         rand::rng().random_range(UDP_PUNCH_PAYLOAD_MIN_LEN..=UDP_PUNCH_PAYLOAD_MAX_LEN);
-    random::<[u8; UDP_PUNCH_PAYLOAD_MAX_LEN]>()[..payload_len].to_vec()
+    let mut payload = random::<[u8; UDP_PUNCH_PAYLOAD_MAX_LEN]>();
+    payload[0] &= !UDP_PUNCH_NON_QUIC_FIXED_BIT;
+    payload[..payload_len].to_vec()
 }
 
 fn udp_punch_start_offset(intent: TunnelConnectIntent) -> Duration {
@@ -628,6 +631,11 @@ mod udp_punch_tests {
         assert!(payloads.iter().all(|payload| {
             (UDP_PUNCH_PAYLOAD_MIN_LEN..=UDP_PUNCH_PAYLOAD_MAX_LEN).contains(&payload.len())
         }));
+        assert!(
+            payloads
+                .iter()
+                .all(|payload| payload[0] & UDP_PUNCH_NON_QUIC_FIXED_BIT == 0)
+        );
         assert!(
             payloads
                 .windows(2)

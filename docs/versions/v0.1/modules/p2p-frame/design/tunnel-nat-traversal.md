@@ -43,6 +43,7 @@
 载荷边界：
 
 - punch 载荷为 `p2p-frame` 私有短探测内容，可以是每包重新生成的随机长度随机字节；长度范围限定为 `5..=30` 字节，不得要求固定 magic/version、logical `tunnel_id`、`candidate_id` 或本地方向标记。
+- punch 载荷必须显式避开 QUIC packet invariant：首字节不得设置 QUIC fixed bit `0x40`，以降低私有探测包被 QUIC endpoint 误判为候选 QUIC 包的风险。
 - punch 载荷不得携带业务数据、身份密钥或任何可被本地、远端或上层依赖的协议语义。
 - 接收侧不新增 raw UDP 读取路径、不解析 punch，也不发送 punch ack；远端 QUIC listener 继续把该 datagram 作为无效 QUIC 输入丢弃。
 - tunnel 成功条件仍是 QUIC handshake 成功，并经 `TunnelManager` 统一 register/publish 生命周期可见。

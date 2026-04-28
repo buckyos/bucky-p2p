@@ -89,7 +89,7 @@ approved_at: 2026-04-28
 - QUIC/UDP NAT 候选场景下，可以在 direct/reverse 建链窗口内发送少量 best-effort 原生 UDP punch 包；该机制必须使用与 QUIC listener 相同的本地 UDP socket/端口或该 socket 的 send-only clone，不得新建不同源端口的 UDP socket 伪装成同一路径打洞。
 - UDP punch 只允许在 SN service 存在时面向非 WAN QUIC/UDP 候选启用；WAN、TCP 和 proxy fallback 路径不得因为该机制改变原有建链语义。映射端点在当前实现中按 WAN endpoint 处理。
 - UDP punch 必须通过本次连接的 `TunnelConnectIntent` 启用，默认不发送；`TunnelManager` 只有在存在 SN service 且候选符合策略时才为本次 candidate intent 开启该开关。该开关只控制这一次 QUIC 建链的 punch 调度，不改变 `TunnelNetwork` trait 参数或 tunnel 成功条件。
-- UDP punch 包必须是本地实现私有的短探测载荷；载荷内容和长度都可以每包随机生成，长度范围限定为 `5..=30` 字节，不要求包含固定 magic、版本、`tunnel_id`、`candidate_id` 或方向标记，也不得被任一侧依赖为协议语义。接收侧不解析、不确认、不投递给上层，QUIC listener 继续把这些非 QUIC datagram 作为无效输入丢弃。
+- UDP punch 包必须是本地实现私有的短探测载荷；载荷内容和长度都可以每包随机生成，长度范围限定为 `5..=30` 字节，不要求包含固定 magic、版本、`tunnel_id`、`candidate_id` 或方向标记，也不得被任一侧依赖为协议语义。payload 首字节必须清除 QUIC fixed bit `0x40`，避免随机探测包碰撞成符合 QUIC packet invariant 的输入。接收侧不解析、不确认、不投递给上层，QUIC listener 继续把这些非 QUIC datagram 作为无效输入丢弃。
 - UDP punch 发送失败、被丢包或被远端忽略不得直接判定 tunnel 成败；真正的成功条件仍是后续 QUIC handshake 和 `TunnelManager` register/publish 生命周期完成。
 - UDP punch burst 必须有严格上限：reverse burst 在启动后立即发送第一包，active burst 则从 `250ms` offset 才发送第一包；之后两者都固定每 `50ms` 一包，默认最晚到 `1s` 截止，并受 NAT hedged window 约束裁剪，避免在弱网或 proxy 脱代理重试中形成无限重发或发送风暴。
 - `SNClientService::call(...)` 必须支持调用方传入本次建链的 `reverse_endpoint_array`；若调用方不传，仍保持现有兼容语义。候选来源和去重由 `tunnel` / `sn/client` 设计补充文档定义。
