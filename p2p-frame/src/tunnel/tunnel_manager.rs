@@ -1,4 +1,4 @@
-use crate::endpoint::{Endpoint, EndpointArea, Protocol};
+use crate::endpoint::{Endpoint, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
@@ -939,7 +939,7 @@ impl TunnelManager {
 
     fn udp_punch_enabled_for_candidate(endpoint: &Endpoint) -> bool {
         endpoint.protocol() == Protocol::Quic
-            && endpoint.get_area() != EndpointArea::Wan
+            && is_non_lan_ipv4_addr(endpoint.addr())
             && endpoint.addr().port() != 0
     }
 
@@ -1636,7 +1636,11 @@ mod nat_strategy_tests {
     use crate::endpoint::{EndpointArea, Protocol};
 
     fn endpoint(protocol: Protocol, port: u16) -> Endpoint {
-        Endpoint::from((protocol, ([127, 0, 0, 1], port).into()))
+        endpoint_with_ip(protocol, [8, 8, 8, 8], port)
+    }
+
+    fn endpoint_with_ip(protocol: Protocol, ip: [u8; 4], port: u16) -> Endpoint {
+        Endpoint::from((protocol, (ip, port).into()))
     }
 
     #[test]
@@ -1669,19 +1673,36 @@ mod nat_strategy_tests {
     }
 
     #[test]
-    fn udp_punch_candidate_policy_requires_quic_non_wan_endpoint() {
-        let lan_quic = endpoint(Protocol::Quic, 22003);
+    fn udp_punch_candidate_policy_requires_quic_non_lan_ipv4_endpoint() {
+        let public_quic = endpoint(Protocol::Quic, 22003);
         let tcp = endpoint(Protocol::Tcp, 22004);
-        let mut wan_quic = endpoint(Protocol::Quic, 22005);
-        wan_quic.set_area(EndpointArea::Wan);
+        let mut public_wan_area_quic = endpoint(Protocol::Quic, 22005);
+        public_wan_area_quic.set_area(EndpointArea::Wan);
+        let private_quic = endpoint_with_ip(Protocol::Quic, [192, 168, 1, 10], 22006);
+        let loopback_quic = endpoint_with_ip(Protocol::Quic, [127, 0, 0, 1], 22007);
         let zero_port_quic = endpoint(Protocol::Quic, 0);
+        let ipv6_quic = Endpoint::from((
+            Protocol::Quic,
+            "[2001:4860:4860::8888]:22008"
+                .parse::<SocketAddr>()
+                .unwrap(),
+        ));
 
-        assert!(TunnelManager::udp_punch_enabled_for_candidate(&lan_quic));
+        assert!(TunnelManager::udp_punch_enabled_for_candidate(&public_quic));
+        assert!(TunnelManager::udp_punch_enabled_for_candidate(
+            &public_wan_area_quic
+        ));
         assert!(!TunnelManager::udp_punch_enabled_for_candidate(&tcp));
-        assert!(!TunnelManager::udp_punch_enabled_for_candidate(&wan_quic));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(
+            &private_quic
+        ));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(
+            &loopback_quic
+        ));
         assert!(!TunnelManager::udp_punch_enabled_for_candidate(
             &zero_port_quic
         ));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(&ipv6_quic));
     }
 
     #[test]

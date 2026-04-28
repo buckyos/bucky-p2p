@@ -140,6 +140,19 @@ impl Endpoint {
     }
 }
 
+pub(crate) fn is_non_lan_ipv4_addr(addr: &SocketAddr) -> bool {
+    let SocketAddr::V4(addr) = addr else {
+        return false;
+    };
+    let ip = addr.ip();
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_unspecified()
+        && !ip.is_broadcast()
+        && !ip.is_multicast()
+}
+
 impl Default for Endpoint {
     fn default() -> Self {
         Self {

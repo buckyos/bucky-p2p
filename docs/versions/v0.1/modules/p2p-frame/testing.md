@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-25
+approved_at: 2026-04-28
 ---
 
 # p2p-frame 测试
@@ -71,7 +71,7 @@ approved_at: 2026-04-25
 | `PnTunnel` idle timeout 生命周期关闭 | `p2p-frame/src/pn/client/pn_tunnel.rs` 的状态机、channel lease、idle sweeper 和 close notify 路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 channel 计数归零并超过 idle timeout 后 tunnel 进入 closed/error 终态，pending `accept_*` 被唤醒并失败，后续 `open_*` 立即失败 |
 | `PnTunnel` 关闭后重新创建 | `p2p-frame/src/pn/client/pn_client.rs` 与 `p2p-frame/src/pn/client/pn_listener.rs` 的 inbound 分发路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 idle close 后同 `(remote_id, tunnel_id)` 的后续 inbound `ProxyOpenReq` 不会投递到已关闭对象，而是能创建新的 passive tunnel |
 | direct/reverse 统一短延迟竞速 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 hedged connect 调度 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 reverse 统一延迟 300ms 启动，且 direct/reverse 共享同一 logical `tunnel_id` |
-| QUIC/UDP NAT 候选下同源 UDP punch burst | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/quic/listener.rs` 与 `p2p-frame/src/networks/quic/network.rs` 的 punch 发送路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 punch 默认关闭；有 SN service 且 `TunnelManager` 为本次 candidate intent 开启后，punch 使用 QUIC listener 同一本地端口的发送句柄，只对非 WAN UDP 候选启用，有发送次数/间隔上限，发送失败不改变 `connect_with_ep(...)` 的建链结果 |
+| QUIC/UDP NAT 候选下同源 UDP punch burst | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/quic/listener.rs` 与 `p2p-frame/src/networks/quic/network.rs` 的 punch 发送路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 punch 默认关闭；有 SN service 且 `TunnelManager` 为本次 candidate intent 开启后，punch 使用 QUIC listener 同一本地端口的发送句柄，只对非 WAN UDP 候选启用，reverse 在 `0ms` 起发、active 在 `250ms` 起发，之后都以固定 `50ms` cadence 发送并在 `1s` 截止或更短 hedged window 结束时停止；punch payload 可为每包 `5..=30` 字节随机短载荷且不得被接收侧解析或上层依赖，发送失败不改变 `connect_with_ep(...)` 的建链结果 |
 | `SnCall` 本次反连候选 | `p2p-frame/src/sn/client/sn_service.rs` 与 `p2p-frame/src/sn/service/service.rs` 的 call/called 字段 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 `SnCall` 携带调用方本次传入的 `reverse_endpoint_array`，SN called 保留这些候选并扩展单 SN 观察候选 |
 | proxy 短窗口脱代理升级 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 proxy upgrade state | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言新建 proxy candidate 先进入 15s/30s/60s/120s 短窗口，再进入有上限的指数退避，且升级路径不把 proxy 视为成功 |
 | endpoint 评分按协议隔离 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 endpoint score | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 TCP 失败不会降低 QUIC/UDP 候选优先级 |

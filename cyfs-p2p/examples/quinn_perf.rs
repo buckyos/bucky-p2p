@@ -292,7 +292,8 @@ fn build_server_config() -> AppResult<quinn::ServerConfig> {
     ));
     let transport = Arc::get_mut(&mut server_config.transport)
         .ok_or_else(|| "server transport config already shared".to_string())?;
-    transport.max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()));
+    transport.max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()))
+        .initial_rtt(Duration::from_millis(200));
     transport.max_concurrent_bidi_streams(1024_u32.into());
 
     Ok(server_config)
@@ -312,6 +313,7 @@ fn build_client_config(parallel: usize) -> AppResult<quinn::ClientConfig> {
     ));
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()));
+    transport.initial_rtt(Duration::from_millis(200));
     transport.keep_alive_interval(Some(Duration::from_secs(15)));
     transport.max_concurrent_bidi_streams((parallel as u32).max(1).into());
     client_config.transport_config(Arc::new(transport));

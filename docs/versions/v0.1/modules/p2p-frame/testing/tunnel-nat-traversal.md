@@ -8,9 +8,9 @@
 |------|----------------|----------|
 | hedged direct/reverse 统一短延迟 | 待补 `nat_quic_candidates_use_short_reverse_delay` | direct 与 reverse 使用同一 `tunnel_id`，reverse 调度延迟固定为 300ms，不再按 endpoint 类型分成 2 秒窗口 |
 | QUIC UDP punch 单次连接开关默认关闭 | 待补 `tunnel_connect_intent_controls_udp_punch_per_connection_with_default_off` | 默认 `TunnelConnectIntent` 不发送 punch，`TunnelManager` 只有在 SN service 存在且候选符合策略时才为本次 candidate intent 开启 punch |
-| QUIC/UDP NAT 候选发送同源 UDP punch | 待补 `quic_nat_candidates_send_same_socket_udp_punch` | punch 从 QUIC listener 同一本地端口发送，只对非 WAN UDP 候选启用，并带有发送次数和间隔上限 |
+| QUIC/UDP NAT 候选发送同源 UDP punch | 待补 `quic_nat_candidates_send_same_socket_udp_punch` | punch 从 QUIC listener 同一本地端口发送，只对非 WAN UDP 候选启用；reverse 在 `0ms` 起发，active 在 `250ms` 起发，之后都以固定 `50ms` cadence 发送，并在 `1s` 截止或更短 hedged window 结束时停止 |
 | UDP punch 发送失败不改变建链结果 | 待补 `udp_punch_send_failure_is_best_effort` | punch 失败只产生诊断，不让 `connect_with_ep(...)` 提前失败，也不改变后续 QUIC handshake 成败判定 |
-| UDP punch 不引入接收解析或业务载荷 | 待补 `udp_punch_has_private_payload_and_no_receive_path` | punch payload 只包含 magic/version 与 tunnel/candidate 关联信息，不被上层读取，不新增 raw UDP receive/ack 路径 |
+| UDP punch 不引入接收解析或业务载荷 | 待补 `udp_punch_has_random_private_payload_and_no_receive_path` | punch payload 可为每包 `5..=30` 字节随机短载荷，不要求包含 magic/version、tunnel/candidate 关联信息或方向标记，不被上层读取，不新增 raw UDP receive/ack 路径 |
 | `SnCall` 携带本次建链候选 | 待补 `reverse_path_passes_reverse_endpoints_to_sn_call` | `SNClientService::call(...)` 收到非空 `reverse_endpoint_array`，候选来自本地 listener / SN observed WAN / 映射端口组合集合 |
 | SN called 保留调用方候选并扩展单 SN 观察候选 | 待补 `sn_call_preserves_caller_reverse_endpoints_before_observed_endpoints` | `SnCalled.reverse_endpoint_array` 前段保留调用方传入候选，后续可追加单 SN 观察和映射端点 |
 | proxy 新建后进入短窗口升级 | 待补 `proxy_upgrade_starts_with_short_nat_retry_window` | 新 proxy candidate 的下一次升级时间约为 15 秒，而不是 5 分钟，且不抢占 PN 首次 open 的 5 秒响应窗口 |
@@ -28,6 +28,7 @@ DV 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame dv`，即 `carg
 - 默认 proxy 兜底仍可用。
 - NAT-aware 调度不要求环境存在真实 NAT，也不要求 DV 断言公网打洞成功率。
 - 同源 UDP punch 默认关闭；SN service 存在且本次 candidate intent 开启时，DV 只要求不破坏 all-in-one 场景，真实 NAT 映射是否因此改善不作为自动断言。
+- unit 必须直接覆盖 active/reverse 的起发时机、cadence 与截止断言，至少确认 reverse 在 burst 启动即发送首包、active 在 `250ms` 发送首包，随后都每 `50ms` 一包，且不会超过默认 `1s` 截止。
 
 ## Integration 验证
 
@@ -38,6 +39,7 @@ Integration 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame integr
 - `SNClientService::call(...)` 的兼容调用路径仍可用，未传候选时保持当前字段语义。
 - `TunnelNetwork` / `Tunnel` trait 不新增 NAT 专用参数。
 - QUIC UDP punch 不要求下游使用方处理 raw UDP payload，也不要求下游新增 socket；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选符合策略时才为本次 `TunnelConnectIntent` 开启。
+- QUIC UDP punch 的 active `250ms` / reverse `0ms` 起发与 `50ms` / `1s` cadence 属于 `p2p-frame` 内部实现边界；integration 只验证该边界不会泄漏成新的公开 trait 参数、raw UDP 协议或额外 socket 依赖。
 
 ## 缺口与边界
 

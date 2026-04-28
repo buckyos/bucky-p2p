@@ -397,11 +397,11 @@ mod udp_punch_timeout_tests {
         );
         assert_eq!(
             connect_timeout_for_intent(base_timeout, active_punch),
-            Duration::from_millis(500)
+            Duration::from_secs(1)
         );
         assert_eq!(
             connect_timeout_for_intent(base_timeout, reverse_punch),
-            Duration::from_millis(200)
+            Duration::from_secs(1)
         );
         assert_eq!(
             connect_timeout_for_intent(Duration::from_secs(3), active_punch),
@@ -438,15 +438,23 @@ mod udp_punch_timeout_tests {
                 Duration::from_secs(3),
                 reverse_punch,
             ),
-            None
+            Some(Duration::from_millis(50))
         );
         assert_eq!(
             udp_punch_retry_delay_after_error(
-                Duration::from_millis(100),
+                Duration::from_millis(950),
                 Duration::from_secs(3),
                 reverse_punch,
             ),
             Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            udp_punch_retry_delay_after_error(
+                Duration::from_millis(1000),
+                Duration::from_secs(3),
+                reverse_punch,
+            ),
+            None
         );
     }
 }

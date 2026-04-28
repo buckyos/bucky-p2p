@@ -1,5 +1,5 @@
 use super::tunnel::QuicTunnel;
-use crate::endpoint::{Endpoint, Protocol};
+use crate::endpoint::{Endpoint, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::finder::DeviceCache;
@@ -13,6 +13,7 @@ use crate::runtime;
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
 use quinn::Incoming;
 use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
+use rand::{Rng, random};
 use rustls::pki_types::CertificateDer;
 use rustls::version::TLS13;
 use socket2::{Domain, Protocol as SocketProtocol, SockAddr, Socket, Type};
@@ -23,19 +24,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{Notify, mpsc};
 
-const UDP_PUNCH_MAGIC: &[u8; 8] = b"P2PPNCH1";
-const UDP_PUNCH_ACTIVE_PACKET_OFFSETS: [Duration; 4] = [
-    Duration::from_millis(250),
-    Duration::from_millis(300),
-    Duration::from_millis(390),
-    Duration::from_millis(500),
-];
-const UDP_PUNCH_REVERSE_PACKET_OFFSETS: [Duration; 4] = [
-    Duration::from_millis(0),
-    Duration::from_millis(30),
-    Duration::from_millis(90),
-    Duration::from_millis(200),
-];
+const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
+const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
+const UDP_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
+const UDP_PUNCH_ACTIVE_START_OFFSET: Duration = Duration::from_millis(250);
+const UDP_PUNCH_REVERSE_START_OFFSET: Duration = Duration::ZERO;
+const UDP_PUNCH_DEADLINE: Duration = Duration::from_secs(1);
 
 struct QuicTunnelListenerState {
     local: Option<Endpoint>,
@@ -202,9 +196,11 @@ impl QuicTunnelListener {
             ))?,
         ));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-        transport_config.max_idle_timeout(Some(
-            std::time::Duration::from_secs(600).try_into().unwrap(),
-        ));
+        transport_config
+            .max_idle_timeout(Some(
+                std::time::Duration::from_secs(600).try_into().unwrap(),
+            ))
+            .initial_rtt(Duration::from_millis(200));
         match self.congestion_algorithm {
             QuicCongestionAlgorithm::Bbr => {
                 transport_config.congestion_controller_factory(Arc::new(
@@ -373,43 +369,53 @@ impl QuicTunnelListener {
 
 fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
     remote.protocol() == Protocol::Quic
-        && remote.get_area() != crate::endpoint::EndpointArea::Wan
+        && is_non_lan_ipv4_addr(remote.addr())
         && remote.addr().port() != 0
 }
 
 fn udp_punch_payload(intent: TunnelConnectIntent) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(18);
-    payload.extend_from_slice(UDP_PUNCH_MAGIC);
-    payload.push(if intent.is_reverse { 1 } else { 0 });
-    payload.push(0);
-    payload.extend_from_slice(&intent.tunnel_id.value().to_be_bytes());
-    payload.extend_from_slice(&intent.candidate_id.value().to_be_bytes());
-    payload
+    let _ = intent;
+    let payload_len =
+        rand::rng().random_range(UDP_PUNCH_PAYLOAD_MIN_LEN..=UDP_PUNCH_PAYLOAD_MAX_LEN);
+    random::<[u8; UDP_PUNCH_PAYLOAD_MAX_LEN]>()[..payload_len].to_vec()
 }
 
-fn udp_punch_packet_offsets(intent: TunnelConnectIntent) -> &'static [Duration] {
+fn udp_punch_start_offset(intent: TunnelConnectIntent) -> Duration {
     if intent.is_reverse {
-        &UDP_PUNCH_REVERSE_PACKET_OFFSETS
+        UDP_PUNCH_REVERSE_START_OFFSET
     } else {
-        &UDP_PUNCH_ACTIVE_PACKET_OFFSETS
+        UDP_PUNCH_ACTIVE_START_OFFSET
     }
 }
 
 pub(crate) fn udp_punch_burst_window(intent: TunnelConnectIntent) -> Duration {
-    *udp_punch_packet_offsets(intent)
-        .last()
-        .unwrap_or(&Duration::ZERO)
+    let _ = intent;
+    UDP_PUNCH_DEADLINE
 }
 
 fn udp_punch_offsets_for_deadline(
     intent: TunnelConnectIntent,
     max_duration: Duration,
 ) -> Vec<Duration> {
-    udp_punch_packet_offsets(intent)
-        .iter()
-        .copied()
-        .take_while(|offset| *offset <= max_duration)
-        .collect()
+    let deadline = max_duration.min(UDP_PUNCH_DEADLINE);
+    let start = udp_punch_start_offset(intent);
+    if start > deadline {
+        return Vec::new();
+    }
+
+    let mut offsets = Vec::new();
+    let mut offset = start;
+    loop {
+        offsets.push(offset);
+        let Some(next_offset) = offset.checked_add(UDP_PUNCH_INTERVAL) else {
+            break;
+        };
+        if next_offset > deadline {
+            break;
+        }
+        offset = next_offset;
+    }
+    offsets
 }
 
 async fn try_send_udp_punch_packet(
@@ -495,7 +501,9 @@ pub(crate) async fn connect_with_ep(
         quinn::crypto::rustls::QuicClientConfig::try_from(config).unwrap(),
     ));
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(idle_timeout.try_into().unwrap()));
+    transport_config
+        .max_idle_timeout(Some(idle_timeout.try_into().unwrap()))
+        .initial_rtt(Duration::from_millis(200));
     if idle_timeout > std::time::Duration::from_secs(15) {
         transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
     }
@@ -547,48 +555,85 @@ mod udp_punch_tests {
     use crate::types::{TunnelCandidateId, TunnelId};
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
 
-    fn endpoint(protocol: Protocol, port: u16, area: EndpointArea) -> Endpoint {
-        let mut ep = Endpoint::from((
-            protocol,
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
-        ));
+    fn endpoint(protocol: Protocol, ip: Ipv4Addr, port: u16, area: EndpointArea) -> Endpoint {
+        let mut ep = Endpoint::from((protocol, SocketAddr::V4(SocketAddrV4::new(ip, port))));
         ep.set_area(area);
         ep
     }
 
     #[test]
-    fn udp_punch_policy_only_enables_quic_non_static_wan_candidates() {
-        let lan_quic = endpoint(Protocol::Quic, 10001, EndpointArea::Lan);
-        let mapped_quic = endpoint(Protocol::Quic, 10002, EndpointArea::Mapped);
-        let static_wan_quic = endpoint(Protocol::Quic, 10003, EndpointArea::Wan);
-        let tcp = endpoint(Protocol::Tcp, 10004, EndpointArea::Lan);
-        let zero_port_quic = endpoint(Protocol::Quic, 0, EndpointArea::Lan);
+    fn udp_punch_policy_only_enables_quic_non_lan_ipv4_candidates() {
+        let public_quic_lan_area = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::new(8, 8, 8, 8),
+            10001,
+            EndpointArea::Lan,
+        );
+        let public_quic_wan_area = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::new(1, 1, 1, 1),
+            10002,
+            EndpointArea::Wan,
+        );
+        let private_quic = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::new(192, 168, 1, 10),
+            10003,
+            EndpointArea::Wan,
+        );
+        let loopback_quic = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::LOCALHOST,
+            10004,
+            EndpointArea::Lan,
+        );
+        let tcp = endpoint(
+            Protocol::Tcp,
+            Ipv4Addr::new(8, 8, 4, 4),
+            10005,
+            EndpointArea::Lan,
+        );
+        let zero_port_quic = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::new(8, 8, 8, 8),
+            0,
+            EndpointArea::Lan,
+        );
+        let ipv6_quic = Endpoint::from((
+            Protocol::Quic,
+            "[2001:4860:4860::8888]:10006"
+                .parse::<SocketAddr>()
+                .unwrap(),
+        ));
 
-        assert!(udp_punch_enabled_for_endpoint(&lan_quic));
-        assert!(udp_punch_enabled_for_endpoint(&mapped_quic));
-        assert!(!udp_punch_enabled_for_endpoint(&static_wan_quic));
+        assert!(udp_punch_enabled_for_endpoint(&public_quic_lan_area));
+        assert!(udp_punch_enabled_for_endpoint(&public_quic_wan_area));
+        assert!(!udp_punch_enabled_for_endpoint(&private_quic));
+        assert!(!udp_punch_enabled_for_endpoint(&loopback_quic));
         assert!(!udp_punch_enabled_for_endpoint(&tcp));
         assert!(!udp_punch_enabled_for_endpoint(&zero_port_quic));
+        assert!(!udp_punch_enabled_for_endpoint(&ipv6_quic));
     }
 
     #[test]
-    fn udp_punch_payload_has_private_magic_and_tunnel_ids() {
+    fn udp_punch_payload_is_random_private_probe_data() {
         let intent = TunnelConnectIntent::reverse(
             TunnelId::from(0x0102_0304),
             TunnelCandidateId::from(0x0506_0708),
         );
-        let payload = udp_punch_payload(intent);
+        let payloads = (0..64)
+            .map(|_| udp_punch_payload(intent))
+            .collect::<Vec<_>>();
 
-        assert_eq!(&payload[..UDP_PUNCH_MAGIC.len()], UDP_PUNCH_MAGIC);
-        assert_eq!(payload[UDP_PUNCH_MAGIC.len()], 1);
-        assert_eq!(
-            &payload[UDP_PUNCH_MAGIC.len() + 2..UDP_PUNCH_MAGIC.len() + 6],
-            &0x0102_0304u32.to_be_bytes()
+        assert!(payloads.iter().all(|payload| {
+            (UDP_PUNCH_PAYLOAD_MIN_LEN..=UDP_PUNCH_PAYLOAD_MAX_LEN).contains(&payload.len())
+        }));
+        assert!(
+            payloads
+                .windows(2)
+                .any(|pair| pair[0].len() != pair[1].len())
         );
-        assert_eq!(
-            &payload[UDP_PUNCH_MAGIC.len() + 6..UDP_PUNCH_MAGIC.len() + 10],
-            &0x0506_0708u32.to_be_bytes()
-        );
+        assert!(payloads.windows(2).any(|pair| pair[0] != pair[1]));
     }
 
     #[test]
@@ -596,15 +641,27 @@ mod udp_punch_tests {
         let active = TunnelConnectIntent::active_logical(TunnelId::from(7));
         let reverse = TunnelConnectIntent::reverse_logical(TunnelId::from(8));
 
-        assert_eq!(udp_punch_burst_window(active), Duration::from_millis(500));
-        assert_eq!(udp_punch_burst_window(reverse), Duration::from_millis(200));
+        assert_eq!(udp_punch_burst_window(active), Duration::from_secs(1));
+        assert_eq!(udp_punch_burst_window(reverse), Duration::from_secs(1));
         assert_eq!(
             udp_punch_offsets_for_deadline(active, Duration::from_secs(3)),
             vec![
                 Duration::from_millis(250),
                 Duration::from_millis(300),
-                Duration::from_millis(390),
+                Duration::from_millis(350),
+                Duration::from_millis(400),
+                Duration::from_millis(450),
                 Duration::from_millis(500),
+                Duration::from_millis(550),
+                Duration::from_millis(600),
+                Duration::from_millis(650),
+                Duration::from_millis(700),
+                Duration::from_millis(750),
+                Duration::from_millis(800),
+                Duration::from_millis(850),
+                Duration::from_millis(900),
+                Duration::from_millis(950),
+                Duration::from_millis(1000),
             ]
         );
         assert_eq!(
@@ -615,17 +672,34 @@ mod udp_punch_tests {
             udp_punch_offsets_for_deadline(reverse, Duration::from_secs(3)),
             vec![
                 Duration::from_millis(0),
-                Duration::from_millis(30),
-                Duration::from_millis(90),
+                Duration::from_millis(50),
+                Duration::from_millis(100),
+                Duration::from_millis(150),
                 Duration::from_millis(200),
+                Duration::from_millis(250),
+                Duration::from_millis(300),
+                Duration::from_millis(350),
+                Duration::from_millis(400),
+                Duration::from_millis(450),
+                Duration::from_millis(500),
+                Duration::from_millis(550),
+                Duration::from_millis(600),
+                Duration::from_millis(650),
+                Duration::from_millis(700),
+                Duration::from_millis(750),
+                Duration::from_millis(800),
+                Duration::from_millis(850),
+                Duration::from_millis(900),
+                Duration::from_millis(950),
+                Duration::from_millis(1000),
             ]
         );
         assert_eq!(
             udp_punch_offsets_for_deadline(reverse, Duration::from_millis(100)),
             vec![
                 Duration::from_millis(0),
-                Duration::from_millis(30),
-                Duration::from_millis(90),
+                Duration::from_millis(50),
+                Duration::from_millis(100),
             ]
         );
     }
