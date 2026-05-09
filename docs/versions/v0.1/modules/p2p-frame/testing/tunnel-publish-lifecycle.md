@@ -9,6 +9,7 @@
 - `reverse_waiter` 命中时的延后 publish 行为
 - reverse waiter 被消费、超时、取消或失败后的可见性转换
 - 已 published candidate 与 hidden reverse candidate 的选择优先级
+- 已 published 非 proxy candidate 与 published proxy candidate 同时存在时的选择优先级
 - proxy tunnel 进入候选管理并触发后续脱代理升级后的 publish 行为
 
 ### 范围外
@@ -25,6 +26,7 @@
 | reverse waiter 被消费后，使用统一入口把 tunnel 提升为 published | 待补 reverse open 完成路径直测 | waiter 返回的 reverse tunnel 随后会进入订阅流，且后续 `get_tunnel()` 优先返回 published candidate |
 | reverse incoming 在本地无 waiter 时立即 publish | 现有 `register_local_reverse_tunnel_without_waiter_is_published`、`reverse_incoming_tunnel_publishes_after_waiter_consumed` 的第二阶段 | reverse tunnel 不再长期隐藏，而是按普通新 tunnel 进入 publish 流程 |
 | published candidate 优先于 hidden reverse candidate | 现有 `get_tunnel_prefers_published_candidate_over_hidden_reverse` | `get_tunnel()` 默认优先返回已 published candidate |
+| published 非 proxy candidate 优先于 published proxy candidate | 现有 `select_preferred_tunnel_entry_prefers_non_proxy_over_newer_proxy`；`x509` feature 下现有 `get_tunnel_prefers_non_proxy_over_newer_proxy` | 同一远端已有 direct/passive/reverse 等非 proxy candidate 时，即使后续 proxy candidate 更新时间更晚，`get_tunnel()` 仍返回非 proxy；只有没有可用非 proxy candidate 时才返回 proxy |
 | publish 入口幂等 | 待补统一 publish 入口幂等测试 | 同一 candidate 重复提升为 published 时，不重复广播，也不破坏状态 |
 | proxy candidate 发布后触发后续脱代理升级 | 现有 proxy upgrade 相关测试集 | proxy 作为立即可用候选被 publish；升级成功后新的 non-proxy candidate 进入同一 publish 路径 |
 | proxy 升级失败退避封顶 | 现有 proxy upgrade backoff 相关测试集 | 重试间隔指数增长但不超过 2 小时 |
@@ -44,6 +46,7 @@
 - 同文件中的 `register_local_reverse_tunnel_without_waiter_is_published` 继续承担“无 waiter 时 reverse 立即 publish”的证据。
 - 同文件中的 `reverse_incoming_tunnel_publishes_after_waiter_consumed` 继续承担“waiter 消费后，后续 reverse candidate 不再隐藏”的证据。
 - 同文件中的 `get_tunnel_prefers_published_candidate_over_hidden_reverse` 继续承担 published candidate 选择优先级的证据。
+- 同文件中的 `select_preferred_tunnel_entry_prefers_non_proxy_over_newer_proxy` 继续承担默认 unit 入口下“非 proxy 优先于更新时间更晚的 proxy”的选择策略证据；`x509` feature 下的 `get_tunnel_prefers_non_proxy_over_newer_proxy` 继续承担完整 `get_tunnel()` 路径证据。
 - 同文件中的 proxy upgrade 测试继续承担 proxy candidate 可见性、升级成功后切换 publish 路径，以及失败退避封顶的证据。
 
 ## 缺口

@@ -9,12 +9,13 @@
 - direct、proxy、普通 incoming 和 reverse incoming 这四类成功建链路径的统一 publish 约束
 - reverse tunnel 与本地 `(remote_id, tunnel_id)` `reverse_waiter` 的交互边界
 - proxy tunnel 在“立即可用”与“后续脱代理升级”之间的候选登记要求
+- 已登记候选被 `get_tunnel()` 或等价默认复用路径选中时的可见性优先级和 proxy 兜底选择边界
 
 ### 范围外
 - `Tunnel` / `TunnelNetwork` trait 形状本身的修改
 - `StreamManager` / `DatagramManager` 的订阅消费逻辑
 - SN called、PN open 和底层 transport 握手协议本身
-- 重新定义“哪些 tunnel 可被复用或被 `get_tunnel` 选中”的更大范围策略
+- 重新定义跨远端、跨协议或跨上层业务目的的全局路径质量策略
 
 ## 目标与原则
 
@@ -23,6 +24,7 @@
 - publish 是“把已登记候选变成对订阅者和默认复用路径可见”的动作，而不是底层建链成功的同义词。
 - 只要某条 tunnel 已经对外可见，它就必须已经被 `TunnelManager` 纳入候选状态管理和后续清理/升级逻辑。
 - publish 入口必须幂等，同一 candidate 重复 publish 不得造成重复广播或状态损坏。
+- 默认复用已有候选时，published candidate 优先于 hidden candidate；在同一可见性层级内，非 proxy candidate 优先于 proxy candidate，proxy 只作为没有可用非 proxy candidate 时的兜底。
 
 ## 生命周期模型
 
@@ -79,6 +81,13 @@
   - 保持幂等，避免同一 candidate 重复广播
 - direct/proxy/incoming/reverse 完成路径都必须复用这一入口，而不是在各自调用点复制 publish 逻辑。
 
+## 已有候选选择要求
+
+- `get_tunnel()` 或等价默认复用路径必须先在已 published 且可用的 candidate 中选择，只有不存在 published 可用 candidate 且调用点允许 hidden fallback 时，才考虑 hidden candidate。
+- 同一可见性层级内，`TunnelForm::Proxy` 的优先级低于 direct、passive 或 reverse 等非 proxy candidate；即使 proxy candidate 更新时间更晚，也不得覆盖已有可用非 proxy candidate。
+- 若存在多个可用非 proxy candidate，则选择最近更新的非 proxy candidate；若仅存在多个 proxy candidate，则选择最近更新的 proxy candidate。
+- 该选择规则不改变 proxy 的兜底职责：当没有可用非 proxy candidate 时，proxy 仍可被默认复用，并继续触发后续 direct/reverse 脱代理升级。
+
 ## reverse waiter 清理要求
 
 - `reverse_waiter` 的生命周期只覆盖“本地还在等待这次 reverse open 结果”的时间窗口。
@@ -96,4 +105,5 @@
 
 - 最大风险是误把“延后 publish 的 reverse”改成“提前 publish 的 reverse”，从而改变 hedged open、默认复用和订阅时序。
 - 第二类风险是 proxy candidate 若从 publish-only 语义改为 register-and-publish，可能改变 `get_tunnel()`、upgrade 状态清理或空闲清理的覆盖面。
+- 第三类风险是后注册的 proxy candidate 覆盖已有 direct/passive candidate，导致连接在已有非代理路径可用时仍粘连到代理路径。
 - 若实现阶段无法在不破坏现有 reverse waiter 语义的前提下完成收敛，应先回滚到当前行为并补充 testing 约束，而不是保留半收敛状态。

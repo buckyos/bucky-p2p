@@ -16,6 +16,7 @@
 | proxy 新建后进入短窗口升级 | 待补 `proxy_upgrade_starts_with_short_nat_retry_window` | 新 proxy candidate 的下一次升级时间约为 15 秒，而不是 5 分钟，且不抢占 PN 首次 open 的 5 秒响应窗口 |
 | proxy 短窗口耗尽后进入有上限退避 | 待补 `proxy_upgrade_short_window_falls_back_to_capped_backoff` | 15s/30s/60s/120s 后进入指数退避，最大不超过 2 小时 |
 | 升级路径不把 proxy 视为成功 | 现有 `stored_proxy_upgrade_dials_direct_instead_of_reusing_proxy` 继续承担，必要时补充断言 | 脱代理尝试调用 direct/reverse，不能通过再次创建 proxy 清理 upgrade 状态 |
+| 多个已有 candidate 的复用选择 | 现有 `select_preferred_tunnel_entry_prefers_non_proxy_over_newer_proxy`；`x509` feature 下现有 `get_tunnel_prefers_non_proxy_over_newer_proxy` | 已有 direct/passive/reverse 等非 proxy candidate 可用时，后续 proxy candidate 不能因为更新时间更新而成为默认复用结果 |
 | endpoint 评分按协议隔离失败 | 待补 `endpoint_score_isolated_by_protocol` | TCP endpoint 失败不降低同地址 QUIC/UDP endpoint 的排序 |
 | 无多 SN fanout | 待补 `nat_traversal_uses_single_sn_call_path` | 单次 reverse path 不并发向多个 SN 发送 call，不依赖跨 SN 观察结果 |
 

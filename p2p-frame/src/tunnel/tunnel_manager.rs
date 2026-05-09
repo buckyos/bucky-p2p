@@ -455,53 +455,91 @@ impl TunnelManager {
     where
         F: Fn(&TunnelEntry) -> bool,
     {
-        let mut tunnels = self.tunnels.write().unwrap();
-        let entries = tunnels.get_mut(remote_id)?;
-        let mut removed_unavailable = Vec::new();
-        entries.retain(|entry| {
-            let keep = is_tunnel_available(entry.tunnel.as_ref());
-            if !keep {
-                removed_unavailable.push(format!(
-                    "tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} published={} state={:?} is_closed={}",
-                    entry.tunnel.tunnel_id(),
-                    entry.tunnel.candidate_id(),
-                    entry.tunnel.form(),
-                    entry.tunnel.protocol(),
-                    entry.tunnel.is_reverse(),
-                    entry.published,
-                    entry.tunnel.state(),
-                    entry.tunnel.is_closed()
-                ));
-            }
-            keep
-        });
-        if !removed_unavailable.is_empty() {
-            log::warn!(
-                "get tunnel local={} remote={} dropped unavailable entries [{}]",
-                self.local_identity.get_id(),
-                remote_id,
-                removed_unavailable.join("; ")
-            );
-        }
-        let selected = entries
-            .iter()
-            .filter(|entry| filter(entry))
-            .filter(|entry| entry.published)
-            .max_by_key(|entry| entry.updated_at)
-            .or_else(|| {
-                if !allow_hidden_fallback {
-                    return None;
+        let (selected, should_track_proxy_upgrade) = {
+            let mut tunnels = self.tunnels.write().unwrap();
+            let entries = tunnels.get_mut(remote_id)?;
+            let mut removed_unavailable = Vec::new();
+            entries.retain(|entry| {
+                let keep = is_tunnel_available(entry.tunnel.as_ref());
+                if !keep {
+                    removed_unavailable.push(format!(
+                        "tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} published={} state={:?} is_closed={}",
+                        entry.tunnel.tunnel_id(),
+                        entry.tunnel.candidate_id(),
+                        entry.tunnel.form(),
+                        entry.tunnel.protocol(),
+                        entry.tunnel.is_reverse(),
+                        entry.published,
+                        entry.tunnel.state(),
+                        entry.tunnel.is_closed()
+                    ));
                 }
-                entries
-                    .iter()
-                    .filter(|entry| filter(entry))
-                    .max_by_key(|entry| entry.updated_at)
-            })
-            .map(|entry| entry.tunnel.clone());
-        if entries.is_empty() {
-            tunnels.remove(remote_id);
+                keep
+            });
+            if !removed_unavailable.is_empty() {
+                log::warn!(
+                    "get tunnel local={} remote={} dropped unavailable entries [{}]",
+                    self.local_identity.get_id(),
+                    remote_id,
+                    removed_unavailable.join("; ")
+                );
+            }
+            let published = entries
+                .iter()
+                .filter(|entry| filter(entry))
+                .filter(|entry| entry.published);
+            let selected = Self::select_preferred_tunnel_entry(published)
+                .or_else(|| {
+                    if !allow_hidden_fallback {
+                        return None;
+                    }
+                    Self::select_preferred_tunnel_entry(
+                        entries.iter().filter(|entry| filter(entry)),
+                    )
+                })
+                .map(|entry| entry.tunnel.clone());
+            let should_track_proxy_upgrade = Self::only_published_proxy_candidates(entries);
+            if entries.is_empty() {
+                tunnels.remove(remote_id);
+            }
+            (selected, should_track_proxy_upgrade)
+        };
+        if should_track_proxy_upgrade {
+            self.track_proxy_upgrade_if_missing(remote_id);
         }
         selected
+    }
+
+    fn select_preferred_tunnel_entry<'a, I>(entries: I) -> Option<&'a TunnelEntry>
+    where
+        I: IntoIterator<Item = &'a TunnelEntry>,
+    {
+        let mut latest_non_proxy = None;
+        let mut latest_proxy = None;
+        for entry in entries {
+            if entry.tunnel.form() == TunnelForm::Proxy {
+                if latest_proxy
+                    .map(|latest: &TunnelEntry| entry.updated_at > latest.updated_at)
+                    .unwrap_or(true)
+                {
+                    latest_proxy = Some(entry);
+                }
+            } else if latest_non_proxy
+                .map(|latest: &TunnelEntry| entry.updated_at > latest.updated_at)
+                .unwrap_or(true)
+            {
+                latest_non_proxy = Some(entry);
+            }
+        }
+        latest_non_proxy.or(latest_proxy)
+    }
+
+    fn only_published_proxy_candidates(entries: &[TunnelEntry]) -> bool {
+        !entries.is_empty()
+            && entries
+                .iter()
+                .all(|entry| entry.tunnel.form() == TunnelForm::Proxy)
+            && entries.iter().any(|entry| entry.published)
     }
 
     fn next_candidate_id(&self) -> TunnelCandidateId {
@@ -1221,6 +1259,20 @@ impl TunnelManager {
         self.proxy_upgrade_notify.notify_one();
     }
 
+    fn track_proxy_upgrade_if_missing(&self, remote_id: &P2pId) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if state.proxy_upgrade_states.contains_key(remote_id) {
+            return;
+        }
+        state.proxy_upgrade_states.insert(
+            remote_id.clone(),
+            ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval),
+        );
+        drop(state);
+        self.proxy_upgrade_notify.notify_one();
+    }
+
     fn clear_proxy_upgrade(&self, remote_id: &P2pId) {
         self.state
             .lock()
@@ -1584,9 +1636,10 @@ impl TunnelManager {
 
     async fn cleanup_closed_tunnels(&self, _idle_timeout: Duration) {
         let mut removed = Vec::new();
+        let mut proxy_only_remotes = Vec::new();
         {
             let mut tunnels = self.tunnels.write().unwrap();
-            tunnels.retain(|_, entries| {
+            tunnels.retain(|remote_id, entries| {
                 entries.retain(|entry| {
                     let keep = is_tunnel_available(entry.tunnel.as_ref());
                     if !keep {
@@ -1594,8 +1647,14 @@ impl TunnelManager {
                     }
                     keep
                 });
+                if Self::only_published_proxy_candidates(entries) {
+                    proxy_only_remotes.push(remote_id.clone());
+                }
                 !entries.is_empty()
             });
+        }
+        for remote_id in proxy_only_remotes {
+            self.track_proxy_upgrade_if_missing(&remote_id);
         }
         for tunnel in removed {
             let _ = tunnel.close().await;
@@ -1635,6 +1694,99 @@ mod nat_strategy_tests {
     use super::*;
     use crate::endpoint::{EndpointArea, Protocol};
 
+    struct SelectionTunnel {
+        form: TunnelForm,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::networks::Tunnel for SelectionTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            TunnelId::from(1)
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            TunnelCandidateId::from(1)
+        }
+
+        fn form(&self) -> TunnelForm {
+            self.form
+        }
+
+        fn is_reverse(&self) -> bool {
+            false
+        }
+
+        fn protocol(&self) -> Protocol {
+            Protocol::Tcp
+        }
+
+        fn local_id(&self) -> P2pId {
+            P2pId::default()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            P2pId::default()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn state(&self) -> TunnelState {
+            TunnelState::Connected
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        async fn close(&self) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
+        }
+
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
+        }
+
+        async fn open_datagram(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
+        }
+
+        async fn accept_datagram(
+            &self,
+        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
+        }
+    }
+
     fn endpoint(protocol: Protocol, port: u16) -> Endpoint {
         endpoint_with_ip(protocol, [8, 8, 8, 8], port)
     }
@@ -1670,6 +1822,32 @@ mod nat_strategy_tests {
         let quic = endpoint(Protocol::Quic, 22002);
 
         assert_ne!(EndpointScoreKey::new(&tcp), EndpointScoreKey::new(&quic));
+    }
+
+    #[test]
+    fn select_preferred_tunnel_entry_prefers_non_proxy_over_newer_proxy() {
+        let non_proxy: TunnelRef = Arc::new(SelectionTunnel {
+            form: TunnelForm::Active,
+        });
+        let proxy: TunnelRef = Arc::new(SelectionTunnel {
+            form: TunnelForm::Proxy,
+        });
+        let entries = vec![
+            TunnelEntry {
+                tunnel: non_proxy,
+                updated_at: Instant::now(),
+                published: true,
+            },
+            TunnelEntry {
+                tunnel: proxy,
+                updated_at: Instant::now() + Duration::from_secs(1),
+                published: true,
+            },
+        ];
+
+        let selected = TunnelManager::select_preferred_tunnel_entry(entries.iter()).unwrap();
+
+        assert_eq!(selected.tunnel.form(), TunnelForm::Active);
     }
 
     #[test]
@@ -2877,6 +3055,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_tunnel_prefers_non_proxy_over_newer_proxy() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-non-proxy-preferred");
+        let remote_identity = new_identity("remote-non-proxy-preferred");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+
+        let direct = TrackableTunnel::new(
+            TunnelForm::Active,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager
+            .register_tunnel_and_publish(direct.clone(), false)
+            .await
+            .unwrap();
+        runtime::sleep(Duration::from_millis(1)).await;
+        manager
+            .register_tunnel_and_publish(proxy.clone(), false)
+            .await
+            .unwrap();
+
+        let selected = manager.get_tunnel(&remote_identity.get_id()).unwrap();
+        let direct_ref: TunnelRef = direct.clone();
+        assert!(Arc::ptr_eq(&selected, &direct_ref));
+        assert_eq!(selected.form(), TunnelForm::Active);
+        assert_eq!(
+            manager
+                .tunnels
+                .read()
+                .unwrap()
+                .get(&remote_identity.get_id())
+                .map(|entries| entries.len()),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn get_tunnel_retracks_proxy_upgrade_after_non_proxy_drops() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-proxy-retrack");
+        let remote_identity = new_identity("remote-proxy-retrack");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        let direct = TrackableTunnel::new(
+            TunnelForm::Active,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager
+            .register_tunnel_and_publish(proxy.clone(), false)
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
+
+        manager
+            .register_tunnel_and_publish(direct.clone(), false)
+            .await
+            .unwrap();
+        assert!(
+            !manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
+
+        *direct.state.lock().unwrap() = TunnelState::Closed;
+
+        let selected = manager.get_tunnel(&remote_identity.get_id()).unwrap();
+        let proxy_ref: TunnelRef = proxy.clone();
+        assert!(Arc::ptr_eq(&selected, &proxy_ref));
+        assert_eq!(selected.form(), TunnelForm::Proxy);
+
+        let state = manager.state.lock().unwrap();
+        let upgrade = state
+            .proxy_upgrade_states
+            .get(&remote_identity.get_id())
+            .copied()
+            .unwrap();
+        assert_eq!(upgrade.retry_interval, PROXY_UPGRADE_SHORT_INTERVALS[0]);
+        assert_eq!(upgrade.short_retry_index, 0);
+        assert!(!upgrade.in_progress);
+    }
+
+    #[tokio::test]
     async fn get_tunnel_prefers_published_candidate_over_hidden_reverse() {
         init_tls_once();
 
@@ -3424,6 +3713,59 @@ mod tests {
         assert!(manager.get_tunnel(&dead_identity.get_id()).is_none());
         assert_eq!(live_tunnel.close_count(), 0);
         assert_eq!(dead_tunnel.close_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_closed_tunnels_retracks_proxy_upgrade_when_proxy_remains() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-cleanup-proxy-retrack");
+        let remote_identity = new_identity("remote-cleanup-proxy-retrack");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        let direct = TrackableTunnel::new(
+            TunnelForm::Active,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Closed,
+        );
+
+        manager
+            .register_tunnel_and_publish(proxy.clone(), false)
+            .await
+            .unwrap();
+        manager
+            .register_tunnel_and_publish(direct.clone(), false)
+            .await
+            .unwrap();
+        assert!(
+            !manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
+
+        manager.cleanup_closed_tunnels(Duration::from_secs(0)).await;
+
+        let selected = manager.get_tunnel(&remote_identity.get_id()).unwrap();
+        let proxy_ref: TunnelRef = proxy.clone();
+        assert!(Arc::ptr_eq(&selected, &proxy_ref));
+        assert_eq!(direct.close_count(), 1);
+        assert!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .proxy_upgrade_states
+                .contains_key(&remote_identity.get_id())
+        );
     }
 
     #[tokio::test]

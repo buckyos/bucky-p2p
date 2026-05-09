@@ -85,6 +85,7 @@ approved_at: 2026-04-28
 - `TunnelManager` 的 publish 可见性决策必须收敛到单一生命周期模型：默认“register 后立即 publish”，唯一允许的延后场景是命中本地 `(remote_id, tunnel_id)` `reverse_waiter` 的 reverse tunnel。
 - 上述延后 publish 只影响时机，不改变规则：reverse tunnel 一旦完成本地 waiter 交付，就必须通过与 direct/proxy 相同的 publish 入口变为可见候选。
 - reverse 建链若在等待期间超时、取消或失败，相关 waiter 必须被清理；该 waiter 之后才到达的同 `(remote_id, tunnel_id)` reverse tunnel 不得继续隐藏，而必须按普通新 tunnel 进入 publish 路径。
+- `TunnelManager` 在默认复用已有 tunnel 时必须先从已发布候选中选择；同一可见性层级下，非 proxy candidate 优先于 proxy candidate，只有没有可用非 proxy candidate 时才返回 proxy。若存在多个同类候选，再按最近更新时间选择最新候选。
 - direct 与 reverse 必须使用同一个 logical `tunnel_id` 进行 hedged 建链；reverse 的启动延迟统一为 300ms，而不是固定等待 direct 路径 2 秒。
 - QUIC/UDP NAT 候选场景下，可以在 direct/reverse 建链窗口内发送少量 best-effort 原生 UDP punch 包；该机制必须使用与 QUIC listener 相同的本地 UDP socket/端口或该 socket 的 send-only clone，不得新建不同源端口的 UDP socket 伪装成同一路径打洞。
 - UDP punch 只允许在 SN service 存在时面向非 WAN QUIC/UDP 候选启用；WAN、TCP 和 proxy fallback 路径不得因为该机制改变原有建链语义。映射端点在当前实现中按 WAN endpoint 处理。
@@ -152,6 +153,7 @@ p2p-frame/src
 | `PnTunnel` idle timeout 生命周期关闭 | `PnTunnel` 本地状态机、channel lease 计数、idle sweeper 和关闭后重新创建 | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs` | 若实现阶段无法可靠追踪已返回给上层的 channel 生命周期，应先退回 design 重新划分 lease wrapper，而不是只统计 inbound queue。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 | 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
+| 多个已有 tunnel candidate 的默认复用选择 | published 优先，非 proxy 优先于 proxy，同类候选内选择最新 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现 proxy 仍可能覆盖已发布 direct/passive candidate，应优先修正 `get_tunnel()` 选择策略，而不是让后台脱代理升级成为唯一恢复路径。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。
