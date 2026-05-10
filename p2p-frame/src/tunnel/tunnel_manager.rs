@@ -1339,6 +1339,8 @@ impl TunnelManager {
         match self.try_upgrade_proxy_tunnel(&remote_id).await {
             Ok(tunnel) => {
                 self.clear_proxy_upgrade(&remote_id);
+                self.close_proxy_tunnels_after_upgrade(&remote_id, &tunnel)
+                    .await;
                 log::info!(
                     "proxy upgrade succeeded remote={} form={:?} protocol={:?}",
                     remote_id,
@@ -1397,6 +1399,53 @@ impl TunnelManager {
             .open_reverse_path(remote_id, self.gen_id.generate())
             .await?;
         Ok(tunnel)
+    }
+
+    async fn close_proxy_tunnels_after_upgrade(&self, remote_id: &P2pId, tunnel: &TunnelRef) {
+        if tunnel.form() == TunnelForm::Proxy {
+            return;
+        }
+
+        let proxy_tunnels = {
+            let mut tunnels = self.tunnels.write().unwrap();
+            let Some(entries) = tunnels.get_mut(remote_id) else {
+                return;
+            };
+            let mut proxy_tunnels = Vec::new();
+            entries.retain(|entry| {
+                let is_proxy = entry.tunnel.form() == TunnelForm::Proxy;
+                if is_proxy {
+                    proxy_tunnels.push(entry.tunnel.clone());
+                }
+                !is_proxy
+            });
+            if entries.is_empty() {
+                tunnels.remove(remote_id);
+            }
+            proxy_tunnels
+        };
+
+        for proxy in proxy_tunnels {
+            log::debug!(
+                "close proxy tunnel after upgrade remote={} proxy_tunnel_id={:?} proxy_candidate_id={:?} upgraded_tunnel_id={:?} upgraded_candidate_id={:?} upgraded_form={:?}",
+                remote_id,
+                proxy.tunnel_id(),
+                proxy.candidate_id(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id(),
+                tunnel.form()
+            );
+            if let Err(err) = proxy.close().await {
+                log::warn!(
+                    "close proxy tunnel after upgrade failed remote={} tunnel_id={:?} candidate_id={:?} code={:?} msg={}",
+                    remote_id,
+                    proxy.tunnel_id(),
+                    proxy.candidate_id(),
+                    err.code(),
+                    err.msg()
+                );
+            }
+        }
     }
 
     async fn on_sn_called(&self, called: SnCalled) -> P2pResult<()> {
@@ -4118,7 +4167,7 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(proxy, false)
+            .register_tunnel_and_publish(proxy.clone(), false)
             .await
             .unwrap();
         manager
@@ -4133,6 +4182,16 @@ mod tests {
         assert_eq!(info.direct, ConnectDirection::Direct);
         assert_eq!(info.remote_ep, remote_ep);
         assert!(manager.get_tunnel(&remote_identity.get_id()).is_some());
+        assert_eq!(proxy.close_count(), 1);
+        assert_eq!(
+            manager
+                .tunnels
+                .read()
+                .unwrap()
+                .get(&remote_identity.get_id())
+                .map(|entries| entries.len()),
+            Some(1)
+        );
         assert_eq!(network.call_count(), 1);
         assert!(
             !manager
@@ -4209,6 +4268,15 @@ mod tests {
                 .unwrap()
                 .form(),
             TunnelForm::Active
+        );
+        assert_eq!(
+            manager
+                .tunnels
+                .read()
+                .unwrap()
+                .get(&remote_identity.get_id())
+                .map(|entries| entries.len()),
+            Some(1)
         );
         assert!(
             !manager
