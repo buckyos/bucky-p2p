@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-28
+approved_at: 2026-05-10
 ---
 
 # p2p-frame 设计
@@ -18,6 +18,7 @@ approved_at: 2026-04-28
 - 为本轮 `pn/service/pn_server.rs` 的用户流量统计与限速需求建立可执行的设计边界，并把 `sfo-io` 接入限定在 relay bridge 路径内，包括 source/target 双边独立统计视图与 source 单边限速的区分。
 - 为本轮 proxy tunnel `stream` 路径的“可选 TLS-over-proxy 载荷加密、由使用者显式接口控制且由两端在 tunnel 外约定”需求建立可执行设计边界，并明确 `datagram` 路径继续保持明文兼容且忽略该 `stream` 加密模式，同时把加密接口限制在 PN 专有 API 内，而不是污染通用 `Tunnel` / `TunnelNetwork` trait。
 - 为本轮 `PnTunnel` idle timeout 生命周期关闭需求建立可执行设计边界，明确 channel lease 计数、原子关闭、accept/open 失败和关闭后重新创建语义。
+- 为本轮 `PnTunnel` 控制通道需求建立可执行设计边界：logical tunnel 打开时建立独立控制 channel，建立成功后才返回可用 tunnel，并在控制面断开、读写失败或对端 close 时关闭本地 tunnel。
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
 - 为本轮单 SN NAT 打洞优化建立可执行设计边界，包括 direct/reverse 统一 300ms 短延迟竞速、`SnCall` 本次反连候选、QUIC listener 同源 UDP punch burst、proxy 短窗口脱代理升级，以及按协议拆分的 endpoint 评分。
@@ -75,8 +76,13 @@ approved_at: 2026-04-28
 - 是否启用 TLS 由 proxy tunnel 两端在 tunnel 外预先约定；PN open 控制流不额外承载 TLS 模式协商。
 - 若调用方显式选择加密，则失败路径必须直接失败，不允许静默回退到明文桥接。
 - 本轮加密设计只覆盖 proxy `stream`；proxy `datagram` 不进入 TLS-over-proxy 范围，但必须忽略 `stream` 加密模式并保持当前明文兼容语义。
-- `PnTunnel` idle close 必须按本地生命周期关闭建模，不引入可靠远端 close 通知；触发后 tunnel 状态进入 `Closed` 或等价错误终态，并复用普通 close 的本地效果。
+- `PnTunnel` idle close 必须按本地兜底生命周期关闭建模；远端关闭感知由控制通道承担，idle timeout 触发后 tunnel 状态进入 `Closed` 或等价错误终态，并复用普通 close 的本地效果。
+- `PnTunnel` 控制通道必须参考 `TcpTunnel` 的 control connection ready gate 和 `QuicTunnel` 的 command stream/heartbeat 模型：active 创建 tunnel 时先打开 PN control channel，passive 侧注册并投递 tunnel 后返回 ready，active 侧收到 ready 成功后才把 tunnel 视为可用。
+- PN control channel 必须与业务 stream/datagram channel 分离；业务 `ProxyOpenReq` / `ProxyOpenResp` 继续只负责单条业务 channel，不能兼任 tunnel 生命周期控制面。
+- PN control channel 建立后必须启动控制接收循环和心跳循环；收到对端 close、控制 read EOF、decode 失败、写失败或 heartbeat timeout 时，必须进入与手动 close/idle close 共用的 `PnTunnel` 关闭路径。
+- 本地 `PnTunnel::close()` 必须尽力通过控制通道发送 close 命令并关闭控制写端；发送失败不阻止本地关闭，但必须保证本地状态幂等收敛。
 - `PnTunnel` 必须在统一状态临界区内维护 channel lease 计数、pending inbound queue 计数、idle deadline 和 close reason；本地 open、inbound 投递、channel drop 与 idle sweeper 都必须通过该状态执行竞态判定。
+- `PnTunnel` 生命周期状态必须显式区分 `OpeningControl`、`Open`、`Closing`、`Closed` 或等价状态；只有控制通道 ready 后才能进入 `Open`，后续 local open 与 inbound channel 投递都必须检查该状态。
 - `PnShared` 必须在 tunnel 关闭后移除 live registry 中的旧对象，确保后续同 `(remote_id, tunnel_id)` inbound `ProxyOpenReq` 不会投递到已关闭 tunnel，而是创建新的 passive tunnel。
 - 当某个远端当前只有 proxy tunnel 可用时，`TunnelManager` 必须在后台继续尝试 direct 或 reverse 建链，而不是无限期停留在 proxy 路径。
 - 上述脱代理尝试不得再次把“升级任务”回退成 proxy 建链；proxy 只作为对外可用的兜底连通性，而不是后台升级路径的成功条件。
@@ -136,6 +142,7 @@ p2p-frame/src
 | `docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 单 SN NAT 打洞优化、direct/reverse 竞速、QUIC listener 同源 UDP punch、候选刷新、proxy 短窗口脱代理和 endpoint 评分补充 | `tunnel`、`networks/quic`、`sn/client`、必要 `sn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-proxy-encryption.md` | PN client / tunnel 侧可选端到端载荷加密、显式接口和 TLS 叠加设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-idle-close.md` | `PnTunnel` idle timeout 生命周期关闭、channel lease 计数和关闭后重新创建设计补充 | `pn/client` |
+| `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-control-channel.md` | `PnTunnel` 控制通道建立、ready gate、heartbeat、远端关闭感知和关闭状态机收敛设计补充 | `pn/client`、`pn/protocol`、必要 `pn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
 | `p2p-frame/docs/tunnel_design.md` | tunnel 概念 | tunnel |
 | `p2p-frame/docs/tunnel_command_protocol_design.md` | tunnel 命令协议 | tunnel/ttp |
@@ -151,6 +158,7 @@ p2p-frame/src
 | relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户统计的流量计量 | relay bridge 上的 source/target 双边独立统计视图 | `p2p-frame/src/pn/service/pn_server.rs`、`PnTrafficManager`、统计查询接口 | 若实现阶段无法在不改变握手与 bridge 契约的前提下同时暴露 source/target 视图，应先退回 design 重新澄清统计模型，而不是把 target 统计挤进 source 视图。 |
 | relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户生效的限速能力 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs`、限速配置/查询接口 | 若实现阶段发现 target 统计可见性会迫使限速扩展成双边模型，应先退回 proposal，而不是静默扩大限速范围。 |
 | `PnTunnel` idle timeout 生命周期关闭 | `PnTunnel` 本地状态机、channel lease 计数、idle sweeper 和关闭后重新创建 | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs` | 若实现阶段无法可靠追踪已返回给上层的 channel 生命周期，应先退回 design 重新划分 lease wrapper，而不是只统计 inbound queue。 |
+| `PnTunnel` tunnel 级控制通道与远端关闭感知 | control channel ready gate、控制接收循环、heartbeat、close 命令和统一关闭状态机 | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、必要 `p2p-frame/src/pn/service/pn_server.rs` bridge 路径 | 若实现阶段发现现有 `ProxyOpenReq` 无法无歧义承载 control channel，应扩展 PN protocol 的 control open 命令或 kind，而不是复用业务 stream/datagram kind 造成兼容歧义。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 | 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
 | 多个已有 tunnel candidate 的默认复用选择 | published 优先，非 proxy 优先于 proxy，同类候选内选择最新 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现 proxy 仍可能覆盖已发布 direct/passive candidate，应优先修正 `get_tunnel()` 选择策略，而不是让后台脱代理升级成为唯一恢复路径。 |

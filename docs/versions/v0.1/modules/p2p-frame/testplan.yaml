@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `TunnelManager` 的统一 publish 生命周期断言、单 SN NAT 打洞调度和 SN 存在时开启的同源 UDP punch 断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 状态机断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 `TunnelManager` 的统一 publish 生命周期断言、单 SN NAT 打洞调度和 SN 存在时开启的同源 UDP punch 断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -32,6 +32,7 @@ levels:
         - 当前 `pn/client/pn_tunnel.rs` 的 unit 测试已直接覆盖 passive 明文兼容、`TlsRequired` 成功、TLS 身份校验失败、`datagram` 忽略 `stream` 模式，以及 `create_tunnel_with_options(...)` / client 级模式配置下 datagram 不被本地拒绝。
         - active `PnTunnel::open_stream()` 的默认明文兼容、双端模式错配和真实 TLS client 握手失败路径仍应继续补足 direct unit 证据。
         - `pn/client/pn_tunnel.rs` 的 unit 测试必须覆盖 idle timeout 关闭、active/pending/queued channel 阻止 idle close、accept 等待者被唤醒、后续 open 立即失败、stream/datagram/TLS wrapper lease drop 归还计数，以及关闭后同一 `(remote_id, tunnel_id)` 的后续 inbound open 重新创建 tunnel。
+        - `pn/protocol.rs`、`pn/client/pn_client.rs`、`pn/client/pn_listener.rs`、`pn/client/pn_tunnel.rs` 与必要 `pn/service/pn_server.rs` 的 unit 测试必须覆盖 control open/ready 与业务 `ProxyOpenReq` 分离、active create 等待 control ready、ready 失败不保留半开 tunnel、passive control open 创建 tunnel、remote close、control EOF、decode/write 失败、heartbeat timeout、manual close 通知对端、以及 control close/manual close/idle close 共享幂等 close path。
     steps:
       - id: p2p-frame-unit
         name: 运行 p2p-frame unit 测试集
@@ -39,7 +40,7 @@ levels:
 
   dv:
     mode: enabled
-    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认 NAT-aware tunnel 调度、默认关闭且仅 SN 存在时开启的同源 UDP punch、默认 `PnServer::new(...)` 路径、当前显式启用的 proxy stream TLS-over-proxy 配置和默认 30 分钟 `PnTunnel` idle timeout 不破坏短时场景
+    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认 NAT-aware tunnel 调度、默认关闭且仅 SN 存在时开启的同源 UDP punch、默认 `PnServer::new(...)` 路径、当前显式启用的 proxy stream TLS-over-proxy 配置、默认 30 分钟 `PnTunnel` idle timeout 和 `PnTunnel` control channel ready gate 不破坏短时场景
     test_targets:
       - cyfs-p2p-test/src/main.rs
       - devices/
@@ -54,6 +55,7 @@ levels:
         - 当前 DV 场景已显式启用 `set_proxy_stream_encrypted(true)`；它验证的是 stack 默认 proxy client 的 client 级 TLS 模式配置路径。
         - relay 只能桥接 TLS 握手字节和密文，不能成为 TLS 终止点，也不需要理解 TLS 模式字段。
         - idle close 的精确时间和竞态验证由 unit 承担；DV 只验证默认 idle 配置不会破坏正常短时 proxy 场景。
+        - control channel 的 heartbeat timeout、decode/write 失败和 close 幂等精确验证由 unit 承担；DV 只验证默认 PN proxy 建链会建立 control channel 且 all-in-one 场景仍可完成。
         - NAT 打洞成功率受真实网络环境影响；DV 只验证 all-in-one 场景仍可运行，不把公网 NAT 成功率作为自动断言。
         - 同源 UDP punch 的真实公网效果不作为 DV 自动断言；DV 只确认默认关闭不破坏本地 QUIC/PN 流程，SN 存在且开启时不要求额外服务。
     steps:
@@ -63,7 +65,7 @@ levels:
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证，确认单 SN NAT 打洞优化和默认关闭、仅 SN 存在时开启的同源 UDP punch、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力和 `PnTunnel` idle close 内部状态不会破坏现有调用方
+    summary: 工作区级兼容性与下游使用方验证，确认单 SN NAT 打洞优化和默认关闭、仅 SN 存在时开启的同源 UDP punch、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test
@@ -77,6 +79,7 @@ levels:
         - 特别关注 `cyfs-p2p-test` 与 `sn-miner-rust` 的 `PnServer::new(...)` 调用点兼容性。
         - 现有未显式启用 TLS-over-proxy 的调用方必须保持明文兼容，不得因新增 PN 专有 API 扩展而回归。
         - `PnTunnel` idle close 的新配置和 wrapper 类型不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名。
+        - `PnTunnel` control channel 不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名；`create_tunnel*` 可以更严格地等待 control ready 后返回可用 tunnel。
         - NAT 打洞优化不得要求下游实现多 SN、STUN/TURN 或新的 `TunnelNetwork` trait 参数。
         - 同源 UDP punch 不得要求下游处理 raw UDP payload、暴露新业务接口或修改 `TunnelNetwork` trait 参数；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选符合策略时才为本次 `TunnelConnectIntent` 开启。
     steps:

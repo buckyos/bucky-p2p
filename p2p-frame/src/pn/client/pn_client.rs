@@ -6,12 +6,15 @@ use std::time::Duration;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::networks::{
-    TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelListenerInfo, TunnelListenerRef,
-    TunnelNetwork, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite,
-    read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
+    Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelListenerInfo,
+    TunnelListenerRef, TunnelNetwork, TunnelPurpose, TunnelRef, TunnelStreamRead,
+    TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
-use crate::pn::{PROXY_SERVICE, PnChannelKind, ProxyOpenReq, ProxyOpenResp};
+use crate::pn::{
+    PROXY_SERVICE, PnChannelKind, ProxyControlOpenReq, ProxyControlOpenResp, ProxyOpenReq,
+    ProxyOpenResp,
+};
 use crate::runtime;
 use crate::ttp::{TtpClientRef, TtpPortListener};
 use crate::types::{TunnelId, TunnelIdGenerator};
@@ -144,6 +147,34 @@ impl PnShared {
         PassiveTunnelDispatch::Created(tunnel)
     }
 
+    pub(super) fn create_passive_control_tunnel(
+        self: &Arc<Self>,
+        req: ProxyControlOpenReq,
+    ) -> P2pResult<Arc<PnTunnel>> {
+        let key = PnShared::tunnel_key(req.from.clone(), req.tunnel_id);
+        let mut tunnels = self.tunnels.lock().unwrap();
+        if let Some(tunnel) = tunnels.get(&key).and_then(Weak::upgrade) {
+            if !tunnel.is_closed_flag() {
+                return Err(p2p_err!(
+                    P2pErrorCode::AlreadyExists,
+                    "pn control tunnel already exists"
+                ));
+            }
+            tunnels.remove(&key);
+        } else {
+            tunnels.remove(&key);
+        }
+        let tunnel = PnTunnel::new_passive_control(
+            self.local_id(),
+            req,
+            Some(self.clone()),
+            self.tls_context(),
+            self.stream_security_mode(),
+        );
+        tunnels.insert(key, Arc::downgrade(&tunnel));
+        Ok(tunnel)
+    }
+
     #[cfg(test)]
     pub(super) fn new_for_test(local_identity: P2pIdentityRef) -> Arc<Self> {
         let net_manager = crate::networks::NetManager::new(
@@ -232,6 +263,64 @@ impl PnShared {
                 "pn open rejected kind {:?} purpose {}",
                 kind, purpose
             )));
+        }
+        Ok((read, write))
+    }
+
+    pub(super) async fn open_control_channel(
+        &self,
+        tunnel_id: crate::types::TunnelId,
+        remote_id: P2pId,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let req = ProxyControlOpenReq {
+            tunnel_id,
+            from: self.local_id(),
+            to: remote_id.clone(),
+        };
+        log::debug!(
+            "pn control open send tunnel_id={:?} from={} to={}",
+            tunnel_id,
+            req.from,
+            req.to
+        );
+        let (mut read, mut write) = self.create_data_connection().await?;
+        write_pn_command(&mut write, req).await?;
+
+        let resp = match runtime::timeout(
+            PN_OPEN_TIMEOUT,
+            read_pn_command::<_, ProxyControlOpenResp>(&mut read),
+        )
+        .await
+        {
+            Ok(resp) => resp?,
+            Err(err) => {
+                log::warn!(
+                    "pn control open timeout tunnel_id={:?} to={} timeout_ms={}",
+                    tunnel_id,
+                    remote_id,
+                    PN_OPEN_TIMEOUT.as_millis()
+                );
+                return Err(into_p2p_err!(
+                    P2pErrorCode::Timeout,
+                    "pn control open timeout"
+                )(err));
+            }
+        };
+        if resp.tunnel_id != tunnel_id {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "pn control open response tunnel id mismatch"
+            ));
+        }
+        let result = TunnelCommandResult::from_u8(resp.result).ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::InvalidData,
+                "invalid pn control open result {}",
+                resp.result
+            )
+        })?;
+        if result != TunnelCommandResult::Success {
+            return Err(result.into_p2p_error("pn control open rejected".to_owned()));
         }
         Ok((read, write))
     }
@@ -327,6 +416,20 @@ impl PnClient {
             self.shared.clone(),
             options.stream_security_mode,
         );
+        let (control_read, control_write) = match self
+            .shared
+            .open_control_channel(tunnel_id, remote_id.clone())
+            .await
+        {
+            Ok(control) => control,
+            Err(err) => {
+                let _ = tunnel.close().await;
+                return Err(err);
+            }
+        };
+        tunnel
+            .set_control_channel(control_read, control_write)
+            .await;
         self.shared
             .register_tunnel(PnShared::tunnel_key(remote_id.clone(), tunnel_id), &tunnel);
         Ok(tunnel)
@@ -477,6 +580,20 @@ impl TunnelNetwork for PnClient {
             self.shared.clone(),
             self.shared.stream_security_mode(),
         );
+        let (control_read, control_write) = match self
+            .shared
+            .open_control_channel(tunnel_id, remote_id.clone())
+            .await
+        {
+            Ok(control) => control,
+            Err(err) => {
+                let _ = tunnel.close().await;
+                return Err(err);
+            }
+        };
+        tunnel
+            .set_control_channel(control_read, control_write)
+            .await;
         self.shared
             .register_tunnel(PnShared::tunnel_key(remote_id.clone(), tunnel_id), &tunnel);
         let tunnel: TunnelRef = tunnel;

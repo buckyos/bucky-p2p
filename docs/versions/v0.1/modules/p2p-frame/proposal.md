@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-04-28
+approved_at: 2026-05-10
 ---
 
 # p2p-frame 提案
@@ -13,6 +13,7 @@ approved_at: 2026-04-28
 - 这个数据包当前的直接目标，是为未来核心网络栈的改动建立一个严格、可评审的基线，确保协议、传输和运行时改动无法绕过 proposal、design、testing 和 acceptance。
 - 当前待落地的直接需求，是在 relay 侧 `pn/service/pn_server.rs` 增加用户流量统计与限速能力，并让经过 proxy server 的 proxy tunnel 支持由使用者显式控制的可选端到端载荷加密；其中 `stream` 路径可显式启用 TLS-over-proxy，而 `datagram` 路径继续保持明文兼容并忽略该加密模式，要求继续复用 `sfo-io` 中已有的统计/限速实现，同时避免在 `p2p-frame` 内重复实现一套新的字节整形逻辑或把业务明文暴露给 relay。本轮新增澄清是：relay 侧统计不再只提供单边 `from` 视图，而是要求 source 和 target 都能独立查询属于自己的桥接流量统计数据；限速仍只按 source 侧用户生效，不因 target 侧统计可见性而扩展成双边限速。
 - 本轮新增需求是为 `PnTunnel` 定义本地 idle 生命周期关闭语义：当 tunnel 上无 active、pending 或 queued channel 且持续达到配置的 idle timeout（默认 30 分钟）时，本端必须按与普通 tunnel close 一致的路径原子关闭该 `PnTunnel`，让该对象上的 `accept_*` 等待者出错、后续 `open_*` 被拒绝；若之后又收到同一 `(remote_id, tunnel_id)` 的 inbound open，本端必须按现有 listener 流程重新创建新的 passive `PnTunnel`。
+- 本轮新增需求是为 `PnTunnel` 在 logical tunnel 打开时建立一条控制通道，使其具备与 `TcpTunnel` / `QuicTunnel` 同类的对端关闭感知能力；当对端关闭或控制通道断开时，本端不能继续误认为该 tunnel 可用，而必须让本地 `PnTunnel` 进入关闭或错误终态，并唤醒相关 open/accept 等待路径。
 - 本轮新增需求是优化单 SN 场景下的 NAT 打洞成功率：在不引入多 SN、不重写 SN/PN 协议、不取消 proxy 兜底的前提下，让 tunnel 建立流程能够使用更实时的候选端点、更适合 QUIC/UDP NAT 打洞的 direct/reverse 竞速窗口、更快的 proxy 脱代理重试，以及更细粒度的 endpoint 评分和刷新策略。本轮新增澄清是：QUIC listener 的同源 UDP punch 不再限定为 2-4 个短包，而是改为在单次 candidate intent 内按固定 50ms 间隔发送，默认持续到 1 秒截止；其中 active punch 从 `250ms` offset 才开始发送，reverse punch 必须立即开始发送，并继续受 SN 存在性、同源 socket 和单次连接开关约束。
 
 ## 范围
@@ -36,6 +37,9 @@ approved_at: 2026-04-28
 - idle close 必须复用普通 tunnel close 的本地效果，包括唤醒并失败 `accept_stream()` / `accept_datagram()`、拒绝后续 `open_stream()` / `open_datagram()`、清理待接收队列和保持 close 幂等
 - idle 判断的 channel 计数必须覆盖已返回给上层的 stream/datagram、正在 open/accept 握手中的 channel，以及已进入 inbound queue 但尚未被消费的 channel
 - 关闭后的同一 `(remote_id, tunnel_id)` 不应继续投递到已关闭对象；后续 inbound `ProxyOpenReq` 必须创建新的 passive `PnTunnel`
+- 为 `PnTunnel` 增加 tunnel 级控制通道：logical tunnel 打开时必须完成控制通道建立或等价的 ready 握手，后续 stream/datagram channel 不得在缺少控制面生命周期依据的情况下被认为属于可用 tunnel
+- 控制通道必须能让本端感知对端关闭、控制面读写失败或控制通道断开，并按普通 tunnel close 的本地效果关闭当前 `PnTunnel`
+- `PnTunnel` 控制通道关闭和 idle timeout 关闭必须共享同一关闭状态机，避免同一对象被重复关闭、重新打开，或在 close 后继续接收新的 channel
 - 单 SN 场景下的 NAT 打洞优化，包括 direct/reverse 统一短延迟竞速、`SnCall` 携带本次反连候选端点、proxy 后短窗口脱代理升级、endpoint 评分按协议隔离，以及 tunnel 建立前组合 SN 观察端点或本地映射候选
 - NAT 打洞优化必须优先覆盖 QUIC/UDP tunnel；TCP 直连仍可保留现有静态 WAN 或明确映射端口路径，但不得把 TCP 失败扩散为 QUIC/UDP 候选降权依据
 - proxy 仍是最终兜底连通性；优化目标是更快从 proxy 升级为 direct/reverse，而不是移除 proxy 或让 proxy 参与后台升级成功判定
@@ -52,7 +56,7 @@ approved_at: 2026-04-28
 - 为 `pn` 之外的 active/reverse/direct tunnel 一次性引入同级别的业务载荷加密改造
 - 为 proxy tunnel 的 `datagram` 路径在本轮同时引入 TLS 等价的载荷加密
 - 借本轮需求重写整套 PN 协议
-- 为 idle close 引入可靠的远端关闭通知协议、全局租约心跳或 relay 侧长期 session 存活模型
+- 为 `PnTunnel` 引入全局租约心跳、跨 relay 长期 session 存活模型，或把控制通道扩展成通用 PN 外的传输控制协议
 - 因 idle timeout 关闭本端 `PnTunnel` 时强制中断已经交给上层并仍在活动的 channel；这些 channel 必须先通过正常生命周期让计数归零，idle 才能触发
 - 引入多 SN fanout、跨 SN 协调或依赖多个 SN 观察结果推断 NAT 类型
 - 重写 SN `ReportSn` / `SnCall` / `SnCalled` 的基础命令协议，或改变 `SnCallResp` 仅表示 SN 受理结果而非最终连通性结果的语义
@@ -103,8 +107,10 @@ approved_at: 2026-04-28
 - 使用者必须能通过显式接口或配置为单条 proxy tunnel、单个调用点或明确的构造路径选择“加密”或“不加密”，而不是依赖全局隐式副作用
 - TLS 是否启用由 proxy tunnel 两端在 tunnel 外通过配置、调用约定或同一构造路径显式决定；relay 不负责为此增加额外协商语义
 - `stream` 加密模式只约束 `stream` channel；`datagram` channel 在本轮必须忽略该模式并保持当前明文兼容语义，不能因为 `TlsRequired` 而被本地或对端 open/accept 路径拒绝
-- `PnTunnel` idle close 是本地生命周期管理，不提供可靠远端关闭通知；远端只能通过后续 channel open/I/O 失败或自身 idle 策略收敛
+- `PnTunnel` 控制通道是 logical tunnel 生命周期的一部分；tunnel 打开时必须建立控制面，并在控制面关闭、读写失败或对端显式关闭时把本地 tunnel 收敛到 `Closed` 或等价错误终态
+- `PnTunnel` idle close 仍是本地兜底生命周期管理；即使没有远端主动关闭，本端也必须能在 channel 计数归零并超过 idle timeout 后独立释放本地对象
 - `PnTunnel` 的 idle 关闭判定必须在统一状态临界区内完成，避免 channel 计数归零、超时扫描、inbound open 投递和本地 open 之间出现误关闭或向已关闭对象投递的竞态
+- `PnTunnel` 控制通道与 channel open/accept、inbound 投递、idle sweeper 的关闭判定必须通过同一状态临界区协调，避免控制面断开后仍创建新 channel 或把迟到 channel 投递给已关闭对象
 - `tunnel_id` 与 `candidate_id` 在 `PnTunnel` 生命周期内保持稳定；idle close 不得在同一对象上更换身份，也不得把已关闭对象重新打开
 - NAT 打洞路径必须保持同一次逻辑建链共享同一个 `tunnel_id`；direct 与 reverse 竞速只能改变候选时机，不能破坏 candidate 注册、reverse waiter 和 publish 生命周期。
 - QUIC/UDP NAT 打洞场景下，reverse 不应被固定为 direct 失败后的长延迟补救；具体延迟与触发条件必须由 design 明确，并可由 unit 测试验证。
@@ -123,6 +129,7 @@ approved_at: 2026-04-28
 - 本轮 proxy tunnel 加密能力以 `stream` 路径上的 TLS-over-proxy 为交付目标；`datagram` 不提供 TLS 语义，但在 `TlsRequired` 场景下仍保持明文兼容并忽略该模式。
 - proxy tunnel 的加密能力具有显式的策略边界，不会把未加密路径误报为具备 confidentiality 的安全通道。
 - `PnTunnel` 能在无 active/pending/queued channel 并持续空闲超过配置阈值后进入本地关闭终态，释放本地 tunnel 资源并让等待中的 accept/open 路径获得明确错误，而不是无限期挂起或依赖不可靠的远端 close 通知。
+- `PnTunnel` 打开后具备 tunnel 级控制通道；当对端关闭或控制通道断开时，本端能够及时关闭当前 `PnTunnel`，避免继续复用一个远端已经不可用的 logical tunnel。
 - 单 SN NAT 打洞路径能以统一 300ms 延迟启动 direct/reverse 竞速，使用本次建链反连候选，并在 proxy 兜底后更快尝试脱代理升级。
 - 在 SN 存在且 `TunnelManager` 为本次 candidate intent 开启的 QUIC/UDP NAT 候选上，同源 UDP punch 能以固定 50ms cadence 从同一本地端口发送，默认持续到 1 秒截止；其中 active 起发时机晚于 reverse，以兼顾正向握手推进与反向 NAT 映射抢开，而不引入新的 raw UDP 接收或业务语义。
 - endpoint 选择能区分协议、历史成功和失败；TCP 与 QUIC/UDP 的失败统计不得互相污染。
@@ -144,6 +151,8 @@ approved_at: 2026-04-28
 - 若 channel 计数没有覆盖所有 active、pending 和 queued 状态，idle timeout 可能误关闭仍有业务活动的 tunnel，或永远无法释放空闲 tunnel
 - 若 idle close 与 inbound `ProxyOpenReq` 分发没有共享状态约束，后续 channel 可能被错误投递到已关闭对象，而不是重新创建 tunnel
 - 若已返回给上层的 stream/datagram 没有可靠的 lease/drop 计数路径，`PnTunnel` 无法判断 channel 数量是否真正归零
+- 若 `PnTunnel` 控制通道建立和 channel open 顺序处理不当，可能出现 channel 已交付但控制面尚未 ready、控制面关闭后仍继续投递 channel，或 close 与 idle sweeper 重复竞争的并发问题
+- 控制通道会增加每个 logical `PnTunnel` 的 relay 连接或控制面资源占用；若关闭、超时和错误清理不完整，可能引入新的资源泄漏或半开 tunnel
 - 过早启动 reverse 可能增加短时并发拨号和日志噪声，也可能在公网直连可快速成功的场景中带来额外候选，需要 endpoint 策略限制触发条件。
 - 反连候选不维护新鲜度窗口，真实 NAT 映射可用性仍依赖 SN 当前缓存和现场网络行为。
 - 若 active `250ms` / reverse `0ms` 的 50ms cadence 在弱网、平台 socket 语义或 proxy 脱代理短窗口里发送过密，或 active 首包延后导致部分 NAT 映射建立偏慢，可能形成额外日志噪声、发送风暴或连通性波动，需要 design/testing 明确起发时机、上限和裁剪规则。
@@ -160,6 +169,9 @@ approved_at: 2026-04-28
 - `PnTunnel` 在 channel 数量归零并持续超过 idle timeout 后必须进入 `Closed` 或等价错误终态，`accept_stream()` / `accept_datagram()` 必须被唤醒并返回错误。
 - idle close 后，本地对同一 `PnTunnel` 的后续 `open_stream()` / `open_datagram()` 必须立即失败，不得重新激活该对象或等待 PN open timeout。
 - idle close 后，迟到或后续的同一 `(remote_id, tunnel_id)` inbound open 不得投递给已关闭对象；必须重新创建新的 passive `PnTunnel`。
+- `PnTunnel` 打开时必须建立 tunnel 级控制通道；控制通道未 ready 时，不得把该 logical tunnel 作为完全可用 tunnel 返回或继续创建业务 channel。
+- 当 `PnTunnel` 对端关闭、控制通道读写失败或控制通道断开时，本端必须进入 `Closed` 或等价错误终态，唤醒 pending `accept_*`，并让后续 `open_*` 明确失败。
+- 控制通道关闭与 idle timeout 关闭必须保持幂等，并且 close 后的同一 `(remote_id, tunnel_id)` inbound open 不得投递到旧对象。
 - QUIC/UDP NAT 候选场景下，`TunnelManager` 的 direct/reverse 竞速统一延迟 300ms 启动 reverse；具体短延迟规则必须由 design/testing 直接覆盖。
 - QUIC/UDP NAT 候选场景下，同源 UDP punch 必须以固定 50ms cadence 发送，并在 1 秒截止或更短的 NAT hedged window 结束时停止；active 首包只能在 `250ms` 起发，reverse 首包必须在 `0ms` 起发。acceptance 必须确认实现没有把该行为扩展成无限重发、独立 UDP socket 或 raw UDP 协议。
 - `open_reverse_path()` 或其等价路径发起 `SnCall` 时，必须能携带本次建链的 `reverse_endpoint_array`，且 SN 转发后的 `SnCalled` 保留这些候选。

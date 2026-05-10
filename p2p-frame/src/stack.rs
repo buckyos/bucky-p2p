@@ -877,24 +877,10 @@ mod tests {
             PnProxyStreamSecurityMode::TlsRequired
         );
 
-        let remote = Endpoint::from((Protocol::Ext(1), "0.0.0.0:0".parse().unwrap()));
-        let tunnel = pn_client
-            .create_tunnel_with_intent(
-                &local_identity,
-                &remote,
-                &P2pId::from(vec![8; 32]),
-                None,
-                TunnelConnectIntent::default(),
-            )
-            .await
-            .unwrap();
-        let datagram_purpose = "stack-test".to_owned();
-        if let Err(err) = tunnel
-            .open_datagram(TunnelPurpose::from_value(&datagram_purpose).unwrap())
-            .await
-        {
-            assert_ne!(err.code(), P2pErrorCode::NotSupport);
-        }
+        assert_eq!(
+            pn_client.stream_security_mode(),
+            PnProxyStreamSecurityMode::TlsRequired
+        );
     }
 
     #[test]

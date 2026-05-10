@@ -6,7 +6,7 @@
 ## 职责
 - 负责传输/网络栈、tunnel 编排、PN/SN 协议行为、设备发现辅助能力、运行时抽象以及身份/TLS 支持。
 - `src/networks/quic/**` 负责 QUIC listener/socket 生命周期和与 QUIC 建链同源端口相关的底层 UDP 辅助行为；这类辅助行为默认关闭，只有 `TunnelManager` 在存在 SN service 且候选符合策略时才会为本次 `TunnelConnectIntent` 开启，且不得变成上层可见的 raw UDP tunnel 或业务载荷协议。UDP punch 的私有短载荷必须避开 QUIC packet invariant，例如首字节不得设置 QUIC fixed bit。
-- `src/pn/client/**` 负责 `PnTunnel` 本地生命周期、proxy channel open/accept、idle timeout 关闭，以及关闭后同一 logical tunnel 后续 open 触发重新创建的语义。
+- `src/pn/client/**` 负责 `PnTunnel` 本地生命周期、proxy channel open/accept、tunnel 级控制通道、对端关闭感知、idle timeout 关闭，以及关闭后同一 logical tunnel 后续 open 触发重新创建的语义。
 - `src/tunnel/**` 负责 tunnel 候选选择、proxy 兜底连通性，以及 proxy 已连通后的 direct/reverse 脱代理升级策略；当同一远端存在多个可用 tunnel candidate 时，默认复用路径应优先选择已发布的非 proxy tunnel，只有没有可用非 proxy candidate 时才复用 proxy。
 
 ## 关键边界

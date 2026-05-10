@@ -292,7 +292,8 @@ fn build_server_config() -> AppResult<quinn::ServerConfig> {
     ));
     let transport = Arc::get_mut(&mut server_config.transport)
         .ok_or_else(|| "server transport config already shared".to_string())?;
-    transport.max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()))
+    transport
+        .max_idle_timeout(Some(Duration::from_secs(600).try_into().unwrap()))
         .initial_rtt(Duration::from_millis(200));
     transport.max_concurrent_bidi_streams(1024_u32.into());
 

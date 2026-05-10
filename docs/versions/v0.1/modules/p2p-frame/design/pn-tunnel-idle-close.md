@@ -1,6 +1,6 @@
 # PN Tunnel Idle Close 设计补充
 
-本补充文档聚焦 `pn/client` 中 `PnTunnel` 的本地 idle timeout 生命周期关闭。该设计不增加可靠远端 close 通知；它只定义本端在 channel 全部结束并持续空闲后如何原子关闭本地 tunnel、释放资源，并让后续同一 `(remote_id, tunnel_id)` 的 inbound open 重新创建新的 passive `PnTunnel`。
+本补充文档聚焦 `pn/client` 中 `PnTunnel` 的本地 idle timeout 生命周期关闭。远端关闭感知由 `pn-tunnel-control-channel.md` 定义；本文只定义本端在 channel 全部结束并持续空闲后如何原子关闭本地 tunnel、释放资源，并让后续同一 `(remote_id, tunnel_id)` 的 inbound open 重新创建新的 passive `PnTunnel`。
 
 ## 范围
 
@@ -14,7 +14,7 @@
 - 关闭后从 live registry 移除，防止同一 `(remote_id, tunnel_id)` 的后续 inbound open 投递到已关闭对象
 
 ### 范围外
-- 引入 `ProxyCloseReq`、可靠远端关闭通知、全局 lease heartbeat 或 relay session 生命周期协议
+- 引入全局 lease heartbeat 或 relay session 生命周期协议；tunnel 级控制通道与远端 close 感知由独立设计补充定义
 - idle timeout 时强制中断仍处于 active 状态并已交给上层的 channel
 - 改变 `Tunnel` / `TunnelNetwork` trait 签名
 - 改变 `tunnel_id` 或 `candidate_id` 的稳定身份语义
@@ -108,7 +108,7 @@ close 不负责杀死仍处于 active 的 channel。idle close 只有在 active 
 ## 兼容性
 
 - `tunnel_id` 与 `candidate_id` 在 `PnTunnel` 生命周期内保持不变。
-- idle close 不要求远端同步关闭；远端只会在后续 open/I/O 或自身 idle close 中收敛。
+- idle close 仍可不依赖远端同步关闭；若控制通道可用，本地 close 会尽力通过控制面通知对端，但 idle 判定本身不能依赖对端响应。
 - 已建立 channel 的 EOF/shutdown 行为继续由底层 stream/datagram IO 决定。
 - 该设计只改变 `PnTunnel` 本地生命周期和等待者失败语义，不改变 `ProxyOpenReq` / `ProxyOpenResp` 格式。
 

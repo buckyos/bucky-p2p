@@ -22,7 +22,9 @@ use crate::networks::{
     write_tunnel_command,
 };
 use crate::p2p_identity::P2pId;
-use crate::pn::{PROXY_SERVICE, ProxyOpenReq, ProxyOpenResp};
+use crate::pn::{
+    PROXY_SERVICE, ProxyControlOpenReq, ProxyControlOpenResp, ProxyOpenReq, ProxyOpenResp,
+};
 use crate::runtime;
 use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
 
@@ -479,6 +481,127 @@ impl PnService {
         }
     }
 
+    async fn handle_proxy_control_open_req(
+        self: &Arc<Self>,
+        from: P2pId,
+        mut req: ProxyControlOpenReq,
+        read: TunnelStreamRead,
+        write: TunnelStreamWrite,
+    ) {
+        req.from = from.clone();
+        log::debug!(
+            "pn server control open recv tunnel_id={:?} from={} to={} proxy_service={}",
+            req.tunnel_id,
+            req.from,
+            req.to,
+            PROXY_SERVICE
+        );
+
+        let mut source_write = write;
+        let open_result = runtime::timeout(
+            PN_OPEN_TIMEOUT,
+            self.target_stream_factory.open_target_stream(&req.to),
+        )
+        .await
+        .map_err(into_p2p_err!(
+            P2pErrorCode::Timeout,
+            "pn control open timeout"
+        ))
+        .and_then(|ret| ret);
+
+        let open_result = match open_result {
+            Ok((mut target_read, mut target_write)) => {
+                let bridge_ready = async {
+                    write_proxy_command(&mut target_write, req.clone()).await?;
+                    let resp = runtime::timeout(
+                        PN_OPEN_TIMEOUT,
+                        read_proxy_command::<_, ProxyControlOpenResp>(&mut target_read),
+                    )
+                    .await
+                    .map_err(into_p2p_err!(
+                        P2pErrorCode::Timeout,
+                        "pn control open timeout"
+                    ))??;
+                    if resp.tunnel_id != req.tunnel_id {
+                        return Err(p2p_err!(
+                            P2pErrorCode::InvalidData,
+                            "pn control open response tunnel id mismatch"
+                        ));
+                    }
+                    let result = TunnelCommandResult::from_u8(resp.result).ok_or_else(|| {
+                        p2p_err!(
+                            P2pErrorCode::InvalidData,
+                            "invalid pn control open result {}",
+                            resp.result
+                        )
+                    })?;
+                    Ok((result, resp, target_read, target_write))
+                }
+                .await;
+
+                match bridge_ready {
+                    Ok((result, resp, target_read, target_write)) => {
+                        let _ = write_proxy_command(
+                            &mut source_write,
+                            ProxyControlOpenResp {
+                                tunnel_id: resp.tunnel_id,
+                                result: result as u8,
+                            },
+                        )
+                        .await;
+                        if result == TunnelCommandResult::Success {
+                            Ok((target_read, target_write))
+                        } else {
+                            Err(result.into_p2p_error("pn control open rejected".to_owned()))
+                        }
+                    }
+                    Err(err) => {
+                        let _ = write_proxy_command(
+                            &mut source_write,
+                            ProxyControlOpenResp {
+                                tunnel_id: req.tunnel_id,
+                                result: result_from_error(&err) as u8,
+                            },
+                        )
+                        .await;
+                        Err(err)
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = write_proxy_command(
+                    &mut source_write,
+                    ProxyControlOpenResp {
+                        tunnel_id: req.tunnel_id,
+                        result: result_from_error(&err) as u8,
+                    },
+                )
+                .await;
+                Err(err)
+            }
+        };
+
+        if let Ok((target_read, target_write)) = open_result {
+            log::debug!(
+                "pn server control bridge start tunnel_id={:?} from={} to={} proxy_service={}",
+                req.tunnel_id,
+                from,
+                req.to,
+                PROXY_SERVICE
+            );
+            let mut source_stream = ProxyStream::new(read, source_write);
+            let mut target_stream = ProxyStream::new(target_read, target_write);
+            let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
+            log::debug!(
+                "pn server control bridge stop tunnel_id={:?} from={} to={} proxy_service={}",
+                req.tunnel_id,
+                req.from,
+                req.to,
+                PROXY_SERVICE
+            );
+        }
+    }
+
     pub async fn handle_proxy_connection(
         self: &Arc<Self>,
         from: P2pId,
@@ -504,6 +627,21 @@ impl PnService {
                     data_len
                 );
                 self.handle_proxy_open_req(from, req.body, read, write)
+                    .await;
+            }
+        } else if header.command_id == ProxyControlOpenReq::COMMAND_ID {
+            let command_id = header.command_id;
+            let data_len = header.data_len;
+            if let Ok(req) =
+                read_tunnel_command_body::<_, ProxyControlOpenReq>(&mut read, header).await
+            {
+                log::debug!(
+                    "pn server control connection frame from={} command_id={} data_len={}",
+                    from,
+                    command_id,
+                    data_len
+                );
+                self.handle_proxy_control_open_req(from, req.body, read, write)
                     .await;
             }
         }
