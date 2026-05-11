@@ -68,6 +68,11 @@ impl TtpClient {
         tunnels.push(tunnel);
     }
 
+    #[cfg(test)]
+    pub(crate) fn remember_tunnel_for_test(&self, tunnel: TunnelRef) {
+        self.remember_tunnel(tunnel);
+    }
+
     fn latest_available_tunnel(&self) -> Option<TunnelRef> {
         let mut tunnels = self.tunnels.lock().unwrap();
         tunnels.retain(|tunnel| is_tunnel_available(tunnel.as_ref()));

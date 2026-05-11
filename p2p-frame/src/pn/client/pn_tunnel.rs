@@ -20,7 +20,8 @@ use crate::networks::{
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{
     PN_COMMAND_CONTROL_CLOSE, PN_COMMAND_CONTROL_PING, PN_COMMAND_CONTROL_PONG, PnChannelKind,
-    PnControlClose, PnControlPing, PnControlPong, ProxyControlOpenReq, ProxyOpenReq, ProxyOpenResp,
+    PnControlClose, PnControlPing, PnControlPong, ProxyControlOpenReq, ProxyControlOpenResp,
+    ProxyOpenReq, ProxyOpenResp,
 };
 use crate::runtime;
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
@@ -220,7 +221,16 @@ enum PnControlCmd {
     Close(PnControlClose),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PnTunnelLifecycleStatus {
+    OpeningControl,
+    Open,
+    Closing,
+    Closed,
+}
+
 struct PnTunnelLifecycleState {
+    status: PnTunnelLifecycleStatus,
     active_channels: usize,
     pending_channels: usize,
     queued_channels: usize,
@@ -230,12 +240,13 @@ struct PnTunnelLifecycleState {
 }
 
 impl PnTunnelLifecycleState {
-    fn new(queued_channels: usize) -> Self {
+    fn new(queued_channels: usize, status: PnTunnelLifecycleStatus) -> Self {
         Self {
+            status,
             active_channels: 0,
             pending_channels: 0,
             queued_channels,
-            zero_since: if queued_channels == 0 {
+            zero_since: if status == PnTunnelLifecycleStatus::Open && queued_channels == 0 {
                 Some(Instant::now())
             } else {
                 None
@@ -246,11 +257,19 @@ impl PnTunnelLifecycleState {
     }
 
     fn is_open(&self) -> bool {
-        self.close_reason.is_none()
+        self.status == PnTunnelLifecycleStatus::Open && self.close_reason.is_none()
     }
 
     fn total_channels(&self) -> usize {
         self.active_channels + self.pending_channels + self.queued_channels
+    }
+
+    fn mark_control_ready(&mut self) -> Option<(Instant, u64)> {
+        if self.status != PnTunnelLifecycleStatus::OpeningControl {
+            return None;
+        }
+        self.status = PnTunnelLifecycleStatus::Open;
+        self.refresh_idle_state()
     }
 
     fn refresh_idle_state(&mut self) -> Option<(Instant, u64)> {
@@ -375,6 +394,7 @@ pub struct PnTunnel {
     idle_timeout: Mutex<Option<Duration>>,
     control_write: AsyncMutex<Option<TunnelStreamWrite>>,
     control_last_seen: Mutex<Instant>,
+    control_pending_ping: Mutex<Option<(u64, Instant)>>,
     control_heartbeat_interval: Mutex<Duration>,
     control_heartbeat_timeout: Mutex<Duration>,
     closed: AtomicBool,
@@ -407,10 +427,14 @@ impl PnTunnel {
             datagram_vports: RwLock::new(None),
             datagram_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
             datagram_vports_notify: Notify::new(),
-            lifecycle: Mutex::new(PnTunnelLifecycleState::new(0)),
+            lifecycle: Mutex::new(PnTunnelLifecycleState::new(
+                0,
+                PnTunnelLifecycleStatus::OpeningControl,
+            )),
             idle_timeout: Mutex::new(idle_timeout),
             control_write: AsyncMutex::new(None),
             control_last_seen: Mutex::new(Instant::now()),
+            control_pending_ping: Mutex::new(None),
             control_heartbeat_interval: Mutex::new(PN_CONTROL_HEARTBEAT_INTERVAL),
             control_heartbeat_timeout: Mutex::new(PN_CONTROL_HEARTBEAT_TIMEOUT),
             closed: AtomicBool::new(false),
@@ -452,10 +476,14 @@ impl PnTunnel {
             datagram_vports: RwLock::new(None),
             datagram_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
             datagram_vports_notify: Notify::new(),
-            lifecycle: Mutex::new(PnTunnelLifecycleState::new(1)),
+            lifecycle: Mutex::new(PnTunnelLifecycleState::new(
+                1,
+                PnTunnelLifecycleStatus::Open,
+            )),
             idle_timeout: Mutex::new(idle_timeout),
             control_write: AsyncMutex::new(None),
             control_last_seen: Mutex::new(Instant::now()),
+            control_pending_ping: Mutex::new(None),
             control_heartbeat_interval: Mutex::new(PN_CONTROL_HEARTBEAT_INTERVAL),
             control_heartbeat_timeout: Mutex::new(PN_CONTROL_HEARTBEAT_TIMEOUT),
             closed: AtomicBool::new(false),
@@ -491,10 +519,14 @@ impl PnTunnel {
             datagram_vports: RwLock::new(None),
             datagram_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
             datagram_vports_notify: Notify::new(),
-            lifecycle: Mutex::new(PnTunnelLifecycleState::new(0)),
+            lifecycle: Mutex::new(PnTunnelLifecycleState::new(
+                0,
+                PnTunnelLifecycleStatus::OpeningControl,
+            )),
             idle_timeout: Mutex::new(idle_timeout),
             control_write: AsyncMutex::new(None),
             control_last_seen: Mutex::new(Instant::now()),
+            control_pending_ping: Mutex::new(None),
             control_heartbeat_interval: Mutex::new(PN_CONTROL_HEARTBEAT_INTERVAL),
             control_heartbeat_timeout: Mutex::new(PN_CONTROL_HEARTBEAT_TIMEOUT),
             closed: AtomicBool::new(false),
@@ -575,6 +607,15 @@ impl PnTunnel {
         *self.control_last_seen.lock().unwrap() = Instant::now();
         *self.control_write.lock().await = Some(control_write);
         self.start_control_loops(control_read);
+        self.mark_control_ready();
+    }
+
+    pub(super) fn mark_control_ready(&self) {
+        let refresh = {
+            let mut state = self.lifecycle.lock().unwrap();
+            state.mark_control_ready()
+        };
+        self.schedule_from_refresh(refresh);
     }
 
     fn start_control_loops(self: &Arc<Self>, control_read: TunnelStreamRead) {
@@ -593,6 +634,22 @@ impl PnTunnel {
 
     fn mark_control_seen(&self) {
         *self.control_last_seen.lock().unwrap() = Instant::now();
+    }
+
+    fn mark_control_ping_sent(&self, seq: u64) {
+        let now = Instant::now();
+        *self.control_last_seen.lock().unwrap() = now;
+        *self.control_pending_ping.lock().unwrap() = Some((seq, now));
+    }
+
+    fn mark_control_pong(&self, seq: u64) {
+        let mut pending = self.control_pending_ping.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(pending_seq, _)| *pending_seq == seq)
+        {
+            *pending = None;
+        }
     }
 
     async fn send_control(&self, cmd: PnControlCmd) -> P2pResult<()> {
@@ -614,6 +671,30 @@ impl PnTunnel {
             }
         };
         result
+    }
+
+    pub(super) async fn send_control_open_response(
+        &self,
+        result: TunnelCommandResult,
+    ) -> P2pResult<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "pn tunnel closed"));
+        }
+        let mut guard = self.control_write.lock().await;
+        let Some(write) = guard.as_mut() else {
+            return Err(p2p_err!(
+                P2pErrorCode::ErrorState,
+                "pn control channel unavailable"
+            ));
+        };
+        write_pn_command(
+            write,
+            ProxyControlOpenResp {
+                tunnel_id: self.tunnel_id,
+                result: result as u8,
+            },
+        )
+        .await
     }
 
     async fn read_control_cmd(
@@ -696,7 +777,9 @@ impl PnTunnel {
                         return;
                     }
                 }
-                PnControlCmd::Pong(_) => {}
+                PnControlCmd::Pong(pong) => {
+                    self.mark_control_pong(pong.seq);
+                }
                 PnControlCmd::Close(_) => {
                     let _ = self
                         .close_with_reason(PnTunnelCloseReason::RemoteControl)
@@ -716,7 +799,13 @@ impl PnTunnel {
                 return;
             }
             let timeout = *self.control_heartbeat_timeout.lock().unwrap();
-            if self.control_last_seen.lock().unwrap().elapsed() >= timeout {
+            let pending_timed_out = self
+                .control_pending_ping
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(_, sent_at)| sent_at.elapsed() >= timeout);
+            if pending_timed_out || self.control_last_seen.lock().unwrap().elapsed() >= timeout {
                 log::warn!(
                     "pn control heartbeat timeout local={} remote={} tunnel_id={:?}",
                     self.local_id,
@@ -727,6 +816,11 @@ impl PnTunnel {
                     .close_with_reason(PnTunnelCloseReason::HeartbeatTimeout)
                     .await;
                 return;
+            }
+            if self.control_last_seen.lock().unwrap().elapsed() < interval
+                || self.control_pending_ping.lock().unwrap().is_some()
+            {
+                continue;
             }
             seq = seq.wrapping_add(1);
             if let Err(err) = self
@@ -748,6 +842,7 @@ impl PnTunnel {
                 }
                 return;
             }
+            self.mark_control_ping_sent(seq);
         }
     }
 
@@ -787,7 +882,10 @@ impl PnTunnel {
     fn begin_pending_channel(&self) -> P2pResult<PnPendingChannel> {
         let mut state = self.lifecycle.lock().unwrap();
         if !state.is_open() {
-            return Err(p2p_err!(P2pErrorCode::ErrorState, "pn tunnel closed"));
+            return Err(p2p_err!(
+                P2pErrorCode::ErrorState,
+                "pn tunnel control channel is not ready"
+            ));
         }
         state.pending_channels += 1;
         state.refresh_idle_state();
@@ -881,9 +979,13 @@ impl PnTunnel {
         state: &mut PnTunnelLifecycleState,
         reason: PnTunnelCloseReason,
     ) -> Option<Vec<PassivePnChannel>> {
-        if !state.is_open() {
+        if matches!(
+            state.status,
+            PnTunnelLifecycleStatus::Closing | PnTunnelLifecycleStatus::Closed
+        ) {
             return None;
         }
+        state.status = PnTunnelLifecycleStatus::Closing;
         state.close_reason = Some(reason);
         state.queued_channels = 0;
         state.zero_since = None;
@@ -909,6 +1011,11 @@ impl PnTunnel {
         }
 
         self.close_control_channel(reason).await;
+
+        let mut state = self.lifecycle.lock().unwrap();
+        if state.status == PnTunnelLifecycleStatus::Closing {
+            state.status = PnTunnelLifecycleStatus::Closed;
+        }
     }
 
     async fn close_control_channel(&self, reason: PnTunnelCloseReason) {
@@ -951,13 +1058,18 @@ impl PnTunnel {
     }
 
     #[cfg(test)]
-    fn lifecycle_counts_for_test(&self) -> (usize, usize, usize) {
+    pub(super) fn lifecycle_counts_for_test(&self) -> (usize, usize, usize) {
         let state = self.lifecycle.lock().unwrap();
         (
             state.active_channels,
             state.pending_channels,
             state.queued_channels,
         )
+    }
+
+    #[cfg(test)]
+    fn lifecycle_status_for_test(&self) -> PnTunnelLifecycleStatus {
+        self.lifecycle.lock().unwrap().status
     }
 
     #[cfg(test)]
@@ -1317,10 +1429,12 @@ impl Tunnel for PnTunnel {
     }
 
     fn state(&self) -> TunnelState {
-        if self.closed.load(Ordering::SeqCst) {
-            TunnelState::Closed
-        } else {
-            TunnelState::Connected
+        match self.lifecycle.lock().unwrap().status {
+            PnTunnelLifecycleStatus::OpeningControl => TunnelState::Connecting,
+            PnTunnelLifecycleStatus::Open => TunnelState::Connected,
+            PnTunnelLifecycleStatus::Closing | PnTunnelLifecycleStatus::Closed => {
+                TunnelState::Closed
+            }
         }
     }
 
@@ -1866,6 +1980,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
         tunnel
             .listen_stream(allow_all_listen_vports())
             .await
@@ -1894,6 +2009,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.result, TunnelCommandResult::Success as u8);
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_active_starts_opening_control_until_ready() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![31; 32]));
+        let local_id = local_identity.get_id();
+        let remote_id = test_p2p_id(32);
+        let tunnel = PnTunnel::new_active(
+            TunnelId::from(58),
+            TunnelCandidateId::from(58),
+            local_id.clone(),
+            remote_id.clone(),
+            PnShared::new_for_test(local_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+
+        assert_eq!(tunnel.state(), TunnelState::Connecting);
+        assert_eq!(
+            tunnel.lifecycle_status_for_test(),
+            PnTunnelLifecycleStatus::OpeningControl
+        );
+        assert_eq!(
+            tunnel.begin_pending_channel().err().unwrap().code(),
+            P2pErrorCode::ErrorState
+        );
+
+        let (local, _remote) = tokio::io::duplex(1024);
+        let (local_read, local_write) = split(local);
+        let rejected = tunnel
+            .push_passive_channel(
+                ProxyOpenReq {
+                    tunnel_id: TunnelId::from(58),
+                    from: remote_id,
+                    to: local_id,
+                    kind: PnChannelKind::Stream,
+                    purpose: purpose_of(1012),
+                },
+                Box::pin(local_read),
+                Box::pin(local_write),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(rejected.error.code(), P2pErrorCode::ErrorState);
+
+        tunnel.mark_control_ready();
+        assert_eq!(tunnel.state(), TunnelState::Connected);
+        assert_eq!(
+            tunnel.lifecycle_status_for_test(),
+            PnTunnelLifecycleStatus::Open
+        );
+        let pending = tunnel.begin_pending_channel().unwrap();
+        drop(pending);
     }
 
     #[tokio::test]
@@ -1943,6 +2110,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
         tunnel.set_idle_timeout_for_test(std::time::Duration::ZERO);
 
         let accept_task = tokio::spawn({
@@ -1976,6 +2144,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
         tunnel.set_idle_timeout_for_test(std::time::Duration::ZERO);
         tunnel.trigger_idle_timeout_for_test().await;
 
@@ -2000,6 +2169,7 @@ mod tests {
             shared.clone(),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
         let key = PnShared::tunnel_key(remote_id.clone(), tunnel_id);
         shared.register_tunnel(key.clone(), &tunnel);
         assert!(shared.get_tunnel(&key).is_some());
@@ -2114,6 +2284,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
 
         let pending = tunnel.begin_pending_channel().unwrap();
         assert_eq!(tunnel.lifecycle_counts_for_test(), (0, 1, 0));
@@ -2138,6 +2309,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
 
         let pending = tunnel.begin_pending_channel().unwrap();
         tunnel.close().await.unwrap();
@@ -2249,6 +2421,107 @@ mod tests {
         .unwrap();
     }
 
+    struct FailWrite;
+
+    impl tokio::io::AsyncWrite for FailWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "fail write for test",
+            )))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_control_send_failure_closes_tunnel() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![81; 32]));
+        let local = PnTunnel::new_active(
+            TunnelId::from(75),
+            TunnelCandidateId::from(75),
+            local_identity.get_id(),
+            test_p2p_id(82),
+            PnShared::new_for_test(local_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        local.set_control_heartbeat_for_test(
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_secs(1),
+        );
+        let (local_stream, _remote_stream) = tokio::io::duplex(1024);
+        let (local_read, _local_write) = split(local_stream);
+        local
+            .set_control_channel(Box::pin(local_read), Box::pin(FailWrite))
+            .await;
+
+        timeout(std::time::Duration::from_secs(1), async {
+            while !local.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_invalid_control_frame_closes_tunnel() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![83; 32]));
+        let local_id = local_identity.get_id();
+        let remote_id = test_p2p_id(84);
+        let local = PnTunnel::new_active(
+            TunnelId::from(76),
+            TunnelCandidateId::from(76),
+            local_id.clone(),
+            remote_id.clone(),
+            PnShared::new_for_test(local_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        let (local_stream, remote_stream) = tokio::io::duplex(1024);
+        let (local_read, local_write) = split(local_stream);
+        let (_remote_read, mut remote_write) = split(remote_stream);
+        local
+            .set_control_channel(Box::pin(local_read), Box::pin(local_write))
+            .await;
+
+        write_pn_command(
+            &mut remote_write,
+            ProxyOpenReq {
+                tunnel_id: TunnelId::from(76),
+                from: remote_id,
+                to: local_id,
+                kind: PnChannelKind::Stream,
+                purpose: purpose_of(1011),
+            },
+        )
+        .await
+        .unwrap();
+
+        timeout(std::time::Duration::from_secs(1), async {
+            while !local.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn pn_tunnel_manual_close_sends_control_close() {
         let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![77; 32]));
@@ -2275,6 +2548,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pn_tunnel_control_close_unregisters_tunnel() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![85; 32]));
+        let remote_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![86; 32]));
+        let shared = PnShared::new_for_test(local_identity.clone());
+        let local = PnTunnel::new_active(
+            TunnelId::from(77),
+            TunnelCandidateId::from(77),
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            shared.clone(),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        let key = PnShared::tunnel_key(remote_identity.get_id(), TunnelId::from(77));
+        shared.register_tunnel(key.clone(), &local);
+        let remote = PnTunnel::new_active(
+            TunnelId::from(77),
+            TunnelCandidateId::from(77),
+            remote_identity.get_id(),
+            local_identity.get_id(),
+            PnShared::new_for_test(remote_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        attach_control_pair(&local, &remote).await;
+
+        remote.close().await.unwrap();
+        timeout(std::time::Duration::from_secs(1), async {
+            while shared.get_tunnel(&key).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_control_close_is_idempotent_with_idle_close() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![87; 32]));
+        let remote_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![88; 32]));
+        let local = PnTunnel::new_active(
+            TunnelId::from(78),
+            TunnelCandidateId::from(78),
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            PnShared::new_for_test(local_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        let remote = PnTunnel::new_active(
+            TunnelId::from(78),
+            TunnelCandidateId::from(78),
+            remote_identity.get_id(),
+            test_p2p_id(87),
+            PnShared::new_for_test(remote_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        attach_control_pair(&local, &remote).await;
+
+        remote.close().await.unwrap();
+        timeout(std::time::Duration::from_secs(1), async {
+            while !local.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        local.trigger_idle_timeout_for_test().await;
+        local.close().await.unwrap();
+        assert!(local.is_closed());
+        assert_eq!(local.lifecycle_counts_for_test(), (0, 0, 0));
+    }
+
+    #[tokio::test]
     async fn pn_tunnel_closed_pending_to_active_consumes_only_its_guard() {
         let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![19; 32]));
         let local_id = local_identity.get_id();
@@ -2286,6 +2630,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
 
         let first = tunnel.begin_pending_channel().unwrap();
         let second = tunnel.begin_pending_channel().unwrap();
@@ -2301,13 +2646,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pn_shared_concurrent_same_key_dispatch_creates_one_tunnel() {
+    async fn pn_shared_rejects_business_open_without_control_tunnel() {
         let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![17; 32]));
         let local_id = local_identity.get_id();
         let shared = PnShared::new_for_test(local_identity);
         let remote_id = test_p2p_id(18);
         let tunnel_id = TunnelId::from(50);
         let key = PnShared::tunnel_key(remote_id.clone(), tunnel_id);
+
+        let request = ProxyOpenReq {
+            tunnel_id,
+            from: remote_id,
+            to: local_id,
+            kind: PnChannelKind::Stream,
+            purpose: purpose_of(1009),
+        };
+        let (local, _remote) = tokio::io::duplex(1024);
+        let (local_read, local_write) = split(local);
+
+        match shared.dispatch_passive_channel(
+            key.clone(),
+            request,
+            Box::pin(local_read),
+            Box::pin(local_write),
+        ) {
+            super::super::pn_client::PassiveTunnelDispatch::Rejected(rejected) => {
+                assert_eq!(rejected.error.code(), P2pErrorCode::ErrorState);
+            }
+            super::super::pn_client::PassiveTunnelDispatch::Dispatched => {
+                panic!("business open without control must not dispatch")
+            }
+        }
+        assert!(shared.get_tunnel(&key).is_none());
+    }
+
+    #[tokio::test]
+    async fn pn_shared_dispatches_business_open_only_to_control_tunnel() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![17; 32]));
+        let local_id = local_identity.get_id();
+        let shared = PnShared::new_for_test(local_identity);
+        let remote_id = test_p2p_id(18);
+        let tunnel_id = TunnelId::from(50);
+        let key = PnShared::tunnel_key(remote_id.clone(), tunnel_id);
+        let control = shared
+            .register_passive_control_tunnel(ProxyControlOpenReq {
+                tunnel_id,
+                from: remote_id.clone(),
+                to: local_id.clone(),
+            })
+            .unwrap();
+        assert!(shared.get_tunnel(&key).is_some());
+        control.mark_control_ready();
 
         let make_channel = |vport| -> (ProxyOpenReq, TunnelStreamRead, TunnelStreamWrite) {
             let request = ProxyOpenReq {
@@ -2327,28 +2716,75 @@ mod tests {
         let first = tokio::spawn({
             let shared = shared.clone();
             let key = key.clone();
-            async move { shared.dispatch_or_create_passive_tunnel(key, req1, read1, write1) }
+            async move { shared.dispatch_passive_channel(key, req1, read1, write1) }
         });
         let second = tokio::spawn({
             let shared = shared.clone();
             let key = key.clone();
-            async move { shared.dispatch_or_create_passive_tunnel(key, req2, read2, write2) }
+            async move { shared.dispatch_passive_channel(key, req2, read2, write2) }
         });
 
         let first = first.await.unwrap();
         let second = second.await.unwrap();
-        let created = matches!(
+        let dispatched = matches!(
             first,
-            super::super::pn_client::PassiveTunnelDispatch::Created(_)
+            super::super::pn_client::PassiveTunnelDispatch::Dispatched
         ) as usize
             + matches!(
                 second,
-                super::super::pn_client::PassiveTunnelDispatch::Created(_)
+                super::super::pn_client::PassiveTunnelDispatch::Dispatched
             ) as usize;
 
-        assert_eq!(created, 1);
+        assert_eq!(dispatched, 2);
         let registered = shared.get_tunnel(&key).unwrap();
         assert_eq!(registered.lifecycle_counts_for_test(), (0, 0, 2));
+    }
+
+    #[tokio::test]
+    async fn pn_shared_keeps_opening_control_tunnel_after_early_business_reject() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![21; 32]));
+        let local_id = local_identity.get_id();
+        let shared = PnShared::new_for_test(local_identity);
+        let remote_id = test_p2p_id(22);
+        let tunnel_id = TunnelId::from(52);
+        let key = PnShared::tunnel_key(remote_id.clone(), tunnel_id);
+        let control = shared
+            .register_passive_control_tunnel(ProxyControlOpenReq {
+                tunnel_id,
+                from: remote_id.clone(),
+                to: local_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            control.lifecycle_status_for_test(),
+            PnTunnelLifecycleStatus::OpeningControl
+        );
+
+        let request = ProxyOpenReq {
+            tunnel_id,
+            from: remote_id,
+            to: local_id,
+            kind: PnChannelKind::Stream,
+            purpose: purpose_of(1013),
+        };
+        let (local, _remote) = tokio::io::duplex(1024);
+        let (local_read, local_write) = split(local);
+        match shared.dispatch_passive_channel(
+            key.clone(),
+            request,
+            Box::pin(local_read),
+            Box::pin(local_write),
+        ) {
+            super::super::pn_client::PassiveTunnelDispatch::Rejected(rejected) => {
+                assert_eq!(rejected.error.code(), P2pErrorCode::ErrorState);
+            }
+            super::super::pn_client::PassiveTunnelDispatch::Dispatched => {
+                panic!("opening control tunnel must reject early business open")
+            }
+        }
+
+        let registered = shared.get_tunnel(&key).unwrap();
+        assert!(Arc::ptr_eq(&registered, &control));
     }
 
     #[tokio::test]
@@ -2632,6 +3068,7 @@ mod tests {
             PnShared::new_for_test(local_identity),
             PnProxyStreamSecurityMode::TlsRequired,
         );
+        tunnel.mark_control_ready();
 
         assert_eq!(
             tunnel.stream_security_mode(),
@@ -2658,6 +3095,7 @@ mod tests {
             shared.clone(),
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
 
         tunnel.trigger_idle_timeout_for_test().await;
         assert!(!tunnel.is_closed());
@@ -2671,6 +3109,7 @@ mod tests {
             shared,
             PnProxyStreamSecurityMode::Disabled,
         );
+        tunnel.mark_control_ready();
 
         tunnel.trigger_idle_timeout_for_test().await;
         assert!(tunnel.is_closed());

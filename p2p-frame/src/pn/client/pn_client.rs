@@ -20,7 +20,9 @@ use crate::ttp::{TtpClientRef, TtpPortListener};
 use crate::types::{TunnelId, TunnelIdGenerator};
 
 use super::pn_listener::PnListener;
-use super::pn_tunnel::{PnProxyStreamSecurityMode, PnTlsContext, PnTunnel, PnTunnelOptions};
+use super::pn_tunnel::{
+    PnProxyStreamSecurityMode, PnTlsContext, PnTunnel, PnTunnelOptions, RejectedPassivePnChannel,
+};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -95,59 +97,72 @@ impl PnShared {
             .insert(key, Arc::downgrade(tunnel));
     }
 
-    pub(super) fn dispatch_or_create_passive_tunnel(
+    pub(super) fn register_control_tunnel_if_absent(
+        &self,
+        key: PnTunnelKey,
+        tunnel: &Arc<PnTunnel>,
+    ) -> P2pResult<()> {
+        if tunnel.is_closed_flag() {
+            return Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "pn control tunnel closed before registration"
+            ));
+        }
+        let mut tunnels = self.tunnels.lock().unwrap();
+        if let Some(current) = tunnels.get(&key).and_then(Weak::upgrade) {
+            if !current.is_closed_flag() {
+                return Err(p2p_err!(
+                    P2pErrorCode::AlreadyExists,
+                    "pn control tunnel already exists"
+                ));
+            }
+        }
+        tunnels.insert(key, Arc::downgrade(tunnel));
+        Ok(())
+    }
+
+    pub(super) fn dispatch_passive_channel(
         self: &Arc<Self>,
         key: PnTunnelKey,
         req: ProxyOpenReq,
         read: TunnelStreamRead,
         write: TunnelStreamWrite,
     ) -> PassiveTunnelDispatch {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        if let Some(tunnel) = tunnels.get(&key).and_then(Weak::upgrade) {
-            if !tunnel.is_closed_flag() {
-                match tunnel.push_passive_channel(req, read, write) {
-                    Ok(()) => return PassiveTunnelDispatch::Dispatched,
-                    Err(rejected) => {
-                        if tunnels
-                            .get(&key)
-                            .and_then(Weak::upgrade)
-                            .is_none_or(|current| Arc::ptr_eq(&current, &tunnel))
-                        {
-                            tunnels.remove(&key);
-                        }
-                        let tunnel = PnTunnel::new_passive(
-                            self.local_id(),
-                            rejected.request,
-                            rejected.read,
-                            rejected.write,
-                            Some(self.clone()),
-                            self.tls_context(),
-                            self.stream_security_mode(),
-                        );
-                        tunnels.insert(key, Arc::downgrade(&tunnel));
-                        return PassiveTunnelDispatch::Created(tunnel);
-                    }
+        let tunnel = {
+            let mut tunnels = self.tunnels.lock().unwrap();
+            match tunnels.get(&key).and_then(Weak::upgrade) {
+                Some(tunnel) if !tunnel.is_closed_flag() => Some(tunnel),
+                _ => {
+                    tunnels.remove(&key);
+                    None
                 }
             }
-            tunnels.remove(&key);
-        } else {
-            tunnels.remove(&key);
+        };
+
+        if let Some(tunnel) = tunnel {
+            match tunnel.push_passive_channel(req, read, write) {
+                Ok(()) => return PassiveTunnelDispatch::Dispatched,
+                Err(rejected) => {
+                    if tunnel.is_closed_flag() {
+                        self.unregister_tunnel(&key, &tunnel);
+                    }
+                    return PassiveTunnelDispatch::Rejected(rejected);
+                }
+            }
         }
 
-        let tunnel = PnTunnel::new_passive(
-            self.local_id(),
-            req,
+        PassiveTunnelDispatch::Rejected(RejectedPassivePnChannel {
+            request: req,
             read,
             write,
-            Some(self.clone()),
-            self.tls_context(),
-            self.stream_security_mode(),
-        );
-        tunnels.insert(key, Arc::downgrade(&tunnel));
-        PassiveTunnelDispatch::Created(tunnel)
+            error: p2p_err!(
+                P2pErrorCode::ErrorState,
+                "pn tunnel control channel is not established"
+            ),
+        })
     }
 
-    pub(super) fn create_passive_control_tunnel(
+    pub(super) fn register_passive_control_tunnel(
         self: &Arc<Self>,
         req: ProxyControlOpenReq,
     ) -> P2pResult<Arc<PnTunnel>> {
@@ -336,7 +351,7 @@ impl PnShared {
 
 pub(super) enum PassiveTunnelDispatch {
     Dispatched,
-    Created(Arc<PnTunnel>),
+    Rejected(RejectedPassivePnChannel),
 }
 
 pub struct PnClient {
@@ -427,11 +442,16 @@ impl PnClient {
                 return Err(err);
             }
         };
+        if let Err(err) = self.shared.register_control_tunnel_if_absent(
+            PnShared::tunnel_key(remote_id.clone(), tunnel_id),
+            &tunnel,
+        ) {
+            let _ = tunnel.close().await;
+            return Err(err);
+        }
         tunnel
             .set_control_channel(control_read, control_write)
             .await;
-        self.shared
-            .register_tunnel(PnShared::tunnel_key(remote_id.clone(), tunnel_id), &tunnel);
         Ok(tunnel)
     }
 
@@ -591,11 +611,16 @@ impl TunnelNetwork for PnClient {
                 return Err(err);
             }
         };
+        if let Err(err) = self.shared.register_control_tunnel_if_absent(
+            PnShared::tunnel_key(remote_id.clone(), tunnel_id),
+            &tunnel,
+        ) {
+            let _ = tunnel.close().await;
+            return Err(err);
+        }
         tunnel
             .set_control_channel(control_read, control_write)
             .await;
-        self.shared
-            .register_tunnel(PnShared::tunnel_key(remote_id.clone(), tunnel_id), &tunnel);
         let tunnel: TunnelRef = tunnel;
         Ok(tunnel)
     }
@@ -637,6 +662,296 @@ where
     let header = read_tunnel_command_header(read).await?;
     let command = read_tunnel_command_body::<_, T>(read, header).await?;
     Ok(command.body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::networks::{
+        ListenVPortsRef, NetManager, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm,
+        TunnelState,
+    };
+    use crate::p2p_identity::{EncodedP2pIdentity, P2pIdentity, P2pIdentityCertRef, P2pSignature};
+    use crate::types::TunnelCandidateId;
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::split;
+    use tokio::time::{Duration, timeout};
+
+    #[derive(Clone)]
+    struct FakeIdentity {
+        id: P2pId,
+    }
+
+    impl FakeIdentity {
+        fn new(byte: u8) -> Self {
+            Self {
+                id: P2pId::from(vec![byte; 32]),
+            }
+        }
+    }
+
+    impl P2pIdentity for FakeIdentity {
+        fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "no cert"))
+        }
+
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            self.id.to_string()
+        }
+
+        fn sign_type(&self) -> crate::p2p_identity::P2pIdentitySignType {
+            crate::p2p_identity::P2pIdentitySignType::Ed25519
+        }
+
+        fn sign(&self, _message: &[u8]) -> P2pResult<P2pSignature> {
+            Ok(vec![1; 64])
+        }
+
+        fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
+            Ok(self.id.as_slice().to_vec())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            vec![]
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityRef {
+            Arc::new(self.clone())
+        }
+    }
+
+    struct FakeCachedTunnel {
+        local_id: P2pId,
+        remote_id: P2pId,
+        stream: StdMutex<Option<(TunnelStreamRead, TunnelStreamWrite)>>,
+    }
+
+    impl FakeCachedTunnel {
+        fn new(
+            local_id: P2pId,
+            remote_id: P2pId,
+        ) -> (Arc<Self>, TunnelStreamRead, TunnelStreamWrite) {
+            let (client_stream, remote_stream) = tokio::io::duplex(1024);
+            let (client_read, client_write) = split(client_stream);
+            let (remote_read, remote_write) = split(remote_stream);
+            (
+                Arc::new(Self {
+                    local_id,
+                    remote_id,
+                    stream: StdMutex::new(Some((Box::pin(client_read), Box::pin(client_write)))),
+                }),
+                Box::pin(remote_read),
+                Box::pin(remote_write),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tunnel for FakeCachedTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            TunnelId::from(900)
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            TunnelCandidateId::from(900)
+        }
+
+        fn form(&self) -> TunnelForm {
+            TunnelForm::Active
+        }
+
+        fn is_reverse(&self) -> bool {
+            false
+        }
+
+        fn protocol(&self) -> Protocol {
+            Protocol::Ext(99)
+        }
+
+        fn local_id(&self) -> P2pId {
+            self.local_id.clone()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            self.remote_id.clone()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn state(&self) -> TunnelState {
+            TunnelState::Connected
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        async fn close(&self) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            _purpose: TunnelPurpose,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            self.stream
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream already opened"))
+        }
+
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "no accept"))
+        }
+
+        async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "no datagram"))
+        }
+
+        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "no datagram"))
+        }
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_create_waits_for_control_ready() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(1));
+        let remote_id = P2pId::from(vec![2; 32]);
+        let net_manager =
+            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
+        let (cached, mut relay_read, mut relay_write) =
+            FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
+        ttp_client.remember_tunnel_for_test(cached);
+        let client = PnClient::new(ttp_client);
+
+        let create_task = tokio::spawn({
+            let client = client.clone();
+            let local_identity = local_identity.clone();
+            let remote_id = remote_id.clone();
+            async move {
+                client
+                    .create_tunnel_with_intent(
+                        &local_identity,
+                        &pn_virtual_endpoint(),
+                        &remote_id,
+                        None,
+                        crate::networks::TunnelConnectIntent::default(),
+                    )
+                    .await
+            }
+        });
+
+        let req = read_pn_command::<_, ProxyControlOpenReq>(&mut relay_read)
+            .await
+            .unwrap();
+        assert_eq!(req.to, remote_id);
+        assert!(!create_task.is_finished());
+        assert!(
+            client
+                .get_tunnel_for_test(&remote_id, req.tunnel_id)
+                .is_none()
+        );
+
+        write_pn_command(
+            &mut relay_write,
+            ProxyControlOpenResp {
+                tunnel_id: req.tunnel_id,
+                result: TunnelCommandResult::Success as u8,
+            },
+        )
+        .await
+        .unwrap();
+
+        let tunnel = timeout(Duration::from_secs(1), create_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(tunnel.tunnel_id(), req.tunnel_id);
+        assert!(
+            client
+                .get_tunnel_for_test(&remote_id, req.tunnel_id)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_control_ready_failure_fails_create() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(3));
+        let remote_id = P2pId::from(vec![4; 32]);
+        let net_manager =
+            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
+        let (cached, mut relay_read, mut relay_write) =
+            FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
+        ttp_client.remember_tunnel_for_test(cached);
+        let client = PnClient::new(ttp_client);
+
+        let create_task = tokio::spawn({
+            let client = client.clone();
+            let local_identity = local_identity.clone();
+            let remote_id = remote_id.clone();
+            async move {
+                client
+                    .create_tunnel_with_intent(
+                        &local_identity,
+                        &pn_virtual_endpoint(),
+                        &remote_id,
+                        None,
+                        crate::networks::TunnelConnectIntent::default(),
+                    )
+                    .await
+            }
+        });
+
+        let req = read_pn_command::<_, ProxyControlOpenReq>(&mut relay_read)
+            .await
+            .unwrap();
+        write_pn_command(
+            &mut relay_write,
+            ProxyControlOpenResp {
+                tunnel_id: req.tunnel_id,
+                result: TunnelCommandResult::ListenerClosed as u8,
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = timeout(Duration::from_secs(1), create_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), P2pErrorCode::Interrupted);
+        assert!(
+            client
+                .get_tunnel_for_test(&remote_id, req.tunnel_id)
+                .is_none()
+        );
+    }
 }
 
 pub fn pn_virtual_endpoint() -> Endpoint {

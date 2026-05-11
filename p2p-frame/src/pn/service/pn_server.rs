@@ -23,7 +23,8 @@ use crate::networks::{
 };
 use crate::p2p_identity::P2pId;
 use crate::pn::{
-    PROXY_SERVICE, ProxyControlOpenReq, ProxyControlOpenResp, ProxyOpenReq, ProxyOpenResp,
+    PROXY_SERVICE, PnChannelKind, ProxyControlOpenReq, ProxyControlOpenResp, ProxyOpenReq,
+    ProxyOpenResp,
 };
 use crate::runtime;
 use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
@@ -192,6 +193,7 @@ pub struct PnConnectionValidateContext {
     pub tunnel_id: crate::types::TunnelId,
     pub kind: crate::pn::PnChannelKind,
     pub purpose: TunnelPurpose,
+    pub is_control: bool,
 }
 
 #[async_trait::async_trait]
@@ -278,6 +280,7 @@ impl PnService {
             tunnel_id: req.tunnel_id,
             kind: req.kind,
             purpose: req.purpose.clone(),
+            is_control: false,
         };
         match self.connection_validator.validate(&ctx).await? {
             ValidateResult::Accept => Ok(()),
@@ -288,6 +291,27 @@ impl PnService {
                 req.to,
                 req.kind,
                 req.purpose,
+                reason
+            )),
+        }
+    }
+
+    async fn validate_proxy_control_open_req(&self, req: &ProxyControlOpenReq) -> P2pResult<()> {
+        let ctx = PnConnectionValidateContext {
+            from: req.from.clone(),
+            to: req.to.clone(),
+            tunnel_id: req.tunnel_id,
+            kind: PnChannelKind::Stream,
+            purpose: TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?,
+            is_control: true,
+        };
+        match self.connection_validator.validate(&ctx).await? {
+            ValidateResult::Accept => Ok(()),
+            ValidateResult::Reject(reason) => Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "pn control connection validate failed from={} to={} reason={}",
+                req.from,
+                req.to,
                 reason
             )),
         }
@@ -498,16 +522,19 @@ impl PnService {
         );
 
         let mut source_write = write;
-        let open_result = runtime::timeout(
-            PN_OPEN_TIMEOUT,
-            self.target_stream_factory.open_target_stream(&req.to),
-        )
-        .await
-        .map_err(into_p2p_err!(
-            P2pErrorCode::Timeout,
-            "pn control open timeout"
-        ))
-        .and_then(|ret| ret);
+        let open_result = match self.validate_proxy_control_open_req(&req).await {
+            Ok(()) => runtime::timeout(
+                PN_OPEN_TIMEOUT,
+                self.target_stream_factory.open_target_stream(&req.to),
+            )
+            .await
+            .map_err(into_p2p_err!(
+                P2pErrorCode::Timeout,
+                "pn control open timeout"
+            ))
+            .and_then(|ret| ret),
+            Err(err) => Err(err),
+        };
 
         let open_result = match open_result {
             Ok((mut target_read, mut target_write)) => {
@@ -589,8 +616,18 @@ impl PnService {
                 req.to,
                 PROXY_SERVICE
             );
-            let mut source_stream = ProxyStream::new(read, source_write);
-            let mut target_stream = ProxyStream::new(target_read, target_write);
+            let traffic_session = self.traffic_manager.begin_session(&req.from, &req.to);
+            let source_stream = ProxyStream::new(read, source_write);
+            let source_stream = LimitStream::new(
+                source_stream,
+                traffic_session.source_read_limit,
+                traffic_session.source_write_limit,
+            );
+            let mut source_stream =
+                StatStream::new_with_tracker(source_stream, traffic_session.source_tracker);
+            let target_stream = ProxyStream::new(target_read, target_write);
+            let mut target_stream =
+                StatStream::new_with_tracker(target_stream, traffic_session.target_tracker);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
             log::debug!(
                 "pn server control bridge stop tunnel_id={:?} from={} to={} proxy_service={}",
@@ -1370,6 +1407,7 @@ mod tests {
         assert_eq!(ctx.tunnel_id, req.tunnel_id);
         assert_eq!(ctx.kind, req.kind);
         assert_eq!(ctx.purpose, req.purpose);
+        assert!(!ctx.is_control);
 
         let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
         let source_resp =
@@ -1379,6 +1417,171 @@ mod tests {
                 .body;
         assert_eq!(source_resp.tunnel_id, req.tunnel_id);
         assert_eq!(source_resp.result, TunnelCommandResult::InvalidParam as u8);
+    }
+
+    #[tokio::test]
+    async fn pn_service_rejects_proxy_control_open_when_validator_rejects() {
+        let source_id = P2pId::from(vec![10u8; 32]);
+        let target_id = P2pId::from(vec![11u8; 32]);
+        let ((service_target_read, service_target_write), _) = make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let validator = TestPnConnectionValidator::new(ValidateResult::Reject(
+            "control not allowed".to_owned(),
+        ));
+        let service = PnService::new(target_stream_factory.clone(), validator.clone());
+
+        let ((service_source_read, service_source_write), (mut source_read, _source_write)) =
+            make_stream_pair();
+        let req = ProxyControlOpenReq {
+            tunnel_id: TunnelId::from(29),
+            from: P2pId::default(),
+            to: target_id.clone(),
+        };
+
+        service
+            .handle_proxy_control_open_req(
+                source_id.clone(),
+                req.clone(),
+                service_source_read,
+                service_source_write,
+            )
+            .await;
+
+        assert_eq!(target_stream_factory.opened_target(), None);
+        let ctx = validator.last_ctx().unwrap();
+        assert_eq!(ctx.from, source_id);
+        assert_eq!(ctx.to, target_id);
+        assert_eq!(ctx.tunnel_id, req.tunnel_id);
+        assert_eq!(ctx.kind, PnChannelKind::Stream);
+        assert_eq!(
+            ctx.purpose,
+            crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap()
+        );
+        assert!(ctx.is_control);
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyControlOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.tunnel_id, req.tunnel_id);
+        assert_eq!(source_resp.result, TunnelCommandResult::InvalidParam as u8);
+    }
+
+    #[tokio::test]
+    async fn pn_service_tracks_and_limits_control_bridge_bytes() {
+        let source_id = P2pId::from(vec![12u8; 32]);
+        let target_id = P2pId::from(vec![13u8; 32]);
+        let ((service_target_read, service_target_write), (mut target_read, mut target_write)) =
+            make_stream_pair();
+        let target_stream_factory =
+            FakeTargetStreamFactory::new((service_target_read, service_target_write));
+        let traffic_manager = PnTrafficManager::new();
+        traffic_manager.set_user_limit(
+            source_id.clone(),
+            PnTrafficLimitConfig {
+                tx_rate: Some(NonZeroU32::new(10).unwrap()),
+                tx_weight: Some(NonZeroU32::new(1).unwrap()),
+                rx_rate: None,
+                rx_weight: None,
+            },
+        );
+        let service = PnService::new_with_traffic_manager(
+            target_stream_factory,
+            allow_all_pn_connection_validator(),
+            traffic_manager.clone(),
+        );
+
+        let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
+            make_stream_pair();
+        let req = ProxyControlOpenReq {
+            tunnel_id: TunnelId::from(30),
+            from: P2pId::default(),
+            to: target_id.clone(),
+        };
+
+        let service_task = tokio::spawn({
+            let service = service.clone();
+            let source_id = source_id.clone();
+            let req = req.clone();
+            async move {
+                service
+                    .handle_proxy_control_open_req(
+                        source_id,
+                        req,
+                        service_source_read,
+                        service_source_write,
+                    )
+                    .await;
+            }
+        });
+
+        let target_header = read_tunnel_command_header(&mut target_read).await.unwrap();
+        let target_req =
+            read_tunnel_command_body::<_, ProxyControlOpenReq>(&mut target_read, target_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(target_req.from, source_id);
+        assert_eq!(target_req.to, target_id);
+
+        let resp = TunnelCommand::new(ProxyControlOpenResp {
+            tunnel_id: req.tunnel_id,
+            result: TunnelCommandResult::Success as u8,
+        })
+        .unwrap();
+        write_tunnel_command(&mut target_write, &resp)
+            .await
+            .unwrap();
+
+        let source_header = read_tunnel_command_header(&mut source_read).await.unwrap();
+        let source_resp =
+            read_tunnel_command_body::<_, ProxyControlOpenResp>(&mut source_read, source_header)
+                .await
+                .unwrap()
+                .body;
+        assert_eq!(source_resp.result, TunnelCommandResult::Success as u8);
+
+        let payload = vec![b'c'; 20];
+        source_write.write_all(payload.as_slice()).await.unwrap();
+        let started_at = Instant::now();
+        let mut received = vec![0u8; payload.len()];
+        target_read
+            .read_exact(received.as_mut_slice())
+            .await
+            .unwrap();
+        assert_eq!(received, payload);
+        assert!(
+            started_at.elapsed() >= Duration::from_millis(700),
+            "expected source control limit to delay bridge"
+        );
+
+        let reply = b"control";
+        target_write.write_all(reply).await.unwrap();
+        let mut reply_buf = vec![0u8; reply.len()];
+        source_read
+            .read_exact(reply_buf.as_mut_slice())
+            .await
+            .unwrap();
+        assert_eq!(reply_buf, reply);
+
+        drop(source_write);
+        drop(target_write);
+        drop(source_read);
+        drop(target_read);
+        timeout(Duration::from_secs(3), service_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let source_snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(source_snapshot.tx_bytes, payload.len() as u64);
+        assert_eq!(source_snapshot.rx_bytes, reply.len() as u64);
+        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
+        assert_eq!(target_snapshot.tx_bytes, reply.len() as u64);
+        assert_eq!(target_snapshot.rx_bytes, payload.len() as u64);
     }
 
     #[tokio::test]
