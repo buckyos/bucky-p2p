@@ -2,7 +2,7 @@ use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
-    ListenPurposeRegistry, TunnelManagerRef, TunnelPurpose, TunnelRef, TunnelStreamRead,
+    ListenPurposeRegistry, Tunnel, TunnelManagerRef, TunnelPurpose, TunnelRef, TunnelStreamRead,
     TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
@@ -12,7 +12,7 @@ use callback_result::SingleCallbackWaiter;
 use futures::TryFutureExt;
 use futures::future::{AbortHandle, abortable};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
@@ -21,6 +21,7 @@ fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
 
 pub struct StreamRead {
     read: TunnelStreamRead,
+    tunnel: Weak<dyn Tunnel>,
     session_id: SessionId,
     purpose: TunnelPurpose,
     remote: Endpoint,
@@ -32,6 +33,7 @@ pub struct StreamRead {
 impl StreamRead {
     pub fn new(
         read: TunnelStreamRead,
+        tunnel: Weak<dyn Tunnel>,
         session_id: SessionId,
         purpose: TunnelPurpose,
         local_id: P2pId,
@@ -41,6 +43,7 @@ impl StreamRead {
     ) -> Self {
         Self {
             read,
+            tunnel,
             session_id,
             purpose,
             remote,
@@ -72,6 +75,13 @@ impl StreamRead {
 
     pub fn local_id(&self) -> P2pId {
         self.local_id.clone()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tunnel
+            .upgrade()
+            .map(|tunnel| tunnel.is_closed())
+            .unwrap_or(true)
     }
 }
 
@@ -91,6 +101,7 @@ impl DerefMut for StreamRead {
 
 pub struct StreamWrite {
     write: Option<BufWriter<TunnelStreamWrite>>,
+    tunnel: Weak<dyn Tunnel>,
     session_id: SessionId,
     purpose: TunnelPurpose,
     remote: Endpoint,
@@ -102,6 +113,7 @@ pub struct StreamWrite {
 impl StreamWrite {
     pub fn new(
         write: TunnelStreamWrite,
+        tunnel: Weak<dyn Tunnel>,
         session_id: SessionId,
         purpose: TunnelPurpose,
         local_id: P2pId,
@@ -111,6 +123,7 @@ impl StreamWrite {
     ) -> Self {
         Self {
             write: Some(BufWriter::new(write)),
+            tunnel,
             session_id,
             purpose,
             remote,
@@ -142,6 +155,13 @@ impl StreamWrite {
 
     pub fn local_id(&self) -> P2pId {
         self.local_id.clone()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tunnel
+            .upgrade()
+            .map(|tunnel| tunnel.is_closed())
+            .unwrap_or(true)
     }
 }
 
@@ -295,7 +315,7 @@ impl StreamManager {
         let tunnel = self.tunnel_manager.open_tunnel(remote).await?;
         let session_id = self.session_gen.generate();
         let (read, write) = tunnel.open_stream(purpose.clone()).await?;
-        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, purpose))
+        Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
     }
 
     pub async fn connect_from_id(
@@ -306,7 +326,7 @@ impl StreamManager {
         let tunnel = self.tunnel_manager.open_tunnel_from_id(remote_id).await?;
         let session_id = self.session_gen.generate();
         let (read, write) = tunnel.open_stream(purpose.clone()).await?;
-        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, purpose))
+        Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
     }
 
     pub async fn connect_direct(
@@ -321,7 +341,7 @@ impl StreamManager {
             .await?;
         let session_id = self.session_gen.generate();
         let (read, write) = tunnel.open_stream(purpose.clone()).await?;
-        Ok(self.wrap_opened_stream(tunnel.as_ref(), read, write, session_id, purpose))
+        Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
     }
 
     pub async fn listen(
@@ -407,13 +427,8 @@ impl StreamManager {
                         let listener = stream.listeners.get(&purpose);
                         if let Some(listener) = listener {
                             let session_id = stream.session_gen.generate();
-                            let (stream_read, stream_write) = stream.wrap_opened_stream(
-                                tunnel.as_ref(),
-                                read,
-                                write,
-                                session_id,
-                                purpose,
-                            );
+                            let (stream_read, stream_write) = stream
+                                .wrap_opened_stream(&tunnel, read, write, session_id, purpose);
                             listener
                                 .waiter
                                 .set_result_with_cache((stream_read, stream_write));
@@ -442,7 +457,7 @@ impl StreamManager {
 
     fn wrap_opened_stream(
         &self,
-        tunnel: &dyn crate::networks::Tunnel,
+        tunnel: &TunnelRef,
         read: TunnelStreamRead,
         write: TunnelStreamWrite,
         session_id: SessionId,
@@ -452,9 +467,11 @@ impl StreamManager {
         let remote = tunnel.remote_ep().unwrap_or_default();
         let local_id = tunnel.local_id();
         let remote_id = tunnel.remote_id();
+        let tunnel = Arc::downgrade(tunnel);
         (
             StreamRead::new(
                 read,
+                tunnel.clone(),
                 session_id,
                 purpose.clone(),
                 local_id.clone(),
@@ -463,8 +480,155 @@ impl StreamManager {
                 remote,
             ),
             StreamWrite::new(
-                write, session_id, purpose, local_id, remote_id, local, remote,
+                write, tunnel, session_id, purpose, local_id, remote_id, local, remote,
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoint::Protocol;
+    use crate::networks::{TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelState};
+    use crate::types::{TunnelCandidateId, TunnelId};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TestTunnel {
+        closed: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Tunnel for TestTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            TunnelId::from(1)
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            TunnelCandidateId::from(1)
+        }
+
+        fn form(&self) -> TunnelForm {
+            TunnelForm::Active
+        }
+
+        fn is_reverse(&self) -> bool {
+            false
+        }
+
+        fn protocol(&self) -> Protocol {
+            Protocol::Tcp
+        }
+
+        fn local_id(&self) -> P2pId {
+            P2pId::default()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            P2pId::default()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn state(&self) -> TunnelState {
+            if self.is_closed() {
+                TunnelState::Closed
+            } else {
+                TunnelState::Connected
+            }
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
+        async fn close(&self) -> P2pResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_datagram(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+        ) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            _purpose: TunnelPurpose,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+
+        async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+
+        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+    }
+
+    fn stream_pair() -> (TunnelStreamRead, TunnelStreamWrite) {
+        let (stream, _peer) = tokio::io::duplex(16);
+        let (read, write) = tokio::io::split(stream);
+        (Box::pin(read), Box::pin(write))
+    }
+
+    #[test]
+    fn stream_wrappers_report_tunnel_closed_state() {
+        Executor::init();
+        let tunnel = Arc::new(TestTunnel {
+            closed: AtomicBool::new(false),
+        });
+        let tunnel_ref: TunnelRef = tunnel.clone();
+        let tunnel_weak = Arc::downgrade(&tunnel_ref);
+        let purpose = TunnelPurpose::from_bytes(vec![1]);
+        let (read, write) = stream_pair();
+        let stream_read = StreamRead::new(
+            read,
+            tunnel_weak.clone(),
+            SessionId::default(),
+            purpose.clone(),
+            P2pId::default(),
+            P2pId::default(),
+            Endpoint::default(),
+            Endpoint::default(),
+        );
+        let stream_write = StreamWrite::new(
+            write,
+            tunnel_weak,
+            SessionId::default(),
+            purpose,
+            P2pId::default(),
+            P2pId::default(),
+            Endpoint::default(),
+            Endpoint::default(),
+        );
+
+        assert!(!stream_read.is_closed());
+        assert!(!stream_write.is_closed());
+
+        tunnel.closed.store(true, Ordering::SeqCst);
+
+        assert!(stream_read.is_closed());
+        assert!(stream_write.is_closed());
     }
 }

@@ -2,7 +2,7 @@ use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
-    ListenPurposeRegistry, TunnelDatagramRead, TunnelDatagramWrite, TunnelManagerRef,
+    ListenPurposeRegistry, Tunnel, TunnelDatagramRead, TunnelDatagramWrite, TunnelManagerRef,
     TunnelPurpose, TunnelRef,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
@@ -10,7 +10,7 @@ use crate::types::{SessionId, SessionIdGenerator};
 use callback_result::SingleCallbackWaiter;
 use futures::future::{AbortHandle, abortable};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
@@ -19,14 +19,21 @@ fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
 
 pub struct DatagramRead {
     read: TunnelDatagramRead,
+    tunnel: Weak<dyn Tunnel>,
     session_id: SessionId,
     purpose: TunnelPurpose,
 }
 
 impl DatagramRead {
-    pub fn new(read: TunnelDatagramRead, session_id: SessionId, purpose: TunnelPurpose) -> Self {
+    pub fn new(
+        read: TunnelDatagramRead,
+        tunnel: Weak<dyn Tunnel>,
+        session_id: SessionId,
+        purpose: TunnelPurpose,
+    ) -> Self {
         Self {
             read,
+            tunnel,
             session_id,
             purpose,
         }
@@ -38,6 +45,13 @@ impl DatagramRead {
 
     pub fn purpose(&self) -> &TunnelPurpose {
         &self.purpose
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tunnel
+            .upgrade()
+            .map(|tunnel| tunnel.is_closed())
+            .unwrap_or(true)
     }
 }
 
@@ -57,14 +71,21 @@ impl DerefMut for DatagramRead {
 
 pub struct DatagramWrite {
     write: Option<BufWriter<TunnelDatagramWrite>>,
+    tunnel: Weak<dyn Tunnel>,
     session_id: SessionId,
     purpose: TunnelPurpose,
 }
 
 impl DatagramWrite {
-    pub fn new(write: TunnelDatagramWrite, session_id: SessionId, purpose: TunnelPurpose) -> Self {
+    pub fn new(
+        write: TunnelDatagramWrite,
+        tunnel: Weak<dyn Tunnel>,
+        session_id: SessionId,
+        purpose: TunnelPurpose,
+    ) -> Self {
         Self {
             write: Some(BufWriter::new(write)),
+            tunnel,
             session_id,
             purpose,
         }
@@ -76,6 +97,13 @@ impl DatagramWrite {
 
     pub fn purpose(&self) -> &TunnelPurpose {
         &self.purpose
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tunnel
+            .upgrade()
+            .map(|tunnel| tunnel.is_closed())
+            .unwrap_or(true)
     }
 }
 
@@ -232,7 +260,12 @@ impl DatagramManager {
         let tunnel = self.tunnel_manager.open_tunnel(remote).await?;
         let session_id = self.session_gen.generate();
         let write = tunnel.open_datagram(purpose.clone()).await?;
-        Ok(DatagramWrite::new(write, session_id, purpose))
+        Ok(DatagramWrite::new(
+            write,
+            Arc::downgrade(&tunnel),
+            session_id,
+            purpose,
+        ))
     }
 
     pub async fn connect_from_id(
@@ -243,7 +276,12 @@ impl DatagramManager {
         let tunnel = self.tunnel_manager.open_tunnel_from_id(remote_id).await?;
         let session_id = self.session_gen.generate();
         let write = tunnel.open_datagram(purpose.clone()).await?;
-        Ok(DatagramWrite::new(write, session_id, purpose))
+        Ok(DatagramWrite::new(
+            write,
+            Arc::downgrade(&tunnel),
+            session_id,
+            purpose,
+        ))
     }
 
     pub async fn connect_direct(
@@ -258,7 +296,12 @@ impl DatagramManager {
             .await?;
         let session_id = self.session_gen.generate();
         let write = tunnel.open_datagram(purpose.clone()).await?;
-        Ok(DatagramWrite::new(write, session_id, purpose))
+        Ok(DatagramWrite::new(
+            write,
+            Arc::downgrade(&tunnel),
+            session_id,
+            purpose,
+        ))
     }
 
     pub async fn listen(
@@ -349,6 +392,7 @@ impl DatagramManager {
                         if let Some(listener) = listener {
                             listener.waiter.set_result_with_cache(DatagramRead::new(
                                 read,
+                                Arc::downgrade(&tunnel),
                                 datagram.session_gen.generate(),
                                 purpose,
                             ));
@@ -373,5 +417,142 @@ impl DatagramManager {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoint::Protocol;
+    use crate::networks::{
+        TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelState, TunnelStreamRead,
+        TunnelStreamWrite,
+    };
+    use crate::types::{TunnelCandidateId, TunnelId};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TestTunnel {
+        closed: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Tunnel for TestTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            TunnelId::from(1)
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            TunnelCandidateId::from(1)
+        }
+
+        fn form(&self) -> TunnelForm {
+            TunnelForm::Active
+        }
+
+        fn is_reverse(&self) -> bool {
+            false
+        }
+
+        fn protocol(&self) -> Protocol {
+            Protocol::Tcp
+        }
+
+        fn local_id(&self) -> P2pId {
+            P2pId::default()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            P2pId::default()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn state(&self) -> TunnelState {
+            if self.is_closed() {
+                TunnelState::Closed
+            } else {
+                TunnelState::Connected
+            }
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
+        async fn close(&self) -> P2pResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_datagram(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+        ) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            _purpose: TunnelPurpose,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+
+        async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+
+        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
+        }
+    }
+
+    fn datagram_pair() -> (TunnelDatagramRead, TunnelDatagramWrite) {
+        let (datagram, _peer) = tokio::io::duplex(16);
+        let (read, write) = tokio::io::split(datagram);
+        (Box::pin(read), Box::pin(write))
+    }
+
+    #[test]
+    fn datagram_wrappers_report_tunnel_closed_state() {
+        Executor::init();
+        let tunnel = Arc::new(TestTunnel {
+            closed: AtomicBool::new(false),
+        });
+        let tunnel_ref: TunnelRef = tunnel.clone();
+        let tunnel_weak = Arc::downgrade(&tunnel_ref);
+        let purpose = TunnelPurpose::from_bytes(vec![1]);
+        let (read, write) = datagram_pair();
+        let datagram_read = DatagramRead::new(
+            read,
+            tunnel_weak.clone(),
+            SessionId::default(),
+            purpose.clone(),
+        );
+        let datagram_write = DatagramWrite::new(write, tunnel_weak, SessionId::default(), purpose);
+
+        assert!(!datagram_read.is_closed());
+        assert!(!datagram_write.is_closed());
+
+        tunnel.closed.store(true, Ordering::SeqCst);
+
+        assert!(datagram_read.is_closed());
+        assert!(datagram_write.is_closed());
     }
 }
