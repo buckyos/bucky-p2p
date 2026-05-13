@@ -1,6 +1,6 @@
 # Tunnel NAT 打洞优化测试补充
 
-本补充文档把 `design/tunnel-nat-traversal.md` 中的单 SN NAT 打洞优化和 `ServerReflexive` endpoint area 语义落地为可运行验证。真实 NAT 成功率无法在 unit 层完全断言，因此 unit 重点覆盖调度、候选、退避、评分规则和 SN 观察地址分类；DV/integration 负责确认现有运行时和下游兼容性不被破坏。
+本补充文档把 `design/tunnel-nat-traversal.md` 中的单 SN NAT 打洞优化和 `ServerReflexive` endpoint area 语义落地为可运行验证。真实 NAT 成功率无法在 unit 层完全断言，因此 unit 重点覆盖调度、候选、退避、评分规则和 SN 观察地址分类；integration 负责确认下游兼容性不被破坏。
 
 ## Unit 验证矩阵
 
@@ -26,15 +26,13 @@
 
 ## DV 验证
 
-DV 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame dv`，即 `cargo run -p cyfs-p2p-test -- all-in-one`。
+当前 disabled。`cyfs-p2p-test all-in-one` 不作为 p2p-frame 或其他模块的 DV 证据。后续如需 NAT/runtime DV，必须先补充新的 proposal/design/testing，并定义能自然返回成功的自动入口。
 
-通过标准：
-- 现有 all-in-one 场景仍能完成。
-- 默认 proxy 兜底仍可用。
-- NAT-aware 调度不要求环境存在真实 NAT，也不要求 DV 断言公网打洞成功率。
-- 同源 UDP punch 默认关闭；SN service 存在且本次 candidate intent 开启时，DV 只要求不破坏 all-in-one 场景，真实 NAT 映射是否因此改善不作为自动断言。
+当前通过标准由 unit 和 integration 承担：
+- 默认 proxy 兜底兼容性由 integration 验证。
+- NAT-aware 调度不要求环境存在真实 NAT，也不要求自动断言公网打洞成功率。
 - unit 必须直接覆盖 active/reverse 的起发时机、cadence 与截止断言，至少确认 reverse 在 burst 启动即发送首包、active 在 `250ms` 发送首包，随后都每 `50ms` 一包，且不会超过默认 `1s` 截止。
-- unit 承担 `ServerReflexive` 精确语义验证；DV 只确认 all-in-one 场景不因新的 endpoint area 编解码和 SN 观察地址分类而失败。
+- unit 承担 `ServerReflexive` 精确语义验证。
 
 ## Integration 验证
 

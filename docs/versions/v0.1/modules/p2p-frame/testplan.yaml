@@ -42,31 +42,10 @@ levels:
         run: ["cargo", "test", "-p", "p2p-frame"]
 
   dv:
-    mode: enabled
-    summary: 使用现有 all-in-one 场景驱动器执行本地运行时验证，并确认 `ServerReflexive` endpoint area 语义、NAT-aware tunnel 调度、默认关闭且仅 SN 存在时开启的同源 UDP punch、默认 `PnServer::new(...)` 路径、当前显式启用的 proxy stream TLS-over-proxy 配置、默认 30 分钟 `PnTunnel` idle timeout 和 `PnTunnel` control channel ready gate 不破坏短时场景
-    test_targets:
-      - cyfs-p2p-test/src/main.rs
-      - devices/
-      - logs/
-    preconditions:
-      tools: ["cargo"]
-      env: []
-      services: []
-      notes:
-        - 因为 `p2p-frame` 没有独立二进制入口，所以 DV 使用现有本地 all-in-one 场景。
-        - DV 关注 `cyfs-p2p-test` 现有 `PnServer::new(...)` 调用点是否保持兼容。
-        - 当前 DV 场景已显式启用 `set_proxy_stream_encrypted(true)`；它验证的是 stack 默认 proxy client 的 client 级 TLS 模式配置路径。
-        - relay 只能桥接 TLS 握手字节和密文，不能成为 TLS 终止点，也不需要理解 TLS 模式字段。
-        - idle close 的精确时间和竞态验证由 unit 承担；DV 只验证默认 idle 配置不会破坏正常短时 proxy 场景。
-        - control channel 的 heartbeat timeout、decode/write 失败和 close 幂等精确验证由 unit 承担；DV 只验证默认 PN proxy 建链会建立 control channel 且 all-in-one 场景仍可完成。
-        - NAT 打洞成功率受真实网络环境影响；DV 只验证 all-in-one 场景仍可运行，不把公网 NAT 成功率作为自动断言。
-        - 同源 UDP punch 的真实公网效果不作为 DV 自动断言；DV 只确认默认关闭不破坏本地 QUIC/PN 流程，SN 存在且开启时不要求额外服务。
-        - `ServerReflexive` 的精确分类和 codec 由 unit 承担；DV 只确认本地 all-in-one 场景不会因新的 endpoint area 语义失败。
-    steps:
-      - id: p2p-frame-dv
-        name: 运行本地 all-in-one 场景
-        change_ids: ["endpoint_area_server_reflexive"]
-        run: ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]
+    mode: disabled
+    summary: p2p-frame 当前不定义自动 DV 入口；`cyfs-p2p-test all-in-one` 不得作为本模块或其他模块的 DV 证据。
+    change_ids: ["endpoint_area_server_reflexive"]
+    reason: 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口；运行时兼容性由 unit 和 integration 承担，新增 DV 必须另行 proposal/design/testing。
 
   integration:
     mode: enabled

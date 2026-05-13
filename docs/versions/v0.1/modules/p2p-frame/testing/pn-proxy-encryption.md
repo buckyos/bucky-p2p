@@ -15,7 +15,7 @@
 ## 规范入口
 
 - Unit: `python3 ./harness/scripts/test-run.py p2p-frame unit`
-- DV: `python3 ./harness/scripts/test-run.py p2p-frame dv`
+- DV: 当前 disabled；`cyfs-p2p-test all-in-one` 不作为 p2p-frame 或其他模块的 DV 证据
 - Integration: `python3 ./harness/scripts/test-run.py p2p-frame integration`
 
 ## Unit 覆盖矩阵
@@ -46,13 +46,13 @@
 
 ## DV 与 Integration 继承
 
-- DV 证据仍然是模块级 all-in-one 运行时场景。当前场景代码显式调用 `set_proxy_stream_encrypted(true)`，因此 DV 直接覆盖的是 stack 默认 proxy client 的 client 级 TLS 模式配置路径；成功意味着这条显式 TLS 配置不会破坏现有场景启动。
+- DV 当前 disabled；stack 默认 proxy client 的 client 级 TLS 模式配置路径不能依赖 `cyfs-p2p-test all-in-one` 作为自动 DV 证据。
 - Integration 证据仍然是工作区级测试套件。对于 TLS-over-proxy，成功意味着新增 PN 专有接口不会破坏 `cyfs-p2p`、`cyfs-p2p-test` 或 `sn-miner-rust` 的现有编译与测试路径。
-- 对 `datagram` 边界，DV 与 integration 的成功还意味着显式 `TlsRequired` 或 client 级默认 TLS 模式不会把现有明文 datagram 调用点回归成 `NotSupport`。
+- 对 `datagram` 边界，unit 与 integration 的成功还意味着显式 `TlsRequired` 或 client 级默认 TLS 模式不会把现有明文 datagram 调用点回归成 `NotSupport`。
 
 ## 完成定义
 
 - proxy stream 的明文兼容路径、TLS 成功路径和 TLS 失败路径都被 unit 测试覆盖。
 - TLS 身份校验已明确绑定到预期 `remote_id` 并有失败断言。
 - `datagram` 忽略 `stream` 加密模式并保持明文兼容的边界已被显式记录并有对应测试。
-- 模块级 DV 与 integration 入口继续与 [testplan.yaml](/mnt/f/work/p2p/docs/versions/v0.1/modules/p2p-frame/testplan.yaml) 保持一致。
+- 模块级 DV disabled 状态与 integration 入口继续与 [testplan.yaml](/mnt/f/work/p2p/docs/versions/v0.1/modules/p2p-frame/testplan.yaml) 保持一致。

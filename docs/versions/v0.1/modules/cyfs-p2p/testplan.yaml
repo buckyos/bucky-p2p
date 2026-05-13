@@ -26,21 +26,10 @@ levels:
         run: ["cargo", "test", "-p", "cyfs-p2p"]
 
   dv:
-    mode: enabled
-    summary: 通过现有测试 harness 执行本地运行时验证
-    test_targets:
-      - cyfs-p2p-test/src/main.rs
-    preconditions:
-      tools: ["cargo"]
-      env: []
-      services: []
-      notes:
-        - 适配层运行时行为通过 `cyfs-p2p-test` 进行验证。
-    steps:
-      - id: cyfs-p2p-dv
-        name: 运行 all-in-one 运行时场景
-        change_ids: ["cyfs_runtime_coverage"]
-        run: ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]
+    mode: disabled
+    summary: cyfs-p2p 当前不定义自动 DV 入口；`cyfs-p2p-test all-in-one` 不得作为本模块或其他模块的 DV 证据。
+    change_ids: ["cyfs_runtime_coverage", "endpoint_area_server_reflexive"]
+    reason: 当前没有满足 harness 自动完成语义的 cyfs-p2p DV 入口；适配层行为由 unit 和 integration 承担，新增 DV 必须另行 proposal/design/testing。
 
   integration:
     mode: enabled

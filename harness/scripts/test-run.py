@@ -8,17 +8,10 @@ import sys
 COMMANDS = {
     "p2p-frame": {
         "unit": ["cargo", "test", "-p", "p2p-frame"],
-        "dv": ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"],
         "integration": ["cargo", "test", "--workspace"],
     },
     "cyfs-p2p": {
         "unit": ["cargo", "test", "-p", "cyfs-p2p"],
-        "dv": ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"],
-        "integration": ["cargo", "test", "--workspace"],
-    },
-    "cyfs-p2p-test": {
-        "unit": ["cargo", "test", "-p", "cyfs-p2p-test"],
-        "dv": ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"],
         "integration": ["cargo", "test", "--workspace"],
     },
     "sn-miner": {
@@ -49,7 +42,7 @@ def main() -> int:
     command = module_commands.get(level)
     if command is None:
         print(f"unknown level: {level}", file=sys.stderr)
-        print("known levels: unit, dv, integration", file=sys.stderr)
+        print(f"known levels for {module}: {', '.join(sorted(module_commands))}", file=sys.stderr)
         return 2
 
     print("+", shlex.join(command))

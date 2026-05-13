@@ -4,8 +4,10 @@
 - 任务 ID：
 - 阶段：
 - 职责：
+- Version：
 - 模块：
 - 子模块：
+- change_id：
 - 父任务：
 - 依赖项：
 - 负责人：
@@ -31,7 +33,11 @@
 - [ ] 必需的上游制品存在
 - [ ] 必需的上游批准存在
 - [ ] 范围保持在该直接子模块内
+- [ ] 范围保持在命名阶段内，除非用户已显式要求跨阶段同步
 - [ ] 若为 implementation：该子模块的 proposal、design、testing 输入均已批准
+- [ ] 若为 implementation：active `version`、`module`、子模块与 `change_id` 已明确
+- [ ] 若为 implementation：module packet 的 `schema-check.py` 已通过
+- [ ] 若为 implementation：每个已准入 `change_id` 的 `admission-check.py` 已通过
 - [ ] 若为 implementation：`testplan.yaml` 已覆盖该子模块的验证入口或缺口说明
 - [ ] 若为 implementation：当前子模块改动已能映射到直接的 proposal/design/testing 条目
 
@@ -39,6 +45,18 @@
 - 输出文件：
 - 证据：
 - 若为 implementation：验证是否执行，以及依据是什么
+
+## 允许的改动
+- 可以修改：
+- 不可修改：
+
+阶段任务默认值：
+- Proposal 可以修改：仅 `proposal.md`
+- Design 可以修改：仅 `design.md`、`design/` 和必需的长期边界同步
+- Testing 可以修改：仅 `testing.md`、`testing/` 和 `testplan.yaml`
+- Implementation 可以修改：仅代码和测试代码
+- Acceptance 可以修改：仅评审报告
+- 跨阶段编辑必须由用户显式命名额外阶段，或显式要求跨阶段同步
 
 ## 完成条件
 - [ ] 子模块输出完整

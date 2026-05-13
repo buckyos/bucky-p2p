@@ -14,7 +14,7 @@
 ## 规范入口
 
 - Unit: `python3 ./harness/scripts/test-run.py p2p-frame unit`
-- DV: `python3 ./harness/scripts/test-run.py p2p-frame dv`
+- DV: 当前 disabled；`cyfs-p2p-test all-in-one` 不作为 p2p-frame 或其他模块的 DV 证据
 - Integration: `python3 ./harness/scripts/test-run.py p2p-frame integration`
 
 ## Unit 覆盖矩阵
@@ -45,7 +45,7 @@
 
 ## DV 与 Integration 继承
 
-- DV 仍通过 all-in-one 场景验证 PN client/server 与 stack 组合路径没有被 idle close 配置破坏。默认 30 分钟 idle timeout 不应影响短时 DV 场景。
+- DV 当前 disabled；PN client/server 与 stack 组合路径不能依赖 `cyfs-p2p-test all-in-one` 作为自动 DV 证据。
 - Integration 仍通过 workspace 测试确认新增 PN client 内部状态与 wrapper 不破坏下游编译和既有测试。
 - idle close 的精确时间、竞态和重新创建行为必须由 unit 测试承担，不依赖 DV 的长时间等待。
 

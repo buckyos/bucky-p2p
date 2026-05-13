@@ -15,7 +15,7 @@
 ## 规范入口
 
 - Unit: `python3 ./harness/scripts/test-run.py p2p-frame unit`
-- DV: `python3 ./harness/scripts/test-run.py p2p-frame dv`
+- DV: 当前 disabled；`cyfs-p2p-test all-in-one` 不作为 p2p-frame 或其他模块的 DV 证据
 - Integration: `python3 ./harness/scripts/test-run.py p2p-frame integration`
 
 `pn_server` 不定义自己的独立执行入口。它继承 [testing.md](/mnt/f/work/p2p/docs/versions/v0.1/modules/p2p-frame/testing.md) 中的模块级命令。
@@ -75,7 +75,7 @@
 
 ## DV 与 Integration 继承
 
-- DV 证据仍然是模块级 all-in-one 运行时场景。对于 `pn_server`，成功意味着 PN relay 启动和 proxy 流不会阻塞场景完成，并且默认构造路径在接入 `sfo-io` 后仍能正常工作；若场景显式启用 TLS-over-proxy，relay 仍应只桥接 TLS 字节而不终止 TLS。
+- DV 当前 disabled；`pn_server` 不再继承 all-in-one 运行时场景作为自动 DV 证据。
 - Integration 证据仍然是工作区级测试套件。对于 `pn_server`，成功意味着 relay 侧 PN 改动不会破坏 `cyfs-p2p`、`cyfs-p2p-test` 或 `sn-miner-rust` 的兼容性，尤其不能要求现有 `PnServer::new(...)` 调用点立即理解新的 target 统计查询或限速配置细节。
 
 ## `pn_server` 的完成定义
@@ -83,5 +83,5 @@
 - relay 启动、请求规范化、校验、响应转发和成功 bridge 激活都被 unit 测试覆盖。
 - relay 在 bridge 前失败时，对非成功 open 结果的映射已被记录并文档化。
 - relay 在成功 bridge 后的 source/target 双边统计准确性、source 侧限速共享预算和背压退出行为都被 unit 测试覆盖。
-- 模块级 DV 与 integration 入口继续与 [testplan.yaml](/mnt/f/work/p2p/docs/versions/v0.1/modules/p2p-frame/testplan.yaml) 保持一致。
+- 模块级 DV disabled 状态与 integration 入口继续与 [testplan.yaml](/mnt/f/work/p2p/docs/versions/v0.1/modules/p2p-frame/testplan.yaml) 保持一致。
 - PN 参考说明与 `pn_server` 实现之间的任何协议字段差异，都在 acceptance 中被显式指出。

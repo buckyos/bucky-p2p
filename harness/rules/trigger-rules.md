@@ -13,6 +13,7 @@
   - 安全、隐私、认证、授权或权限
   - runtime、integration、后台任务或分布式流程
   - build、依赖、配置、打包、部署或环境行为
+  - UI 数据模型、展示契约、可访问性或用户可见工作流
   - 测试基础设施、harness 规则、准入检查或 release gate
 
 ## 触发判断规则
@@ -147,6 +148,21 @@
   - 生成文件漂移
   - 改变生产行为的默认值
 
+## UI 数据模型、展示契约或工作流变更
+- 触发条件：
+  - UI 可见状态、导航、表单校验、可访问性语义、localization key、具有行为含义的用户可见文案，或前后端数据契约发生变化
+- 额外检查：
+  - 状态覆盖评审
+  - 相关时执行可访问性或键盘路径评审
+  - 契约验证
+  - 自动化不可用时，为视觉工作流变化附上截图或手工证据
+- 评审关注点：
+  - empty/error/loading 状态破坏
+  - 数据不匹配
+  - 不可访问控件
+  - 布局重叠
+  - 工作流回归
+
 ## Harness、准入或流程规则变更
 - 触发条件：
   - `AGENTS.md`、`harness/rules/**`、`harness/process_rules/**`、`harness/checklists/**`、`harness/human-rules/**`、`harness/scripts/**`、模块模板、`testplan.yaml` schema、CI 入口或 acceptance report 格式发生变化
@@ -187,6 +203,7 @@
 | security/privacy/permission | yes / no | | | | | |
 | runtime/integration | yes / no | | | | | |
 | build/dependency/config/deployment | yes / no | | | | | |
+| ui/datamodel/workflow | yes / no | | | | | |
 | harness/process | yes / no | | | | | |
 
 规则：
