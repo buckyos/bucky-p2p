@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 适配层本地验证
+    summary: 适配层本地验证，包含 `ServerReflexive` endpoint area 消费映射
     test_targets:
       - cyfs-p2p/src/lib.rs
       - cyfs-p2p/src/stack_builder.rs
@@ -17,11 +17,12 @@ levels:
       tools: ["cargo"]
       env: []
       services: []
-      notes: []
+      notes:
+        - `stack_builder.rs` 必须能消费 `p2p-frame::EndpointArea::ServerReflexive`，且本轮继续映射到 CYFS 下游仍使用的 `bucky_objects::EndpointArea::Default`。
     steps:
       - id: cyfs-p2p-unit
         name: 运行适配层 crate 测试
-        change_ids: ["cyfs_adapter_traceability"]
+        change_ids: ["cyfs_adapter_traceability", "endpoint_area_server_reflexive"]
         run: ["cargo", "test", "-p", "cyfs-p2p"]
 
   dv:
@@ -55,5 +56,5 @@ levels:
     steps:
       - id: cyfs-p2p-integration
         name: 运行工作区测试套件
-        change_ids: ["cyfs_runtime_coverage"]
+        change_ids: ["cyfs_runtime_coverage", "endpoint_area_server_reflexive"]
         run: ["cargo", "test", "--workspace"]

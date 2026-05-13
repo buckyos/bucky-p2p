@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-05-10
+approved_at: 2026-05-13
 ---
 
 # p2p-frame 设计
@@ -22,12 +22,14 @@ approved_at: 2026-05-10
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
 - 为本轮单 SN NAT 打洞优化建立可执行设计边界，包括 direct/reverse 统一 300ms 短延迟竞速、`SnCall` 本次反连候选、QUIC listener 同源 UDP punch burst、proxy 短窗口脱代理升级，以及按协议拆分的 endpoint 评分。
+- 为本轮 endpoint area 语义变更建立可执行设计边界：`EndpointArea::Default` 重命名为 `ServerReflexive`，`Display`/`FromStr` 和 raw codec 使用 `S` 编码，SN 观察地址只有与节点自上报地址一致时才标记为 `Wan`，否则标记为 `ServerReflexive`，并移除 `is_sys_default()` 的公开判定入口。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
 - 在 harness 启动改造阶段重组源码文件
 - 引入多 SN fanout、跨 SN NAT 类型推断、完整 STUN/TURN 协议栈或二层虚拟局域网语义
 - 引入可被上层消费的原生 UDP tunnel、UDP payload 业务协议、raw UDP 接收解析器或独立于 QUIC listener 端口的新 UDP 打洞 socket
+- 保留 `Default` 作为 endpoint area 名称、继续接受 `D` 作为新语义编码，或把 SN 观察地址无条件提升为静态 `Wan`
 
 ## 总体方案
 - 将 `p2p-frame` 视为 Tier 0 核心模块。
@@ -100,6 +102,10 @@ approved_at: 2026-05-10
 - UDP punch 发送失败、被丢包或被远端忽略不得直接判定 tunnel 成败；真正的成功条件仍是后续 QUIC handshake 和 `TunnelManager` register/publish 生命周期完成。
 - UDP punch burst 必须有严格上限：reverse burst 在启动后立即发送第一包，active burst 则从 `250ms` offset 才发送第一包；之后两者都固定每 `50ms` 一包，默认最晚到 `1s` 截止，并受 NAT hedged window 约束裁剪，避免在弱网或 proxy 脱代理重试中形成无限重发或发送风暴。
 - `SNClientService::call(...)` 必须支持调用方传入本次建链的 `reverse_endpoint_array`；若调用方不传，仍保持现有兼容语义。候选来源和去重由 `tunnel` / `sn/client` 设计补充文档定义。
+- `EndpointArea::ServerReflexive` 是 SN 观察到的 server-reflexive endpoint 标记，不代表系统默认绑定地址。`Endpoint` 的文本编码必须用 `S` 表示该 area，字符串解析只把 `S` 映射到 `ServerReflexive`；raw codec 继续复用原 area bit 位置，但语义名改为 `ServerReflexive`。
+- `Endpoint::is_sys_default()` 不再属于公开接口；实现阶段应删除该方法并修正调用点。若发现下游依赖该方法，应退回 design 明确兼容策略，而不是保留旧 system-default 语义。
+- SN 服务端扩展观察 endpoint 时必须比较 SN 观察到的 socket address 与节点自上报 endpoint 集合：协议、IP 和端口均匹配时可标记为 `Wan`；否则标记为 `ServerReflexive`。`Mapped` 仍表示明确映射端口构造出的 WAN 类候选，不与 `ServerReflexive` 合并。
+- tunnel/NAT 候选消费端必须把 `ServerReflexive` 作为非静态 WAN 来源处理；它可参与反连候选和 NAT 打洞策略，但不得满足 `is_static_wan()` 的 `Wan` / `Mapped` 判定。
 - endpoint 评分必须按协议和端点来源记录历史结果；TCP 失败不得降低同一远端 QUIC/UDP 候选的打洞优先级。
 - 本轮保持单 SN 信令模型。SN 服务端只转发单 SN 观察到的公网端点、客户端上报的映射端口和本次 `SnCall` 候选，不承担多 SN 汇总或最终连通性判定。
 
@@ -139,7 +145,7 @@ p2p-frame/src
 |------|------|------|
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
 | `docs/versions/v0.1/modules/p2p-frame/design/tunnel-publish-lifecycle.md` | `TunnelManager` 新 tunnel 注册/发布生命周期与 reverse 延后 publish 规则补充 | `tunnel` |
-| `docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 单 SN NAT 打洞优化、direct/reverse 竞速、QUIC listener 同源 UDP punch、候选刷新、proxy 短窗口脱代理和 endpoint 评分补充 | `tunnel`、`networks/quic`、`sn/client`、必要 `sn/service` |
+| `docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 单 SN NAT 打洞优化、direct/reverse 竞速、QUIC listener 同源 UDP punch、候选刷新、proxy 短窗口脱代理、endpoint 评分和 `ServerReflexive` endpoint area 分类补充 | `endpoint`、`tunnel`、`networks/quic`、`sn/client`、必要 `sn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-proxy-encryption.md` | PN client / tunnel 侧可选端到端载荷加密、显式接口和 TLS 叠加设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-idle-close.md` | `PnTunnel` idle timeout 生命周期关闭、channel lease 计数和关闭后重新创建设计补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-control-channel.md` | `PnTunnel` 控制通道建立、ready gate、heartbeat、远端关闭感知和关闭状态机收敛设计补充 | `pn/client`、`pn/protocol`、必要 `pn/service` |
@@ -162,6 +168,12 @@ p2p-frame/src
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 | 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
 | 多个已有 tunnel candidate 的默认复用选择 | published 优先，非 proxy 优先于 proxy，同类候选内选择最新 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现 proxy 仍可能覆盖已发布 direct/passive candidate，应优先修正 `get_tunnel()` 选择策略，而不是让后台脱代理升级成为唯一恢复路径。 |
+| `EndpointArea::ServerReflexive` endpoint area 语义 | endpoint enum 命名、`S` 文本/codec 编码、SN 观察地址 `Wan` / `ServerReflexive` 分类、删除 `is_sys_default()` | `p2p-frame/src/endpoint.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/tunnel/**` | 若实现阶段发现必须继续兼容 `D` 或 `is_sys_default()`，应退回 design 明确兼容策略；若需要 STUN/TURN 或跨 SN NAT 类型推断，应退回 proposal。 |
+
+## Directly Mapped Change Items
+| change_id | proposal_id | Design Coverage | Scope Paths | Risk / Rollback Notes |
+|-----------|-------------|-----------------|-------------|-----------------------|
+| endpoint_area_server_reflexive | P-ENDPOINT-AREA-1 | 将 `EndpointArea::Default` 重命名为 `ServerReflexive`；`Display`/`FromStr` 使用 `S`，raw codec 保持 area bit 位置但更新语义；SN 观察地址与节点自上报 endpoint 完全一致时标记 `Wan`，否则标记 `ServerReflexive`；删除 `is_sys_default()` 并保持 `is_static_wan()` 只覆盖 `Wan` / `Mapped`。 | `p2p-frame/src/endpoint.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/tunnel/**`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 该变更影响公开枚举和文本编码；若下游依赖 `D` 或旧 method，回滚应恢复旧 enum/codec 并退回 proposal 重新定义兼容窗口。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。

@@ -1,6 +1,6 @@
 # Tunnel NAT 打洞优化测试补充
 
-本补充文档把 `design/tunnel-nat-traversal.md` 中的单 SN NAT 打洞优化落地为可运行验证。真实 NAT 成功率无法在 unit 层完全断言，因此 unit 重点覆盖调度、候选、退避和评分规则；DV/integration 负责确认现有运行时和下游兼容性不被破坏。
+本补充文档把 `design/tunnel-nat-traversal.md` 中的单 SN NAT 打洞优化和 `ServerReflexive` endpoint area 语义落地为可运行验证。真实 NAT 成功率无法在 unit 层完全断言，因此 unit 重点覆盖调度、候选、退避、评分规则和 SN 观察地址分类；DV/integration 负责确认现有运行时和下游兼容性不被破坏。
 
 ## Unit 验证矩阵
 
@@ -13,6 +13,10 @@
 | UDP punch 不引入接收解析或业务载荷 | 现有 `udp_punch_payload_is_random_private_probe_data`，必要时补充 receive-path 断言 | punch payload 可为每包 `5..=30` 字节随机短载荷，首字节不得设置 QUIC fixed bit `0x40`，不要求包含 magic/version、tunnel/candidate 关联信息或方向标记，不被上层读取，不新增 raw UDP receive/ack 路径 |
 | `SnCall` 携带本次建链候选 | 待补 `reverse_path_passes_reverse_endpoints_to_sn_call` | `SNClientService::call(...)` 收到非空 `reverse_endpoint_array`，候选来自本地 listener / SN observed WAN / 映射端口组合集合 |
 | SN called 保留调用方候选并扩展单 SN 观察候选 | 待补 `sn_call_preserves_caller_reverse_endpoints_before_observed_endpoints` | `SnCalled.reverse_endpoint_array` 前段保留调用方传入候选，后续可追加单 SN 观察和映射端点 |
+| `ServerReflexive` endpoint 编解码 | 待补 `endpoint_area_server_reflexive_uses_s_codec` | `EndpointArea::ServerReflexive` 使用 `S` 文本标记，raw codec 往返保持 area，`D` 不再作为新语义输入，`is_static_wan()` 不包含 `ServerReflexive` |
+| `is_sys_default()` 移除 | 编译期覆盖 | 公开方法不再存在，所有 crate 内调用点已改用新的 area 语义或删除旧 system-default 判定 |
+| SN 观察地址与上报地址一致 | 待补 `sn_observed_endpoint_matching_reported_addr_is_wan` | SN 观察 socket address 与节点自上报 endpoint 的协议、IP、端口完全一致时，扩展候选标记为 `Wan` |
+| SN 观察地址与上报地址不一致 | 待补 `sn_observed_endpoint_mismatch_is_server_reflexive` | SN 观察 socket address 未与节点自上报 endpoint 完全一致时，扩展候选标记为 `ServerReflexive` 而不是 `Wan` |
 | proxy 新建后进入短窗口升级 | 待补 `proxy_upgrade_starts_with_short_nat_retry_window` | 新 proxy candidate 的下一次升级时间约为 15 秒，而不是 5 分钟，且不抢占 PN 首次 open 的 5 秒响应窗口 |
 | proxy 短窗口耗尽后进入有上限退避 | 待补 `proxy_upgrade_short_window_falls_back_to_capped_backoff` | 15s/30s/60s/120s 后进入指数退避，最大不超过 2 小时 |
 | 升级路径不把 proxy 视为成功 | 现有 `stored_proxy_upgrade_dials_direct_instead_of_reusing_proxy` 继续承担，必要时补充断言 | 脱代理尝试调用 direct/reverse，不能通过再次创建 proxy 清理 upgrade 状态 |
@@ -30,6 +34,7 @@ DV 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame dv`，即 `carg
 - NAT-aware 调度不要求环境存在真实 NAT，也不要求 DV 断言公网打洞成功率。
 - 同源 UDP punch 默认关闭；SN service 存在且本次 candidate intent 开启时，DV 只要求不破坏 all-in-one 场景，真实 NAT 映射是否因此改善不作为自动断言。
 - unit 必须直接覆盖 active/reverse 的起发时机、cadence 与截止断言，至少确认 reverse 在 burst 启动即发送首包、active 在 `250ms` 发送首包，随后都每 `50ms` 一包，且不会超过默认 `1s` 截止。
+- unit 承担 `ServerReflexive` 精确语义验证；DV 只确认 all-in-one 场景不因新的 endpoint area 编解码和 SN 观察地址分类而失败。
 
 ## Integration 验证
 
@@ -41,6 +46,7 @@ Integration 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame integr
 - `TunnelNetwork` / `Tunnel` trait 不新增 NAT 专用参数。
 - QUIC UDP punch 不要求下游使用方处理 raw UDP payload，也不要求下游新增 socket；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选符合策略时才为本次 `TunnelConnectIntent` 开启。
 - QUIC UDP punch 的 active `250ms` / reverse `0ms` 起发与 `50ms` / `1s` cadence 属于 `p2p-frame` 内部实现边界；integration 只验证该边界不会泄漏成新的公开 trait 参数、raw UDP 协议或额外 socket 依赖。
+- `ServerReflexive` 是 `p2p-frame` 的公开 endpoint area 语义；integration 必须覆盖下游 crate 编译测试边界，确认删除 `is_sys_default()` 和改用 `S` 编码不会留下未迁移调用点。
 
 ## 缺口与边界
 
@@ -48,3 +54,4 @@ Integration 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame integr
 - 如果实现新增可配置延迟或候选新鲜度参数，必须补充默认值和边界值测试；当前设计不维护候选新鲜度窗口。
 - 如果实现需要改变 `SnCall` 字段编码或 `SnCallResp` 语义，必须退回 proposal；本测试文档不覆盖该类协议重写。
 - 如果实现无法在 QUIC listener 同一 socket/端口上发送 punch，必须记录缺口或退回 design；测试不得接受“新建不同源端口 UDP socket”作为等价覆盖。
+- 如果实现必须继续接受 `D` 或保留 `is_sys_default()`，必须退回 design 定义迁移边界；当前测试不接受隐式兼容旧 system-default 语义。

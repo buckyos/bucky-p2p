@@ -19,6 +19,7 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("docs/architecture/validation-model.md"),
     pathlib.Path("harness/workspace-governance.yaml"),
     pathlib.Path("harness/rules/approval-metadata-rules.md"),
+    pathlib.Path("harness/rules/acceptance-review-rules.md"),
     pathlib.Path("harness/rules/acceptance-task-rules.md"),
     pathlib.Path("harness/rules/auto-pipeline-rules.md"),
     pathlib.Path("harness/rules/design-doc-rules.md"),

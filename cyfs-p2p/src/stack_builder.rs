@@ -134,7 +134,7 @@ impl P2pIdentityCert for CyfsIdentityCert {
                 EndpointArea::Lan => {
                     cyfs_ep.set_area(bucky_objects::EndpointArea::Lan);
                 }
-                EndpointArea::Default => {
+                EndpointArea::ServerReflexive => {
                     cyfs_ep.set_area(bucky_objects::EndpointArea::Default);
                 }
                 EndpointArea::Wan => {

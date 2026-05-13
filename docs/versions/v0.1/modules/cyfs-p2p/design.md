@@ -1,9 +1,9 @@
 ---
 module: cyfs-p2p
 version: v0.1
-status: draft
-approved_by:
-approved_at:
+status: approved
+approved_by: user
+approved_at: 2026-05-13
 ---
 
 # cyfs-p2p 设计
@@ -12,10 +12,12 @@ approved_at:
 ### 目标
 - 让适配层边界明确化。
 - 将身份/证书适配与栈构建关注点分离。
+- 跟随 `p2p-frame::EndpointArea::ServerReflexive` 公开 enum 变更，更新 CYFS endpoint 转换分支，保持对下游 `bucky_objects::EndpointArea::Default` 的兼容映射。
 
 ### 非目标
 - 重新定义 `p2p-frame` 内部实现
 - 让这个适配层 crate 成为运行时场景的所有者
+- 在适配层新增 endpoint area、NAT 类型推断或覆盖 `p2p-frame` 的 SN 观察地址分类规则
 
 ## 总体方案
 - 将 `cyfs-p2p` 视为一个轻薄但高耦合的适配层。
@@ -47,6 +49,7 @@ approved_at:
 
 ### 运行约束
 - 影响运行时启动或 endpoint 处理的适配层改动需要下游证据
+- `ServerReflexive` 只在 `stack_builder` 的转换层消费；适配层不得把它改写成 `Wan`，也不得恢复旧的 `p2p-frame::EndpointArea::Default` 名称依赖。
 
 ## 实现布局
 ```text
@@ -72,6 +75,7 @@ cyfs-p2p/src
 |-----------|-------------|-----------------|-------------|-----------------------|
 | cyfs_adapter_traceability | P-1 | 适配层边界与子模块拆分 | `cyfs-p2p/src/lib.rs`、`cyfs-p2p/src/types.rs` | 避免把核心语义重新定义到适配层 |
 | cyfs_runtime_coverage | P-2 | 栈构建与身份适配职责 | `cyfs-p2p/src/stack_builder.rs` | 若适配路径漂移需回滚具体实现而不是扩大边界 |
+| endpoint_area_server_reflexive | P-ENDPOINT-AREA-ADAPTER | `stack_builder` 在把 `p2p-frame::EndpointArea` 转换为 CYFS endpoint area 时，消费新命名的 `ServerReflexive` 分支，并映射到当前下游仍使用的 `bucky_objects::EndpointArea::Default`。 | `cyfs-p2p/src/stack_builder.rs` | 若下游 CYFS endpoint area 后续也引入 `ServerReflexive`，应退回 design 重新定义迁移策略；本轮不在适配层创建新语义。 |
 
 ## 风险与回滚
 - 回滚应当在撤销具体适配层改动的同时，保留已批准的数据包文档

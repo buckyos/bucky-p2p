@@ -1,9 +1,9 @@
 ---
 module: cyfs-p2p
 version: v0.1
-status: draft
-approved_by:
-approved_at:
+status: approved
+approved_by: user
+approved_at: 2026-05-13
 ---
 
 # cyfs-p2p 测试
@@ -23,7 +23,7 @@ approved_at:
 | 子模块 | 职责 | 详细测试文档 | 必需行为 | 边界/失败场景 | 测试类型 | 测试文件 |
 |--------|------|--------------|----------|----------------|----------|----------|
 | `identity_adapter` | CYFS 身份与证书桥接 | none | 身份编码/解码、证书校验、endpoint 更新 | 无效证书/签名、endpoint 不匹配 | unit + integration | `cyfs-p2p/src/stack_builder.rs` |
-| `stack_builder` | 构建并配置 stack/env | none | 栈创建与配置转换 | 配置不匹配、运行时 feature 假设 | unit + DV | `cyfs-p2p/src/stack_builder.rs` |
+| `stack_builder` | 构建并配置 stack/env | none | 栈创建、配置转换、`ServerReflexive` endpoint area 适配转换 | 配置不匹配、运行时 feature 假设、把 `ServerReflexive` 误提升为 `Wan` 或恢复旧 `p2p-frame::EndpointArea::Default` 依赖 | unit + DV | `cyfs-p2p/src/stack_builder.rs` |
 | `types` | 共享适配辅助逻辑 | none | 辅助逻辑一致性和转换语义 | 序列化/hash 边界场景 | unit | `cyfs-p2p/src/types.rs` |
 
 ## 模块级测试
@@ -45,6 +45,8 @@ approved_at:
 | cyfs_adapter_traceability | V-1 | unit | cyfs-p2p-unit | 验证 crate 本地适配行为仍可执行 | no | |
 | cyfs_runtime_coverage | V-2 | dv | cyfs-p2p-dv | 验证运行时使用方兼容性 | no | |
 | cyfs_runtime_coverage | V-3 | integration | cyfs-p2p-integration | 验证工作区兼容性 | no | |
+| endpoint_area_server_reflexive | V-ENDPOINT-AREA-ADAPTER-UNIT | unit | cyfs-p2p-unit | 覆盖 `cyfs-p2p/src/stack_builder.rs` 能消费 `p2p-frame::EndpointArea::ServerReflexive`，并保持到当前 CYFS `EndpointArea::Default` 的兼容映射。 | no | |
+| endpoint_area_server_reflexive | V-ENDPOINT-AREA-ADAPTER-INTEGRATION | integration | cyfs-p2p-integration | 运行 workspace 测试，确认 `ServerReflexive` 公开 enum 变更不会破坏适配层和下游使用方编译测试边界。 | no | |
 
 ## 回归关注点
 - `stack_builder.rs` 中的身份与证书适配

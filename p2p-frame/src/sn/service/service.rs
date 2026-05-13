@@ -203,6 +203,31 @@ impl SnService {
         *endpoints = unique;
     }
 
+    fn classify_observed_endpoint(mut endpoint: Endpoint, reported_eps: &[Endpoint]) -> Endpoint {
+        if reported_eps.iter().any(|reported| {
+            reported.protocol() == endpoint.protocol() && reported.addr() == endpoint.addr()
+        }) {
+            endpoint.set_area(EndpointArea::Wan);
+        } else {
+            endpoint.set_area(EndpointArea::ServerReflexive);
+        }
+        endpoint
+    }
+
+    fn mapped_endpoint_from_observed(ep: &Endpoint, protocol: Protocol, port: u16) -> Endpoint {
+        let mut map_ep = Endpoint::from((protocol, ep.addr().ip(), port));
+        map_ep.set_area(EndpointArea::Mapped);
+        map_ep
+    }
+
+    fn reported_endpoints_for_peer(
+        peer: &crate::sn::service::peer_manager::CachedPeerInfo,
+    ) -> Vec<Endpoint> {
+        let mut endpoints = peer.desc.endpoints();
+        Self::extend_unique_endpoints(&mut endpoints, peer.local_eps.as_slice());
+        endpoints
+    }
+
     async fn handle_call(
         &self,
         mut call_req: SnCall,
@@ -220,97 +245,113 @@ impl SnService {
         );
         info!("{}.", log_key);
 
-        let call_resp = if let Some(from_peer_cache) =
-            self.peer_manager().find_peer(&call_req.from_peer_id)
-        {
-            if let Some(to_peer_cache) = self.peer_manager().find_peer(&call_req.to_peer_id) {
-                // Self::call_stat_contract(to_peer_cache, &call_req);
-                let from_peer_desc = if call_req.peer_info.is_none() {
-                    self.peer_manager().find_peer(from_peer_id).map(|c| c.desc)
-                } else {
-                    call_req
-                        .peer_info
-                        .map(|info| self.cert_factory.create(&info).unwrap())
-                };
+        let call_resp =
+            if let Some(from_peer_cache) = self.peer_manager().find_peer(&call_req.from_peer_id) {
+                if let Some(to_peer_cache) = self.peer_manager().find_peer(&call_req.to_peer_id) {
+                    // Self::call_stat_contract(to_peer_cache, &call_req);
+                    let from_peer_desc = if call_req.peer_info.is_none() {
+                        self.peer_manager().find_peer(from_peer_id).map(|c| c.desc)
+                    } else {
+                        call_req
+                            .peer_info
+                            .map(|info| self.cert_factory.create(&info).unwrap())
+                    };
 
-                let mut reverse_eps = self
-                    .get_peer_wan_ep_with_map_port(&peer_id, from_peer_cache.map_ports.as_slice())
-                    .await;
-                reverse_eps.extend_from_slice(from_peer_cache.local_eps.as_slice());
-
-                if let Some(from_peer_desc) = from_peer_desc {
-                    info!(
-                        "{} to-peer found, endpoints: {}, always_call: {}, to-peer.is_wan: {}.",
-                        log_key,
-                        endpoints_to_string(to_peer_cache.desc.endpoints().as_slice()),
-                        call_req.is_always_call,
-                        to_peer_cache.is_wan
+                    let from_reported_eps = Self::reported_endpoints_for_peer(&from_peer_cache);
+                    let mut reverse_eps = self
+                        .get_peer_wan_ep_with_map_port(
+                            &peer_id,
+                            from_peer_cache.map_ports.as_slice(),
+                            from_reported_eps.as_slice(),
+                        )
+                        .await;
+                    Self::extend_unique_endpoints(
+                        &mut reverse_eps,
+                        from_peer_cache.local_eps.as_slice(),
                     );
 
-                    if self.call_stub.insert(from_peer_id, &call_req.tunnel_id) {
-                        if call_req.is_always_call || !to_peer_cache.is_wan {
-                            let called_seq = self.seq_generator.generate();
-                            let mut called_req = SnCalled {
-                                seq: called_seq,
-                                to_peer_id: call_req.to_peer_id.clone(),
-                                sn_peer_id: local_id.clone(),
-                                peer_info: from_peer_desc.get_encoded_cert().unwrap(),
-                                tunnel_id: call_req.tunnel_id,
-                                call_send_time: call_req.send_time,
-                                call_type: call_req.call_type,
-                                payload: vec![],
-                                reverse_endpoint_array: vec![],
-                                active_pn_list: vec![],
-                            };
+                    if let Some(from_peer_desc) = from_peer_desc {
+                        info!(
+                            "{} to-peer found, endpoints: {}, always_call: {}, to-peer.is_wan: {}.",
+                            log_key,
+                            endpoints_to_string(to_peer_cache.desc.endpoints().as_slice()),
+                            call_req.is_always_call,
+                            to_peer_cache.is_wan
+                        );
 
-                            std::mem::swap(&mut call_req.payload, &mut called_req.payload);
-                            if let Some(eps) = call_req.reverse_endpoint_array.as_mut() {
-                                std::mem::swap(eps, &mut called_req.reverse_endpoint_array);
+                        if self.call_stub.insert(from_peer_id, &call_req.tunnel_id) {
+                            if call_req.is_always_call || !to_peer_cache.is_wan {
+                                let called_seq = self.seq_generator.generate();
+                                let mut called_req = SnCalled {
+                                    seq: called_seq,
+                                    to_peer_id: call_req.to_peer_id.clone(),
+                                    sn_peer_id: local_id.clone(),
+                                    peer_info: from_peer_desc.get_encoded_cert().unwrap(),
+                                    tunnel_id: call_req.tunnel_id,
+                                    call_send_time: call_req.send_time,
+                                    call_type: call_req.call_type,
+                                    payload: vec![],
+                                    reverse_endpoint_array: vec![],
+                                    active_pn_list: vec![],
+                                };
+
+                                std::mem::swap(&mut call_req.payload, &mut called_req.payload);
+                                if let Some(eps) = call_req.reverse_endpoint_array.as_mut() {
+                                    std::mem::swap(eps, &mut called_req.reverse_endpoint_array);
+                                }
+                                if let Some(pn_list) = call_req.active_pn_list.as_mut() {
+                                    std::mem::swap(pn_list, &mut called_req.active_pn_list);
+                                }
+                                Self::dedup_endpoints(&mut called_req.reverse_endpoint_array);
+                                Self::extend_unique_endpoints(
+                                    &mut called_req.reverse_endpoint_array,
+                                    reverse_eps.as_slice(),
+                                );
+
+                                let called_log =
+                                    format!("{} called-req seq({})", log_key, called_seq.value());
+                                log::info!(
+                                    "{} will send with payload(len={}) pn_list({:?}).",
+                                    called_log,
+                                    called_req.payload.len(),
+                                    called_req.active_pn_list
+                                );
+
+                                self.cmd_server
+                                    .send_by_all_tunnels(
+                                        &PeerId::from(call_req.to_peer_id.as_slice()),
+                                        PackageCmdCode::SnCalled as u8,
+                                        self.cmd_version,
+                                        called_req
+                                            .to_vec()
+                                            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
+                                            .as_slice(),
+                                    )
+                                    .await
+                                    .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
                             }
-                            if let Some(pn_list) = call_req.active_pn_list.as_mut() {
-                                std::mem::swap(pn_list, &mut called_req.active_pn_list);
-                            }
-                            Self::dedup_endpoints(&mut called_req.reverse_endpoint_array);
-                            Self::extend_unique_endpoints(
-                                &mut called_req.reverse_endpoint_array,
-                                reverse_eps.as_slice(),
-                            );
+                        } else {
+                            info!("{} ignore send called req for already exists.", log_key);
+                        }
 
-                            let called_log =
-                                format!("{} called-req seq({})", log_key, called_seq.value());
-                            log::info!(
-                                "{} will send with payload(len={}) pn_list({:?}).",
-                                called_log,
-                                called_req.payload.len(),
-                                called_req.active_pn_list
-                            );
-
-                            self.cmd_server
-                                .send_by_all_tunnels(
-                                    &PeerId::from(call_req.to_peer_id.as_slice()),
-                                    PackageCmdCode::SnCalled as u8,
-                                    self.cmd_version,
-                                    called_req
-                                        .to_vec()
-                                        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                                        .as_slice(),
-                                )
-                                .await
-                                .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+                        SnCallResp {
+                            seq: call_req.seq,
+                            sn_peer_id: local_id.clone(),
+                            result: P2pErrorCode::Ok.into_u8(),
+                            to_peer_info: Some(to_peer_cache.desc.get_encoded_cert().unwrap()),
                         }
                     } else {
-                        info!("{} ignore send called req for already exists.", log_key);
-                    }
+                        warn!("{} without from-desc.", log_key);
 
-                    SnCallResp {
-                        seq: call_req.seq,
-                        sn_peer_id: local_id.clone(),
-                        result: P2pErrorCode::Ok.into_u8(),
-                        to_peer_info: Some(to_peer_cache.desc.get_encoded_cert().unwrap()),
+                        SnCallResp {
+                            seq: call_req.seq,
+                            sn_peer_id: local_id.clone(),
+                            result: P2pErrorCode::NotFound.into_u8(),
+                            to_peer_info: None,
+                        }
                     }
                 } else {
-                    warn!("{} without from-desc.", log_key);
-
+                    warn!("{} to-peer not found.", log_key);
                     SnCallResp {
                         seq: call_req.seq,
                         sn_peer_id: local_id.clone(),
@@ -319,23 +360,14 @@ impl SnService {
                     }
                 }
             } else {
-                warn!("{} to-peer not found.", log_key);
+                warn!("{} from-peer not found.", log_key);
                 SnCallResp {
                     seq: call_req.seq,
                     sn_peer_id: local_id.clone(),
                     result: P2pErrorCode::NotFound.into_u8(),
                     to_peer_info: None,
                 }
-            }
-        } else {
-            warn!("{} from-peer not found.", log_key);
-            SnCallResp {
-                seq: call_req.seq,
-                sn_peer_id: local_id.clone(),
-                result: P2pErrorCode::NotFound.into_u8(),
-                to_peer_info: None,
-            }
-        };
+            };
 
         self.cmd_server
             .send_by_specify_tunnel(
@@ -371,7 +403,11 @@ impl SnService {
         // }
     }
 
-    pub async fn get_peer_wan_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
+    pub async fn get_peer_wan_ep(
+        &self,
+        peer_id: &PeerId,
+        reported_eps: &[Endpoint],
+    ) -> Vec<Endpoint> {
         let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
@@ -383,10 +419,7 @@ impl SnService {
         remotes
             .iter_mut()
             .filter(|remote| !remote.is_loopback())
-            .map(|remote| {
-                remote.set_area(EndpointArea::Wan);
-                remote.clone()
-            })
+            .map(|remote| Self::classify_observed_endpoint(*remote, reported_eps))
             .collect()
     }
 
@@ -394,16 +427,16 @@ impl SnService {
         &self,
         peer_id: &PeerId,
         map_ports: &[(Protocol, u16)],
+        reported_eps: &[Endpoint],
     ) -> Vec<Endpoint> {
-        let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
+        let mut remote_ep = self.get_peer_wan_ep(peer_id, reported_eps).await;
         let mut map_eps = Vec::new();
         for ep in remote_ep.iter() {
             for (protocol, port) in map_ports.iter() {
-                let mut map_ep = Endpoint::from((*protocol, ep.addr().ip(), *port));
+                let map_ep = Self::mapped_endpoint_from_observed(ep, *protocol, *port);
                 if remote_ep.contains(&map_ep) || map_eps.contains(&map_ep) {
                     continue;
                 }
-                map_ep.set_area(EndpointArea::Wan);
                 map_eps.push(map_ep);
             }
         }
@@ -424,7 +457,12 @@ impl SnService {
             report_sn.local_eps,
             report_sn.map_ports
         );
-        let mut remote_ep = self.get_peer_wan_ep(peer_id).await;
+        let mut reported_eps = report_sn.local_eps.clone();
+        if let Some(peer_info) = report_sn.peer_info.as_ref() {
+            let peer_desc = self.cert_factory.create(peer_info).unwrap();
+            Self::extend_unique_endpoints(&mut reported_eps, peer_desc.endpoints().as_slice());
+        }
+        let remote_ep = self.get_peer_wan_ep(peer_id, reported_eps.as_slice()).await;
 
         if report_sn.from_peer_id.is_some() {
             self.peer_mgr.add_or_update_peer(
@@ -475,13 +513,15 @@ impl SnService {
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();
+            let reported_eps = Self::reported_endpoints_for_peer(&device_info);
             let mut end_point_array = self
                 .get_peer_wan_ep_with_map_port(
                     &PeerId::from(query.query_id.as_slice()),
                     device_info.map_ports.as_slice(),
+                    reported_eps.as_slice(),
                 )
                 .await;
-            end_point_array.extend_from_slice(device_info.local_eps.as_slice());
+            Self::extend_unique_endpoints(&mut end_point_array, device_info.local_eps.as_slice());
             SnQueryResp {
                 seq: query.seq,
                 peer_info: Some(device_info.desc.get_encoded_cert().unwrap()),
@@ -1152,6 +1192,75 @@ mod tests {
         SnService::extend_unique_endpoints(&mut endpoints, &[mapped_same_addr, ipv6_ep]);
 
         assert_eq!(endpoints, vec![wan_ep, local_ep, ipv6_ep]);
+    }
+
+    #[test]
+    fn sn_observed_endpoint_matching_reported_addr_is_wan() {
+        let reported = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+        let observed = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+
+        let classified = SnService::classify_observed_endpoint(observed, &[reported]);
+
+        assert_eq!(classified.get_area(), EndpointArea::Wan);
+    }
+
+    #[test]
+    fn sn_observed_endpoint_matching_reported_addr_ignores_area() {
+        let mut reported =
+            Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+        reported.set_area(EndpointArea::ServerReflexive);
+        let observed = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+
+        let classified = SnService::classify_observed_endpoint(observed, &[reported]);
+
+        assert_eq!(classified.get_area(), EndpointArea::Wan);
+    }
+
+    #[test]
+    fn sn_observed_endpoint_protocol_mismatch_is_server_reflexive() {
+        let reported = Endpoint::from((Protocol::Tcp, "119.127.198.117:44325".parse().unwrap()));
+        let observed = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+
+        let classified = SnService::classify_observed_endpoint(observed, &[reported]);
+
+        assert_eq!(classified.get_area(), EndpointArea::ServerReflexive);
+    }
+
+    #[test]
+    fn sn_unique_endpoint_extension_keeps_wan_over_lan_duplicate() {
+        let mut observed =
+            Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+        observed.set_area(EndpointArea::Wan);
+        let reported_lan =
+            Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+        let mut endpoints = vec![observed];
+
+        SnService::extend_unique_endpoints(&mut endpoints, &[reported_lan]);
+
+        assert_eq!(endpoints, vec![observed]);
+        assert_eq!(endpoints[0].get_area(), EndpointArea::Wan);
+    }
+
+    #[test]
+    fn sn_map_port_candidate_from_observed_endpoint_is_mapped() {
+        let observed = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+
+        let mapped = SnService::mapped_endpoint_from_observed(&observed, Protocol::Quic, 7000);
+
+        assert_eq!(mapped.get_area(), EndpointArea::Mapped);
+        assert_eq!(mapped.protocol(), Protocol::Quic);
+        assert_eq!(mapped.addr().ip(), observed.addr().ip());
+        assert_eq!(mapped.addr().port(), 7000);
+    }
+
+    #[test]
+    fn sn_observed_endpoint_mismatch_is_server_reflexive() {
+        let reported = Endpoint::from((Protocol::Quic, "192.168.1.10:44325".parse().unwrap()));
+        let observed = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+
+        let classified = SnService::classify_observed_endpoint(observed, &[reported]);
+
+        assert_eq!(classified.get_area(), EndpointArea::ServerReflexive);
     }
 
     #[tokio::test]

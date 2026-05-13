@@ -1021,7 +1021,7 @@ impl TunnelManager {
             Self::push_unique_endpoint(&mut endpoints, wan_ep);
             for (protocol, port) in mapping_ports.iter() {
                 let mut mapped = Endpoint::from((*protocol, wan_ep.addr().ip(), *port));
-                mapped.set_area(crate::endpoint::EndpointArea::Wan);
+                mapped.set_area(crate::endpoint::EndpointArea::Mapped);
                 Self::push_unique_endpoint(&mut endpoints, mapped);
             }
         }
@@ -1995,11 +1995,16 @@ mod nat_strategy_tests {
             vec![wan],
         );
         let mut mapped = Endpoint::from((Protocol::Quic, wan.addr().ip(), 7000));
-        mapped.set_area(EndpointArea::Wan);
+        mapped.set_area(EndpointArea::Mapped);
 
         assert!(endpoints.contains(&local));
         assert!(endpoints.contains(&wan));
         assert!(endpoints.contains(&mapped));
+        let mapped_area = endpoints
+            .iter()
+            .find(|ep| ep.addr() == mapped.addr() && ep.protocol() == mapped.protocol())
+            .map(|ep| ep.get_area());
+        assert_eq!(mapped_area, Some(EndpointArea::Mapped));
     }
 }
 

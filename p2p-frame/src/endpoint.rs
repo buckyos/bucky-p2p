@@ -18,7 +18,7 @@ pub enum Protocol {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum EndpointArea {
     Lan,
-    Default,
+    ServerReflexive,
     Wan,
     Mapped,
 }
@@ -119,9 +119,6 @@ impl Endpoint {
     }
     pub fn is_tcp(&self) -> bool {
         self.protocol == Protocol::Tcp
-    }
-    pub fn is_sys_default(&self) -> bool {
-        self.area == EndpointArea::Default
     }
     pub fn is_static_wan(&self) -> bool {
         self.area == EndpointArea::Wan || self.area == EndpointArea::Mapped
@@ -231,10 +228,10 @@ impl std::fmt::Display for Endpoint {
         let mut result = String::new();
 
         result += match self.area {
-            EndpointArea::Lan => "L",     // LOCAL
-            EndpointArea::Default => "D", // DEFAULT,
-            EndpointArea::Wan => "W",     // WAN,
-            EndpointArea::Mapped => "M",  // MAPPED WAN,
+            EndpointArea::Lan => "L",             // LOCAL
+            EndpointArea::ServerReflexive => "S", // SERVER REFLEXIVE
+            EndpointArea::Wan => "W",             // WAN
+            EndpointArea::Mapped => "M",          // MAPPED WAN
         };
 
         result += match self.addr {
@@ -263,7 +260,7 @@ impl FromStr for Endpoint {
                 "W" => Ok(EndpointArea::Wan),
                 "M" => Ok(EndpointArea::Mapped),
                 "L" => Ok(EndpointArea::Lan),
-                "D" => Ok(EndpointArea::Default),
+                "S" => Ok(EndpointArea::ServerReflexive),
                 _ => Err(P2pError::new(
                     P2pErrorCode::InvalidInput,
                     format!("invalid endpoint string {}", s),
@@ -353,7 +350,7 @@ const ENDPOINT_IP_VERSION_6: u8 = 1u8 << 4;
 const ENDPOINT_IP_VERSION_MASK: u8 = 0x10;
 
 const ENDPOINT_AREA_LAN: u8 = 0u8 << 5;
-const ENDPOINT_AREA_DEFAULT: u8 = 1u8 << 5;
+const ENDPOINT_AREA_SERVER_REFLEXIVE: u8 = 1u8 << 5;
 const ENDPOINT_AREA_WAN: u8 = 2u8 << 5;
 const ENDPOINT_AREA_MAPPED: u8 = 3u8 << 5;
 
@@ -378,7 +375,7 @@ impl Endpoint {
         };
         flags |= match self.area {
             EndpointArea::Lan => ENDPOINT_AREA_LAN,
-            EndpointArea::Default => ENDPOINT_AREA_DEFAULT,
+            EndpointArea::ServerReflexive => ENDPOINT_AREA_SERVER_REFLEXIVE,
             EndpointArea::Wan => ENDPOINT_AREA_WAN,
             EndpointArea::Mapped => ENDPOINT_AREA_MAPPED,
         };
@@ -452,10 +449,10 @@ impl Endpoint {
         };
         let area = match flags & ENDPOINT_AREA_MASK {
             ENDPOINT_AREA_LAN => EndpointArea::Lan,
-            ENDPOINT_AREA_DEFAULT => EndpointArea::Default,
+            ENDPOINT_AREA_SERVER_REFLEXIVE => EndpointArea::ServerReflexive,
             ENDPOINT_AREA_WAN => EndpointArea::Wan,
             ENDPOINT_AREA_MAPPED => EndpointArea::Mapped,
-            _ => EndpointArea::Default,
+            _ => EndpointArea::Lan,
         };
 
         let port = {
@@ -554,5 +551,47 @@ impl<'de> RawDecode<'de> for Endpoint {
         }
         let flags = buf[0];
         Self::raw_decode_no_flags(flags, &buf[1..])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bucky_raw_codec::{RawDecode, RawEncode};
+
+    #[test]
+    fn server_reflexive_uses_s_text_codec() {
+        let mut endpoint = Endpoint::from((
+            Protocol::Quic,
+            "203.0.113.7:3456".parse::<SocketAddr>().unwrap(),
+        ));
+        endpoint.set_area(EndpointArea::ServerReflexive);
+
+        let encoded = endpoint.to_string();
+        assert!(encoded.starts_with("S4qic"));
+        assert_eq!(
+            Endpoint::from_str(&encoded).unwrap().get_area(),
+            EndpointArea::ServerReflexive
+        );
+        assert!(Endpoint::from_str("D4qic203.0.113.7:3456").is_err());
+        assert!(!endpoint.is_static_wan());
+    }
+
+    #[test]
+    fn server_reflexive_round_trips_raw_codec() {
+        let mut endpoint = Endpoint::from((
+            Protocol::Tcp,
+            "203.0.113.8:3457".parse::<SocketAddr>().unwrap(),
+        ));
+        endpoint.set_area(EndpointArea::ServerReflexive);
+
+        let mut buf = vec![0u8; endpoint.raw_measure(&None).unwrap()];
+        let remain = endpoint.raw_encode(&mut buf, &None).unwrap();
+        assert!(remain.is_empty());
+
+        let (decoded, remain) = Endpoint::raw_decode(buf.as_slice()).unwrap();
+        assert!(remain.is_empty());
+        assert_eq!(decoded.get_area(), EndpointArea::ServerReflexive);
+        assert_eq!(decoded, endpoint);
     }
 }

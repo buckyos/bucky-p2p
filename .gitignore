@@ -1,3 +1,19 @@
 /target
 logs
 *.log
+
+# Python/runtime generated files
+__pycache__/
+*.py[cod]
+
+# Local editor and agent state
+.codex
+.idea/
+
+# Local runtime state and generated node credentials
+devices/
+profile/
+sn/
+sn.desc
+sn.sec
+tree.txt

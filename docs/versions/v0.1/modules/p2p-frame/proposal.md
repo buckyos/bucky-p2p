@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-05-10
+approved_at: 2026-05-13
 ---
 
 # p2p-frame 提案
@@ -15,6 +15,7 @@ approved_at: 2026-05-10
 - 本轮新增需求是为 `PnTunnel` 定义本地 idle 生命周期关闭语义：当 tunnel 上无 active、pending 或 queued channel 且持续达到配置的 idle timeout（默认 30 分钟）时，本端必须按与普通 tunnel close 一致的路径原子关闭该 `PnTunnel`，让该对象上的 `accept_*` 等待者出错、后续 `open_*` 被拒绝；若之后又收到同一 `(remote_id, tunnel_id)` 的 inbound open，本端必须按现有 listener 流程重新创建新的 passive `PnTunnel`。
 - 本轮新增需求是为 `PnTunnel` 在 logical tunnel 打开时建立一条控制通道，使其具备与 `TcpTunnel` / `QuicTunnel` 同类的对端关闭感知能力；当对端关闭或控制通道断开时，本端不能继续误认为该 tunnel 可用，而必须让本地 `PnTunnel` 进入关闭或错误终态，并唤醒相关 open/accept 等待路径。
 - 本轮新增需求是优化单 SN 场景下的 NAT 打洞成功率：在不引入多 SN、不重写 SN/PN 协议、不取消 proxy 兜底的前提下，让 tunnel 建立流程能够使用更实时的候选端点、更适合 QUIC/UDP NAT 打洞的 direct/reverse 竞速窗口、更快的 proxy 脱代理重试，以及更细粒度的 endpoint 评分和刷新策略。本轮新增澄清是：QUIC listener 的同源 UDP punch 不再限定为 2-4 个短包，而是改为在单次 candidate intent 内按固定 50ms 间隔发送，默认持续到 1 秒截止；其中 active punch 从 `250ms` offset 才开始发送，reverse punch 必须立即开始发送，并继续受 SN 存在性、同源 socket 和单次连接开关约束。
+- 本轮新增需求是收敛 endpoint area 语义：`EndpointArea::Default` 不再表示 system default，而应重命名为 `ServerReflexive`，用于标识 SN 从连接来源观察到的节点外网地址；SN 观察地址只有与节点自己上报的地址相同时才能升级为 `Wan`，否则必须保持为 `ServerReflexive`，从而区分节点自声明公网地址与 SN 侧反射地址。
 
 ## 范围
 ### 范围内
@@ -41,6 +42,7 @@ approved_at: 2026-05-10
 - 控制通道必须能让本端感知对端关闭、控制面读写失败或控制通道断开，并按普通 tunnel close 的本地效果关闭当前 `PnTunnel`
 - `PnTunnel` 控制通道关闭和 idle timeout 关闭必须共享同一关闭状态机，避免同一对象被重复关闭、重新打开，或在 close 后继续接收新的 channel
 - 单 SN 场景下的 NAT 打洞优化，包括 direct/reverse 统一短延迟竞速、`SnCall` 携带本次反连候选端点、proxy 后短窗口脱代理升级、endpoint 评分按协议隔离，以及 tunnel 建立前组合 SN 观察端点或本地映射候选
+- endpoint area 语义更新：将 `Default` 改名为 `ServerReflexive`，将 SN 观察到但未与节点自上报地址一致的外网地址标记为 `ServerReflexive`，只有一致时才标记为 `Wan`
 - NAT 打洞优化必须优先覆盖 QUIC/UDP tunnel；TCP 直连仍可保留现有静态 WAN 或明确映射端口路径，但不得把 TCP 失败扩散为 QUIC/UDP 候选降权依据
 - proxy 仍是最终兜底连通性；优化目标是更快从 proxy 升级为 direct/reverse，而不是移除 proxy 或让 proxy 参与后台升级成功判定
 - `TunnelManager` 复用已有 tunnel 时，若同一远端同时存在多个可用候选，必须优先返回非 proxy tunnel；proxy 只在没有可用非 proxy candidate 时作为兜底复用路径
@@ -63,6 +65,7 @@ approved_at: 2026-05-10
 - 引入完整 STUN/TURN 协议栈、外部第三方 NAT 探测服务，或把 PN relay 替换为 TURN 等价服务
 - 将 NAT 打洞优化扩展成二层广播域、L2 bridge、虚拟局域网自动发现或跨网段服务发现能力
 - 为本轮同时设计双边 NAT 类型数据库、长期全局路径质量服务或跨进程持久化的连接质量画像
+- 保留 `Default` 作为 endpoint area 的公开语义，或继续用 `D` 作为 `Display`/`FromStr` 的 area 标记
 
 ### 与相邻模块的边界
 - `cyfs-p2p` 可以适配 `p2p-frame`，但不拥有 `p2p-frame` 的协议语义。
@@ -75,6 +78,7 @@ approved_at: 2026-05-10
 - proxy tunnel 的 `datagram` 明文兼容语义同样属于 `p2p-frame` 的 PN/tunnel 责任边界；`cyfs-p2p` 不得通过适配层把 `stream` 加密模式扩展成 `datagram` 拒绝或隐式加密语义。
 - NAT 打洞优化属于 `p2p-frame/src/tunnel/**`、`p2p-frame/src/sn/client/**` 和必要的 SN 服务端候选转发边界；`cyfs-p2p` 可以暴露配置或消费行为，但不得在适配层分叉 tunnel 建立策略。
 - SN 服务端在本轮只承担单 SN 的观察端点、上报候选和 call/called 转发职责；它不负责判定最终连通性，也不负责跨多个 SN 汇总 NAT 类型。
+- SN 观察地址分类属于 `p2p-frame` 的 SN/tunnel endpoint 语义边界；下游适配层不得把 `ServerReflexive` 与节点自声明 `Wan` 静默合并成同一类地址。
 
 ## 约束
 - 允许使用的库/组件：
@@ -116,6 +120,8 @@ approved_at: 2026-05-10
 - QUIC/UDP NAT 打洞场景下，reverse 不应被固定为 direct 失败后的长延迟补救；具体延迟与触发条件必须由 design 明确，并可由 unit 测试验证。
 - QUIC/UDP NAT 打洞场景下，同源 UDP punch 必须在本次连接开始后按固定 50ms cadence 发送，默认持续到 1 秒截止；active path 只能从 `250ms` offset 开始发首包，reverse path 必须从 `0ms` 立即发首包。若本次 NAT hedged window 更短，则只能在更短窗口内裁剪，禁止无限重发或跨 candidate 共享重试状态。
 - `SnCall` 携带的反连候选必须来自本次可解释的本地 listener、SN 观察端点或映射端口集合，且必须避免重复候选。
+- SN 服务端生成或扩展观察端点时，若观察到的外网地址与节点自上报地址相同，才允许把该 endpoint 标记为 `Wan`；若不同，必须标记为 `ServerReflexive`。
+- `EndpointArea::ServerReflexive` 的文本编码必须使用 `S`，`Display`、`FromStr` 和 raw codec 的 area 语义必须同步；原 `is_sys_default()` system-default 语义不再保留为公开判定入口。
 - proxy 脱代理升级必须在 proxy 连通后进入短窗口重试，再回到有上限的指数退避；后台升级路径不得把再次建立 proxy 视为升级成功。
 
 ## 高层结果
@@ -134,6 +140,7 @@ approved_at: 2026-05-10
 - 在 SN 存在且 `TunnelManager` 为本次 candidate intent 开启的 QUIC/UDP NAT 候选上，同源 UDP punch 能以固定 50ms cadence 从同一本地端口发送，默认持续到 1 秒截止；其中 active 起发时机晚于 reverse，以兼顾正向握手推进与反向 NAT 映射抢开，而不引入新的 raw UDP 接收或业务语义。
 - endpoint 选择能区分协议、历史成功和失败；TCP 与 QUIC/UDP 的失败统计不得互相污染。
 - SN report / call 相关候选传递保持 `SnCallResp` 与最终 tunnel 连通性结果解耦。
+- endpoint area 能明确区分节点自声明公网地址与 SN 反射地址：相同地址可作为 `Wan`，不相同地址作为 `ServerReflexive`，并通过 `S` 文本标记序列化。
 
 ## 风险
 - 旧设计说明与未来实现之间的协议漂移
@@ -159,6 +166,7 @@ approved_at: 2026-05-10
 - proxy 后短窗口脱代理会增加 SN call、direct connect 和 reverse waiter 的频率，需要有退避、上限和并发保护，避免在弱网络下形成重试风暴。
 - 若按协议拆分评分实现不完整，可能出现 TCP 与 QUIC/UDP 路径质量互相污染，降低原本可成功的打洞候选优先级。
 - NAT 打洞运行时结果高度依赖真实网络环境，unit 测试只能覆盖调度和候选规则；DV 或 integration 需要明确哪些结果是可自动断言，哪些只能作为运行证据。
+- `Default` 改名为 `ServerReflexive` 会影响公开枚举、字符串编解码和已有外部配置/日志；如果下游仍依赖 `D` 或 `is_sys_default()`，实现阶段需要明确兼容或破坏性迁移边界。
 
 ## 验收锚点
 - source 侧用户能够通过 `pn_server` 的查询入口看到属于自己这条 bridge 的累计统计，且记账主体使用 relay 规范化后的已认证 `req.from`，不受源端伪造 `from` 影响。
@@ -179,3 +187,9 @@ approved_at: 2026-05-10
 - 当同一远端同时存在已发布的非 proxy candidate 和 proxy candidate 时，`get_tunnel()` 或等价默认复用路径必须优先选择非 proxy candidate，即使 proxy candidate 更新时间更晚。
 - endpoint 评分必须能按协议独立影响候选顺序，且 TCP 失败不得降低 QUIC/UDP 候选的打洞优先级。
 - 单 SN 优化不得引入多 SN fanout 或跨 SN NAT 类型推断；acceptance 必须确认最终实现仍只依赖单 SN 信令与观察端点。
+- SN 观察 endpoint 分类必须可验收：当 SN 观察地址与节点自上报地址一致时输出 `Wan`，不一致时输出 `ServerReflexive`；`EndpointArea` 的显示、解析和 raw codec 语义必须使用 `ServerReflexive` / `S`，且不再暴露 `is_sys_default()` 判定。
+
+## Proposal Items
+| proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
+|-------------|-----------|---------|--------------------------|------------------|
+| P-ENDPOINT-AREA-1 | endpoint_area_server_reflexive | `EndpointArea::Default` 重命名为 `ServerReflexive`，SN 观察到的节点外网地址只有与节点自上报地址一致时标记为 `Wan`，否则标记为 `ServerReflexive`；文本编码使用 `S`，不再保留 `is_sys_default()` system-default 判定。 | 不引入 STUN/TURN、多 SN NAT 类型推断或新的 endpoint area；不继续把 `D` 作为 `ServerReflexive` 的文本标记；不把 SN 反射地址静默等同于节点自声明公网地址。 | unit 能覆盖 SN 观察地址一致/不一致时的 area 分类，覆盖 `Display`/`FromStr`/raw codec 的 `ServerReflexive` / `S` 编解码，并确认 `is_sys_default()` 不再作为公开方法存在。 |
