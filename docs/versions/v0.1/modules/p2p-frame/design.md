@@ -23,6 +23,7 @@ approved_at: 2026-05-13
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
 - 为本轮单 SN NAT 打洞优化建立可执行设计边界，包括 direct/reverse 统一 300ms 短延迟竞速、`SnCall` 本次反连候选、QUIC listener 同源 UDP punch burst、proxy 短窗口脱代理升级，以及按协议拆分的 endpoint 评分。
 - 为本轮 endpoint area 语义变更建立可执行设计边界：`EndpointArea::Default` 重命名为 `ServerReflexive`，`Display`/`FromStr` 和 raw codec 使用 `S` 编码，SN 观察地址只有与节点自上报地址一致时才标记为 `Wan`，否则标记为 `ServerReflexive`，并移除 `is_sys_default()` 的公开判定入口。
+- 为本轮 `ServerReflexive` QUIC NAT keepalive 需求建立可执行设计边界：UDP punch 只对 `EndpointArea::ServerReflexive` QUIC candidate 开启，QUIC tunnel 控制心跳发送间隔保持现有值，heartbeat timeout 调整为 30 秒。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -96,11 +97,12 @@ approved_at: 2026-05-13
 - `TunnelManager` 在默认复用已有 tunnel 时必须先从已发布候选中选择；同一可见性层级下，非 proxy candidate 优先于 proxy candidate，只有没有可用非 proxy candidate 时才返回 proxy。若存在多个同类候选，再按最近更新时间选择最新候选。
 - direct 与 reverse 必须使用同一个 logical `tunnel_id` 进行 hedged 建链；reverse 的启动延迟统一为 300ms，而不是固定等待 direct 路径 2 秒。
 - QUIC/UDP NAT 候选场景下，可以在 direct/reverse 建链窗口内发送少量 best-effort 原生 UDP punch 包；该机制必须使用与 QUIC listener 相同的本地 UDP socket/端口或该 socket 的 send-only clone，不得新建不同源端口的 UDP socket 伪装成同一路径打洞。
-- UDP punch 只允许在 SN service 存在时面向非 WAN QUIC/UDP 候选启用；WAN、TCP 和 proxy fallback 路径不得因为该机制改变原有建链语义。映射端点在当前实现中按 WAN endpoint 处理。
+- UDP punch 只允许在 SN service 存在时面向 `EndpointArea::ServerReflexive` QUIC/UDP 候选启用；`Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口和 proxy fallback 路径不得因为该机制改变原有建链语义。映射端点在当前实现中按 WAN endpoint 处理，不触发 punch。
 - UDP punch 必须通过本次连接的 `TunnelConnectIntent` 启用，默认不发送；`TunnelManager` 只有在存在 SN service 且候选符合策略时才为本次 candidate intent 开启该开关。该开关只控制这一次 QUIC 建链的 punch 调度，不改变 `TunnelNetwork` trait 参数或 tunnel 成功条件。
 - UDP punch 包必须是本地实现私有的短探测载荷；载荷内容和长度都可以每包随机生成，长度范围限定为 `5..=30` 字节，不要求包含固定 magic、版本、`tunnel_id`、`candidate_id` 或方向标记，也不得被任一侧依赖为协议语义。payload 首字节必须清除 QUIC fixed bit `0x40`，避免随机探测包碰撞成符合 QUIC packet invariant 的输入。接收侧不解析、不确认、不投递给上层，QUIC listener 继续把这些非 QUIC datagram 作为无效输入丢弃。
 - UDP punch 发送失败、被丢包或被远端忽略不得直接判定 tunnel 成败；真正的成功条件仍是后续 QUIC handshake 和 `TunnelManager` register/publish 生命周期完成。
 - UDP punch burst 必须有严格上限：reverse burst 在启动后立即发送第一包，active burst 则从 `250ms` offset 才发送第一包；之后两者都固定每 `50ms` 一包，默认最晚到 `1s` 截止，并受 NAT hedged window 约束裁剪，避免在弱网或 proxy 脱代理重试中形成无限重发或发送风暴。
+- QUIC tunnel 控制心跳发送间隔保持现有默认值；heartbeat timeout 调整为 30 秒。该调整只改变失活判定阈值，不新增上层业务心跳、raw UDP keepalive 协议或公共 `TunnelNetwork` 参数；心跳超时后的关闭仍走既有 QUIC tunnel close/error 路径。
 - `SNClientService::call(...)` 必须支持调用方传入本次建链的 `reverse_endpoint_array`；若调用方不传，仍保持现有兼容语义。候选来源和去重由 `tunnel` / `sn/client` 设计补充文档定义。
 - `EndpointArea::ServerReflexive` 是 SN 观察到的 server-reflexive endpoint 标记，不代表系统默认绑定地址。`Endpoint` 的文本编码必须用 `S` 表示该 area，字符串解析只把 `S` 映射到 `ServerReflexive`；raw codec 继续复用原 area bit 位置，但语义名改为 `ServerReflexive`。
 - `Endpoint::is_sys_default()` 不再属于公开接口；实现阶段应删除该方法并修正调用点。若发现下游依赖该方法，应退回 design 明确兼容策略，而不是保留旧 system-default 语义。
@@ -167,6 +169,7 @@ p2p-frame/src
 | `PnTunnel` tunnel 级控制通道与远端关闭感知 | control channel ready gate、控制接收循环、heartbeat、close 命令和统一关闭状态机 | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、必要 `p2p-frame/src/pn/service/pn_server.rs` bridge 路径 | 若实现阶段发现现有 `ProxyOpenReq` 无法无歧义承载 control channel，应扩展 PN protocol 的 control open 命令或 kind，而不是复用业务 stream/datagram kind 造成兼容歧义。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 | 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
+| `ServerReflexive` QUIC NAT keepalive | UDP punch candidate policy 收窄为 `EndpointArea::ServerReflexive` QUIC endpoint；QUIC tunnel heartbeat interval 保持现有值，heartbeat timeout 调整为 30 秒 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、必要 `p2p-frame/src/networks/quic/listener.rs` 测试 | 若实现阶段需要改变 heartbeat interval、增加 raw UDP keepalive、让远端解析 punch payload 或修改公共 `TunnelNetwork` trait，应退回 proposal。 |
 | 多个已有 tunnel candidate 的默认复用选择 | published 优先，非 proxy 优先于 proxy，同类候选内选择最新 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现 proxy 仍可能覆盖已发布 direct/passive candidate，应优先修正 `get_tunnel()` 选择策略，而不是让后台脱代理升级成为唯一恢复路径。 |
 | `EndpointArea::ServerReflexive` endpoint area 语义 | endpoint enum 命名、`S` 文本/codec 编码、SN 观察地址 `Wan` / `ServerReflexive` 分类、删除 `is_sys_default()` | `p2p-frame/src/endpoint.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/tunnel/**` | 若实现阶段发现必须继续兼容 `D` 或 `is_sys_default()`，应退回 design 明确兼容策略；若需要 STUN/TURN 或跨 SN NAT 类型推断，应退回 proposal。 |
 
@@ -174,6 +177,7 @@ p2p-frame/src
 | change_id | proposal_id | Design Coverage | Scope Paths | Risk / Rollback Notes |
 |-----------|-------------|-----------------|-------------|-----------------------|
 | endpoint_area_server_reflexive | P-ENDPOINT-AREA-1 | 将 `EndpointArea::Default` 重命名为 `ServerReflexive`；`Display`/`FromStr` 使用 `S`，raw codec 保持 area bit 位置但更新语义；SN 观察地址与节点自上报 endpoint 完全一致时标记 `Wan`，否则标记 `ServerReflexive`；删除 `is_sys_default()` 并保持 `is_static_wan()` 只覆盖 `Wan` / `Mapped`。 | `p2p-frame/src/endpoint.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/tunnel/**`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 该变更影响公开枚举和文本编码；若下游依赖 `D` 或旧 method，回滚应恢复旧 enum/codec 并退回 proposal 重新定义兼容窗口。 |
+| server_reflexive_quic_nat_keepalive | P-QUIC-SR-NAT-KEEPALIVE-1 | UDP punch 只由 `EndpointArea::ServerReflexive` QUIC candidate 在 SN service 存在且满足非 LAN IPv4、非 0 端口基本条件时开启；`Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口和默认 intent 路径不触发 punch；QUIC tunnel heartbeat interval 保持现有值，heartbeat timeout 调整为 30 秒。 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、必要 `p2p-frame/src/networks/quic/listener.rs` 测试 | 该变更收窄 punch 触发面并放宽 QUIC heartbeat timeout；若回滚，应恢复旧 candidate policy 和旧 timeout 常量，但不得重新引入 raw UDP 协议或公共 trait 参数。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。

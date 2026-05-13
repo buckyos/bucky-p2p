@@ -16,6 +16,7 @@ approved_at: 2026-05-13
 - 本轮新增需求是为 `PnTunnel` 在 logical tunnel 打开时建立一条控制通道，使其具备与 `TcpTunnel` / `QuicTunnel` 同类的对端关闭感知能力；当对端关闭或控制通道断开时，本端不能继续误认为该 tunnel 可用，而必须让本地 `PnTunnel` 进入关闭或错误终态，并唤醒相关 open/accept 等待路径。
 - 本轮新增需求是优化单 SN 场景下的 NAT 打洞成功率：在不引入多 SN、不重写 SN/PN 协议、不取消 proxy 兜底的前提下，让 tunnel 建立流程能够使用更实时的候选端点、更适合 QUIC/UDP NAT 打洞的 direct/reverse 竞速窗口、更快的 proxy 脱代理重试，以及更细粒度的 endpoint 评分和刷新策略。本轮新增澄清是：QUIC listener 的同源 UDP punch 不再限定为 2-4 个短包，而是改为在单次 candidate intent 内按固定 50ms 间隔发送，默认持续到 1 秒截止；其中 active punch 从 `250ms` offset 才开始发送，reverse punch 必须立即开始发送，并继续受 SN 存在性、同源 socket 和单次连接开关约束。
 - 本轮新增需求是收敛 endpoint area 语义：`EndpointArea::Default` 不再表示 system default，而应重命名为 `ServerReflexive`，用于标识 SN 从连接来源观察到的节点外网地址；SN 观察地址只有与节点自己上报的地址相同时才能升级为 `Wan`，否则必须保持为 `ServerReflexive`，从而区分节点自声明公网地址与 SN 侧反射地址。
+- 本轮新增需求是进一步收窄 QUIC NAT 打洞辅助的触发条件：同源 UDP punch 只应面向 `EndpointArea::ServerReflexive` 的 QUIC endpoint 发起，不再面向普通 `Lan`、`Wan`、`Mapped` 或仅凭公网 IP 判断的 endpoint 发起；同时，现有 QUIC tunnel 控制心跳发送间隔保持不变，但心跳超时阈值应调整为 30 秒，降低弱网或调度抖动下的误关闭概率。
 
 ## 范围
 ### 范围内
@@ -43,6 +44,8 @@ approved_at: 2026-05-13
 - `PnTunnel` 控制通道关闭和 idle timeout 关闭必须共享同一关闭状态机，避免同一对象被重复关闭、重新打开，或在 close 后继续接收新的 channel
 - 单 SN 场景下的 NAT 打洞优化，包括 direct/reverse 统一短延迟竞速、`SnCall` 携带本次反连候选端点、proxy 后短窗口脱代理升级、endpoint 评分按协议隔离，以及 tunnel 建立前组合 SN 观察端点或本地映射候选
 - endpoint area 语义更新：将 `Default` 改名为 `ServerReflexive`，将 SN 观察到但未与节点自上报地址一致的外网地址标记为 `ServerReflexive`，只有一致时才标记为 `Wan`
+- QUIC NAT punch 策略收窄：只有目标 endpoint 的 area 是 `ServerReflexive` 时，`TunnelManager` 才能为本次 QUIC candidate intent 开启同源 UDP punch
+- QUIC tunnel 控制心跳超时策略：保持现有心跳发送间隔不变，将失活判定超时调整为 30 秒
 - NAT 打洞优化必须优先覆盖 QUIC/UDP tunnel；TCP 直连仍可保留现有静态 WAN 或明确映射端口路径，但不得把 TCP 失败扩散为 QUIC/UDP 候选降权依据
 - proxy 仍是最终兜底连通性；优化目标是更快从 proxy 升级为 direct/reverse，而不是移除 proxy 或让 proxy 参与后台升级成功判定
 - `TunnelManager` 复用已有 tunnel 时，若同一远端同时存在多个可用候选，必须优先返回非 proxy tunnel；proxy 只在没有可用非 proxy candidate 时作为兜底复用路径
@@ -66,6 +69,9 @@ approved_at: 2026-05-13
 - 将 NAT 打洞优化扩展成二层广播域、L2 bridge、虚拟局域网自动发现或跨网段服务发现能力
 - 为本轮同时设计双边 NAT 类型数据库、长期全局路径质量服务或跨进程持久化的连接质量画像
 - 保留 `Default` 作为 endpoint area 的公开语义，或继续用 `D` 作为 `Display`/`FromStr` 的 area 标记
+- 对非 `ServerReflexive` endpoint 发起 UDP punch，包括仅因地址是非 LAN IPv4 就发起 punch
+- 为 `ServerReflexive` tunnel 引入新的上层业务心跳、raw UDP keepalive 协议、额外心跳发送频率或要求远端解析 punch payload
+- 改变 QUIC tunnel 现有心跳发送间隔；本轮只允许调整心跳超时阈值
 
 ### 与相邻模块的边界
 - `cyfs-p2p` 可以适配 `p2p-frame`，但不拥有 `p2p-frame` 的协议语义。
@@ -119,6 +125,8 @@ approved_at: 2026-05-13
 - NAT 打洞路径必须保持同一次逻辑建链共享同一个 `tunnel_id`；direct 与 reverse 竞速只能改变候选时机，不能破坏 candidate 注册、reverse waiter 和 publish 生命周期。
 - QUIC/UDP NAT 打洞场景下，reverse 不应被固定为 direct 失败后的长延迟补救；具体延迟与触发条件必须由 design 明确，并可由 unit 测试验证。
 - QUIC/UDP NAT 打洞场景下，同源 UDP punch 必须在本次连接开始后按固定 50ms cadence 发送，默认持续到 1 秒截止；active path 只能从 `250ms` offset 开始发首包，reverse path 必须从 `0ms` 立即发首包。若本次 NAT hedged window 更短，则只能在更短窗口内裁剪，禁止无限重发或跨 candidate 共享重试状态。
+- QUIC/UDP NAT 打洞场景下，同源 UDP punch 的候选准入必须以 endpoint area 为准：只有 `EndpointArea::ServerReflexive` 且满足 QUIC、非 LAN IPv4、非 0 端口等基本发送条件时才可开启；`Wan`、`Mapped`、`Lan` 和未标记为 `ServerReflexive` 的公网 endpoint 不得触发 punch。
+- QUIC tunnel 控制心跳必须保持现有发送间隔不变，仅将 heartbeat timeout 调整为 30 秒；该策略不得改变通用 `TunnelNetwork` trait 签名，也不得要求下游调用方显式传入 NAT 类型。
 - `SnCall` 携带的反连候选必须来自本次可解释的本地 listener、SN 观察端点或映射端口集合，且必须避免重复候选。
 - SN 服务端生成或扩展观察端点时，若观察到的外网地址与节点自上报地址相同，才允许把该 endpoint 标记为 `Wan`；若不同，必须标记为 `ServerReflexive`。
 - `EndpointArea::ServerReflexive` 的文本编码必须使用 `S`，`Display`、`FromStr` 和 raw codec 的 area 语义必须同步；原 `is_sys_default()` system-default 语义不再保留为公开判定入口。
@@ -138,6 +146,8 @@ approved_at: 2026-05-13
 - `PnTunnel` 打开后具备 tunnel 级控制通道；当对端关闭或控制通道断开时，本端能够及时关闭当前 `PnTunnel`，避免继续复用一个远端已经不可用的 logical tunnel。
 - 单 SN NAT 打洞路径能以统一 300ms 延迟启动 direct/reverse 竞速，使用本次建链反连候选，并在 proxy 兜底后更快尝试脱代理升级。
 - 在 SN 存在且 `TunnelManager` 为本次 candidate intent 开启的 QUIC/UDP NAT 候选上，同源 UDP punch 能以固定 50ms cadence 从同一本地端口发送，默认持续到 1 秒截止；其中 active 起发时机晚于 reverse，以兼顾正向握手推进与反向 NAT 映射抢开，而不引入新的 raw UDP 接收或业务语义。
+- 同源 UDP punch 不再由“非 WAN 公网 QUIC endpoint”泛化触发，而是只由 `ServerReflexive` QUIC endpoint 触发，避免对静态公网、映射端口或 LAN endpoint 发送无收益的 NAT punch。
+- QUIC tunnel 在保持现有心跳发送间隔的同时，将心跳超时阈值调整为 30 秒，降低短时弱网、调度抖动或 NAT 路径抖动导致的误关闭概率。
 - endpoint 选择能区分协议、历史成功和失败；TCP 与 QUIC/UDP 的失败统计不得互相污染。
 - SN report / call 相关候选传递保持 `SnCallResp` 与最终 tunnel 连通性结果解耦。
 - endpoint area 能明确区分节点自声明公网地址与 SN 反射地址：相同地址可作为 `Wan`，不相同地址作为 `ServerReflexive`，并通过 `S` 文本标记序列化。
@@ -182,6 +192,8 @@ approved_at: 2026-05-13
 - 控制通道关闭与 idle timeout 关闭必须保持幂等，并且 close 后的同一 `(remote_id, tunnel_id)` inbound open 不得投递到旧对象。
 - QUIC/UDP NAT 候选场景下，`TunnelManager` 的 direct/reverse 竞速统一延迟 300ms 启动 reverse；具体短延迟规则必须由 design/testing 直接覆盖。
 - QUIC/UDP NAT 候选场景下，同源 UDP punch 必须以固定 50ms cadence 发送，并在 1 秒截止或更短的 NAT hedged window 结束时停止；active 首包只能在 `250ms` 起发，reverse 首包必须在 `0ms` 起发。acceptance 必须确认实现没有把该行为扩展成无限重发、独立 UDP socket 或 raw UDP 协议。
+- QUIC/UDP NAT punch 必须只对 `ServerReflexive` endpoint 开启；acceptance 必须确认 `Wan`、`Mapped`、`Lan`、TCP、IPv6、0 端口和默认 intent 路径均不会开启 punch。
+- QUIC tunnel heartbeat timeout 必须调整为 30 秒，且心跳发送间隔保持现有值不变；acceptance 必须确认心跳超时仍走既有 QUIC tunnel close/error 路径。
 - `open_reverse_path()` 或其等价路径发起 `SnCall` 时，必须能携带本次建链的 `reverse_endpoint_array`，且 SN 转发后的 `SnCalled` 保留这些候选。
 - proxy tunnel 成功后，后台脱代理升级必须先进入短窗口 direct/reverse 重试，再进入有上限的指数退避；升级成功后非 proxy candidate 必须按统一 register/publish 生命周期可见。
 - 当同一远端同时存在已发布的非 proxy candidate 和 proxy candidate 时，`get_tunnel()` 或等价默认复用路径必须优先选择非 proxy candidate，即使 proxy candidate 更新时间更晚。
@@ -193,3 +205,4 @@ approved_at: 2026-05-13
 | proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
 |-------------|-----------|---------|--------------------------|------------------|
 | P-ENDPOINT-AREA-1 | endpoint_area_server_reflexive | `EndpointArea::Default` 重命名为 `ServerReflexive`，SN 观察到的节点外网地址只有与节点自上报地址一致时标记为 `Wan`，否则标记为 `ServerReflexive`；文本编码使用 `S`，不再保留 `is_sys_default()` system-default 判定。 | 不引入 STUN/TURN、多 SN NAT 类型推断或新的 endpoint area；不继续把 `D` 作为 `ServerReflexive` 的文本标记；不把 SN 反射地址静默等同于节点自声明公网地址。 | unit 能覆盖 SN 观察地址一致/不一致时的 area 分类，覆盖 `Display`/`FromStr`/raw codec 的 `ServerReflexive` / `S` 编解码，并确认 `is_sys_default()` 不再作为公开方法存在。 |
+| P-QUIC-SR-NAT-KEEPALIVE-1 | server_reflexive_quic_nat_keepalive | QUIC 同源 UDP punch 只对 `EndpointArea::ServerReflexive` candidate 开启；QUIC tunnel 保持现有控制心跳发送间隔不变，但 heartbeat timeout 调整为 30 秒。 | 不对 `Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口或默认 intent 发起 punch；不新增 raw UDP keepalive 协议、业务载荷解析或公共 `TunnelNetwork` trait 参数；不改变 QUIC tunnel 现有心跳发送间隔。 | unit 能覆盖 punch candidate policy 只接受 `ServerReflexive` QUIC endpoint，覆盖非 `ServerReflexive` endpoint 不开启 punch；unit 能覆盖 QUIC heartbeat interval 保持现有值且 heartbeat timeout 为 30 秒，且 heartbeat timeout 仍收敛到既有关闭路径。 |

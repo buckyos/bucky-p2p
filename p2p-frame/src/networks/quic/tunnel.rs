@@ -19,13 +19,24 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 
 const COMMAND_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-const COMMAND_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+const COMMAND_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, RawEncode, RawDecode)]
 enum TunnelChannelKind {
     Stream = 1,
     Datagram = 2,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quic_tunnel_heartbeat_timeout_is_thirty_seconds_without_interval_change() {
+        assert_eq!(COMMAND_HEARTBEAT_INTERVAL, Duration::from_secs(5));
+        assert_eq!(COMMAND_HEARTBEAT_TIMEOUT, Duration::from_secs(30));
+    }
 }
 
 #[repr(u8)]

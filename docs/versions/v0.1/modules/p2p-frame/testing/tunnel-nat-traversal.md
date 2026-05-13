@@ -7,8 +7,9 @@
 | 行为 | 建议或现有测试 | 预期结果 |
 |------|----------------|----------|
 | hedged direct/reverse 统一短延迟 | 待补 `nat_quic_candidates_use_short_reverse_delay` | direct 与 reverse 使用同一 `tunnel_id`，reverse 调度延迟固定为 300ms，不再按 endpoint 类型分成 2 秒窗口 |
-| QUIC UDP punch 单次连接开关默认关闭 | 待补 `tunnel_connect_intent_controls_udp_punch_per_connection_with_default_off` | 默认 `TunnelConnectIntent` 不发送 punch，`TunnelManager` 只有在 SN service 存在且候选符合策略时才为本次 candidate intent 开启 punch |
-| QUIC/UDP NAT 候选发送同源 UDP punch | 待补 `quic_nat_candidates_send_same_socket_udp_punch` | punch 从 QUIC listener 同一本地端口发送，只对非 WAN UDP 候选启用；reverse 在 `0ms` 起发，active 在 `250ms` 起发，之后都以固定 `50ms` cadence 发送，并在 `1s` 截止或更短 hedged window 结束时停止 |
+| QUIC UDP punch 单次连接开关默认关闭 | 待补 `tunnel_connect_intent_controls_udp_punch_per_connection_with_default_off` | 默认 `TunnelConnectIntent` 不发送 punch，`TunnelManager` 只有在 SN service 存在且候选是 `ServerReflexive` QUIC endpoint 时才为本次 candidate intent 开启 punch |
+| QUIC/UDP NAT 候选发送同源 UDP punch | 待补 `quic_nat_candidates_send_same_socket_udp_punch` | punch 从 QUIC listener 同一本地端口发送，只对 `EndpointArea::ServerReflexive` QUIC/UDP 候选启用；`Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口和无 SN service 反例不启用；reverse 在 `0ms` 起发，active 在 `250ms` 起发，之后都以固定 `50ms` cadence 发送，并在 `1s` 截止或更短 hedged window 结束时停止 |
+| QUIC tunnel heartbeat timeout | 待补 `quic_tunnel_heartbeat_timeout_is_thirty_seconds_without_interval_change` | QUIC heartbeat interval 保持现有 5 秒，heartbeat timeout 为 30 秒，timeout 后仍走既有 close/error 路径 |
 | UDP punch 发送失败不改变建链结果 | 待补 `udp_punch_send_failure_is_best_effort` | punch 失败只产生诊断，不让 `connect_with_ep(...)` 提前失败，也不改变后续 QUIC handshake 成败判定 |
 | UDP punch 不引入接收解析或业务载荷 | 现有 `udp_punch_payload_is_random_private_probe_data`，必要时补充 receive-path 断言 | punch payload 可为每包 `5..=30` 字节随机短载荷，首字节不得设置 QUIC fixed bit `0x40`，不要求包含 magic/version、tunnel/candidate 关联信息或方向标记，不被上层读取，不新增 raw UDP receive/ack 路径 |
 | `SnCall` 携带本次建链候选 | 待补 `reverse_path_passes_reverse_endpoints_to_sn_call` | `SNClientService::call(...)` 收到非空 `reverse_endpoint_array`，候选来自本地 listener / SN observed WAN / 映射端口组合集合 |
@@ -42,7 +43,8 @@ Integration 继续使用 `python3 ./harness/scripts/test-run.py p2p-frame integr
 - `cyfs-p2p`、`cyfs-p2p-test`、`sn-miner-rust` 不需要实现多 SN 或新的公开 tunnel trait。
 - `SNClientService::call(...)` 的兼容调用路径仍可用，未传候选时保持当前字段语义。
 - `TunnelNetwork` / `Tunnel` trait 不新增 NAT 专用参数。
-- QUIC UDP punch 不要求下游使用方处理 raw UDP payload，也不要求下游新增 socket；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选符合策略时才为本次 `TunnelConnectIntent` 开启。
+- QUIC UDP punch 不要求下游使用方处理 raw UDP payload，也不要求下游新增 socket；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选是 `ServerReflexive` QUIC endpoint 时才为本次 `TunnelConnectIntent` 开启。
+- QUIC heartbeat timeout 调整为 30 秒不得要求下游修改 `TunnelNetwork` / `Tunnel` trait，也不得新增业务心跳配置。
 - QUIC UDP punch 的 active `250ms` / reverse `0ms` 起发与 `50ms` / `1s` cadence 属于 `p2p-frame` 内部实现边界；integration 只验证该边界不会泄漏成新的公开 trait 参数、raw UDP 协议或额外 socket 依赖。
 - `ServerReflexive` 是 `p2p-frame` 的公开 endpoint area 语义；integration 必须覆盖下游 crate 编译测试边界，确认删除 `is_sys_default()` 和改用 `S` 编码不会留下未迁移调用点。
 

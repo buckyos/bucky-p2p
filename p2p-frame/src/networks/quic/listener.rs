@@ -1,5 +1,5 @@
 use super::tunnel::QuicTunnel;
-use crate::endpoint::{Endpoint, Protocol, is_non_lan_ipv4_addr};
+use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::finder::DeviceCache;
@@ -370,6 +370,7 @@ impl QuicTunnelListener {
 
 fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
     remote.protocol() == Protocol::Quic
+        && remote.get_area() == EndpointArea::ServerReflexive
         && is_non_lan_ipv4_addr(remote.addr())
         && remote.addr().port() != 0
 }
@@ -565,12 +566,12 @@ mod udp_punch_tests {
     }
 
     #[test]
-    fn udp_punch_policy_only_enables_quic_non_lan_ipv4_candidates() {
-        let public_quic_lan_area = endpoint(
+    fn udp_punch_policy_only_enables_server_reflexive_quic_non_lan_ipv4_candidates() {
+        let server_reflexive_quic = endpoint(
             Protocol::Quic,
             Ipv4Addr::new(8, 8, 8, 8),
             10001,
-            EndpointArea::Lan,
+            EndpointArea::ServerReflexive,
         );
         let public_quic_wan_area = endpoint(
             Protocol::Quic,
@@ -578,39 +579,54 @@ mod udp_punch_tests {
             10002,
             EndpointArea::Wan,
         );
+        let public_quic_mapped_area = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::new(8, 8, 4, 4),
+            10007,
+            EndpointArea::Mapped,
+        );
+        let public_quic_lan_area = endpoint(
+            Protocol::Quic,
+            Ipv4Addr::new(9, 9, 9, 9),
+            10008,
+            EndpointArea::Lan,
+        );
         let private_quic = endpoint(
             Protocol::Quic,
             Ipv4Addr::new(192, 168, 1, 10),
             10003,
-            EndpointArea::Wan,
+            EndpointArea::ServerReflexive,
         );
         let loopback_quic = endpoint(
             Protocol::Quic,
             Ipv4Addr::LOCALHOST,
             10004,
-            EndpointArea::Lan,
+            EndpointArea::ServerReflexive,
         );
         let tcp = endpoint(
             Protocol::Tcp,
             Ipv4Addr::new(8, 8, 4, 4),
             10005,
-            EndpointArea::Lan,
+            EndpointArea::ServerReflexive,
         );
         let zero_port_quic = endpoint(
             Protocol::Quic,
             Ipv4Addr::new(8, 8, 8, 8),
             0,
-            EndpointArea::Lan,
+            EndpointArea::ServerReflexive,
         );
-        let ipv6_quic = Endpoint::from((
+        let mut ipv6_quic = Endpoint::from((
             Protocol::Quic,
             "[2001:4860:4860::8888]:10006"
                 .parse::<SocketAddr>()
                 .unwrap(),
         ));
+        ipv6_quic.set_area(EndpointArea::ServerReflexive);
 
-        assert!(udp_punch_enabled_for_endpoint(&public_quic_lan_area));
-        assert!(udp_punch_enabled_for_endpoint(&public_quic_wan_area));
+        assert!(udp_punch_enabled_for_endpoint(&server_reflexive_quic));
+        assert!(!udp_punch_enabled_for_endpoint(&public_quic_lan_area));
+        assert!(!udp_punch_enabled_for_endpoint(&public_quic_wan_area));
+        assert!(!udp_punch_enabled_for_endpoint(&public_quic_mapped_area));
         assert!(!udp_punch_enabled_for_endpoint(&private_quic));
         assert!(!udp_punch_enabled_for_endpoint(&loopback_quic));
         assert!(!udp_punch_enabled_for_endpoint(&tcp));

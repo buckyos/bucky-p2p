@@ -5,7 +5,7 @@
 
 ## 职责
 - 负责传输/网络栈、tunnel 编排、PN/SN 协议行为、设备发现辅助能力、运行时抽象以及身份/TLS 支持。
-- `src/networks/quic/**` 负责 QUIC listener/socket 生命周期和与 QUIC 建链同源端口相关的底层 UDP 辅助行为；这类辅助行为默认关闭，只有 `TunnelManager` 在存在 SN service 且候选符合策略时才会为本次 `TunnelConnectIntent` 开启，且不得变成上层可见的 raw UDP tunnel 或业务载荷协议。UDP punch 的私有短载荷必须避开 QUIC packet invariant，例如首字节不得设置 QUIC fixed bit。
+- `src/networks/quic/**` 负责 QUIC listener/socket 生命周期、QUIC tunnel 控制心跳和与 QUIC 建链同源端口相关的底层 UDP 辅助行为；这类辅助行为默认关闭，只有 `TunnelManager` 在存在 SN service 且候选是 `ServerReflexive` QUIC endpoint 时才会为本次 `TunnelConnectIntent` 开启，且不得变成上层可见的 raw UDP tunnel 或业务载荷协议。UDP punch 的私有短载荷必须避开 QUIC packet invariant，例如首字节不得设置 QUIC fixed bit。QUIC tunnel 心跳发送间隔保持当前默认，heartbeat timeout 为 30 秒。
 - `src/endpoint.rs` 负责 endpoint area、协议和地址的公开语义及编解码；`ServerReflexive` 表示 SN 观察到但未与节点自上报地址一致的外网地址，文本编码使用 `S`，不得再作为 system default 语义使用。
 - `src/sn/**` 负责 SN 观察 endpoint 的归类：只有 SN 观察地址与节点自上报 endpoint 完全一致时才可标记为 `Wan`，否则必须标记为 `ServerReflexive`。
 - `src/pn/client/**` 负责 `PnTunnel` 本地生命周期、proxy channel open/accept、tunnel 级控制通道、对端关闭感知、idle timeout 关闭，以及关闭后同一 logical tunnel 后续 open 触发重新创建的语义。

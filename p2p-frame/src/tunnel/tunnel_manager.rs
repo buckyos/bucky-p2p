@@ -1,4 +1,4 @@
-use crate::endpoint::{Endpoint, Protocol, is_non_lan_ipv4_addr};
+use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
@@ -977,6 +977,7 @@ impl TunnelManager {
 
     fn udp_punch_enabled_for_candidate(endpoint: &Endpoint) -> bool {
         endpoint.protocol() == Protocol::Quic
+            && endpoint.get_area() == EndpointArea::ServerReflexive
             && is_non_lan_ipv4_addr(endpoint.addr())
             && endpoint.addr().port() != 0
     }
@@ -1900,24 +1901,38 @@ mod nat_strategy_tests {
     }
 
     #[test]
-    fn udp_punch_candidate_policy_requires_quic_non_lan_ipv4_endpoint() {
-        let public_quic = endpoint(Protocol::Quic, 22003);
+    fn udp_punch_candidate_policy_requires_server_reflexive_quic_non_lan_ipv4_endpoint() {
+        let mut server_reflexive_quic = endpoint(Protocol::Quic, 22003);
+        server_reflexive_quic.set_area(EndpointArea::ServerReflexive);
         let tcp = endpoint(Protocol::Tcp, 22004);
         let mut public_wan_area_quic = endpoint(Protocol::Quic, 22005);
         public_wan_area_quic.set_area(EndpointArea::Wan);
+        let mut mapped_quic = endpoint(Protocol::Quic, 22009);
+        mapped_quic.set_area(EndpointArea::Mapped);
+        let public_lan_area_quic = endpoint(Protocol::Quic, 22010);
         let private_quic = endpoint_with_ip(Protocol::Quic, [192, 168, 1, 10], 22006);
         let loopback_quic = endpoint_with_ip(Protocol::Quic, [127, 0, 0, 1], 22007);
-        let zero_port_quic = endpoint(Protocol::Quic, 0);
-        let ipv6_quic = Endpoint::from((
+        let mut zero_port_quic = endpoint(Protocol::Quic, 0);
+        zero_port_quic.set_area(EndpointArea::ServerReflexive);
+        let mut ipv6_quic = Endpoint::from((
             Protocol::Quic,
             "[2001:4860:4860::8888]:22008"
                 .parse::<SocketAddr>()
                 .unwrap(),
         ));
+        ipv6_quic.set_area(EndpointArea::ServerReflexive);
 
-        assert!(TunnelManager::udp_punch_enabled_for_candidate(&public_quic));
         assert!(TunnelManager::udp_punch_enabled_for_candidate(
+            &server_reflexive_quic
+        ));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(
+            &public_lan_area_quic
+        ));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(
             &public_wan_area_quic
+        ));
+        assert!(!TunnelManager::udp_punch_enabled_for_candidate(
+            &mapped_quic
         ));
         assert!(!TunnelManager::udp_punch_enabled_for_candidate(&tcp));
         assert!(!TunnelManager::udp_punch_enabled_for_candidate(
@@ -1934,19 +1949,24 @@ mod nat_strategy_tests {
 
     #[test]
     fn quic_nat_candidate_enables_udp_punch_only_when_sn_is_available() {
-        let lan_quic = endpoint(Protocol::Quic, 22006);
+        let mut server_reflexive_quic = endpoint(Protocol::Quic, 22006);
+        server_reflexive_quic.set_area(EndpointArea::ServerReflexive);
+        let lan_quic = endpoint(Protocol::Quic, 22007);
         let active = TunnelConnectIntent::active_logical(TunnelId::from(31));
         let reverse = TunnelConnectIntent::reverse_logical(TunnelId::from(32));
 
-        let no_sn = TunnelManager::intent_for_candidate(&lan_quic, active, false);
+        let no_sn = TunnelManager::intent_for_candidate(&server_reflexive_quic, active, false);
         assert!(!no_sn.udp_punch_enabled);
 
-        let active = TunnelManager::intent_for_candidate(&lan_quic, active, true);
+        let non_server_reflexive = TunnelManager::intent_for_candidate(&lan_quic, active, true);
+        assert!(!non_server_reflexive.udp_punch_enabled);
+
+        let active = TunnelManager::intent_for_candidate(&server_reflexive_quic, active, true);
         assert_eq!(active.tunnel_id, TunnelId::from(31));
         assert!(!active.is_reverse);
         assert!(active.udp_punch_enabled);
 
-        let reverse = TunnelManager::intent_for_candidate(&lan_quic, reverse, true);
+        let reverse = TunnelManager::intent_for_candidate(&server_reflexive_quic, reverse, true);
         assert_eq!(reverse.tunnel_id, TunnelId::from(32));
         assert!(reverse.is_reverse);
         assert!(reverse.udp_punch_enabled);
