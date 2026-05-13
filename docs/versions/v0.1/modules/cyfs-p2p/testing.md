@@ -39,11 +39,12 @@ approved_at:
 | `p2p-frame` 边界 | 在无语义漂移的前提下消费核心 API | 栈和身份适配成功 | 核心行为变化破坏适配层假设 | integration | workspace |
 | 运行时使用方边界 | 支持 `cyfs-p2p-test` 和 `sn-miner` | 运行时使用方能构建并运行关键入口 | 启动/配置回归 | DV + integration | `cyfs-p2p-test/src/main.rs`、`sn-miner-rust/src/main.rs` |
 
-## 当前改动直接验证
-| Design 条目 | 验证层级 | 入口/步骤 ID | 覆盖说明 | 缺口/原因 |
-|-------------|----------|--------------|----------|-----------|
-| 适配层边界与子模块拆分 | unit | `cargo test -p cyfs-p2p` | 验证 crate 本地适配行为仍可执行 | 无 |
-| 栈构建与身份适配职责 | DV / integration | `cargo run -p cyfs-p2p-test -- all-in-one`、`cargo test --workspace` | 验证运行时使用方和工作区兼容性 | 无 |
+## Direct Change Coverage
+| change_id | validation_id | testplan_level | testplan_step_id | Coverage | gap | gap_manual_reason |
+|-----------|---------------|----------------|------------------|----------|-----|-------------------|
+| cyfs_adapter_traceability | V-1 | unit | cyfs-p2p-unit | 验证 crate 本地适配行为仍可执行 | no | |
+| cyfs_runtime_coverage | V-2 | dv | cyfs-p2p-dv | 验证运行时使用方兼容性 | no | |
+| cyfs_runtime_coverage | V-3 | integration | cyfs-p2p-integration | 验证工作区兼容性 | no | |
 
 ## 回归关注点
 - `stack_builder.rs` 中的身份与证书适配

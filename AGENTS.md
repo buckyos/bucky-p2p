@@ -8,15 +8,16 @@
 - 由人类定义意图、范围、约束和审批边界。
 - Agent 只能在仓库定义的阶段边界内执行。
 - Acceptance 是对完整证据链的独立审计，与 implementation 分离。
-- Auto-pipeline 模式已启用：一个已批准的 proposal 可以触发后续的 planning、design、testing、implementation 和 acceptance 任务。
+- Auto-pipeline 规则已安装，但模式默认不进入；只有用户显式要求启动、进入或运行自动流水线时，已批准的 proposal 才能作为后续 planning、design、testing、implementation 和 acceptance 任务的前置条件。
 
 ## 任务读取顺序
 1. 先读本文件。
-2. 再读 `docs/versions/<version>/modules/<module>/` 下当前活跃的模块数据包。
-3. 读取 `docs/modules/<module>.md` 了解长期模块边界。
-4. 读取 `docs/architecture/` 了解工作区级约束。
-5. 读取 `harness/rules/` 了解硬性不变量和门禁。
-6. 当任务类型或模块级别要求时，再读取 `harness/process_rules/`、`harness/checklists/` 和 `harness/human-rules/`。
+2. 对任何可能影响代码、测试、运行时、构建、资源、bugfix、optimization 或 refactor 的请求，先读 `harness/rules/task-entry-gate-rules.md`。
+3. 再读 `docs/versions/<version>/modules/<module>/` 下当前活跃的模块数据包。
+4. 读取 `docs/modules/<module>.md` 了解长期模块边界。
+5. 读取 `docs/architecture/` 了解工作区级约束。
+6. 读取 `harness/rules/` 了解硬性不变量和门禁。
+7. 当任务类型或模块级别要求时，再读取 `harness/process_rules/`、`harness/checklists/` 和 `harness/human-rules/`。
 
 ## 阶段边界
 - Proposal 职责：把用户意图转化为可审批的目标、范围、非目标、约束与风险边界基线。Proposal 任务只能修改 `proposal.md`。
@@ -28,6 +29,7 @@
 
 ## 硬门禁
 - 除 `harness/rules/module-doc-exception-rules.md` 中显式列出的模块级文档豁免外，在 `proposal.md`、`design.md` 与 `testing.md` 全部存在且标记为 `status: approved` 之前，implementation 和 bugfix 工作都不得开始。
+- implementation 和 bugfix 工作还必须明确 `version`、`module` 与一个或多个 `change_id`，并通过 `schema-check.py` 与 `admission-check.py`；审批状态本身不是充分准入证据。
 - 下游文档不得静默缩窄、扩展或违背已批准的 proposal。
 - 后续阶段如果发现上游问题，必须把工作退回责任阶段，而不是就地修改上游制品。
 - 如果问题相关文档已为 `status: approved`，实现前仍必须核对文档中是否已经定义相关逻辑；如果没有，必须先退回相应文档阶段补齐并重新以文档为依据，禁止仅依据用户在对话中的直接说明实现；模块级文档豁免仅适用于规则中显式声明的模块。
@@ -57,7 +59,9 @@
 - Integration：`python3 ./harness/scripts/test-run.py <module> integration`
 - 结构检查：`python3 ./harness/scripts/verify-module-packet.py v0.1 <module>`
 - 工作区结构检查：`python3 ./harness/scripts/verify-workspace-harness.py v0.1`
-- 准入检查：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <module>`
+- 结构准入检查：`python3 ./harness/scripts/schema-check.py --version v0.1 --module <module>`
+- 改动准入检查：`python3 ./harness/scripts/admission-check.py --version v0.1 --module <module> --change-id <change_id>`
+- 兼容准入入口：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <module> <change_id>`
 - 审批状态报告：`python3 ./harness/scripts/report-approval-status.py v0.1`
 
 ## 治理索引

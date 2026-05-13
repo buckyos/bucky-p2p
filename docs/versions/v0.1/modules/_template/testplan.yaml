@@ -9,6 +9,7 @@ levels:
   unit:
     mode: enabled
     summary: crate 内局部验证
+    reason: ""
     gap_reason: ""
     test_targets:
       - docs/versions/v0.1/modules/example-module/testing.md
@@ -20,11 +21,13 @@ levels:
     steps:
       - id: example-unit
         name: 运行模块 unit 测试
+        change_ids: ["example_change"]
         run: ["cargo", "test", "-p", "example-module"]
 
   dv:
     mode: enabled
     summary: 单模块运行时验证
+    reason: ""
     gap_reason: ""
     test_targets:
       - docs/versions/v0.1/modules/example-module/testing.md
@@ -36,11 +39,13 @@ levels:
     steps:
       - id: example-dv
         name: 运行模块 DV 入口
+        change_ids: ["example_change"]
         run: ["<tool>", "<args>"]
 
   integration:
     mode: enabled
     summary: 工作区或相邻模块验证
+    reason: ""
     gap_reason: ""
     test_targets:
       - docs/versions/v0.1/modules/example-module/testing.md
@@ -52,4 +57,5 @@ levels:
     steps:
       - id: example-integration
         name: 运行模块 integration 入口
+        change_ids: ["example_change"]
         run: ["<tool>", "<args>"]

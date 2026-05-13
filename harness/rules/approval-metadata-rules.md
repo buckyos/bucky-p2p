@@ -18,6 +18,8 @@
 ## 允许的状态值
 - `draft`
 - `approved`
+- `rejected`
+- `superseded`
 
 ## 规则
 - `status: approved` 要求 `approved_by` 和 `approved_at` 都非空。

@@ -15,9 +15,9 @@ REQUIRED_PACKET_FILES = (
 REQUIRED_METADATA = ("module", "version", "status", "approved_by", "approved_at")
 REQUIRED_TEST_LEVELS = ("unit", "dv", "integration")
 REQUIRED_DIRECT_MAPPING_SECTIONS = {
-    "proposal.md": "## 验收锚点",
-    "design.md": "## 当前改动直接映射",
-    "testing.md": "## 当前改动直接验证",
+    "proposal.md": "## Proposal Items",
+    "design.md": "## Directly Mapped Change Items",
+    "testing.md": "## Direct Change Coverage",
 }
 LEGACY_DIRECT_MAPPING_EXEMPT_MODULES = {"p2p-frame"}
 

@@ -20,6 +20,7 @@ levels:
     steps:
       - id: cyfs-p2p-test-unit
         name: 运行 harness crate 测试
+        change_ids: ["cyfs_test_harness_audit"]
         run: ["cargo", "test", "-p", "cyfs-p2p-test"]
 
   dv:
@@ -38,6 +39,7 @@ levels:
     steps:
       - id: cyfs-p2p-test-dv
         name: 运行 all-in-one 场景
+        change_ids: ["cyfs_test_harness_audit"]
         run: ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]
 
   integration:
@@ -54,4 +56,5 @@ levels:
     steps:
       - id: cyfs-p2p-test-integration
         name: 运行工作区测试套件
+        change_ids: ["cyfs_test_scenario_evidence"]
         run: ["cargo", "test", "--workspace"]

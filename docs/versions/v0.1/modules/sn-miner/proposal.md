@@ -35,11 +35,11 @@ approved_at:
 - 服务启动改动变得可审计
 - 默认制品和启动行为不再静默漂移
 
-## 验收锚点
-| 条目 ID | 结果描述 | 约束/非目标 | 验收如何判断 |
-|---------|----------|-------------|--------------|
-| P-1 | 服务启动改动可审计 | 不拥有 CYFS 适配层逻辑 | proposal/design/testing/acceptance 证据链齐全 |
-| P-2 | 默认制品和启动行为不再静默漂移 | 不替换核心 SN 协议语义 | testing 与 DV 证据覆盖启动和制品行为 |
+## Proposal Items
+| proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
+|-------------|-----------|---------|--------------------------|------------------|
+| P-1 | sn_miner_startup_audit | 服务启动改动可审计 | 不拥有 CYFS 适配层逻辑 | proposal/design/testing/acceptance 证据链齐全 |
+| P-2 | sn_miner_artifact_defaults | 默认制品和启动行为不再静默漂移 | 不替换核心 SN 协议语义 | testing 与 DV 证据覆盖启动和制品行为 |
 
 ## 风险
 - 意外的启动行为变化

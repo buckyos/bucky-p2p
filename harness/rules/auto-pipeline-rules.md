@@ -1,10 +1,13 @@
 # 自动流水线规则
 
 ## 目标
-- 定义 proposal 获批后，仓库如何自动推进下游工作流。
+- 定义用户显式启动且 proposal 已获批后，仓库如何自动推进下游工作流。
 
 ## 触发条件
-- 启动信号：用户确认某个已批准的 `proposal.md`
+- 本规则默认不激活，除非用户显式要求启用、启动、运行或进入自动流水线。
+- 启动信号：用户显式要求进入自动流水线。
+- 必需前提：`proposal.md` 存在且 `status: approved`。
+- `proposal.md` 获批本身不是进入自动流水线的信号。
 - 规划输出：`harness/pipeline-plan.md`
 
 ## 验收基线
@@ -32,11 +35,15 @@
 - 如果 `design.md` 标识出可分离负责的直接子模块，计划应当包含子模块任务。
 
 ## 实现准入规则
+- 自动流水线内仍必须先应用 `task-entry-gate-rules.md`。
 - 任一 implementation 任务在以下条件满足前都不得启动：
   - `proposal.md` 存在且 `status: approved`
   - `design.md` 存在且 `status: approved`
   - `testing.md` 存在且 `status: approved`
+  - `testplan.yaml` 存在
 - implementation 任务必须读取这些已批准文档，并确认当前任务范围能直接映射到 proposal、design 与 testing 的具体条目。
+- implementation 任务必须先识别明确的 `version`、`module` 和 `change_id`。
+- implementation 任务必须对每个受影响模块通过 `schema-check.py` 与 `admission-check.py`。
 - 若 `testplan.yaml` 缺失，或 testing 制品尚未声明当前任务的验证入口/缺口说明，implementation 任务不得启动。
 - 若 implementation 任务被阻塞，必须退回到对应的前置责任阶段，而不是在部分假设下继续推进。
 

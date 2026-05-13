@@ -1,120 +1,58 @@
 #!/usr/bin/env python3
+"""Compatibility wrapper for the current implementation admission checks."""
 
-import pathlib
+from __future__ import annotations
+
+import subprocess
 import sys
-
-
-REQUIRED_DOCS = ("proposal.md", "design.md", "testing.md")
-REQUIRED_APPROVAL_FIELDS = ("approved_by", "approved_at")
-REQUIRED_DIRECT_MAPPING_SECTIONS = {
-    "proposal.md": "## 验收锚点",
-    "design.md": "## 当前改动直接映射",
-    "testing.md": "## 当前改动直接验证",
-}
-# Temporary exemption for the legacy approved packet until it is refreshed in a doc-stage task.
-LEGACY_DIRECT_MAPPING_EXEMPT_MODULES = {"p2p-frame"}
-DOCUMENT_EXEMPT_MODULES_KEY = "document_exempt_modules:"
-
-
-def parse_front_matter(path: pathlib.Path) -> dict[str, str]:
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    if len(lines) < 3 or lines[0].strip() != "---":
-        raise ValueError(f"{path} is missing YAML front matter")
-
-    data: dict[str, str] = {}
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            return data
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        data[key.strip()] = value.strip()
-
-    raise ValueError(f"{path} front matter is not closed")
-
-
-def load_document_exempt_modules() -> set[str]:
-    path = pathlib.Path("harness/workspace-governance.yaml")
-    if not path.exists():
-        return set()
-
-    modules: set[str] = set()
-    lines = path.read_text(encoding="utf-8").splitlines()
-    in_section = False
-    section_indent = 0
-
-    for line in lines:
-        content = line.split("#", 1)[0].rstrip()
-        if not content.strip():
-            continue
-
-        indent = len(content) - len(content.lstrip(" "))
-        stripped = content.strip()
-
-        if stripped == DOCUMENT_EXEMPT_MODULES_KEY:
-            in_section = True
-            section_indent = indent
-            continue
-
-        if in_section:
-            if indent <= section_indent:
-                break
-            if stripped.startswith("- "):
-                modules.add(stripped[2:].strip())
-
-    return modules
+from pathlib import Path
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: python3 ./harness/scripts/check-implementation-admission.py <version> <module>", file=sys.stderr)
+    if len(sys.argv) < 4:
+        print(
+            "usage: python3 ./harness/scripts/check-implementation-admission.py "
+            "<version> <module> <change_id> [<change_id>...]",
+            file=sys.stderr,
+        )
+        print(
+            "implementation admission now requires explicit change_id coverage; "
+            "use schema-check.py and admission-check.py directly for new tasks.",
+            file=sys.stderr,
+        )
         return 2
 
-    version, module = sys.argv[1], sys.argv[2]
-    if module in load_document_exempt_modules():
-        print(f"implementation admission passed for {module} {version} (document-exempt module)")
-        return 0
+    version, module, *change_ids = sys.argv[1:]
+    root = Path(__file__).resolve().parents[2]
 
-    module_dir = pathlib.Path("docs") / "versions" / version / "modules" / module
+    schema_cmd = [
+        sys.executable,
+        str(root / "harness" / "scripts" / "schema-check.py"),
+        "--root",
+        str(root),
+        "--version",
+        version,
+        "--module",
+        module,
+    ]
+    admission_cmd = [
+        sys.executable,
+        str(root / "harness" / "scripts" / "admission-check.py"),
+        "--root",
+        str(root),
+        "--version",
+        version,
+        "--module",
+        module,
+    ]
+    for change_id in change_ids:
+        admission_cmd.extend(["--change-id", change_id])
 
-    missing = []
-    draft = []
-    invalid = []
-    for name in REQUIRED_DOCS:
-        path = module_dir / name
-        if not path.exists():
-            missing.append(str(path))
-            continue
-        metadata = parse_front_matter(path)
-        if metadata.get("status") != "approved":
-            draft.append(f"{path}: status={metadata.get('status', '<missing>')}")
-            continue
-        for field in REQUIRED_APPROVAL_FIELDS:
-            if not metadata.get(field, "").strip():
-                invalid.append(f"{path}: missing {field}")
-        if module not in LEGACY_DIRECT_MAPPING_EXEMPT_MODULES:
-            text = path.read_text(encoding="utf-8")
-            required_section = REQUIRED_DIRECT_MAPPING_SECTIONS[name]
-            if required_section not in text:
-                invalid.append(f"{path}: missing direct mapping section {required_section}")
-
-    testplan_path = module_dir / "testplan.yaml"
-    if not testplan_path.exists():
-        missing.append(str(testplan_path))
-
-    if missing or draft or invalid:
-        for item in missing:
-            print(f"missing: {item}", file=sys.stderr)
-        for item in draft:
-            print(f"not approved: {item}", file=sys.stderr)
-        for item in invalid:
-            print(f"invalid approval metadata: {item}", file=sys.stderr)
-        return 1
-
-    print(f"implementation admission passed for {module} {version}")
-    return 0
+    schema_result = subprocess.run(schema_cmd, check=False)
+    if schema_result.returncode != 0:
+        return schema_result.returncode
+    admission_result = subprocess.run(admission_cmd, check=False)
+    return admission_result.returncode
 
 
 if __name__ == "__main__":

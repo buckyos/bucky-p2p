@@ -34,11 +34,11 @@ approved_at:
 - 工具行为变更变得可评审、可复现
 - 文件输出语义不再静默漂移
 
-## 验收锚点
-| 条目 ID | 结果描述 | 约束/非目标 | 验收如何判断 |
-|---------|----------|-------------|--------------|
-| P-1 | 工具行为变更可评审、可复现 | 不变成运行时服务 | proposal/design/testing/acceptance 证据链齐全 |
-| P-2 | 文件输出语义不再静默漂移 | 不替换底层 CYFS 对象语义 | testing 与 DV 证据覆盖输出敏感路径 |
+## Proposal Items
+| proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
+|-------------|-----------|---------|--------------------------|------------------|
+| P-1 | desc_tool_cli_reviewability | 工具行为变更可评审、可复现 | 不变成运行时服务 | proposal/design/testing/acceptance 证据链齐全 |
+| P-2 | desc_tool_output_semantics | 文件输出语义不再静默漂移 | 不替换底层 CYFS 对象语义 | testing 与 DV 证据覆盖输出敏感路径 |
 
 ## 风险
 - 输出制品损坏或不兼容

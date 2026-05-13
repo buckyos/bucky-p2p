@@ -26,6 +26,8 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("harness/rules/implementation-admission-rules.md"),
     pathlib.Path("harness/rules/module-doc-exception-rules.md"),
     pathlib.Path("harness/rules/proposal-first-acceptance-rules.md"),
+    pathlib.Path("harness/rules/schema-validation-rules.md"),
+    pathlib.Path("harness/rules/task-entry-gate-rules.md"),
     pathlib.Path("harness/rules/testing-doc-rules.md"),
     pathlib.Path("harness/rules/trigger-rules.md"),
     pathlib.Path("harness/rules/unified-test-entry-rules.md"),
@@ -39,6 +41,9 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("harness/checklists/module-acceptance-checklist.md"),
     pathlib.Path("harness/human-rules/contribution-modes.md"),
     pathlib.Path("harness/human-rules/module-tier-matrix.md"),
+    pathlib.Path("harness/scripts/admission-check.py"),
+    pathlib.Path("harness/scripts/schema-check.py"),
+    pathlib.Path("harness/scripts/check-implementation-admission.py"),
     pathlib.Path("harness/scripts/test-run.py"),
 )
 

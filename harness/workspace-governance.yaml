@@ -21,11 +21,14 @@ implementation_gate:
     - cyfs-p2p-test
   direct_change_mapping_policy:
     required_sections:
-      proposal.md: "## 验收锚点"
-      design.md: "## 当前改动直接映射"
-      testing.md: "## 当前改动直接验证"
+      proposal.md: "## Proposal Items"
+      design.md: "## Directly Mapped Change Items"
+      testing.md: "## Direct Change Coverage"
     legacy_exempt_modules:
       - p2p-frame
+  required_checkers:
+    schema: ["python3", "./harness/scripts/schema-check.py"]
+    admission: ["python3", "./harness/scripts/admission-check.py"]
   required_documents:
     - proposal.md
     - design.md

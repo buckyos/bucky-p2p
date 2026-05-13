@@ -41,11 +41,12 @@ approved_at:
 | 操作员 CLI 边界 | 暴露稳定子命令 | help 和分发成功 | 子命令错误或缺少参数 | DV | `desc-tool/src/main.rs` |
 | 文件输出边界 | 生成安全制品 | create/modify/sign 行为符合预期 | 输出格式错误或不兼容 | unit + DV | desc 文件与命令流程 |
 
-## 当前改动直接验证
-| Design 条目 | 验证层级 | 入口/步骤 ID | 覆盖说明 | 缺口/原因 |
-|-------------|----------|--------------|----------|-----------|
-| 子命令族拆分与 CLI 稳定入口 | unit / DV | `cargo test -p desc-tool`、`cargo run -p desc-tool -- --help` | 验证 CLI 和本地逻辑仍可执行 | 无 |
-| 输出敏感和签名敏感路径 | integration | `cargo test --workspace` | 验证工作区构建兼容性 | 无 |
+## Direct Change Coverage
+| change_id | validation_id | testplan_level | testplan_step_id | Coverage | gap | gap_manual_reason |
+|-----------|---------------|----------------|------------------|----------|-----|-------------------|
+| desc_tool_cli_reviewability | V-1 | unit | desc-tool-unit | 验证 CLI 和本地逻辑仍可执行 | no | |
+| desc_tool_cli_reviewability | V-2 | dv | desc-tool-dv | 验证操作入口仍可执行 | no | |
+| desc_tool_output_semantics | V-3 | integration | desc-tool-integration | 验证工作区构建兼容性 | no | |
 
 ## 回归关注点
 - 签名流程

@@ -21,6 +21,7 @@ levels:
     steps:
       - id: sn-miner-unit
         name: 运行 sn-miner crate 测试
+        change_ids: ["sn_miner_startup_audit"]
         run: ["cargo", "test", "-p", "sn-miner"]
 
   dv:
@@ -37,6 +38,7 @@ levels:
     steps:
       - id: sn-miner-dv
         name: 运行 sn-miner help 入口
+        change_ids: ["sn_miner_startup_audit"]
         run: ["cargo", "run", "-p", "sn-miner", "--", "--help"]
 
   integration:
@@ -53,4 +55,5 @@ levels:
     steps:
       - id: sn-miner-integration
         name: 运行工作区测试套件
+        change_ids: ["sn_miner_artifact_defaults"]
         run: ["cargo", "test", "--workspace"]

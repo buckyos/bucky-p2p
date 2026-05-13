@@ -2,6 +2,7 @@
 
 ## 目标
 - 定义实现或 bugfix 工作启动前的硬性前提。
+- 本规则只能在 `task-entry-gate-rules.md` 已完成任务分类并要求实现准入后应用。
 
 ## 范围
 - implementation 任务
@@ -23,6 +24,13 @@
 - 对默认模块，在这三个输入全部为 `status: approved` 之前，implementation 不得开始。
 - 对默认模块，`status: approved` 不是充分条件；implementation 与 bugfix 任务必须读取这些已批准文档，并确认当前改动能直接映射到 proposal、design 与 testing 中的具体条目。
 - bugfix 任务遵循同样规则，除非仓库在版本化规则中发布了更窄的例外路径。
+- 对默认模块，implementation 与 bugfix 任务必须先明确 active `version`、`module` 与一个或多个具体 `change_id`。
+- 对默认模块，每个 `change_id` 必须通过以下精确位置完成追踪：
+  - `proposal.md` 的 `## Proposal Items` 表 `change_id` 列
+  - `design.md` 的 `## Directly Mapped Change Items` 表 `change_id` 列
+  - `testing.md` 的 `## Direct Change Coverage` 表 `change_id` 列
+  - `testplan.yaml` 中对应步骤或 manual/disabled 层级的 `change_ids`
+- 跨模块 implementation 与 bugfix 必须对每个受影响模块分别通过准入。
 - 如果当前改动无法映射到直接的 proposal、design 或 testing 条目，implementation 与 bugfix 不得只依赖模块总览、历史设计说明、聊天说明或口头解释启动。
 - 如果问题相关的已批准文档未定义实现所需的逻辑、约束、接口或流程，implementation 与 bugfix 不得以对话中的用户直接说明替代文档依据。
 - 对默认模块，如果 `testplan.yaml` 缺失，或当前改动对应的验证入口/缺口说明未在 testing 制品中声明，implementation 不得开始。
@@ -43,7 +51,9 @@
 - `acceptance.md`
 
 ## 机械化执行
-- 在实现开始前运行 `python3 ./harness/scripts/check-implementation-admission.py <version> <module>`。
+- 在实现开始前运行 `python3 ./harness/scripts/schema-check.py --version <version> --module <module>`。
+- 在实现开始前运行 `python3 ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id>`。
+- 兼容入口 `python3 ./harness/scripts/check-implementation-admission.py <version> <module> <change_id>` 可以委托上述新检查器；没有 `change_id` 时必须失败并指向文档补齐。
 - 准入检查失败会阻塞任务，而不是仅供参考。
 
 ## 默认验证策略
@@ -53,6 +63,10 @@
   - 调试需要新的失败证据
   - 已批准的 testing 制品或仓库规则要求必须先跑某个验证入口
 - “顺手跑一下”、“最小自测” 或类似习惯性理由，不构成例外。
+
+## Rust 格式化策略
+- Agent 不得自动运行 `cargo fmt`。
+- 只有用户明确要求格式化，或仓库本地规则/已批准任务文档明确要求当前任务运行格式化时，才允许运行 `cargo fmt`。
 
 ## 退回路由
 - proposal 缺失或仍为 draft：退回 proposal

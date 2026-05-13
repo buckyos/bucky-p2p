@@ -21,6 +21,7 @@ levels:
     steps:
       - id: cyfs-p2p-unit
         name: 运行适配层 crate 测试
+        change_ids: ["cyfs_adapter_traceability"]
         run: ["cargo", "test", "-p", "cyfs-p2p"]
 
   dv:
@@ -37,6 +38,7 @@ levels:
     steps:
       - id: cyfs-p2p-dv
         name: 运行 all-in-one 运行时场景
+        change_ids: ["cyfs_runtime_coverage"]
         run: ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]
 
   integration:
@@ -53,4 +55,5 @@ levels:
     steps:
       - id: cyfs-p2p-integration
         name: 运行工作区测试套件
+        change_ids: ["cyfs_runtime_coverage"]
         run: ["cargo", "test", "--workspace"]

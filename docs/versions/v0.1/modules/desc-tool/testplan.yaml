@@ -23,6 +23,7 @@ levels:
     steps:
       - id: desc-tool-unit
         name: 运行 desc-tool crate 测试
+        change_ids: ["desc_tool_cli_reviewability"]
         run: ["cargo", "test", "-p", "desc-tool"]
 
   dv:
@@ -39,6 +40,7 @@ levels:
     steps:
       - id: desc-tool-dv
         name: 运行 desc-tool help 入口
+        change_ids: ["desc_tool_cli_reviewability"]
         run: ["cargo", "run", "-p", "desc-tool", "--", "--help"]
 
   integration:
@@ -54,4 +56,5 @@ levels:
     steps:
       - id: desc-tool-integration
         name: 运行工作区测试套件
+        change_ids: ["desc_tool_output_semantics"]
         run: ["cargo", "test", "--workspace"]
