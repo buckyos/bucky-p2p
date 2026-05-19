@@ -21,6 +21,7 @@ approved_at: 2026-05-13
 - 为本轮 `PnTunnel` 控制通道需求建立可执行设计边界：logical tunnel 打开时建立独立控制 channel，建立成功后才返回可用 tunnel，并在控制面断开、读写失败或对端 close 时关闭本地 tunnel。
 - 为本轮 `tunnel/TunnelManager` 中“当远端当前通过 proxy tunnel 连通时，后台周期性重试 direct/reverse 升级并限制失败退避上限”的行为建立设计边界，避免连接长期粘连在代理路径上。
 - 为本轮 `tunnel/TunnelManager` 中“新建 tunnel 的统一 register/publish 生命周期，以及 reverse tunnel 只延后 publish 时机而不改变 publish 规则”的行为建立可执行设计边界，收敛当前散落在多处的发布决策。
+- 为本轮 `tunnel/TunnelManager` 中“reverse incoming 无同 `(remote_id, tunnel_id)` waiter 时直接关闭且不发布”的行为建立可执行设计边界，避免本地未等待的 reverse tunnel 通过订阅路径变成可用候选。
 - 为本轮单 SN NAT 打洞优化建立可执行设计边界，包括 direct/reverse 统一 300ms 短延迟竞速、`SnCall` 本次反连候选、QUIC listener 同源 UDP punch burst、proxy 短窗口脱代理升级，以及按协议拆分的 endpoint 评分。
 - 为本轮 endpoint area 语义变更建立可执行设计边界：`EndpointArea::Default` 重命名为 `ServerReflexive`，`Display`/`FromStr` 和 raw codec 使用 `S` 编码，SN 观察地址只有与节点自上报地址一致时才标记为 `Wan`，否则标记为 `ServerReflexive`，并移除 `is_sys_default()` 的公开判定入口。
 - 为本轮 `ServerReflexive` QUIC NAT keepalive 需求建立可执行设计边界：UDP punch 只对 `EndpointArea::ServerReflexive` QUIC candidate 开启，QUIC tunnel 控制心跳发送间隔保持现有值，heartbeat timeout 调整为 30 秒。
@@ -93,7 +94,8 @@ approved_at: 2026-05-13
 - 对外可用的新 tunnel 必须先进入 `TunnelManager` 候选注册，再进入统一 publish 路径；除 `remote_id` 未知的临时 wrapper 外，不允许存在“只广播不登记”的长期语义分支。
 - `TunnelManager` 的 publish 可见性决策必须收敛到单一生命周期模型：默认“register 后立即 publish”，唯一允许的延后场景是命中本地 `(remote_id, tunnel_id)` `reverse_waiter` 的 reverse tunnel。
 - 上述延后 publish 只影响时机，不改变规则：reverse tunnel 一旦完成本地 waiter 交付，就必须通过与 direct/proxy 相同的 publish 入口变为可见候选。
-- reverse 建链若在等待期间超时、取消或失败，相关 waiter 必须被清理；该 waiter 之后才到达的同 `(remote_id, tunnel_id)` reverse tunnel 不得继续隐藏，而必须按普通新 tunnel 进入 publish 路径。
+- reverse incoming 必须先尝试消费同 `(remote_id, tunnel_id)` 的 pending reverse waiter。命中 waiter 时，incoming 分支只 notify waiter，不得立即 register；waiter 接收方确认拿到 tunnel 后，才负责 register 并通过统一 publish 入口发布。无 waiter 时必须直接关闭，不得 register、不得 publish、不得进入默认复用候选。
+- reverse 建链若在等待期间超时、取消或失败，相关 waiter 必须被清理。清理后迟到的同 key reverse incoming 会因为无 waiter 而关闭；实现不得为此引入额外 reverse 过期表。
 - `TunnelManager` 在默认复用已有 tunnel 时必须先从已发布候选中选择；同一可见性层级下，非 proxy candidate 优先于 proxy candidate，只有没有可用非 proxy candidate 时才返回 proxy。若存在多个同类候选，再按最近更新时间选择最新候选。
 - direct 与 reverse 必须使用同一个 logical `tunnel_id` 进行 hedged 建链；reverse 的启动延迟统一为 300ms，而不是固定等待 direct 路径 2 秒。
 - QUIC/UDP NAT 候选场景下，可以在 direct/reverse 建链窗口内发送少量 best-effort 原生 UDP punch 包；该机制必须使用与 QUIC listener 相同的本地 UDP socket/端口或该 socket 的 send-only clone，不得新建不同源端口的 UDP socket 伪装成同一路径打洞。
@@ -168,6 +170,7 @@ p2p-frame/src
 | `PnTunnel` idle timeout 生命周期关闭 | `PnTunnel` 本地状态机、channel lease 计数、idle sweeper 和关闭后重新创建 | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs` | 若实现阶段无法可靠追踪已返回给上层的 channel 生命周期，应先退回 design 重新划分 lease wrapper，而不是只统计 inbound queue。 |
 | `PnTunnel` tunnel 级控制通道与远端关闭感知 | control channel ready gate、控制接收循环、heartbeat、close 命令和统一关闭状态机 | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、必要 `p2p-frame/src/pn/service/pn_server.rs` bridge 路径 | 若实现阶段发现现有 `ProxyOpenReq` 无法无歧义承载 control channel，应扩展 PN protocol 的 control open 命令或 kind，而不是复用业务 stream/datagram kind 造成兼容歧义。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
+| reverse incoming 无 waiter 关闭 | `TunnelManager` 的 incoming reverse waiter 判定与 close 分支 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现无 waiter reverse 仍可能被合法接收，应退回 design 明确协议来源，而不是继续 publish 未等待的 reverse tunnel。 |
 | 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
 | `ServerReflexive` QUIC NAT keepalive | UDP punch candidate policy 收窄为 `EndpointArea::ServerReflexive` QUIC endpoint；QUIC tunnel heartbeat interval 保持现有值，heartbeat timeout 调整为 30 秒 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、必要 `p2p-frame/src/networks/quic/listener.rs` 测试 | 若实现阶段需要改变 heartbeat interval、增加 raw UDP keepalive、让远端解析 punch payload 或修改公共 `TunnelNetwork` trait，应退回 proposal。 |
 | 多个已有 tunnel candidate 的默认复用选择 | published 优先，非 proxy 优先于 proxy，同类候选内选择最新 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现 proxy 仍可能覆盖已发布 direct/passive candidate，应优先修正 `get_tunnel()` 选择策略，而不是让后台脱代理升级成为唯一恢复路径。 |
@@ -178,6 +181,7 @@ p2p-frame/src
 |-----------|-------------|-----------------|-------------|-----------------------|
 | endpoint_area_server_reflexive | P-ENDPOINT-AREA-1 | 将 `EndpointArea::Default` 重命名为 `ServerReflexive`；`Display`/`FromStr` 使用 `S`，raw codec 保持 area bit 位置但更新语义；SN 观察地址与节点自上报 endpoint 完全一致时标记 `Wan`，否则标记 `ServerReflexive`；删除 `is_sys_default()` 并保持 `is_static_wan()` 只覆盖 `Wan` / `Mapped`。 | `p2p-frame/src/endpoint.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/tunnel/**`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md` | 该变更影响公开枚举和文本编码；若下游依赖 `D` 或旧 method，回滚应恢复旧 enum/codec 并退回 proposal 重新定义兼容窗口。 |
 | server_reflexive_quic_nat_keepalive | P-QUIC-SR-NAT-KEEPALIVE-1 | UDP punch 只由 `EndpointArea::ServerReflexive` QUIC candidate 在 SN service 存在且满足非 LAN IPv4、非 0 端口基本条件时开启；`Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口和默认 intent 路径不触发 punch；QUIC tunnel heartbeat interval 保持现有值，heartbeat timeout 调整为 30 秒。 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、必要 `p2p-frame/src/networks/quic/listener.rs` 测试 | 该变更收窄 punch 触发面并放宽 QUIC heartbeat timeout；若回滚，应恢复旧 candidate policy 和旧 timeout 常量，但不得重新引入 raw UDP 协议或公共 trait 参数。 |
+| reverse_timeout_close_late_tunnel | P-REV-TIMEOUT-1 | `TunnelManager` 对 incoming reverse 先消费同 `(remote_id, tunnel_id)` pending waiter；命中 waiter 时只 notify，后续由 reverse open 接收方 register 并 publish；无 waiter 时关闭 tunnel 并跳过 register/publish。 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-publish-lifecycle.md` | 该变更收窄 reverse incoming 可见性；若回滚，应恢复无 waiter reverse publish，但不得影响正常 waiter 命中后 publish 或非 reverse incoming publish。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。

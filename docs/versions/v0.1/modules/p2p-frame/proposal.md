@@ -17,6 +17,7 @@ approved_at: 2026-05-13
 - 本轮新增需求是优化单 SN 场景下的 NAT 打洞成功率：在不引入多 SN、不重写 SN/PN 协议、不取消 proxy 兜底的前提下，让 tunnel 建立流程能够使用更实时的候选端点、更适合 QUIC/UDP NAT 打洞的 direct/reverse 竞速窗口、更快的 proxy 脱代理重试，以及更细粒度的 endpoint 评分和刷新策略。本轮新增澄清是：QUIC listener 的同源 UDP punch 不再限定为 2-4 个短包，而是改为在单次 candidate intent 内按固定 50ms 间隔发送，默认持续到 1 秒截止；其中 active punch 从 `250ms` offset 才开始发送，reverse punch 必须立即开始发送，并继续受 SN 存在性、同源 socket 和单次连接开关约束。
 - 本轮新增需求是收敛 endpoint area 语义：`EndpointArea::Default` 不再表示 system default，而应重命名为 `ServerReflexive`，用于标识 SN 从连接来源观察到的节点外网地址；SN 观察地址只有与节点自己上报的地址相同时才能升级为 `Wan`，否则必须保持为 `ServerReflexive`，从而区分节点自声明公网地址与 SN 侧反射地址。
 - 本轮新增需求是进一步收窄 QUIC NAT 打洞辅助的触发条件：同源 UDP punch 只应面向 `EndpointArea::ServerReflexive` 的 QUIC endpoint 发起，不再面向普通 `Lan`、`Wan`、`Mapped` 或仅凭公网 IP 判断的 endpoint 发起；同时，现有 QUIC tunnel 控制心跳发送间隔保持不变，但心跳超时阈值应调整为 30 秒，降低弱网或调度抖动下的误关闭概率。
+- 本轮新增需求是收紧 reverse tunnel 入站可见性语义：reverse incoming tunnel 只有命中本地正在等待的同 `(remote_id, tunnel_id)` reverse waiter 时才可被接收；如果没有 waiter，说明本地并未等待或已经放弃该 reverse 结果，必须直接关闭，不得作为普通 tunnel 向上发布。
 
 ## 范围
 ### 范围内
@@ -49,6 +50,7 @@ approved_at: 2026-05-13
 - NAT 打洞优化必须优先覆盖 QUIC/UDP tunnel；TCP 直连仍可保留现有静态 WAN 或明确映射端口路径，但不得把 TCP 失败扩散为 QUIC/UDP 候选降权依据
 - proxy 仍是最终兜底连通性；优化目标是更快从 proxy 升级为 direct/reverse，而不是移除 proxy 或让 proxy 参与后台升级成功判定
 - `TunnelManager` 复用已有 tunnel 时，若同一远端同时存在多个可用候选，必须优先返回非 proxy tunnel；proxy 只在没有可用非 proxy candidate 时作为兜底复用路径
+- reverse incoming tunnel 必须命中同 `(remote_id, tunnel_id)` 的本地 reverse waiter；无 waiter 时必须关闭，不得 register、不得 publish、不得进入 `get_tunnel()` 默认复用候选
 
 ### 范围外
 - 重写当前协议实现
@@ -72,6 +74,8 @@ approved_at: 2026-05-13
 - 对非 `ServerReflexive` endpoint 发起 UDP punch，包括仅因地址是非 LAN IPv4 就发起 punch
 - 为 `ServerReflexive` tunnel 引入新的上层业务心跳、raw UDP keepalive 协议、额外心跳发送频率或要求远端解析 punch payload
 - 改变 QUIC tunnel 现有心跳发送间隔；本轮只允许调整心跳超时阈值
+- 改变 direct、proxy、普通 incoming tunnel 的 register/publish 规则；本轮只收窄 reverse incoming 无 waiter 的行为
+- 引入 reverse tunnel 过期表或跨进程状态；本轮只以当前 pending reverse waiter 作为接收入站 reverse 的依据
 
 ### 与相邻模块的边界
 - `cyfs-p2p` 可以适配 `p2p-frame`，但不拥有 `p2p-frame` 的协议语义。
@@ -123,6 +127,7 @@ approved_at: 2026-05-13
 - `PnTunnel` 控制通道与 channel open/accept、inbound 投递、idle sweeper 的关闭判定必须通过同一状态临界区协调，避免控制面断开后仍创建新 channel 或把迟到 channel 投递给已关闭对象
 - `tunnel_id` 与 `candidate_id` 在 `PnTunnel` 生命周期内保持稳定；idle close 不得在同一对象上更换身份，也不得把已关闭对象重新打开
 - NAT 打洞路径必须保持同一次逻辑建链共享同一个 `tunnel_id`；direct 与 reverse 竞速只能改变候选时机，不能破坏 candidate 注册、reverse waiter 和 publish 生命周期。
+- reverse incoming 的接收判定必须只依赖当前 pending reverse waiter；无同 `(remote_id, tunnel_id)` waiter 时必须关闭该 tunnel，且不得阻止非 reverse incoming tunnel 的普通处理。
 - QUIC/UDP NAT 打洞场景下，reverse 不应被固定为 direct 失败后的长延迟补救；具体延迟与触发条件必须由 design 明确，并可由 unit 测试验证。
 - QUIC/UDP NAT 打洞场景下，同源 UDP punch 必须在本次连接开始后按固定 50ms cadence 发送，默认持续到 1 秒截止；active path 只能从 `250ms` offset 开始发首包，reverse path 必须从 `0ms` 立即发首包。若本次 NAT hedged window 更短，则只能在更短窗口内裁剪，禁止无限重发或跨 candidate 共享重试状态。
 - QUIC/UDP NAT 打洞场景下，同源 UDP punch 的候选准入必须以 endpoint area 为准：只有 `EndpointArea::ServerReflexive` 且满足 QUIC、非 LAN IPv4、非 0 端口等基本发送条件时才可开启；`Wan`、`Mapped`、`Lan` 和未标记为 `ServerReflexive` 的公网 endpoint 不得触发 punch。
@@ -174,6 +179,7 @@ approved_at: 2026-05-13
 - 反连候选不维护新鲜度窗口，真实 NAT 映射可用性仍依赖 SN 当前缓存和现场网络行为。
 - 若 active `250ms` / reverse `0ms` 的 50ms cadence 在弱网、平台 socket 语义或 proxy 脱代理短窗口里发送过密，或 active 首包延后导致部分 NAT 映射建立偏慢，可能形成额外日志噪声、发送风暴或连通性波动，需要 design/testing 明确起发时机、上限和裁剪规则。
 - proxy 后短窗口脱代理会增加 SN call、direct connect 和 reverse waiter 的频率，需要有退避、上限和并发保护，避免在弱网络下形成重试风暴。
+- 若 reverse incoming 无 waiter 时仍发布 tunnel，调用方会看到“本地未等待 reverse 结果但订阅收到 reverse tunnel”的不一致语义。
 - 若按协议拆分评分实现不完整，可能出现 TCP 与 QUIC/UDP 路径质量互相污染，降低原本可成功的打洞候选优先级。
 - NAT 打洞运行时结果高度依赖真实网络环境，unit 测试只能覆盖调度和候选规则；DV 或 integration 需要明确哪些结果是可自动断言，哪些只能作为运行证据。
 - `Default` 改名为 `ServerReflexive` 会影响公开枚举、字符串编解码和已有外部配置/日志；如果下游仍依赖 `D` 或 `is_sys_default()`，实现阶段需要明确兼容或破坏性迁移边界。
@@ -196,6 +202,8 @@ approved_at: 2026-05-13
 - QUIC tunnel heartbeat timeout 必须调整为 30 秒，且心跳发送间隔保持现有值不变；acceptance 必须确认心跳超时仍走既有 QUIC tunnel close/error 路径。
 - `open_reverse_path()` 或其等价路径发起 `SnCall` 时，必须能携带本次建链的 `reverse_endpoint_array`，且 SN 转发后的 `SnCalled` 保留这些候选。
 - proxy tunnel 成功后，后台脱代理升级必须先进入短窗口 direct/reverse 重试，再进入有上限的指数退避；升级成功后非 proxy candidate 必须按统一 register/publish 生命周期可见。
+- reverse incoming 无同 `(remote_id, tunnel_id)` waiter 时必须被关闭；acceptance 必须确认它不会进入候选表、不会向订阅者发布，也不会被后续 `get_tunnel(remote)` 复用。
+- reverse incoming 命中同 `(remote_id, tunnel_id)` waiter 时必须继续按延后 publish 规则交付给 waiter；acceptance 必须确认该正常 reverse open 路径不被无 waiter close 规则破坏。
 - 当同一远端同时存在已发布的非 proxy candidate 和 proxy candidate 时，`get_tunnel()` 或等价默认复用路径必须优先选择非 proxy candidate，即使 proxy candidate 更新时间更晚。
 - endpoint 评分必须能按协议独立影响候选顺序，且 TCP 失败不得降低 QUIC/UDP 候选的打洞优先级。
 - 单 SN 优化不得引入多 SN fanout 或跨 SN NAT 类型推断；acceptance 必须确认最终实现仍只依赖单 SN 信令与观察端点。
@@ -206,3 +214,4 @@ approved_at: 2026-05-13
 |-------------|-----------|---------|--------------------------|------------------|
 | P-ENDPOINT-AREA-1 | endpoint_area_server_reflexive | `EndpointArea::Default` 重命名为 `ServerReflexive`，SN 观察到的节点外网地址只有与节点自上报地址一致时标记为 `Wan`，否则标记为 `ServerReflexive`；文本编码使用 `S`，不再保留 `is_sys_default()` system-default 判定。 | 不引入 STUN/TURN、多 SN NAT 类型推断或新的 endpoint area；不继续把 `D` 作为 `ServerReflexive` 的文本标记；不把 SN 反射地址静默等同于节点自声明公网地址。 | unit 能覆盖 SN 观察地址一致/不一致时的 area 分类，覆盖 `Display`/`FromStr`/raw codec 的 `ServerReflexive` / `S` 编解码，并确认 `is_sys_default()` 不再作为公开方法存在。 |
 | P-QUIC-SR-NAT-KEEPALIVE-1 | server_reflexive_quic_nat_keepalive | QUIC 同源 UDP punch 只对 `EndpointArea::ServerReflexive` candidate 开启；QUIC tunnel 保持现有控制心跳发送间隔不变，但 heartbeat timeout 调整为 30 秒。 | 不对 `Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口或默认 intent 发起 punch；不新增 raw UDP keepalive 协议、业务载荷解析或公共 `TunnelNetwork` trait 参数；不改变 QUIC tunnel 现有心跳发送间隔。 | unit 能覆盖 punch candidate policy 只接受 `ServerReflexive` QUIC endpoint，覆盖非 `ServerReflexive` endpoint 不开启 punch；unit 能覆盖 QUIC heartbeat interval 保持现有值且 heartbeat timeout 为 30 秒，且 heartbeat timeout 仍收敛到既有关闭路径。 |
+| P-REV-TIMEOUT-1 | reverse_timeout_close_late_tunnel | reverse incoming tunnel 只有命中同 `(remote_id, tunnel_id)` reverse waiter 时才可接收；无 waiter 时必须关闭，不得作为普通 tunnel publish。 | 不改变 direct、proxy、普通 incoming tunnel 的 publish 规则；不改变 SN call/called 协议；不引入 reverse 过期表或跨进程状态；不按 remote 粗粒度关闭其他 tunnel。 | unit 能覆盖无 waiter reverse tunnel 被 close、未 register、未 publish、订阅者收不到、`get_tunnel()` 不返回；unit 能覆盖命中 waiter 的 reverse tunnel 仍正常交付并延后 publish。 |

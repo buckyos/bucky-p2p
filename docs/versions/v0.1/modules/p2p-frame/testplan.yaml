@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、`TunnelManager` 的统一 publish 生命周期断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -23,7 +23,7 @@ levels:
       services: []
       notes:
         - 源码内的异步和同步测试是主要的 unit 验证面。
-        - `tunnel/tunnel_manager.rs` 的 unit 测试必须覆盖 direct/proxy/普通 incoming 的 register 后立即 publish、reverse waiter 命中时的延后 publish、waiter 完成后的统一 publish 路径，以及 waiter 清理后的 later-arriving reverse 不再隐藏。
+        - `tunnel/tunnel_manager.rs` 的 unit 测试必须覆盖 direct/proxy/普通 incoming 的 register 后立即 publish、reverse waiter 命中时 incoming 分支只交付不 register/publish、waiter 接收方完成 register/publish，以及 incoming reverse 无同 `(remote_id, tunnel_id)` waiter 时被关闭且不 register/publish。
         - `tunnel/tunnel_manager.rs` 的 unit 测试还必须覆盖统一 publish 入口的幂等性、published candidate 相对 hidden reverse candidate 的选择优先级，以及同一远端多个 published candidate 中非 proxy 优先于更新时间更晚的 proxy。
         - `tunnel/tunnel_manager.rs` 的 unit 测试必须覆盖 reverse 统一 300ms 延迟、direct/reverse 共享同一 logical tunnel、proxy 新建后进入 15s/30s/60s/120s 短窗口脱代理、短窗口后回到 2 小时封顶退避，以及 endpoint 评分按协议隔离失败。
         - `TunnelConnectIntent`、`networks/quic/listener.rs` 与 `networks/quic/network.rs` 的 unit 测试必须覆盖 UDP punch 默认关闭、`TunnelManager` 只在 SN service 存在且候选是 `ServerReflexive` QUIC endpoint 时为单次 candidate intent 开启，且开启后同源 UDP punch 只从 QUIC listener 同一本地端口发送、`Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口和无 SN service 反例不启用、reverse 在 `0ms` 起发、active 在 `250ms` 起发，随后都以固定 `50ms` cadence 发送并在默认 `1s` 截止或更短 hedged window 结束时停止、payload 可为每包 `5..=30` 字节随机短载荷且不要求 magic/version 或 tunnel/candidate 关联信息、发送失败不改变 QUIC 建链结果，且不新增 raw UDP 接收解析或业务载荷路径。
@@ -39,18 +39,18 @@ levels:
     steps:
       - id: p2p-frame-unit
         name: 运行 p2p-frame unit 测试集
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel"]
         run: ["cargo", "test", "-p", "p2p-frame"]
 
   dv:
     mode: disabled
     summary: p2p-frame 当前不定义自动 DV 入口；`cyfs-p2p-test all-in-one` 不得作为本模块或其他模块的 DV 证据。
-    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive"]
+    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel"]
     reason: 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口；运行时兼容性由 unit 和 integration 承担，新增 DV 必须另行 proposal/design/testing。
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证，确认 `ServerReflexive` endpoint area 语义、单 SN NAT 打洞优化和默认关闭、仅 SN 存在时对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch、QUIC heartbeat timeout 调整、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
+    summary: 工作区级兼容性与下游使用方验证，确认 `ServerReflexive` endpoint area 语义、单 SN NAT 打洞优化和默认关闭、仅 SN 存在时对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch、QUIC heartbeat timeout 调整、incoming reverse 无 waiter close、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test
@@ -66,11 +66,12 @@ levels:
         - `PnTunnel` idle close 的新配置和 wrapper 类型不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名。
         - `PnTunnel` control channel 不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名；`create_tunnel*` 可以更严格地等待 control ready 后返回可用 tunnel。
         - NAT 打洞优化不得要求下游实现多 SN、STUN/TURN 或新的 `TunnelNetwork` trait 参数。
+        - incoming reverse 无 waiter close 只影响本地未等待的 reverse incoming，不得改变公开 trait、SN 协议、普通 incoming 或命中 waiter 的 reverse open。
         - 同源 UDP punch 不得要求下游处理 raw UDP payload、暴露新业务接口或修改 `TunnelNetwork` trait 参数；默认关闭，只有 `TunnelManager` 在 SN service 存在且候选是 `ServerReflexive` QUIC endpoint 时才为本次 `TunnelConnectIntent` 开启。
         - QUIC heartbeat timeout 调整不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名。
         - `ServerReflexive` 公开 enum 和 `is_sys_default()` 删除不得留下未迁移的 workspace 调用点；下游若需要文本 endpoint，应使用 `S` 标记。
     steps:
       - id: p2p-frame-integration
         name: 运行工作区测试套件
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel"]
         run: ["cargo", "test", "--workspace"]

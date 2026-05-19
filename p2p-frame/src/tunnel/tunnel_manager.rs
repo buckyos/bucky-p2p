@@ -326,7 +326,7 @@ impl TunnelManager {
                                         break;
                                     };
                                     if let Err(err) =
-                                        manager.register_tunnel_and_publish(tunnel, false).await
+                                        manager.register_tunnel_and_publish(tunnel).await
                                     {
                                         log::warn!(
                                             "register incoming proxy tunnel failed: {:?}",
@@ -605,31 +605,31 @@ impl TunnelManager {
             tunnel.local_ep(),
             tunnel.remote_ep()
         );
-        let tunnel = self.register_tunnel(tunnel, false).await?;
-        if !tunnel.is_reverse() {
-            self.publish_registered_tunnel(&tunnel);
-            log::debug!(
-                "incoming tunnel remote={} tunnel_id={:?} ignore reverse waiter because reverse=false",
-                remote_id,
-                tunnel_id
-            );
-            return Ok(());
-        }
-        if let Some(waiter) = self.take_reverse_waiter(&remote_id, &tunnel_id) {
+        if tunnel.is_reverse() {
+            let Some(waiter) = self.take_reverse_waiter(&remote_id, &tunnel_id) else {
+                log::debug!(
+                    "incoming tunnel remote={} tunnel_id={:?} no reverse waiter, close tunnel",
+                    remote_id,
+                    tunnel_id
+                );
+                tunnel.close().await?;
+                return Ok(());
+            };
             log::debug!(
                 "incoming tunnel remote={} tunnel_id={:?} matched reverse waiter",
                 remote_id,
                 tunnel_id
             );
             waiter.notify(Ok(tunnel));
-        } else {
-            self.publish_registered_tunnel(&tunnel);
-            log::debug!(
-                "incoming tunnel remote={} tunnel_id={:?} no reverse waiter, publish tunnel",
-                remote_id,
-                tunnel_id
-            );
+            return Ok(());
         }
+        let tunnel = self.register_tunnel(tunnel).await?;
+        self.publish_registered_tunnel(&tunnel);
+        log::debug!(
+            "incoming tunnel remote={} tunnel_id={:?} ignore reverse waiter because reverse=false",
+            remote_id,
+            tunnel_id
+        );
         Ok(())
     }
 
@@ -889,7 +889,7 @@ impl TunnelManager {
                     Ok(tunnel) => {
                         if let Some(manager) = manager_weak.upgrade() {
                             manager.on_direct_connect_result(&remote_ep, true);
-                            match manager.register_tunnel_and_publish(tunnel, true).await {
+                            match manager.register_tunnel_and_publish(tunnel).await {
                                 Ok(tunnel) => {
                                     manager
                                         .conn_info_cache
@@ -1101,6 +1101,7 @@ impl TunnelManager {
         }
         let tunnel = tunnel.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
         waiter_registration.dismiss();
+        let tunnel = self.register_tunnel(tunnel).await?;
         self.publish_registered_tunnel(&tunnel);
         log::debug!(
             "reverse path remote={} tunnel_id={:?} incoming tunnel ready local_ep={:?} remote_ep={:?}",
@@ -1141,7 +1142,7 @@ impl TunnelManager {
                 intent,
             )
             .await?;
-        let tunnel = self.register_tunnel_and_publish(tunnel, true).await?;
+        let tunnel = self.register_tunnel_and_publish(tunnel).await?;
         self.conn_info_cache
             .add(
                 remote_id.clone(),
@@ -1533,14 +1534,10 @@ impl TunnelManager {
         Ok(())
     }
 
-    async fn register_tunnel(
-        &self,
-        tunnel: TunnelRef,
-        close_replaced: bool,
-    ) -> P2pResult<TunnelRef> {
+    async fn register_tunnel(&self, tunnel: TunnelRef) -> P2pResult<TunnelRef> {
         let remote_id = tunnel.remote_id();
         log::debug!(
-            "register tunnel local={:?} remote={} tunnel_id={:?} candidate_id={:?} form={:?} reverse={} protocol={:?} close_replaced={} local_ep={:?} remote_ep={:?}",
+            "register tunnel local={:?} remote={} tunnel_id={:?} candidate_id={:?} form={:?} reverse={} protocol={:?} local_ep={:?} remote_ep={:?}",
             self.local_identity.get_id(),
             remote_id,
             tunnel.tunnel_id(),
@@ -1548,7 +1545,6 @@ impl TunnelManager {
             tunnel.form(),
             tunnel.is_reverse(),
             tunnel.protocol(),
-            close_replaced,
             tunnel.local_ep(),
             tunnel.remote_ep()
         );
@@ -1562,7 +1558,7 @@ impl TunnelManager {
 
         let _guard = Locker::get_locker(format!("network-register-{}", remote_id)).await;
         let remote_id_for_log = remote_id.clone();
-        let replaced = {
+        let duplicate_same_arc = {
             let mut tunnels = self.tunnels.write().unwrap();
             let entries = tunnels.entry(remote_id).or_default();
             entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
@@ -1570,13 +1566,7 @@ impl TunnelManager {
                 entry.tunnel.tunnel_id() == tunnel.tunnel_id()
                     && entry.tunnel.candidate_id() == tunnel.candidate_id()
             }) {
-                let same_tunnel = Arc::ptr_eq(&entry.tunnel, &tunnel);
-                let replaced = std::mem::replace(&mut entry.tunnel, tunnel.clone());
-                entry.updated_at = Instant::now();
-                if !same_tunnel {
-                    entry.published = false;
-                }
-                Some(replaced)
+                Some(Arc::ptr_eq(&entry.tunnel, &tunnel))
             } else {
                 entries.push(TunnelEntry {
                     tunnel: tunnel.clone(),
@@ -1587,29 +1577,27 @@ impl TunnelManager {
             }
         };
 
-        if let Some(old) = replaced {
-            log::debug!(
-                "register tunnel local={} remote={} replacing old tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} state={:?} is_closed={} with new tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} state={:?} is_closed={}",
+        if let Some(same_arc) = duplicate_same_arc {
+            log::warn!(
+                "register tunnel local={} remote={} duplicate tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} state={:?} is_closed={} same_arc={}",
                 self.local_identity.get_id(),
                 remote_id_for_log,
-                old.tunnel_id(),
-                old.candidate_id(),
-                old.form(),
-                old.protocol(),
-                old.is_reverse(),
-                old.state(),
-                old.is_closed(),
                 tunnel.tunnel_id(),
                 tunnel.candidate_id(),
                 tunnel.form(),
                 tunnel.protocol(),
                 tunnel.is_reverse(),
                 tunnel.state(),
-                tunnel.is_closed()
+                tunnel.is_closed(),
+                same_arc
             );
-            if !Arc::ptr_eq(&old, &tunnel) {
-                let _ = old.close().await;
+            if !same_arc {
+                let _ = tunnel.close().await;
             }
+            return Err(p2p_err!(
+                P2pErrorCode::AlreadyExists,
+                "tunnel candidate already registered"
+            ));
         }
 
         log::debug!(
@@ -1629,17 +1617,14 @@ impl TunnelManager {
         Ok(tunnel)
     }
 
-    async fn register_tunnel_and_publish(
-        &self,
-        tunnel: TunnelRef,
-        close_replaced: bool,
-    ) -> P2pResult<TunnelRef> {
-        let tunnel = self.register_tunnel(tunnel, close_replaced).await?;
+    async fn register_tunnel_and_publish(&self, tunnel: TunnelRef) -> P2pResult<TunnelRef> {
+        let tunnel = self.register_tunnel(tunnel).await?;
         self.publish_registered_tunnel(&tunnel);
         Ok(tunnel)
     }
 
     fn publish_registered_tunnel(&self, tunnel: &TunnelRef) {
+        let mut should_publish = false;
         {
             let mut tunnels = self.tunnels.write().unwrap();
             if let Some(entries) = tunnels.get_mut(&tunnel.remote_id()) {
@@ -1652,8 +1637,19 @@ impl TunnelManager {
                     }
                     entry.published = true;
                     entry.updated_at = Instant::now();
+                    should_publish = true;
                 }
             }
+        }
+        if !should_publish {
+            log::warn!(
+                "skip publish unregistered tunnel remote={} tunnel_id={:?} candidate_id={:?} form={:?}",
+                tunnel.remote_id(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id(),
+                tunnel.form()
+            );
+            return;
         }
         self.publish_tunnel(tunnel.clone());
     }
@@ -1743,9 +1739,240 @@ fn is_tunnel_available(tunnel: &dyn crate::networks::Tunnel) -> bool {
 mod nat_strategy_tests {
     use super::*;
     use crate::endpoint::{EndpointArea, Protocol};
+    use crate::p2p_identity::{
+        EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
+        P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pIdentitySignType,
+        P2pSignature,
+    };
+    use std::sync::atomic::AtomicUsize;
 
     struct SelectionTunnel {
         form: TunnelForm,
+    }
+
+    struct TestIdentity {
+        id: P2pId,
+        name: String,
+    }
+
+    impl TestIdentity {
+        fn new(id: u8, name: &str) -> P2pIdentityRef {
+            Arc::new(Self {
+                id: P2pId::from(vec![id; 32]),
+                name: name.to_owned(),
+            })
+        }
+    }
+
+    impl P2pIdentity for TestIdentity {
+        fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test identity cert"))
+        }
+
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn sign_type(&self) -> P2pIdentitySignType {
+            P2pIdentitySignType::Ed25519
+        }
+
+        fn sign(&self, _message: &[u8]) -> P2pResult<P2pSignature> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test sign"))
+        }
+
+        fn get_encoded_identity(&self) -> P2pResult<EncodedP2pIdentity> {
+            Ok(Vec::new())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            Vec::new()
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityRef {
+            Arc::new(Self {
+                id: self.id.clone(),
+                name: self.name.clone(),
+            })
+        }
+    }
+
+    struct TestCertFactory;
+
+    impl P2pIdentityCertFactory for TestCertFactory {
+        fn create(&self, _cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test cert factory"))
+        }
+    }
+
+    struct ClosableReverseTunnel {
+        tunnel_id: TunnelId,
+        candidate_id: TunnelCandidateId,
+        form: TunnelForm,
+        is_reverse: bool,
+        local_id: P2pId,
+        remote_id: P2pId,
+        state: Mutex<TunnelState>,
+        close_count: AtomicUsize,
+    }
+
+    impl ClosableReverseTunnel {
+        fn new(
+            tunnel_id: TunnelId,
+            candidate_id: TunnelCandidateId,
+            local_id: P2pId,
+            remote_id: P2pId,
+        ) -> Arc<Self> {
+            Self::new_with_form(
+                tunnel_id,
+                candidate_id,
+                TunnelForm::Passive,
+                true,
+                local_id,
+                remote_id,
+            )
+        }
+
+        fn new_with_form(
+            tunnel_id: TunnelId,
+            candidate_id: TunnelCandidateId,
+            form: TunnelForm,
+            is_reverse: bool,
+            local_id: P2pId,
+            remote_id: P2pId,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                tunnel_id,
+                candidate_id,
+                form,
+                is_reverse,
+                local_id,
+                remote_id,
+                state: Mutex::new(TunnelState::Connected),
+                close_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn close_count(&self) -> usize {
+            self.close_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::networks::Tunnel for ClosableReverseTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            self.tunnel_id
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            self.candidate_id
+        }
+
+        fn form(&self) -> TunnelForm {
+            self.form
+        }
+
+        fn is_reverse(&self) -> bool {
+            self.is_reverse
+        }
+
+        fn protocol(&self) -> Protocol {
+            Protocol::Tcp
+        }
+
+        fn local_id(&self) -> P2pId {
+            self.local_id.clone()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            self.remote_id.clone()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            None
+        }
+
+        fn state(&self) -> TunnelState {
+            *self.state.lock().unwrap()
+        }
+
+        fn is_closed(&self) -> bool {
+            self.state() == TunnelState::Closed
+        }
+
+        async fn close(&self) -> P2pResult<()> {
+            self.close_count.fetch_add(1, Ordering::SeqCst);
+            *self.state.lock().unwrap() = TunnelState::Closed;
+            Ok(())
+        }
+
+        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
+        }
+
+        async fn accept_stream(
+            &self,
+        ) -> P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
+        }
+
+        async fn open_datagram(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
+        }
+
+        async fn accept_datagram(
+            &self,
+        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
+        }
+    }
+
+    fn test_manager(local_identity: P2pIdentityRef) -> TunnelManagerRef {
+        Executor::init();
+        TunnelManager::new(
+            local_identity,
+            None,
+            crate::networks::NetManager::new(
+                Vec::new(),
+                crate::tls::DefaultTlsServerCertResolver::new(),
+            )
+            .unwrap(),
+            None,
+            Arc::new(TestCertFactory),
+            None,
+            crate::tunnel::DefaultP2pConnectionInfoCache::new(),
+            Arc::new(TunnelIdGenerator::new()),
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            PROXY_UPGRADE_INITIAL_INTERVAL,
+        )
+        .unwrap()
     }
 
     #[async_trait::async_trait]
@@ -1970,6 +2197,121 @@ mod nat_strategy_tests {
         assert_eq!(reverse.tunnel_id, TunnelId::from(32));
         assert!(reverse.is_reverse);
         assert!(reverse.udp_punch_enabled);
+    }
+
+    #[tokio::test]
+    async fn reverse_without_waiter_closes_without_publish() {
+        let local = TestIdentity::new(1, "local-no-reverse-waiter");
+        let remote = TestIdentity::new(2, "remote-no-reverse-waiter");
+        let manager = test_manager(local.clone());
+        let mut sub = manager.subscribe();
+        let tunnel_id = TunnelId::from(51);
+        let (notify, _waiter) = Notify::new();
+        let registration =
+            ReverseWaitRegistration::register(manager.as_ref(), remote.get_id(), tunnel_id, notify);
+        drop(registration);
+
+        let late = ClosableReverseTunnel::new(
+            tunnel_id,
+            TunnelCandidateId::from(5101),
+            local.get_id(),
+            remote.get_id(),
+        );
+
+        manager.on_incoming_tunnel(late.clone()).await.unwrap();
+
+        assert_eq!(late.close_count(), 1);
+        assert!(manager.get_tunnel(&remote.get_id()).is_none());
+        assert!(
+            runtime::timeout(Duration::from_millis(50), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_without_waiter_closes_fresh_tunnel_id_without_x509() {
+        let local = TestIdentity::new(3, "local-no-waiter-reverse");
+        let remote = TestIdentity::new(4, "remote-no-waiter-reverse");
+        let manager = test_manager(local.clone());
+        let mut sub = manager.subscribe();
+        let fresh_tunnel_id = TunnelId::from(53);
+
+        let fresh = ClosableReverseTunnel::new(
+            fresh_tunnel_id,
+            TunnelCandidateId::from(5301),
+            local.get_id(),
+            remote.get_id(),
+        );
+        let fresh_ref: TunnelRef = fresh.clone();
+
+        manager.on_incoming_tunnel(fresh_ref.clone()).await.unwrap();
+
+        assert_eq!(fresh.close_count(), 1);
+        assert!(manager.get_tunnel(&remote.get_id()).is_none());
+        assert!(
+            runtime::timeout(Duration::from_millis(50), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_registered_tunnel_skips_unregistered_candidate() {
+        let local = TestIdentity::new(5, "local-publish-unregistered");
+        let remote = TestIdentity::new(6, "remote-publish-unregistered");
+        let manager = test_manager(local.clone());
+        let mut sub = manager.subscribe();
+        let tunnel = ClosableReverseTunnel::new_with_form(
+            TunnelId::from(55),
+            TunnelCandidateId::from(5501),
+            TunnelForm::Active,
+            false,
+            local.get_id(),
+            remote.get_id(),
+        );
+        let tunnel_ref: TunnelRef = tunnel.clone();
+
+        manager.publish_registered_tunnel(&tunnel_ref);
+
+        assert!(manager.get_tunnel(&remote.get_id()).is_none());
+        assert!(
+            runtime::timeout(Duration::from_millis(50), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn register_tunnel_duplicate_candidate_fails_and_closes_new_tunnel() {
+        let local = TestIdentity::new(7, "local-duplicate-candidate");
+        let remote = TestIdentity::new(8, "remote-duplicate-candidate");
+        let manager = test_manager(local.clone());
+        let tunnel_id = TunnelId::from(57);
+        let candidate_id = TunnelCandidateId::from(5701);
+        let first = ClosableReverseTunnel::new_with_form(
+            tunnel_id,
+            candidate_id,
+            TunnelForm::Active,
+            false,
+            local.get_id(),
+            remote.get_id(),
+        );
+        let second = ClosableReverseTunnel::new_with_form(
+            tunnel_id,
+            candidate_id,
+            TunnelForm::Active,
+            false,
+            local.get_id(),
+            remote.get_id(),
+        );
+
+        manager.register_tunnel(first.clone()).await.unwrap();
+        let err = manager.register_tunnel(second.clone()).await.err().unwrap();
+
+        assert_eq!(err.code(), P2pErrorCode::AlreadyExists);
+        assert_eq!(first.close_count(), 0);
+        assert_eq!(second.close_count(), 1);
     }
 
     #[test]
@@ -2707,10 +3049,7 @@ mod tests {
             .unwrap();
 
         let accepted = server_listener.accept_tunnel().await.unwrap();
-        let accepted = callee_manager
-            .register_tunnel(accepted, false)
-            .await
-            .unwrap();
+        let accepted = callee_manager.register_tunnel(accepted).await.unwrap();
         callee_manager.publish_registered_tunnel(&accepted);
 
         let subscribed = callee_sub.accept_tunnel().await.unwrap();
@@ -2753,7 +3092,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(notified.remote_id(), remote_identity.get_id());
-        assert!(manager.get_tunnel(&remote_identity.get_id()).is_some());
+        assert!(manager.get_tunnel(&remote_identity.get_id()).is_none());
+        assert!(
+            !manager
+                .tunnels
+                .read()
+                .unwrap()
+                .contains_key(&remote_identity.get_id())
+        );
         assert!(
             runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
                 .await
@@ -2815,6 +3161,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_reverse_tunnel_after_waiter_timeout_is_closed_not_published() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-late-reverse-close");
+        let remote_identity = new_identity("remote-late-reverse-close");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let mut sub = manager.subscribe();
+        let tunnel_id = TunnelId::from(45);
+        let (notify, _waiter) = Notify::new();
+        let registration = ReverseWaitRegistration::register(
+            manager.as_ref(),
+            remote_identity.get_id(),
+            tunnel_id,
+            notify,
+        );
+        drop(registration);
+
+        let late_reverse = TrackableTunnel::new_with_ids(
+            tunnel_id,
+            TunnelCandidateId::from(4501),
+            TunnelForm::Passive,
+            true,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+
+        manager
+            .on_incoming_tunnel(late_reverse.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(late_reverse.close_count(), 1);
+        assert!(late_reverse.is_closed());
+        assert!(manager.get_tunnel(&remote_identity.get_id()).is_none());
+        assert!(
+            !manager
+                .tunnels
+                .read()
+                .unwrap()
+                .contains_key(&remote_identity.get_id())
+        );
+        assert!(
+            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_without_waiter_closes_new_tunnel_id() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-no-waiter-reverse-new-id");
+        let remote_identity = new_identity("remote-no-waiter-reverse-new-id");
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let mut sub = manager.subscribe();
+        let fresh_tunnel_id = TunnelId::from(47);
+
+        let fresh_reverse = TrackableTunnel::new_with_ids(
+            fresh_tunnel_id,
+            TunnelCandidateId::from(4701),
+            TunnelForm::Passive,
+            true,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
+        let fresh_ref: TunnelRef = fresh_reverse.clone();
+
+        manager.on_incoming_tunnel(fresh_ref.clone()).await.unwrap();
+
+        assert_eq!(fresh_reverse.close_count(), 1);
+        assert!(manager.get_tunnel(&remote_identity.get_id()).is_none());
+        assert!(
+            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn get_tunnel_removes_unavailable_entry() {
         init_tls_once();
 
@@ -2865,7 +3293,7 @@ mod tests {
         );
         let existing_ref: TunnelRef = existing.clone();
         manager
-            .register_tunnel_and_publish(existing_ref.clone(), false)
+            .register_tunnel_and_publish(existing_ref.clone())
             .await
             .unwrap();
 
@@ -2881,7 +3309,7 @@ mod tests {
         let replacement_ref: TunnelRef = replacement.clone();
 
         let returned = manager
-            .register_tunnel_and_publish(replacement_ref.clone(), true)
+            .register_tunnel_and_publish(replacement_ref.clone())
             .await
             .unwrap();
 
@@ -2933,11 +3361,11 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(first.clone(), false)
+            .register_tunnel_and_publish(first.clone())
             .await
             .unwrap();
         manager
-            .register_tunnel_and_publish(second.clone(), false)
+            .register_tunnel_and_publish(second.clone())
             .await
             .unwrap();
 
@@ -2981,7 +3409,7 @@ mod tests {
 
         let reverse_ref: TunnelRef = reverse.clone();
         let returned = manager
-            .register_tunnel_and_publish(reverse_ref.clone(), false)
+            .register_tunnel_and_publish(reverse_ref.clone())
             .await
             .unwrap();
         let published = sub.accept_tunnel().await.unwrap();
@@ -2991,7 +3419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reverse_incoming_tunnel_publishes_after_waiter_consumed() {
+    async fn reverse_incoming_tunnel_closes_without_waiter_after_waiter_consumed() {
         init_tls_once();
 
         let local_identity = new_identity("local-reverse-after-waiter");
@@ -3036,11 +3464,13 @@ mod tests {
         );
 
         manager.on_incoming_tunnel(second.clone()).await.unwrap();
-        let published = sub.accept_tunnel().await.unwrap();
-        let second_ref: TunnelRef = second.clone();
-        assert!(Arc::ptr_eq(&published, &second_ref));
         assert_eq!(first.close_count(), 0);
-        assert_eq!(second.close_count(), 0);
+        assert_eq!(second.close_count(), 1);
+        assert!(
+            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
         assert_eq!(
             manager
                 .tunnels
@@ -3048,7 +3478,7 @@ mod tests {
                 .unwrap()
                 .get(&remote_identity.get_id())
                 .map(|entries| entries.len()),
-            Some(2)
+            None
         );
     }
 
@@ -3079,6 +3509,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let notified = manager.register_tunnel(notified).await.unwrap();
         manager.publish_registered_tunnel(&notified);
 
         let published = sub.accept_tunnel().await.unwrap();
@@ -3107,12 +3538,9 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager.register_tunnel(first.clone(), false).await.unwrap();
+        manager.register_tunnel(first.clone()).await.unwrap();
         runtime::sleep(Duration::from_millis(1)).await;
-        manager
-            .register_tunnel(second.clone(), false)
-            .await
-            .unwrap();
+        manager.register_tunnel(second.clone()).await.unwrap();
 
         let selected = manager.get_tunnel(&remote_identity.get_id()).unwrap();
         let second_ref: TunnelRef = second.clone();
@@ -3150,12 +3578,12 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(direct.clone(), false)
+            .register_tunnel_and_publish(direct.clone())
             .await
             .unwrap();
         runtime::sleep(Duration::from_millis(1)).await;
         manager
-            .register_tunnel_and_publish(proxy.clone(), false)
+            .register_tunnel_and_publish(proxy.clone())
             .await
             .unwrap();
 
@@ -3196,7 +3624,7 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(proxy.clone(), false)
+            .register_tunnel_and_publish(proxy.clone())
             .await
             .unwrap();
         assert!(
@@ -3209,7 +3637,7 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(direct.clone(), false)
+            .register_tunnel_and_publish(direct.clone())
             .await
             .unwrap();
         assert!(
@@ -3268,11 +3696,11 @@ mod tests {
         );
 
         manager
-            .register_tunnel(reverse_hidden.clone(), false)
+            .register_tunnel(reverse_hidden.clone())
             .await
             .unwrap();
         manager
-            .register_tunnel_and_publish(published.clone(), false)
+            .register_tunnel_and_publish(published.clone())
             .await
             .unwrap();
 
@@ -3298,7 +3726,7 @@ mod tests {
         let proxy_ref: TunnelRef = proxy.clone();
 
         let returned = manager
-            .register_tunnel_and_publish(proxy_ref, false)
+            .register_tunnel_and_publish(proxy_ref)
             .await
             .unwrap();
         let published = sub.accept_tunnel().await.unwrap();
@@ -3334,10 +3762,7 @@ mod tests {
         );
         let tunnel_ref: TunnelRef = tunnel.clone();
 
-        manager
-            .register_tunnel(tunnel_ref.clone(), false)
-            .await
-            .unwrap();
+        manager.register_tunnel(tunnel_ref.clone()).await.unwrap();
         manager.publish_registered_tunnel(&tunnel_ref);
         manager.publish_registered_tunnel(&tunnel_ref);
 
@@ -3351,11 +3776,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_published_candidate_republishes_new_tunnel() {
+    async fn duplicate_published_candidate_registration_fails_without_republish() {
         init_tls_once();
 
-        let local_identity = new_identity("local-republish-replacement");
-        let remote_identity = new_identity("remote-republish-replacement");
+        let local_identity = new_identity("local-duplicate-published");
+        let remote_identity = new_identity("remote-duplicate-published");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
         let mut sub = manager.subscribe();
         let tunnel_id = TunnelId::from(901);
@@ -3380,23 +3805,27 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(first.clone(), false)
+            .register_tunnel_and_publish(first.clone())
             .await
             .unwrap();
         let first_published = sub.accept_tunnel().await.unwrap();
         let first_ref: TunnelRef = first.clone();
         assert!(Arc::ptr_eq(&first_published, &first_ref));
 
-        manager
-            .register_tunnel_and_publish(replacement.clone(), false)
+        let err = manager
+            .register_tunnel_and_publish(replacement.clone())
             .await
+            .err()
             .unwrap();
-        let replacement_published = runtime::timeout(Duration::from_secs(1), sub.accept_tunnel())
-            .await
-            .unwrap()
-            .unwrap();
-        let replacement_ref: TunnelRef = replacement.clone();
-        assert!(Arc::ptr_eq(&replacement_published, &replacement_ref));
+
+        assert_eq!(err.code(), P2pErrorCode::AlreadyExists);
+        assert_eq!(first.close_count(), 0);
+        assert_eq!(replacement.close_count(), 1);
+        assert!(
+            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3433,10 +3862,7 @@ mod tests {
             remote_identity.get_id(),
             TunnelState::Connected,
         );
-        manager
-            .register_tunnel_and_publish(existing, false)
-            .await
-            .unwrap();
+        manager.register_tunnel_and_publish(existing).await.unwrap();
 
         manager
             .on_sn_called(make_sn_called(&remote_identity, tunnel_id, vec![remote_ep]))
@@ -3479,10 +3905,7 @@ mod tests {
             remote_identity.get_id(),
             TunnelState::Connected,
         );
-        manager
-            .register_tunnel_and_publish(existing, false)
-            .await
-            .unwrap();
+        manager.register_tunnel_and_publish(existing).await.unwrap();
 
         let new_tunnel_id = TunnelId::from(903);
         manager
@@ -3810,11 +4233,11 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(proxy.clone(), false)
+            .register_tunnel_and_publish(proxy.clone())
             .await
             .unwrap();
         manager
-            .register_tunnel_and_publish(direct.clone(), false)
+            .register_tunnel_and_publish(direct.clone())
             .await
             .unwrap();
         assert!(
@@ -3857,7 +4280,7 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(tunnel.clone(), false)
+            .register_tunnel_and_publish(tunnel.clone())
             .await
             .unwrap();
 
@@ -4056,10 +4479,7 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager
-            .register_tunnel_and_publish(proxy, false)
-            .await
-            .unwrap();
+        manager.register_tunnel_and_publish(proxy).await.unwrap();
 
         let state = manager.state.lock().unwrap();
         let upgrade = state
@@ -4103,10 +4523,7 @@ mod tests {
             TunnelState::Connected,
         );
 
-        manager
-            .register_tunnel_and_publish(proxy, false)
-            .await
-            .unwrap();
+        manager.register_tunnel_and_publish(proxy).await.unwrap();
 
         let state = manager.state.lock().unwrap();
         let upgrade = state
@@ -4192,7 +4609,7 @@ mod tests {
         );
 
         manager
-            .register_tunnel_and_publish(proxy.clone(), false)
+            .register_tunnel_and_publish(proxy.clone())
             .await
             .unwrap();
         manager

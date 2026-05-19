@@ -9,7 +9,7 @@
 - `src/endpoint.rs` 负责 endpoint area、协议和地址的公开语义及编解码；`ServerReflexive` 表示 SN 观察到但未与节点自上报地址一致的外网地址，文本编码使用 `S`，不得再作为 system default 语义使用。
 - `src/sn/**` 负责 SN 观察 endpoint 的归类：只有 SN 观察地址与节点自上报 endpoint 完全一致时才可标记为 `Wan`，否则必须标记为 `ServerReflexive`。
 - `src/pn/client/**` 负责 `PnTunnel` 本地生命周期、proxy channel open/accept、tunnel 级控制通道、对端关闭感知、idle timeout 关闭，以及关闭后同一 logical tunnel 后续 open 触发重新创建的语义。
-- `src/tunnel/**` 负责 tunnel 候选选择、proxy 兜底连通性，以及 proxy 已连通后的 direct/reverse 脱代理升级策略；当同一远端存在多个可用 tunnel candidate 时，默认复用路径应优先选择已发布的非 proxy tunnel，只有没有可用非 proxy candidate 时才复用 proxy。
+- `src/tunnel/**` 负责 tunnel 候选选择、proxy 兜底连通性，以及 proxy 已连通后的 direct/reverse 脱代理升级策略；当同一远端存在多个可用 tunnel candidate 时，默认复用路径应优先选择已发布的非 proxy tunnel，只有没有可用非 proxy candidate 时才复用 proxy。reverse incoming tunnel 必须命中本地同 `(remote_id, tunnel_id)` reverse waiter；无 waiter 时必须关闭且不得发布为可用候选。
 
 ## 关键边界
 - 范围内：

@@ -20,7 +20,7 @@
 ## 目标与原则
 
 - 所有对外可用的新 tunnel 都遵循同一条生命周期：`register -> publish`。
-- `reverse` tunnel 的特殊性只允许体现在“本地 waiter 尚未完成交付时，publish 时机延后”，不允许演化成另一套 publish 规则。
+- `reverse` tunnel 的特殊性只允许体现在两处：命中本地 waiter 时 publish 时机延后；没有命中本地 waiter 时直接关闭且不发布。
 - publish 是“把已登记候选变成对订阅者和默认复用路径可见”的动作，而不是底层建链成功的同义词。
 - 只要某条 tunnel 已经对外可见，它就必须已经被 `TunnelManager` 纳入候选状态管理和后续清理/升级逻辑。
 - publish 入口必须幂等，同一 candidate 重复 publish 不得造成重复广播或状态损坏。
@@ -33,7 +33,8 @@
 | 状态 | 含义 | 是否在候选表中 | 是否已对外可见 |
 |------|------|----------------|----------------|
 | `ConnectedUnregistered` | 底层建链成功，但尚未交给 `TunnelManager` | no | no |
-| `RegisteredHidden` | 已登记为候选，但由于命中本地 reverse waiter 而暂不对外发布 | yes | no |
+| `WaiterDelivered` | reverse incoming 已交给本地 waiter，但尚未由 waiter 接收方登记 | no | no |
+| `RegisteredHidden` | waiter 接收方已登记 reverse tunnel，但尚未对外发布 | yes | no |
 | `RegisteredPublished` | 已登记并完成 publish，可被订阅者消费，也可被默认复用路径优先选中 | yes | yes |
 
 ### 状态迁移
@@ -41,9 +42,10 @@
 | 触发 | 起点 | 终点 | 说明 |
 |------|------|------|------|
 | direct/proxy/普通 incoming 成功 | `ConnectedUnregistered` | `RegisteredPublished` | 默认路径：先登记，再立即 publish |
-| reverse incoming 命中 waiter | `ConnectedUnregistered` | `RegisteredHidden` | 先登记，避免 tunnel 脱离候选管理；仅推迟 publish 时机 |
+| reverse incoming 命中 waiter | `ConnectedUnregistered` | `WaiterDelivered` | incoming 分支只交给 waiter，不登记、不 publish |
+| waiter 接收方拿到 reverse tunnel | `WaiterDelivered` | `RegisteredHidden` | waiter 接收方确认结果后登记，随后进入统一 publish |
 | waiter 成功收到 reverse tunnel | `RegisteredHidden` | `RegisteredPublished` | 通过与 direct/proxy 相同的 publish 入口提升可见性 |
-| waiter 先超时/取消/失败后，reverse tunnel 才到达 | `ConnectedUnregistered` | `RegisteredPublished` | 因 waiter 已清理，不再允许继续隐藏 |
+| reverse incoming 未命中 waiter | `ConnectedUnregistered` | closed | 直接关闭，不进入候选表，也不 publish |
 
 ## 各路径设计要求
 
@@ -61,10 +63,10 @@
 
 ### 3. reverse incoming tunnel
 
-- reverse incoming 到达时，`TunnelManager` 先按普通新候选完成登记。
-- 若该 tunnel 命中本地 `(remote_id, tunnel_id)` `reverse_waiter`，则该候选先停留在 `RegisteredHidden`，同时把 tunnel 交给 waiter。
-- waiter 成功取得 tunnel 并把 reverse 建链视为完成后，必须立刻调用统一 publish 入口，把该 tunnel 提升为 `RegisteredPublished`。
-- 若 reverse incoming 到达时本地已无 waiter，则该 tunnel 不再视为“本次 reverse open 的内部结果”，必须像其他新 tunnel 一样立即 publish。
+- reverse incoming 到达时，`TunnelManager` 必须先尝试消费本地同 `(remote_id, tunnel_id)` `reverse_waiter`。
+- 若该 tunnel 命中本地 `(remote_id, tunnel_id)` `reverse_waiter`，incoming 分支只把 tunnel 交给 waiter，不得 register，不得 publish，也不得让该 tunnel 出现在 `get_tunnel()` 候选中。
+- waiter 接收方成功取得 tunnel 并把 reverse 建链视为完成后，必须先完成 register，再立刻调用统一 publish 入口，把该 tunnel 提升为 `RegisteredPublished`。
+- 若 reverse incoming 到达时本地已无 waiter，该 tunnel 不得再视为可对外发布的新 tunnel，必须直接关闭，不得 register、不得 publish、不得进入订阅流。
 
 ### 4. proxy tunnel 与后续脱代理升级
 
@@ -92,7 +94,9 @@
 
 - `reverse_waiter` 的生命周期只覆盖“本地还在等待这次 reverse open 结果”的时间窗口。
 - 一旦 reverse open 超时、取消或失败，对应 waiter 必须立即移除。
-- waiter 被移除后，同 `(remote_id, tunnel_id)` 的 later-arriving reverse tunnel 不得继续保持 hidden，而必须按普通新 tunnel 规则 publish。
+- waiter 正常完成时，命中的 tunnel 必须由 waiter 接收方 register，并通过统一 publish 入口提升为可见候选。
+- waiter 被移除后，同 `(remote_id, tunnel_id)` 的 later-arriving reverse tunnel 会因为无 waiter 而直接关闭，不得按普通新 tunnel 规则 publish。
+- 实现不得为该判定引入额外 reverse 过期表；pending reverse waiter 是 reverse incoming 是否可接收的唯一本地状态。
 - 实现阶段若发现 hedged direct/reverse 竞争会留下悬空 waiter，必须优先修正 waiter 清理，再推进 publish 简化实现。
 
 ## 对现有实现形状的约束
