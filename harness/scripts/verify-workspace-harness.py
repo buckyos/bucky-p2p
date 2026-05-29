@@ -14,6 +14,8 @@ MODULES = (
 
 REQUIRED_ROOT_FILES = (
     pathlib.Path("AGENTS.md"),
+    pathlib.Path("test-run.bat"),
+    pathlib.Path("test-run.sh"),
     pathlib.Path("docs/architecture/principles.md"),
     pathlib.Path("docs/architecture/workspace-constraints.md"),
     pathlib.Path("docs/architecture/validation-model.md"),
@@ -26,6 +28,7 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("harness/rules/direct-change-mapping-rules.md"),
     pathlib.Path("harness/rules/implementation-admission-rules.md"),
     pathlib.Path("harness/rules/module-doc-exception-rules.md"),
+    pathlib.Path("harness/rules/proposal-doc-rules.md"),
     pathlib.Path("harness/rules/proposal-first-acceptance-rules.md"),
     pathlib.Path("harness/rules/schema-validation-rules.md"),
     pathlib.Path("harness/rules/task-entry-gate-rules.md"),
@@ -45,15 +48,13 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("harness/scripts/admission-check.py"),
     pathlib.Path("harness/scripts/schema-check.py"),
     pathlib.Path("harness/scripts/check-implementation-admission.py"),
+    pathlib.Path("harness/scripts/stage-scope-check.py"),
     pathlib.Path("harness/scripts/test-run.py"),
 )
 
 REQUIRED_PACKET_FILES = (
     "proposal.md",
     "design.md",
-    "testing.md",
-    "acceptance.md",
-    "testplan.yaml",
 )
 
 

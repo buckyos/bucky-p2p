@@ -21,6 +21,7 @@ use crate::tls::{
 };
 use crate::tunnel::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -90,6 +91,7 @@ pub struct P2pConfig {
     quic_idle_time: Duration,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
+    server_runtime: Option<ServerRuntime>,
 }
 
 impl P2pConfig {
@@ -120,6 +122,7 @@ impl P2pConfig {
             quic_idle_time: Duration::from_secs(60),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
+            server_runtime: None,
         }
     }
 
@@ -269,6 +272,15 @@ impl P2pConfig {
         self.reuse_address = reuse_address;
         self
     }
+
+    pub fn server_runtime(&self) -> Option<&ServerRuntime> {
+        self.server_runtime.as_ref()
+    }
+
+    pub fn set_server_runtime(mut self, server_runtime: ServerRuntime) -> Self {
+        self.server_runtime = Some(server_runtime);
+        self
+    }
 }
 
 pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
@@ -280,12 +292,22 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
 
     let tsl_server_cert_resolver = config.sever_cert_resolver();
     let mut tunnel_networks = config.extra_networks().clone();
-    let tcp_network = Arc::new(TcpTunnelNetwork::new(
+    let server_runtime = match config.server_runtime() {
+        Some(runtime) => runtime.clone(),
+        None => ServerRuntime::start(ServerRuntimeConfig::default()).map_err(
+            crate::error::into_p2p_err!(
+                P2pErrorCode::ExecuteError,
+                "start sfo reuseport server runtime failed"
+            ),
+        )?,
+    };
+    let tcp_network = Arc::new(TcpTunnelNetwork::new_with_server_runtime(
         tsl_server_cert_resolver.clone(),
         cert_factory.clone(),
         config.tcp_connect_timout,
         Duration::from_secs(5),
         Duration::from_secs(15),
+        server_runtime.clone(),
     ));
     TunnelNetwork::set_reuse_address(tcp_network.as_ref(), config.reuse_address());
     let quic_network = Arc::new(QuicTunnelNetwork::new(
@@ -295,6 +317,7 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         config.quic_congestion_algorithm,
         config.quic_connect_timeout,
         config.quic_idle_time,
+        server_runtime,
     ));
     TunnelNetwork::set_reuse_address(quic_network.as_ref(), config.reuse_address());
     tunnel_networks.extend(vec![

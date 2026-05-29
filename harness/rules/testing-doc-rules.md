@@ -1,32 +1,49 @@
-# 测试文档规则
+# Testing Document Rules
 
-## 目标
-- 定义 `testing.md`、`testing/` 与 `testplan.yaml` 的最低结构和审批要求。
+## Goal
+- Define optional persistent testing artifacts and the required post-implementation testing responsibilities.
 
-## 范围
+## Scope
 - `docs/versions/<version>/modules/<module>/testing.md`
 - `docs/versions/<version>/modules/<module>/testing/`
+- `docs/versions/<version>/modules/<module>/<submodule>/testing.md` when a large module is split into direct submodule packets
 - `docs/versions/<version>/modules/<module>/testplan.yaml`
+- `docs/versions/<version>/modules/<module>/<submodule>/testplan.yaml` when a large module is split into direct submodule packets
 
-## 必需元数据
+## Metadata For Optional Testing Documents
 - `module`
 - `version`
 - `status`
 - `approved_by`
 - `approved_at`
 
-## 必需内容
-- 从 `design.md` 映射出的直接子模块覆盖
-- 模块级验证
-- 外部接口验证
-- 完成定义
-- 与 `testplan.yaml` 对齐的规范 unit、DV、integration 入口
-- 面向当前改动的直接验证覆盖
-- 没有直接验证时的明确缺口记录
+## Required Content
+- test cases designed after implementation from proposal, design, and delivered code
+- submodule test coverage mapped to design and implementation
+- module-level verification
+- external interface verification
+- validation rationale that ties checks to concrete behaviors, risks, or success criteria
+- definition of done
+- stable test entrypoints, optionally aligned with `testplan.yaml`
+- direct change coverage for implemented work
+- stable `change_id` values matching proposal and design items
+- explicit gap records where direct validation does not yet exist
+- large-module submodule test documentation when design uses direct submodules
 
-## 护栏
-- Testing 必须把已批准的 proposal 与 design 意图转化为可执行验证。
-- Testing 任务不得重写 proposal、design 或 implementation 制品。
-- 三个层级都必须声明。若某一层级被禁用或只能手工执行，必须在 `testplan.yaml` 和验收评审中明确说明原因。
-- 每个 implementation-ready 的改动都必须有直接验证覆盖，或者在 `testing.md` 与 `testplan.yaml` 中留下明确缺口和原因。
-- 如果 testing 发现上游设计问题，应退回 design，而不是静默扩大范围。
+## Guardrails
+- Testing must operationalize approved proposal/design intent against the delivered implementation.
+- Testing tasks run after implementation completes and MUST inspect `proposal.md`, `design.md`, and the delivered code before designing test cases.
+- Testing tasks are single-stage by default and MUST NOT edit `proposal.md`, `design.md`, `design/`, acceptance artifacts, or production code unless the user explicitly requested those additional stages.
+- Testing tasks may modify test code, test fixtures, test runners, and optional testing artifacts.
+- Testing tasks may modify unified test entrypoint wiring when needed to register the generated tests.
+- Testing tasks must not rewrite proposal, design, or production implementation artifacts.
+- If proposal/design split a large module into direct submodules and optional testing artifacts are generated, those artifacts MUST mirror that split using submodule packets under the large module directory, such as `docs/versions/<version>/modules/<module>/<submodule>/testing.md` and `testplan.yaml`, not `testing/<submodule>/`.
+- Human-authored testing docs SHOULD stay under 1000 lines each. Any testing document that would exceed 1000 lines MUST be split by submodule, responsibility, validation layer, or interface boundary and the test document index MUST be updated.
+- Every implemented change should have direct validation coverage or an explicit gap.
+- Every implemented `change_id` should map to a validation id and a generated test implementation or optional `testplan.yaml` step unless the validation path is explicitly `manual` or `disabled`.
+- Every generated or changed automated test MUST be reachable through `harness/scripts/test-run.py`.
+- Testing is not complete until `uv run --active python ./harness/scripts/test-run.py <module> all` reaches the module tests and `uv run --active python ./harness/scripts/test-run.py all all` reaches all project tests registered with the harness.
+- Validation paths should prove a named behavior or risk; do not add unrelated checks as evidence.
+- If a layer is `manual` or `disabled`, the reason should appear in generated test evidence and optional testing metadata when present.
+- If a testing task discovers an upstream design or implementation problem, return work to the owning design or implementation stage instead of widening test scope silently.
+- If a testing change implies acceptance updates, record the downstream follow-up unless the user explicitly requested cross-stage synchronization.

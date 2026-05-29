@@ -8,7 +8,7 @@
 - 由人类定义意图、范围、约束和审批边界。
 - Agent 只能在仓库定义的阶段边界内执行。
 - Acceptance 是对完整证据链的独立审计，与 implementation 分离。
-- Auto-pipeline 规则已安装，但模式默认不进入；只有用户显式要求启动、进入或运行自动流水线时，已批准的 proposal 才能作为后续 planning、design、testing、implementation 和 acceptance 任务的前置条件。
+- Auto-pipeline 规则已安装，但模式默认不进入；只有用户显式要求启动、进入或运行自动流水线时，已批准的 proposal 才能作为后续 planning、design、implementation、post-implementation testing 和 acceptance 任务的前置条件。
 
 ## 任务读取顺序
 1. 先读本文件。
@@ -23,12 +23,12 @@
 - Proposal 职责：把用户意图转化为可审批的目标、范围、非目标、约束与风险边界基线。Proposal 任务只能修改 `proposal.md`。
 - 流水线规划职责：在下游执行开始前创建阶段图、依赖、输出和退回路径。Planning 任务只能修改 `harness/pipeline-plan.md` 和任务制品。
 - Design 职责：把已批准的 proposal 转化为可执行结构、接口、模块拆分和实现顺序。Design 任务只能修改 `design.md`、`design/`，以及必须同步的 `docs/modules/<module>.md` 边界说明。
-- Testing 职责：把已批准的 design 转化为可运行的验证覆盖、执行入口和通过标准。Testing 任务只能修改 `testing.md`、`testing/` 和 `testplan.yaml`。
-- Implementation 职责：交付满足已批准 proposal、design 与 testing 输入的最小代码和测试变更。Implementation 任务只能修改代码和测试代码。
+- Testing 职责：在 implementation 完成后，基于 proposal、design 和已交付代码设计并生成可运行验证覆盖。Testing 任务只能修改测试代码、测试夹具、测试入口，以及可选的 `testing.md`、`testing/` 和 `testplan.yaml`。
+- Implementation 职责：交付满足已批准 proposal 与 design 的最小生产代码和必需运行时/构建资源变更。Implementation 任务只能修改生产代码和必需的非测试运行时/构建资源。
 - Acceptance 职责：独立审计 proposal、design、testing、implementation、测试与结果是否仍然一致。Acceptance 任务只写评审报告。
 
 ## 硬门禁
-- 除 `harness/rules/module-doc-exception-rules.md` 中显式列出的模块级文档豁免外，在 `proposal.md`、`design.md` 与 `testing.md` 全部存在且标记为 `status: approved` 之前，implementation 和 bugfix 工作都不得开始。
+- 除 `harness/rules/module-doc-exception-rules.md` 中显式列出的模块级文档豁免外，在 `proposal.md` 与 `design.md` 全部存在且标记为 `status: approved` 之前，implementation 和 bugfix 工作都不得开始。
 - implementation 和 bugfix 工作还必须明确 `version`、`module` 与一个或多个 `change_id`，并通过 `schema-check.py` 与 `admission-check.py`；审批状态本身不是充分准入证据。
 - 下游文档不得静默缩窄、扩展或违背已批准的 proposal。
 - 后续阶段如果发现上游问题，必须把工作退回责任阶段，而不是就地修改上游制品。
@@ -62,6 +62,8 @@
 - 结构准入检查：`python3 ./harness/scripts/schema-check.py --version v0.1 --module <module>`
 - 改动准入检查：`python3 ./harness/scripts/admission-check.py --version v0.1 --module <module> --change-id <change_id>`
 - 兼容准入入口：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <module> <change_id>`
+- 阶段范围检查：`python3 ./harness/scripts/stage-scope-check.py --stage <stage>`
+- 全量验证入口：`./test-run.sh all all` 或 `test-run.bat all all`
 - 审批状态报告：`python3 ./harness/scripts/report-approval-status.py v0.1`
 
 ## 治理索引

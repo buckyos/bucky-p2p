@@ -1,60 +1,58 @@
-# 实现准入规则
+# Implementation Admission Rules
 
-## 目标
-- 定义实现或 bugfix 工作启动前的硬性前提。
-- 本规则只能在 `task-entry-gate-rules.md` 已完成任务分类并要求实现准入后应用。
+## Goal
+- Define the hard prerequisites for starting implementation or bugfix work.
+- This rule is reached only after `task-entry-gate-rules.md` classifies the task and requires implementation admission.
 
-## 范围
-- implementation 任务
-- bugfix 任务
-- 某个版本化模块中的代码与测试代码变更
+## Scope
+- implementation tasks
+- bugfix tasks
+- production code changes for a versioned module
 
-## 必需输入
-- 对默认模块：
-  - `docs/versions/<version>/modules/<module>/proposal.md`
-  - `docs/versions/<version>/modules/<module>/design.md`
-  - `docs/versions/<version>/modules/<module>/testing.md`
-  - `docs/versions/<version>/modules/<module>/testplan.yaml`
-- 对 `harness/rules/module-doc-exception-rules.md` 中列出的模块：
-  - 机器可读治理中已登记该豁免
-  - 当前改动确属该模块自身的本地 harness/工具改动，而不是跨模块契约变更
+## Required Inputs
+- `docs/versions/<version>/modules/<module>/proposal.md`
+- `docs/versions/<version>/modules/<module>/design.md`
+- Or, for a direct submodule packet under a large module:
+  - `docs/versions/<version>/modules/<module>/<submodule>/proposal.md`
+  - `docs/versions/<version>/modules/<module>/<submodule>/design.md`
 
-## 准入规则
-- 在编辑代码、测试、构建文件或资源前，必须先完成 implementation 准入评估。
-- 对默认模块，在所有必需输入存在之前，implementation 不得开始。
-- 对默认模块，在这三个输入全部为 `status: approved` 之前，implementation 不得开始。
-- 对默认模块，`status: approved` 不是充分条件；implementation 与 bugfix 任务必须读取这些已批准文档，并确认当前改动能直接映射到 proposal、design 与 testing 中的具体条目。
-- bugfix 任务遵循同样规则，除非仓库在版本化规则中发布了更窄的例外路径。
-- 对默认模块，implementation 与 bugfix 任务必须先明确 active `version`、`module` 与一个或多个具体 `change_id`。
-- 对默认模块，每个 `change_id` 必须通过以下精确位置完成追踪：
-  - `proposal.md` 的 `## Proposal Items` 表 `change_id` 列
-  - `design.md` 的 `## Directly Mapped Change Items` 表 `change_id` 列
-  - `testing.md` 的 `## Direct Change Coverage` 表 `change_id` 列
-  - `testplan.yaml` 中对应步骤或 manual/disabled 层级的 `change_ids`
-- 跨模块 implementation 与 bugfix 必须对每个受影响模块分别通过准入。
-- 如果当前改动无法映射到直接的 proposal、design 或 testing 条目，implementation 与 bugfix 不得只依赖模块总览、历史设计说明、聊天说明或口头解释启动。
-- 如果问题相关的已批准文档未定义实现所需的逻辑、约束、接口或流程，implementation 与 bugfix 不得以对话中的用户直接说明替代文档依据。
-- 对默认模块，如果 `testplan.yaml` 缺失，或当前改动对应的验证入口/缺口说明未在 testing 制品中声明，implementation 不得开始。
-- 对 `cyfs-p2p-test`，若改动仅限本模块运行时 harness，不要求 proposal/design/testing/testplan 准入；但一旦改动同时改变相邻模块契约、默认值、验证语义或长期边界，必须回到受影响模块的文档阶段。
-- 遇到上述缺口时，必须退回对应的 proposal、design 或 testing 阶段补齐文档，并在文档成为实现依据后再继续代码修改。
-- 代码修改只能在任务明确输出 `实现准入通过` (`Implementation admission passed`) 后开始。
+## Admission Rule
+- Implementation admission MUST be evaluated before editing production code, build files, or resources.
+- Implementation MUST NOT start unless all required inputs exist.
+- Implementation MUST NOT start unless proposal and design documents have `status: approved`.
+- Approved status alone does NOT satisfy implementation admission; implementation and bugfix tasks MUST read the approved proposal/design docs and confirm they contain task-relevant coverage for the current change.
+- Bugfix tasks follow the same rule unless the repository publishes an explicit exception path.
+- Implementation MUST NOT start unless the active `version`, `module`, and concrete `change_id` values are known.
+- If implementation targets a direct submodule packet, implementation MUST NOT start unless the active `submodule` is also known.
+- Implementation MUST NOT start unless each `change_id` maps through the exact required traceability locations:
+  - `proposal.md` `## Proposal Items` table, `change_id` column
+  - `design.md` `## Directly Mapped Change Items` table, `change_id` column
+- If the request affects multiple modules, each affected module MUST pass admission separately.
+- If the request affects multiple direct submodules, each affected submodule packet MUST pass admission separately.
+- Implementation MUST run `schema-check.py` and `admission-check.py` successfully before code edits.
+- For direct submodule packets, implementation MUST run those checks with `--submodule <submodule>`.
+- If approved docs do not yet contain the current change's required content, implementation MUST stop and return work to the owning upstream doc stage before coding starts.
+- Code modification may begin only after the task explicitly outputs: `实现准入通过` (`Implementation admission passed`).
+- Module-level baseline docs, package overviews, historical notes, or oral explanation do not count as sufficient implementation admission.
+- If direct mapping is missing, the default path is to return work upstream, not to implement first and document later.
 
-## 允许的改动
-- 代码
-- 测试代码
+## Allowed Changes
+- production code
+- required non-test runtime/build resources
 
-## 执行护栏
-- 只实现已批准 proposal、design、testing 计划和当前请求要求的最小代码。
-- 只触及已准入任务所需的文件和行。
-- 匹配周围代码的风格、命名和结构。
-- 除非已准入任务要求，否则不得重构、重格式化、重写注释、重命名符号或清理相邻代码。
-- 不得添加未请求的功能、选项、扩展点、配置项，或为已批准文档和可达代码路径排除的场景添加防御性处理。
-- 只移除因当前改动而变得未使用的 import、变量、函数、文件或测试。
-- 如果发现无关死代码或缺陷，记录为残余风险或后续任务，不得在当前 implementation 任务内顺手修复。
-- 每一处改动都应能追踪到当前任务的已批准文档、请求行为或必需验证。
-- 每一处改动都应能追踪到至少一个已准入的 `change_id`。
+## Execution Guardrails
+- Implement the minimum production code needed to satisfy the approved proposal, design, and current request.
+- Leave test implementation for the post-implementation testing stage unless the user explicitly requested a combined implementation/testing task.
+- Touch only files and lines required by the admitted task.
+- Match surrounding style, naming, and structure.
+- Do not refactor, reformat, rewrite comments, rename symbols, or clean adjacent code unless the admitted task requires it.
+- Do not add unrequested features, options, extension points, configuration, or defensive handling for scenarios ruled out by approved docs or reachable code paths.
+- Remove only unused imports, variables, functions, or files made unused by the current change.
+- If unrelated dead code or defects are noticed, record them as residual risk or follow-up instead of repairing them in the implementation task.
+- Every changed line should trace to the current task's approved docs, requested behavior, or required verification.
+- Every changed line should trace to at least one admitted `change_id`.
 
-## 禁止的改动
+## Forbidden Changes
 - `proposal.md`
 - `design.md`
 - `design/`
@@ -62,32 +60,27 @@
 - `testing/`
 - `testplan.yaml`
 - `acceptance.md`
+- test code and test fixtures, unless the user explicitly requested a combined implementation/testing task
 
-## 机械化执行
-- 在实现开始前运行 `python3 ./harness/scripts/schema-check.py --version <version> --module <module>`。
-- 在实现开始前运行 `python3 ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id>`。
-- 兼容入口 `python3 ./harness/scripts/check-implementation-admission.py <version> <module> <change_id>` 可以委托上述新检查器；没有 `change_id` 时必须失败并指向文档补齐。
-- 准入检查失败会阻塞任务，而不是仅供参考。
+## Verification Default
+- Repositories may choose a strict default where implementation does not proactively run validation commands.
+- In that mode, tests run only when:
+  - the user explicitly requests validation
+  - debugging needs fresh evidence
+  - task docs or repo-local rules explicitly require validation
+- "quick sanity check", "minimal self-test", and similar habitual reasons are not valid exceptions.
 
-## 默认验证策略
-- 工作区默认采用严格实现模式：implementation 阶段不主动把测试执行当成例行动作。
-- 只有以下情况允许在实现阶段运行验证命令：
-  - 用户明确要求验证
-  - 调试需要新的失败证据
-  - 已批准的 testing 制品或仓库规则要求必须先跑某个验证入口
-- “顺手跑一下”、“最小自测” 或类似习惯性理由，不构成例外。
+## Rust Formatting Default
+- For Rust repositories, agents MUST NOT automatically run `cargo fmt`.
+- `cargo fmt` may run only when the user explicitly requests formatting or repo-local rules explicitly require it for the current task.
 
-## Rust 格式化策略
-- Agent 不得自动运行 `cargo fmt`。
-- 只有用户明确要求格式化，或仓库本地规则/已批准任务文档明确要求当前任务运行格式化时，才允许运行 `cargo fmt`。
-
-## 退回路由
-- proposal 缺失或仍为 draft：退回 proposal
-- design 缺失或仍为 draft：退回 design
-- testing 缺失或仍为 draft：退回 testing
-- `testplan.yaml` 缺失或 testing 中未声明当前改动对应的验证路径：退回 testing
-- proposal 缺少当前改动的直接目标或约束锚点：退回 proposal
-- design 缺少当前改动的结构、接口或边界映射：退回 design
-- testing 缺少当前改动的直接验证覆盖或明确缺口记录：退回 testing
-- `cyfs-p2p-test` 改动实际影响到相邻模块契约，却试图走文档豁免：退回受影响模块的 proposal/design/testing
-- 实现期间发现上游矛盾：退回对应的上游责任阶段，而不是就地修补文档
+## Return Routing
+- Missing or draft proposal: return to proposal task
+- Missing or draft design: return to design task
+- Missing direct proposal mapping: return to proposal task
+- Missing direct design mapping or changed boundaries/interfaces: return to design task
+- Missing active module or `change_id`: return to proposal or design task
+- Missing active submodule for work that belongs to a direct submodule packet: return to proposal or design task
+- Failed schema or admission checker: return to the owning document stage named by the checker output
+- Approved proposal/design docs exist but do not yet cover the current task in enough detail: return to the owning proposal/design task to supplement docs first
+- Upstream contradiction discovered during implementation: return to the owning upstream stage instead of patching docs in place

@@ -5,12 +5,14 @@
 
 ## 验证面
 - 人类可读：
-  - `testing.md`
-  - `acceptance.md`
+  - 可选 `testing.md`
+  - 可选 `acceptance.md`
   - `docs/versions/<version>/reviews/` 下的验收报告
 - 机器可读：
-  - `testplan.yaml`
+  - 可选 `testplan.yaml`
   - `python3 ./harness/scripts/test-run.py <module> <level>`
+  - `python3 ./harness/scripts/test-run.py <module> all`
+  - `python3 ./harness/scripts/test-run.py all all`
   - `python3 ./harness/scripts/verify-module-packet.py <version> <module>`
   - `python3 ./harness/scripts/check-implementation-admission.py <version> <module>`
 
@@ -20,14 +22,14 @@
 - `integration`：相邻模块或工作区级契约验证。
 
 ## 一致性规则
-- `testing.md` 必须解释 `testplan.yaml` 所声明的同一组验证面。
+- 当 `testing.md` 与 `testplan.yaml` 存在时，二者必须解释同一组验证面。
 - Acceptance 必须把实现与结果回溯到已批准的 proposal。
 - 任何必需文件缺失，或缺少必需元数据，模块数据包都视为不完整。
 
 ## 阶段门禁
 - 在 implementation 之前：
-  - 若模块未命中 `harness/rules/module-doc-exception-rules.md`，则 `proposal.md`、`design.md` 与 `testing.md` 全部存在
-  - 若模块未命中 `harness/rules/module-doc-exception-rules.md`，则每个文档都为 `status: approved`
+  - 若模块未命中 `harness/rules/module-doc-exception-rules.md`，则 `proposal.md` 与 `design.md` 全部存在
+  - 若模块未命中 `harness/rules/module-doc-exception-rules.md`，则 `proposal.md` 与 `design.md` 都为 `status: approved`
 - 在 DV 之前：
   - 模块数据包存在
   - unit 计划存在

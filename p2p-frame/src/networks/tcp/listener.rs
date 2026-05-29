@@ -1,16 +1,17 @@
-use super::connection::{TcpTlsConnection, accept_connection, bind_listener, build_acceptor};
+use super::connection::{TcpTlsConnection, accept_connection, build_acceptor};
 use super::protocol::{
     DataConnReady, DataConnReadyResult, TcpConnectionHello, TcpConnectionRole, write_raw_frame,
 };
 use super::tunnel::{TcpIncomingControlDecision, TcpTunnel, TcpTunnelConnector};
 use crate::endpoint::Endpoint;
-use crate::error::{P2pErrorCode, P2pResult, p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::networks::{Tunnel, TunnelForm, TunnelListener, TunnelRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
-use crate::runtime::{self, TcpListener};
+use crate::runtime;
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
 use crate::types::{TunnelCandidateId, TunnelId};
+use sfo_reuseport::{ServerRuntime, ServiceConfig, SocketOptions, TcpServer};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -119,7 +120,8 @@ impl TcpTunnelRegistry {
 struct TcpTunnelListenerState {
     local: Option<Endpoint>,
     outer: Option<Endpoint>,
-    socket: Option<Arc<TcpListener>>,
+    server: Option<TcpServer>,
+    bound_local: Option<Endpoint>,
     mapping_port: Option<u16>,
 }
 
@@ -137,6 +139,7 @@ pub(crate) struct TcpTunnelListener {
     timeout: Duration,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
+    server_runtime: ServerRuntime,
     #[cfg(test)]
     forced_control_decision: Mutex<Option<TcpIncomingControlDecision>>,
 }
@@ -149,6 +152,7 @@ impl TcpTunnelListener {
         timeout: Duration,
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
+        server_runtime: ServerRuntime,
     ) -> Arc<Self> {
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
@@ -158,7 +162,8 @@ impl TcpTunnelListener {
             state: Mutex::new(TcpTunnelListenerState {
                 local: None,
                 outer: None,
-                socket: None,
+                server: None,
+                bound_local: None,
                 mapping_port: None,
             }),
             accepted_tx: Mutex::new(Some(accepted_tx)),
@@ -170,6 +175,7 @@ impl TcpTunnelListener {
             timeout,
             heartbeat_interval,
             heartbeat_timeout,
+            server_runtime,
             #[cfg(test)]
             forced_control_decision: Mutex::new(None),
         })
@@ -183,19 +189,37 @@ impl TcpTunnelListener {
         *self.forced_control_decision.lock().unwrap() = decision;
     }
 
-    pub(crate) async fn bind(
-        &self,
+    pub(crate) async fn start(
+        self: &Arc<Self>,
         local: Endpoint,
         out: Option<Endpoint>,
         mapping_port: Option<u16>,
         reuse_address: bool,
     ) -> P2pResult<()> {
-        let socket = bind_listener(local, reuse_address).await?;
+        let listener = self.clone();
+        let bind_local = resolve_tcp_bind_endpoint(local)?;
+        let config = ServiceConfig::new(*bind_local.addr()).with_socket_options(SocketOptions {
+            reuse_address,
+            ..SocketOptions::default()
+        });
+        let server = TcpServer::serve(&self.server_runtime, config, move |stream| {
+            let listener = listener.clone();
+            async move {
+                listener.handle_accepted_stream(stream).await;
+                Ok(())
+            }
+        })
+        .map_err(into_p2p_err!(
+            P2pErrorCode::AlreadyExists,
+            "bind tcp listener {} error",
+            local
+        ))?;
         let mut state = self.state.lock().unwrap();
         state.local = Some(local);
         state.outer = out;
         state.mapping_port = mapping_port;
-        state.socket = Some(Arc::new(socket));
+        state.bound_local = Some(bind_local);
+        state.server = Some(server);
         Ok(())
     }
 
@@ -204,8 +228,7 @@ impl TcpTunnelListener {
     }
 
     pub(crate) fn bound_local(&self) -> Endpoint {
-        let socket = self.state.lock().unwrap().socket.as_ref().unwrap().clone();
-        Endpoint::from((crate::endpoint::Protocol::Tcp, socket.local_addr().unwrap()))
+        self.state.lock().unwrap().bound_local.unwrap()
     }
 
     pub(crate) fn mapping_port(&self) -> Option<u16> {
@@ -221,12 +244,12 @@ impl TcpTunnelListener {
         if let Some(task) = self.accept_task.lock().unwrap().take() {
             task.abort();
         }
-        let socket = {
+        let server = {
             let mut state = self.state.lock().unwrap();
-            state.socket.take()
+            state.server.take()
         };
-        if let Some(socket) = socket {
-            close_tcp_listener_socket(socket.as_ref());
+        if let Some(server) = server {
+            let _ = server.close();
         }
     }
 
@@ -319,61 +342,51 @@ impl TcpTunnelListener {
         tunnel.on_incoming_data_connection(hello, connection).await
     }
 
-    pub(crate) fn start(self: &Arc<Self>) {
-        if self.closed.load(Ordering::SeqCst) {
-            return;
-        }
-        let this = self.clone();
-        let socket = self.state.lock().unwrap().socket.as_ref().unwrap().clone();
-        let handle = Executor::spawn_with_handle(async move {
-            loop {
-                let accepted = socket.accept().await;
-                let (stream, _) = match accepted {
-                    Ok(v) => v,
-                    Err(err) => {
-                        log::warn!("tcp tunnel listener accept failed: {:?}", err);
-                        break;
+    async fn handle_accepted_stream(self: Arc<Self>, stream: crate::runtime::TcpStream) {
+        match accept_connection(
+            &self.acceptor,
+            &self.cert_factory,
+            &self.cert_resolver,
+            stream,
+        )
+        .await
+        {
+            Ok((connection, hello)) => match hello.role {
+                TcpConnectionRole::Control => {
+                    match self.on_control_connection(hello, connection).await {
+                        Ok(Some(tunnel)) => self.send_accepted(Ok(tunnel)),
+                        Ok(None) => {}
+                        Err(err) => self.send_accepted(Err(err)),
                     }
-                };
-                let this2 = this.clone();
-                let _ = Executor::spawn(async move {
-                    match accept_connection(
-                        &this2.acceptor,
-                        &this2.cert_factory,
-                        &this2.cert_resolver,
-                        stream,
-                    )
-                    .await
-                    {
-                        Ok((connection, hello)) => match hello.role {
-                            TcpConnectionRole::Control => {
-                                match this2.on_control_connection(hello, connection).await {
-                                    Ok(Some(tunnel)) => {
-                                        this2.send_accepted(Ok(tunnel));
-                                    }
-                                    Ok(None) => {}
-                                    Err(err) => {
-                                        this2.send_accepted(Err(err));
-                                    }
-                                }
-                            }
-                            TcpConnectionRole::Data => {
-                                if let Err(err) = this2.on_data_connection(hello, connection).await
-                                {
-                                    log::warn!("tcp tunnel data accept failed: {:?}", err);
-                                }
-                            }
-                        },
-                        Err(err) => {
-                            log::warn!("tcp tunnel listener handshake failed: {:?}", err);
-                        }
+                }
+                TcpConnectionRole::Data => {
+                    if let Err(err) = self.on_data_connection(hello, connection).await {
+                        log::warn!("tcp tunnel data accept failed: {:?}", err);
                     }
-                });
+                }
+            },
+            Err(err) => {
+                log::warn!("tcp tunnel listener handshake failed: {:?}", err);
             }
-        })
-        .unwrap();
-        *self.accept_task.lock().unwrap() = Some(handle);
+        }
     }
+}
+
+fn resolve_tcp_bind_endpoint(local: Endpoint) -> P2pResult<Endpoint> {
+    if local.addr().port() != 0 {
+        return Ok(local);
+    }
+    let probe = std::net::TcpListener::bind(local.addr()).map_err(into_p2p_err!(
+        P2pErrorCode::AlreadyExists,
+        "allocate tcp listener port {} error",
+        local
+    ))?;
+    let bound_addr = probe.local_addr().map_err(into_p2p_err!(
+        P2pErrorCode::IoError,
+        "get allocated tcp listener address failed"
+    ))?;
+    drop(probe);
+    Ok(Endpoint::from((crate::endpoint::Protocol::Tcp, bound_addr)))
 }
 
 #[async_trait::async_trait]
@@ -391,31 +404,6 @@ impl TunnelListener for TcpTunnelListener {
             }
             _ = &mut closed => {
                 Err(p2p_err!(P2pErrorCode::Interrupted, "accept tunnel closed"))
-            }
-        }
-    }
-}
-
-fn close_tcp_listener_socket(socket: &TcpListener) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawSocket;
-        use winapi::um::winsock2::closesocket;
-
-        unsafe {
-            let raw = socket.as_raw_socket();
-            closesocket(raw.try_into().unwrap());
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        #[cfg(feature = "runtime-tokio")]
-        {
-            use std::os::fd::AsRawFd;
-
-            unsafe {
-                let raw = socket.as_raw_fd();
-                libc::close(raw.try_into().unwrap());
             }
         }
     }

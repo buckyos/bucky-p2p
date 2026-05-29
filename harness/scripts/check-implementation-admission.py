@@ -12,7 +12,7 @@ def main() -> int:
     if len(sys.argv) < 4:
         print(
             "usage: python3 ./harness/scripts/check-implementation-admission.py "
-            "<version> <module> <change_id> [<change_id>...]",
+            "<version> <module> [--submodule <submodule>] <change_id> [<change_id>...]",
             file=sys.stderr,
         )
         print(
@@ -22,7 +22,15 @@ def main() -> int:
         )
         return 2
 
-    version, module, *change_ids = sys.argv[1:]
+    version, module, *rest = sys.argv[1:]
+    submodule = None
+    if rest[:1] == ["--submodule"]:
+        if len(rest) < 3:
+            print("--submodule requires a value and at least one change_id", file=sys.stderr)
+            return 2
+        submodule = rest[1]
+        rest = rest[2:]
+    change_ids = rest
     root = Path(__file__).resolve().parents[2]
 
     schema_cmd = [
@@ -35,6 +43,8 @@ def main() -> int:
         "--module",
         module,
     ]
+    if submodule:
+        schema_cmd.extend(["--submodule", submodule])
     admission_cmd = [
         sys.executable,
         str(root / "harness" / "scripts" / "admission-check.py"),
@@ -45,6 +55,8 @@ def main() -> int:
         "--module",
         module,
     ]
+    if submodule:
+        admission_cmd.extend(["--submodule", submodule])
     for change_id in change_ids:
         admission_cmd.extend(["--change-id", change_id])
 

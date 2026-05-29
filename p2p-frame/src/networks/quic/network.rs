@@ -12,6 +12,7 @@ use crate::p2p_identity::{
 use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelCandidateId, TunnelId, TunnelIdGenerator};
 use rustls::pki_types::CertificateDer;
+use sfo_reuseport::ServerRuntime;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ pub struct QuicTunnelNetwork {
     congestion_algorithm: QuicCongestionAlgorithm,
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
+    server_runtime: ServerRuntime,
 }
 
 fn connect_timeout_for_intent(base_timeout: Duration, intent: TunnelConnectIntent) -> Duration {
@@ -61,6 +63,7 @@ impl QuicTunnelNetwork {
         congestion_algorithm: QuicCongestionAlgorithm,
         timeout: Duration,
         idle_timeout: Duration,
+        server_runtime: ServerRuntime,
     ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
@@ -72,6 +75,7 @@ impl QuicTunnelNetwork {
             congestion_algorithm,
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
             reuse_address: AtomicBool::new(false),
+            server_runtime,
         }
     }
 
@@ -256,6 +260,7 @@ impl TunnelNetwork for QuicTunnelNetwork {
             self.cert_resolver.clone(),
             self.cert_factory.clone(),
             self.congestion_algorithm,
+            self.server_runtime.clone(),
         );
         listener
             .bind(
@@ -265,7 +270,7 @@ impl TunnelNetwork for QuicTunnelNetwork {
                 self.reuse_address.load(Ordering::Relaxed),
             )
             .await?;
-        listener.start();
+        listener.start().await?;
         self.listeners.lock().unwrap().push(listener.clone());
         Ok(listener)
     }
@@ -541,6 +546,8 @@ mod tests {
                 QuicCongestionAlgorithm::Bbr,
                 Duration::from_secs(3),
                 Duration::from_secs(10),
+                ServerRuntime::start(sfo_reuseport::ServerRuntimeConfig::default())
+                    .expect("sfo reuseport server runtime should start"),
             ),
             resolver,
         )

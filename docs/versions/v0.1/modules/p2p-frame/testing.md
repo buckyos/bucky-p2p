@@ -2,8 +2,8 @@
 module: p2p-frame
 version: v0.1
 status: approved
-approved_by: user
-approved_at: 2026-05-13
+approved_by: auto-pipeline
+approved_at: 2026-05-29
 ---
 
 # p2p-frame 测试
@@ -18,6 +18,7 @@ approved_at: 2026-05-13
 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md` | `PnTunnel` idle timeout 生命周期关闭验证补充 | `pn/client` |
 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-control-channel.md` | `PnTunnel` 控制通道、ready gate、heartbeat 和远端关闭感知验证补充 | `pn/client`、`pn/protocol`、必要 `pn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md` | relay 侧 PN server 验证补充 | `pn/service` |
+| `docs/versions/v0.1/modules/p2p-frame/testing/sfo-reuseport-listeners.md` | `networks` 基于 `sfo-reuseport` 的 TCP/QUIC listener 验证补充 | `networks/tcp`、`networks/quic`、`stack` |
 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md` | TCP tunnel 协议用例 | transport/tunnel |
 
 ## 统一测试入口
@@ -29,7 +30,7 @@ approved_at: 2026-05-13
 ## 子模块测试
 | 子模块 | 职责 | 详细测试文档 | 必需行为 | 边界/失败场景 | 测试类型 | 测试文件 |
 |--------|------|--------------|----------|----------------|----------|----------|
-| `networks` | TCP/QUIC 传输和 listener 行为 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md` | 连接建立、复用、地址处理、network manager 行为 | listener 失败、连接复用边界、协议不匹配 | unit + integration | `p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs` |
+| `networks` | TCP/QUIC 传输和 listener 行为 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sfo-reuseport-listeners.md` | 连接建立、复用、地址处理、network manager 行为、TCP listener 由 `sfo_reuseport::TcpServer` 驱动、QUIC listener 由 `sfo_reuseport::QuicServer::serve_socket(...)` 驱动并通过 per-worker 自定义 `AsyncUdpSocket` 交给 Quinn | listener 失败、连接复用边界、协议不匹配、`ServerRuntime` 注入/default 启动失败、QUIC worker CID 路由不稳定、主动发送 socket 获取失败 | unit + integration | `p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/listener.rs` |
 | `endpoint` | endpoint area、协议和地址编解码 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | `ServerReflexive` enum 命名、`S` 文本编解码、raw codec area 映射、`is_sys_default()` 移除 | 旧 `D` 文本不得继续作为新语义输入，`ServerReflexive` 不得被 `is_static_wan()` 判定为静态公网 | unit | `p2p-frame/src/endpoint.rs` |
 | `tunnel` | tunnel 生命周期和 manager 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-publish-lifecycle.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | active/passive/proxy tunnel 创建、统一 register/publish 生命周期、reverse waiter 命中时的延后 publish 和完成后的 publish、reverse incoming 无 waiter close、proxy tunnel 发布后的后台 direct/reverse 升级重试、已有多个 candidate 时非 proxy 优先复用、direct/reverse 统一 300ms 短延迟竞速、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启同源 UDP punch 调度、proxy 短窗口脱代理、按协议隔离 endpoint 评分、`ServerReflexive` 与静态 `Wan` / `Mapped` 区分 | 同时存在多个 tunnel、选择回退、后注册 proxy 不得覆盖已有可用非 proxy candidate、reverse waiter 命中时的延后 publish、无 waiter reverse incoming close 且不 register/publish、失败清理、proxy 升级路径持续失败后的退避封顶，升级流程不得回退成 proxy，TCP 失败不得拖累 QUIC/UDP 候选，默认 intent、无 SN service 和非 `ServerReflexive` 路径不得发送 punch，punch 发送失败不得改变建链结果，SN 反射地址不得被误判为静态公网 | unit | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/tunnel.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client 协议交互 | 无效命令流、channel 关闭 | unit | `p2p-frame/src/ttp/tests.rs` |
@@ -101,6 +102,10 @@ approved_at: 2026-05-13
 | reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-UNIT | unit | p2p-frame-unit | 覆盖 reverse incoming 无同 `(remote_id, tunnel_id)` waiter 时被关闭，且不会 register、publish、进入订阅流或被 `get_tunnel()` 返回；覆盖命中 waiter 时 incoming 分支只交付、不注册，waiter 接收方随后 register/publish。 | no | |
 | reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-DV | dv |  | 当前无自动 DV 入口；`cyfs-p2p-test all-in-one` 不作为模块 DV 证据。 | yes | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
 | reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 reverse incoming 无 waiter close 不改变公开 trait、SN 协议或下游构造路径。 | no | |
+| networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 `TcpTunnelNetwork` / stack 编译路径、`P2pConfig::set_server_runtime` 公开注入入口、`TcpTunnelListener` 以 `TcpServer::serve(...)` 接管 accept handler，且 unit 套件保持现有 TCP/网络调用方兼容。 | no | |
+| networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 `ServerRuntime` 注入和 `TcpServer` listener 不改变 `TunnelNetwork` trait 或下游构造边界。 | no | |
+| networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 `QuicTunnelNetwork` / stack 编译路径、`QuicTunnelListener` 以 `QuicServer::serve_socket(...)` 接收 worker socket、自定义 `AsyncUdpSocket` 委托 `UdpSocket::poll_recv_from_vectored` / `try_send_to` / `poll_send_ready`、per-worker CID generator 使用对应 worker shard、UDP punch 使用首个可用 worker socket。 | no | |
+| networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 QUIC listener socket 抽象不要求下游处理 raw UDP payload 或修改公开 trait。 | no | |
 
 ## 完成定义
 - [ ] 直接子模块至少映射到一个验证面

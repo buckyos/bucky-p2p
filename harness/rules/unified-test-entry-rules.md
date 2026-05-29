@@ -1,31 +1,45 @@
-# 统一测试入口规则
+# Unified Test Entry Rules
 
-## 目标
-- 定义模块工作使用的规范可运行验证入口。
+## Goal
+- Define the canonical runnable test interface for all project validation.
+- Ensure every generated or hand-written test can be run through one stable command surface.
 
-## 范围
+## Scope
+- project-root test shortcuts: `test-run.bat` on Windows and `test-run.sh` on Unix-like systems
 - `harness/scripts/test-run.py`
-- `testing.md`
-- `testplan.yaml`
+- generated test implementation
+- optional `testing.md`
+- optional `testplan.yaml`
 
-## 规范命令
-- `python3 ./harness/scripts/test-run.py <module> unit`
-- `python3 ./harness/scripts/test-run.py <module> dv`
-- `python3 ./harness/scripts/test-run.py <module> integration`
+## Canonical Commands
+- Project-root shortcut:
+  - Windows: `test-run.bat [<module> <level>]`
+  - Unix: `./test-run.sh [<module> <level>]`
+- `uv run --active python ./harness/scripts/test-run.py <module> unit`
+- `uv run --active python ./harness/scripts/test-run.py <module> dv`
+- `uv run --active python ./harness/scripts/test-run.py <module> integration`
+- `uv run --active python ./harness/scripts/test-run.py <module> all`
+- `uv run --active python ./harness/scripts/test-run.py all all`
 
-## 一致性规则
-- `testing.md` 与 `testplan.yaml` 必须引用同一组层级和验证面。
-- 测试脚本必须是非交互式的，返回有意义的退出码，并输出它实际执行的具体命令。
-- 新的验证路径必须接入规范入口，而不是在任务提示里额外塞入未治理的命令。
+## Consistency Rule
+- `harness/scripts/test-run.py` is mandatory in generated repositories.
+- A generated repository MUST include both project-root one-click test shortcuts: `test-run.bat` for Windows and `test-run.sh` for Unix-like systems.
+- The root shortcut MUST check whether `uv` is installed and print an installation hint when it is missing.
+- The root shortcuts MUST create a local `.venv` when it is missing, use `uv` to sync or install dependencies when project metadata exists, activate the project virtual environment, and then invoke `harness/scripts/test-run.py` through `uv run --active python`.
+- The root shortcut MUST NOT bypass the unified test entrypoint.
+- The unified test interface MUST be able to run every project test that is part of the harness evidence chain.
+- A testing task is not complete until every new or changed test implementation is registered with, or otherwise reachable through, the unified test interface.
+- Generated tests, optional `testing.md`, and optional `testplan.yaml` must reference the same validation surfaces when those artifacts exist.
+- Test scripts should be non-interactive and return meaningful exit codes.
+- New test execution paths should be added to the canonical entrypoint instead of creating unrelated ad hoc commands.
+- Test implementation may use local framework-specific commands internally, but acceptance and pipeline tasks must call them through `harness/scripts/test-run.py`.
 
-## 执行契约
-- 未知模块或未知层级必须非零退出。
-- 已启用层级必须按声明顺序执行其步骤。
-- 只有 `manual` 或 `disabled` 层级可以在不执行命令时仍然返回成功。
-- 每个已启用步骤都应声明稳定的机器可读字段，例如 `id`、`name` 与 `run`。
-- 用于实现准入的已启用步骤必须声明其覆盖的 `change_ids`。
-- `manual` 或 `disabled` 层级必须在 `testing.md` 与 `testplan.yaml` 中同时声明原因；缺少原因不得被当作成功验证。
-
-## 当前登记策略
-- `p2p-frame` 的 DV 使用本地 all-in-one 场景，因为核心库没有独立的二进制入口。
-- 未登记某个层级的模块必须明确失败，而不是静默通过。
+## Execution Contract
+- Unknown modules or test levels should exit non-zero.
+- The `all all` command should run all registered project tests in deterministic order.
+- `<module> all` should run every registered test level for that module.
+- Enabled steps should execute in declared order.
+- "success without executing steps" should be reserved for `manual` or `disabled` layers.
+- Each enabled step should declare stable machine-readable fields such as `id`, `name`, and `run`.
+- Each enabled step should declare the `change_ids` it validates when it is used as acceptance evidence.
+- `harness/scripts/schema-check.py` should reject unknown levels, duplicate step ids, enabled levels without steps, and manual or disabled levels without reasons when `testplan.yaml` exists.

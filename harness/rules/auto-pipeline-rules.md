@@ -1,63 +1,116 @@
-# 自动流水线规则
+# Auto Pipeline Rules
 
-## 目标
-- 定义用户显式启动且 proposal 已获批后，仓库如何自动推进下游工作流。
+## Goal
+- Define the repository's fully automatic downstream workflow after explicit user launch and proposal approval.
+- Ensure the pipeline continues until proposal-based acceptance succeeds.
 
-## 触发条件
-- 本规则默认不激活，除非用户显式要求启用、启动、运行或进入自动流水线。
-- 启动信号：用户显式要求进入自动流水线。
-- 必需前提：`proposal.md` 存在且 `status: approved`。
-- `proposal.md` 获批本身不是进入自动流水线的信号。
-- 规划输出：`harness/pipeline-plan.md`
+## Start Condition
+- This rule is inactive unless the user explicitly asks to enter it.
+- `proposal.md` status is `approved`
+- user explicitly asks to enable, launch, run, or enter the automatic pipeline
+- proposal approval alone does not enter auto-pipeline mode
 
-## 验收基线
-- 最终验收基线：已批准的 `proposal.md`
-- `design.md`、`testing.md` 与 `acceptance.md` 可以细化执行细节，但不得与 proposal 冲突、缩窄其范围，或静默扩展其范围
+## User Authorization Precedence
+- Explicit user instructions have highest priority for entering auto-pipeline mode, requested pipeline scope, and whether per-stage user confirmation is required
+- If the user explicitly asks auto-pipeline mode to handle all subsequent stages or the whole downstream workflow, the pipeline continues through design, implementation, post-implementation testing, and acceptance without stopping for separate user confirmation after each stage
+- When a document-producing stage completes, the pipeline auto-confirms that stage by updating the produced stage document front matter to `status: approved`, `approved_by: auto-pipeline`, and `approved_at: <current timestamp>`
+- Auto-confirmation happens only after that stage's declared done criteria and required checks pass
+- After each child task completes, the pipeline updates the pipeline plan task status to `confirmed` or `complete` before continuing to dependent tasks
+- Implementation completion is recorded in the pipeline plan and implementation evidence, and final acceptance is recorded in the pipeline plan and acceptance report
+- This does not waive proposal authority, stage write scopes, `stage-scope-check.py`, implementation admission, schema checks, admission checks, required validation, or final acceptance
 
-## 阶段职责
-- Proposal：定义目标、范围、非目标和约束的已批准基线
-- 流水线规划：在执行开始前规划任务图、依赖、输出和退回路由
-- Design：把已批准 proposal 转成可执行的结构与接口
-- Testing：把已批准 design 转成可运行的验证覆盖与入口
-- Implementation：在已批准边界内交付代码和测试改动
-- Acceptance：审计证据链，并把失败路由回正确的前置阶段
+## Final Acceptance Baseline
+- Final acceptance is judged against the approved `proposal.md`
+- `design.md`, optional testing artifacts, optional acceptance artifacts, implementation, and tests are supporting evidence and execution artifacts
+- If downstream artifacts conflict with the approved proposal, the proposal is authoritative
+- If downstream artifacts or code disagree, fixes preserve the approved proposal and route non-requirement defects through design -> implementation/code -> testing implementation
+- Code follows design; tests verify proposal/design/code behavior
 
-## 规划规则
-- 流水线在执行开始前，必须先创建 design、testing、implementation 和 acceptance 任务。
-- 每个阶段任务必须声明：
-  - task id
-  - stage
-  - responsibility
-  - scope
-  - dependencies
-  - outputs
-  - done condition
-- 如果 `design.md` 标识出可分离负责的直接子模块，计划应当包含子模块任务。
+## Stage Responsibilities
+- Proposal responsibility:
+  - define the approved baseline outcome for the pipeline
+- Pipeline planning responsibility:
+  - create the task graph, dependencies, outputs, and done conditions before execution starts
+- Design responsibility:
+  - convert the approved proposal into executable structure and interfaces
+  - keep module and submodule dependencies acyclic
+  - split submodules by business logic first, extract shared implementation logic into shared submodules, and isolate clear technical areas such as HTTP interfaces or persistence/database access
+  - keep design at module shape level: submodules, dependencies, key call flows, exported interfaces, and external module dependencies
+- Implementation responsibility:
+  - deliver production code inside approved proposal/design boundaries
+- Testing responsibility:
+  - after implementation completes, design test cases from proposal, design, and delivered code, then generate test implementation
+- Acceptance responsibility:
+  - evaluate document coverage, document consistency, document-to-implementation consistency, and logic, then return failures to the correct earlier stage
 
-## 实现准入规则
-- 自动流水线内仍必须先应用 `task-entry-gate-rules.md`。
-- 任一 implementation 任务在以下条件满足前都不得启动：
-  - `proposal.md` 存在且 `status: approved`
-  - `design.md` 存在且 `status: approved`
-  - `testing.md` 存在且 `status: approved`
-  - `testplan.yaml` 存在
-- implementation 任务必须读取这些已批准文档，并确认当前任务范围能直接映射到 proposal、design 与 testing 的具体条目。
-- implementation 任务必须先识别明确的 `version`、`module` 和 `change_id`。
-- implementation 任务必须对每个受影响模块通过 `schema-check.py` 与 `admission-check.py`。
-- 若 `testplan.yaml` 缺失，或 testing 制品尚未声明当前任务的验证入口/缺口说明，implementation 任务不得启动。
-- 若 implementation 任务被阻塞，必须退回到对应的前置责任阶段，而不是在部分假设下继续推进。
+## Mandatory Planning Step
+- The pipeline MUST create or refresh `harness/pipeline-plan.md` before starting downstream execution
+- The plan MUST list:
+  - top-level stage tasks
+  - child tasks per direct submodule when needed
+  - stage responsibility for each task
+  - dependencies between tasks
+  - outputs and done conditions
+  - return-routing targets for failed acceptance
 
-## 退回路由规则
-- 验收失败不代表流水线完成。
-- 流水线必须重新打开或重新创建正确的前置阶段任务，并附带：
-  - 阻塞问题 ID
-  - 责任阶段
-  - 证据
-  - 期望修复输出
+## Stage Execution Model
+- Design, implementation, testing, and acceptance MUST run as separate child tasks
+- Each child task MUST keep writes inside its named stage artifact group unless the user explicitly requested cross-stage synchronization for that task
+- Each single-stage child task MUST run `stage-scope-check.py --stage <stage>` before completion and fail on out-of-stage diffs
+- Upstream-stage changes MUST NOT automatically edit downstream-stage artifacts; create or reopen the downstream child task instead
+- If direct submodules exist, stage tasks SHOULD be decomposed into submodule child tasks
+- Independent direct submodules SHOULD use submodule packets under the large module directory, such as `docs/versions/<version>/modules/<module>/<submodule>/proposal.md` and `design.md`; optional post-implementation testing artifacts can live there when generated
+- Each child task MUST have:
+  - one owner
+  - one scope boundary
+  - one output
+  - clear dependencies
+  - observable done criteria
 
-## 退出条件
-- 仅当以下条件全部满足时，流水线才结束：
-  - proposal 定义的结果已满足
-  - 阻塞问题已关闭
-  - 必需的测试证据存在
-  - 最终验收通过
+## Implementation Admission
+- The task entry gate still applies inside the pipeline: implementation tasks MUST classify scope and run admission before editing production code, build files, or resources.
+- Implementation MUST NOT start unless:
+  - `proposal.md` exists and `status: approved`
+  - `design.md` exists and `status: approved`
+- Implementation MUST inspect the approved proposal/design docs and confirm they cover the current task before coding.
+- Implementation MUST identify explicit `version`, `module`, and `change_id` values before coding.
+- Implementation for a direct submodule packet MUST also identify explicit `submodule`.
+- Implementation MUST pass `schema-check.py` and `admission-check.py` for each affected module packet.
+- Implementation for a direct submodule packet MUST pass those checks with `--submodule <submodule>`.
+- Cross-module implementation MUST pass admission independently for every affected module.
+- Cross-submodule implementation MUST pass admission independently for every affected submodule packet.
+- If any prerequisite is missing, still draft, or approved-but-incomplete for the task, return work to the owning stage.
+
+## Return Routing
+- If acceptance fails, the pipeline MUST return to the correct earlier stage
+- Non-requirement failures repeat design -> implementation -> testing, then rerun acceptance.
+- If the same unresolved issue remains after more than 5 unsuccessful iterations, stop and report the issue to the user.
+- Acceptance MUST apply `harness/rules/acceptance-review-rules.md` and audit admission for every module needed as evidence for accepted behavior.
+- Acceptance MUST audit admission for every direct submodule packet needed as evidence for accepted behavior.
+- Acceptance MUST fail on missing documented behavior, document inconsistency, document-to-implementation mismatch, or document/implementation logic defects even when tests pass.
+- Minimum return targets:
+  - proposal clarification
+  - design
+  - implementation
+  - testing implementation
+- The failed acceptance report MUST name:
+  - issue id
+  - blocking status
+  - target return stage
+  - task to reopen or recreate
+  - expected fix output
+
+## Exit Condition
+- The automatic pipeline exits only when:
+  - all proposal-defined outcomes are satisfied
+  - all blocking acceptance issues are closed
+  - required tests and evidence exist
+  - the final acceptance task reports success
+
+## Prohibited Shortcuts
+- Do not skip planning
+- Do not treat draft or missing design artifacts as implementation-ready
+- Do not treat missing post-implementation test evidence as acceptance-ready
+- Do not merge stage boundaries into one large child task without justification
+- Do not treat one failed acceptance as terminal completion
+- Do not let downstream artifacts override the approved proposal

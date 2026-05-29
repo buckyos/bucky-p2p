@@ -1,7 +1,7 @@
 use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
-use crate::executor::{Executor, SpawnHandle};
+use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::networks::{
     QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelListener, TunnelRef,
@@ -16,11 +16,16 @@ use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
 use rand::{Rng, random};
 use rustls::pki_types::CertificateDer;
 use rustls::version::TLS13;
-use socket2::{Domain, Protocol as SocketProtocol, SockAddr, Socket, Type};
+use sfo_reuseport::{
+    Error as SfoReuseportError, QuicCidGenerator, QuicServer, ServerRuntime, ServiceConfig,
+    SocketOptions, UdpSocket as SfoUdpSocket,
+};
+use std::io::{self, IoSliceMut};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{Notify, mpsc};
 
@@ -31,13 +36,247 @@ const UDP_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 const UDP_PUNCH_ACTIVE_START_OFFSET: Duration = Duration::from_millis(250);
 const UDP_PUNCH_REVERSE_START_OFFSET: Duration = Duration::ZERO;
 const UDP_PUNCH_DEADLINE: Duration = Duration::from_secs(1);
+const QUIC_ENDPOINT_READY_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct SfoQuicUdpSocket {
+    socket: SfoUdpSocket,
+    worker_id: usize,
+}
+
+impl SfoQuicUdpSocket {
+    fn new(socket: SfoUdpSocket, worker_id: usize) -> Self {
+        Self { socket, worker_id }
+    }
+}
+
+fn quic_packet_worker_index_prefix(packet: &[u8]) -> Option<usize> {
+    if packet.is_empty() {
+        return None;
+    }
+
+    let dcid = if packet[0] & 0x80 != 0 {
+        if matches!(packet[0] & 0x30, 0x00 | 0x10) {
+            return None;
+        }
+        let dcid_len = usize::from(*packet.get(5)?);
+        if dcid_len == 0 {
+            return None;
+        }
+        packet.get(6..6 + dcid_len)?
+    } else {
+        packet.get(1..)?
+    };
+
+    let high = *dcid.first()?;
+    let low = *dcid.get(1)?;
+    Some((usize::from(high) << 8) | usize::from(low))
+}
+
+fn quic_packet_prefix<'a>(
+    bufs: &'a [IoSliceMut<'_>],
+    len: usize,
+    out: &'a mut Vec<u8>,
+) -> &'a [u8] {
+    if let Some(first) = bufs.first()
+        && first.len() >= len
+    {
+        return &first[..len];
+    }
+
+    out.clear();
+    out.reserve(len);
+    let mut remaining = len;
+    for buf in bufs {
+        if remaining == 0 {
+            break;
+        }
+        let copy_len = remaining.min(buf.len());
+        out.extend_from_slice(&buf[..copy_len]);
+        remaining -= copy_len;
+    }
+    out.as_slice()
+}
+
+impl std::fmt::Debug for SfoQuicUdpSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SfoQuicUdpSocket").finish_non_exhaustive()
+    }
+}
+
+impl quinn::AsyncUdpSocket for SfoQuicUdpSocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn quinn::UdpPoller>> {
+        Box::pin(SfoQuicUdpPoller { socket: self })
+    }
+
+    fn try_send(&self, transmit: &quinn::udp::Transmit) -> io::Result<()> {
+        match transmit.segment_size {
+            Some(segment_size) if segment_size > 0 => {
+                for chunk in transmit.contents.chunks(segment_size) {
+                    let sent = self.socket.try_send_to(chunk, transmit.destination)?;
+                    if sent != chunk.len() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "short quic udp send",
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            _ => {
+                let sent = self
+                    .socket
+                    .try_send_to(transmit.contents, transmit.destination)?;
+                if sent == transmit.contents.len() {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "short quic udp send",
+                    ))
+                }
+            }
+        }
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        if bufs.is_empty() || meta.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        match self.socket.poll_recv_from_vectored(cx, bufs) {
+            Poll::Ready(Ok((len, peer_addr))) => {
+                let mut packet = Vec::new();
+                if let Some(worker_index) =
+                    quic_packet_worker_index_prefix(quic_packet_prefix(bufs, len, &mut packet))
+                {
+                    assert_eq!(
+                        worker_index, self.worker_id,
+                        "quic packet dcid worker index does not match sfo worker socket"
+                    );
+                }
+                meta[0] = quinn::udp::RecvMeta {
+                    addr: peer_addr,
+                    len,
+                    stride: len,
+                    ecn: None,
+                    dst_ip: None,
+                };
+                Poll::Ready(Ok(1))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.socket
+            .local_addr()
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
+    }
+}
+
+struct SfoQuicUdpPoller {
+    socket: Arc<SfoQuicUdpSocket>,
+}
+
+impl std::fmt::Debug for SfoQuicUdpPoller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SfoQuicUdpPoller").finish()
+    }
+}
+
+impl quinn::UdpPoller for SfoQuicUdpPoller {
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        self.socket.socket.poll_send_ready(cx)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WorkerQuicCidGenerator {
+    inner: QuicCidGenerator,
+}
+
+impl WorkerQuicCidGenerator {
+    fn for_worker(worker_id: usize) -> P2pResult<Self> {
+        let inner = QuicCidGenerator::for_worker(worker_id).map_err(into_p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "create quic cid generator failed"
+        ))?;
+        Ok(Self { inner })
+    }
+}
+
+impl quinn::ConnectionIdGenerator for WorkerQuicCidGenerator {
+    fn generate_cid(&mut self) -> quinn::ConnectionId {
+        let cid = self
+            .inner
+            .generate()
+            .expect("sfo quic cid generation should not fail after validation");
+        quinn::ConnectionId::new(cid.as_slice())
+    }
+
+    fn cid_len(&self) -> usize {
+        self.inner.cid_len()
+    }
+
+    fn cid_lifetime(&self) -> Option<Duration> {
+        None
+    }
+}
+
+fn new_quic_endpoint_config(worker_id: usize) -> P2pResult<quinn::EndpointConfig> {
+    let generator = WorkerQuicCidGenerator::for_worker(worker_id)?;
+    let mut endpoint_config = quinn::EndpointConfig::default();
+    endpoint_config.cid_generator(move || Box::new(generator.clone()));
+    Ok(endpoint_config)
+}
+
+async fn wait_quic_endpoint_ready(listener: &QuicTunnelListener) -> P2pResult<()> {
+    if !listener.state.read().unwrap().endpoints.is_empty() {
+        return Ok(());
+    }
+    let ready = listener.endpoint_ready.notified();
+    tokio::pin!(ready);
+    match runtime::timeout(QUIC_ENDPOINT_READY_TIMEOUT, &mut ready).await {
+        Ok(_) => Ok(()),
+        Err(_) if listener.state.read().unwrap().endpoints.is_empty() => Err(p2p_err!(
+            P2pErrorCode::QuicError,
+            "quic endpoint did not become ready"
+        )),
+        Err(_) => Ok(()),
+    }
+}
+
+async fn wait_quic_accept_loop(listener: Arc<QuicTunnelListener>, endpoint: quinn::Endpoint) {
+    loop {
+        match endpoint.accept().await {
+            Some(conn) => {
+                let result = listener.accept_connection(conn).await;
+                let sender = listener.accepted_tx.lock().unwrap().clone();
+                let Some(tx) = sender else {
+                    break;
+                };
+                if tx.send(result).is_err() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+}
 
 struct QuicTunnelListenerState {
     local: Option<Endpoint>,
     outer: Option<Endpoint>,
-    socket: Option<quinn::Endpoint>,
-    punch_socket: Option<Arc<UdpSocket>>,
+    endpoints: Vec<quinn::Endpoint>,
+    server: Option<QuicServer>,
+    punch_socket: Option<SfoUdpSocket>,
     mapping_port: Option<u16>,
+    reuse_address: bool,
 }
 
 pub(crate) struct QuicTunnelListener {
@@ -48,9 +287,10 @@ pub(crate) struct QuicTunnelListener {
     state: RwLock<QuicTunnelListenerState>,
     accepted: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
     accepted_tx: Mutex<Option<mpsc::UnboundedSender<P2pResult<TunnelRef>>>>,
-    accept_task: Mutex<Option<SpawnHandle<()>>>,
     close_notify: Notify,
+    endpoint_ready: Notify,
     closed: AtomicBool,
+    server_runtime: ServerRuntime,
 }
 
 impl QuicTunnelListener {
@@ -59,6 +299,7 @@ impl QuicTunnelListener {
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
         congestion_algorithm: QuicCongestionAlgorithm,
+        server_runtime: ServerRuntime,
     ) -> Arc<Self> {
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
@@ -69,15 +310,18 @@ impl QuicTunnelListener {
             state: RwLock::new(QuicTunnelListenerState {
                 local: None,
                 outer: None,
-                socket: None,
+                endpoints: Vec::new(),
+                server: None,
                 punch_socket: None,
                 mapping_port: None,
+                reuse_address: false,
             }),
             accepted: AsyncMutex::new(accepted_rx),
             accepted_tx: Mutex::new(Some(accepted_tx)),
-            accept_task: Mutex::new(None),
             close_notify: Notify::new(),
+            endpoint_ready: Notify::new(),
             closed: AtomicBool::new(false),
+            server_runtime,
         })
     }
 
@@ -86,7 +330,14 @@ impl QuicTunnelListener {
     }
 
     pub(crate) fn bound_local(&self) -> Endpoint {
-        let endpoint = self.state.read().unwrap().socket.clone().unwrap();
+        let endpoint = self
+            .state
+            .read()
+            .unwrap()
+            .endpoints
+            .first()
+            .cloned()
+            .unwrap();
         Endpoint::from((
             crate::endpoint::Protocol::Quic,
             endpoint.local_addr().unwrap(),
@@ -98,7 +349,9 @@ impl QuicTunnelListener {
     }
 
     pub(crate) fn quic_ep(&self) -> quinn::Endpoint {
-        self.state.read().unwrap().socket.clone().unwrap()
+        let state = self.state.read().unwrap();
+        let index = rand::rng().random_range(0..state.endpoints.len());
+        state.endpoints[index].clone()
     }
 
     pub(crate) fn start_udp_punch_burst(
@@ -133,12 +386,9 @@ impl QuicTunnelListener {
                 if !sleep_duration.is_zero() {
                     runtime::sleep(sleep_duration).await;
                 }
-                let sent = try_send_udp_punch_packet(
-                    punch_socket.as_ref(),
-                    *remote.addr(),
-                    payload.as_slice(),
-                )
-                .await;
+                let sent =
+                    try_send_udp_punch_packet(&punch_socket, *remote.addr(), payload.as_slice())
+                        .await;
                 if !sent {
                     log::trace!(
                         "quic udp punch send failed remote={} index={}",
@@ -157,26 +407,22 @@ impl QuicTunnelListener {
         }
         self.close_notify.notify_waiters();
         self.accepted_tx.lock().unwrap().take();
-        if let Some(task) = self.accept_task.lock().unwrap().take() {
-            task.abort();
-        }
-        let ep = {
+        let (endpoints, server) = {
             let mut state = self.state.write().unwrap();
+            let server = state.server.take();
             state.punch_socket.take();
-            state.socket.take()
+            let endpoints = std::mem::take(&mut state.endpoints);
+            (endpoints, server)
         };
-        if let Some(ep) = ep {
+        for ep in endpoints {
             ep.close(0_u32.into(), b"close all listeners");
+        }
+        if let Some(server) = server {
+            let _ = server.close();
         }
     }
 
-    pub(crate) async fn bind(
-        &self,
-        local: Endpoint,
-        out: Option<Endpoint>,
-        mapping_port: Option<u16>,
-        reuse_address: bool,
-    ) -> P2pResult<()> {
+    fn build_server_config(&self) -> P2pResult<quinn::ServerConfig> {
         let mut server_config =
             rustls::ServerConfig::builder_with_provider(crate::tls::provider().into())
                 .with_protocol_versions(&[&TLS13])
@@ -220,69 +466,128 @@ impl QuicTunnelListener {
             }
         }
 
-        let sockaddr: SockAddr = local.addr().to_owned().into();
-        let domain = match local.addr() {
-            std::net::SocketAddr::V4(_) => Domain::IPV4,
-            std::net::SocketAddr::V6(_) => Domain::IPV6,
-        };
-        let socket = Socket::new(domain, Type::DGRAM, Some(SocketProtocol::UDP)).map_err(
-            into_p2p_err!(P2pErrorCode::QuicError, "create quic socket failed"),
-        )?;
-        socket.set_nonblocking(true).map_err(into_p2p_err!(
-            P2pErrorCode::QuicError,
-            "set quic socket nonblocking failed"
-        ))?;
-        #[cfg(target_os = "linux")]
-        if reuse_address {
-            socket.set_reuse_address(true).map_err(into_p2p_err!(
-                P2pErrorCode::QuicError,
-                "set reuse address failed"
-            ))?;
+        Ok(server_config)
+    }
+
+    pub(crate) async fn bind(
+        self: &Arc<Self>,
+        local: Endpoint,
+        out: Option<Endpoint>,
+        mapping_port: Option<u16>,
+        reuse_address: bool,
+    ) -> P2pResult<()> {
+        {
+            let mut state = self.state.write().unwrap();
+            state.local = Some(local);
+            state.outer = out;
+            state.mapping_port = mapping_port;
+            state.reuse_address = reuse_address;
         }
-        socket.bind(&sockaddr).map_err(into_p2p_err!(
-            P2pErrorCode::AlreadyExists,
-            "bind {} error",
-            local
-        ))?;
-        #[cfg(unix)]
-        let socket = unsafe {
-            use std::os::fd::{FromRawFd, IntoRawFd};
-
-            std::net::UdpSocket::from_raw_fd(socket.into_raw_fd())
-        };
-        #[cfg(windows)]
-        let socket = unsafe {
-            use std::os::windows::io::{FromRawSocket, IntoRawSocket};
-
-            std::net::UdpSocket::from_raw_socket(socket.into_raw_socket())
-        };
-        let punch_socket = socket.try_clone().map_err(into_p2p_err!(
-            P2pErrorCode::QuicError,
-            "clone quic punch socket failed"
-        ))?;
-        let punch_socket = Arc::new(UdpSocket::from_std(punch_socket).map_err(into_p2p_err!(
-            P2pErrorCode::QuicError,
-            "create quic punch socket failed"
-        ))?);
-        let endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            Some(server_config),
-            socket,
-            Arc::new(quinn::TokioRuntime),
-        )
-        .map_err(into_p2p_err!(
-            P2pErrorCode::QuicError,
-            "Create quic server error"
-        ))?;
-
-        let mut state = self.state.write().unwrap();
-        state.local = Some(local);
-        state.outer = out;
-        state.socket = Some(endpoint);
-        state.punch_socket = Some(punch_socket);
-        state.mapping_port = mapping_port;
 
         Ok(())
+    }
+
+    pub(crate) async fn start(self: &Arc<Self>) -> P2pResult<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(p2p_err!(P2pErrorCode::ErrorState, "quic listener closed"));
+        }
+
+        let (local, reuse_address) = {
+            let state = self.state.read().unwrap();
+            if state.server.is_some() {
+                return Err(p2p_err!(
+                    P2pErrorCode::AlreadyExists,
+                    "quic listener already started"
+                ));
+            }
+            let local = state
+                .local
+                .ok_or_else(|| p2p_err!(P2pErrorCode::InvalidParam, "quic listener not bound"))?;
+            (local, state.reuse_address)
+        };
+
+        let server_config = self.build_server_config()?;
+        let config = ServiceConfig::new(*local.addr()).with_socket_options(SocketOptions {
+            reuse_address,
+            ..SocketOptions::default()
+        });
+        let listener = self.clone();
+        let server =
+            QuicServer::serve_socket(&self.server_runtime, config, move |socket, worker_id| {
+                let listener = listener.clone();
+                let server_config = server_config.clone();
+                async move {
+                    listener
+                        .run_worker_endpoint(socket, worker_id, server_config)
+                        .await
+                }
+            })
+            .map_err(into_p2p_err!(
+                P2pErrorCode::AlreadyExists,
+                "bind quic listener {} error",
+                local
+            ))?;
+
+        {
+            let mut state = self.state.write().unwrap();
+            state.server = Some(server.clone());
+        }
+        if let Err(err) = wait_quic_endpoint_ready(self).await {
+            let _ = server.close();
+            let endpoints = {
+                let mut state = self.state.write().unwrap();
+                state.server.take();
+                state.punch_socket.take();
+                std::mem::take(&mut state.endpoints)
+            };
+            for endpoint in endpoints {
+                endpoint.close(0_u32.into(), b"close listener");
+            }
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    async fn run_worker_endpoint(
+        self: Arc<Self>,
+        socket: SfoUdpSocket,
+        worker_id: usize,
+        server_config: quinn::ServerConfig,
+    ) -> Result<(), SfoReuseportError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let endpoint_config = new_quic_endpoint_config(worker_id)
+            .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            endpoint_config,
+            Some(server_config),
+            Arc::new(SfoQuicUdpSocket::new(socket.clone(), worker_id)),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
+
+        if !self.register_worker_endpoint(endpoint.clone(), socket) {
+            endpoint.close(0_u32.into(), b"close listener");
+            return Ok(());
+        }
+        wait_quic_accept_loop(self, endpoint).await;
+        Ok(())
+    }
+
+    fn register_worker_endpoint(&self, endpoint: quinn::Endpoint, socket: SfoUdpSocket) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut state = self.state.write().unwrap();
+        if state.punch_socket.is_none() {
+            state.punch_socket = Some(socket);
+        }
+        state.endpoints.push(endpoint);
+        drop(state);
+        self.endpoint_ready.notify_waiters();
+        true
     }
 
     async fn accept_connection(&self, conn: Incoming) -> P2pResult<TunnelRef> {
@@ -340,32 +645,6 @@ impl QuicTunnelListener {
         .await?)
     }
 
-    pub(crate) fn start(self: &Arc<Self>) {
-        if self.closed.load(Ordering::SeqCst) {
-            return;
-        }
-        let this = self.clone();
-        let socket = self.quic_ep();
-        let handle = Executor::spawn_with_handle(async move {
-            loop {
-                match socket.accept().await {
-                    Some(conn) => {
-                        let result = this.accept_connection(conn).await;
-                        let sender = this.accepted_tx.lock().unwrap().clone();
-                        let Some(tx) = sender else {
-                            break;
-                        };
-                        if tx.send(result).is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
-                }
-            }
-        })
-        .unwrap();
-        *self.accept_task.lock().unwrap() = Some(handle);
-    }
 }
 
 fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
@@ -423,7 +702,7 @@ fn udp_punch_offsets_for_deadline(
 }
 
 async fn try_send_udp_punch_packet(
-    socket: &UdpSocket,
+    socket: &SfoUdpSocket,
     remote: std::net::SocketAddr,
     payload: &[u8],
 ) -> bool {
@@ -557,7 +836,8 @@ mod udp_punch_tests {
     use super::*;
     use crate::endpoint::EndpointArea;
     use crate::types::{TunnelCandidateId, TunnelId};
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
+    use sfo_reuseport::{ServerRuntimeConfig, UdpServer};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     fn endpoint(protocol: Protocol, ip: Ipv4Addr, port: u16, area: EndpointArea) -> Endpoint {
         let mut ep = Endpoint::from((protocol, SocketAddr::V4(SocketAddrV4::new(ip, port))));
@@ -728,23 +1008,37 @@ mod udp_punch_tests {
         );
     }
 
-    #[tokio::test]
-    async fn udp_punch_async_socket_preserves_listener_local_port() {
-        let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.set_nonblocking(true).unwrap();
-        let punch_socket = UdpSocket::from_std(socket.try_clone().unwrap()).unwrap();
+    async fn sfo_udp_socket() -> (ServerRuntime, UdpServer, SfoUdpSocket) {
+        let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap());
+        let server = UdpServer::serve_socket(&runtime, config, move |socket, _worker_id| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(socket);
+                std::future::pending::<Result<(), SfoReuseportError>>().await
+            }
+        })
+        .unwrap();
+        let socket = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(2)))
+            .await
+            .unwrap()
+            .unwrap();
+        (runtime, server, socket)
+    }
 
+    #[tokio::test]
+    async fn udp_punch_socket_preserves_listener_local_port() {
+        let (_runtime, server, punch_socket) = sfo_udp_socket().await;
         assert_eq!(
-            socket.local_addr().unwrap(),
+            server.listener_socket().unwrap().local_addr().unwrap(),
             punch_socket.local_addr().unwrap()
         );
     }
 
     #[tokio::test]
     async fn udp_punch_send_failure_is_best_effort() {
-        let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.set_nonblocking(true).unwrap();
-        let socket = UdpSocket::from_std(socket).unwrap();
+        let (_runtime, _server, socket) = sfo_udp_socket().await;
         let invalid_remote = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
         let payload = udp_punch_payload(TunnelConnectIntent::active_logical(TunnelId::from(7)));
 

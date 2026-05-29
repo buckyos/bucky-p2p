@@ -7,10 +7,8 @@ import sys
 REQUIRED_PACKET_FILES = (
     "proposal.md",
     "design.md",
-    "testing.md",
-    "acceptance.md",
-    "testplan.yaml",
 )
+OPTIONAL_PACKET_FILES = ("testing.md", "acceptance.md", "testplan.yaml")
 
 REQUIRED_METADATA = ("module", "version", "status", "approved_by", "approved_at")
 REQUIRED_TEST_LEVELS = ("unit", "dv", "integration")
@@ -58,6 +56,28 @@ def main() -> int:
         path = module_dir / name
         if not path.exists():
             errors.append(f"missing required file: {path}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        metadata = parse_front_matter(path)
+        for key in REQUIRED_METADATA:
+            if key not in metadata:
+                errors.append(f"missing metadata {key} in {path}")
+        if metadata.get("module") not in ("", module):
+            errors.append(f"wrong module metadata in {path}: {metadata.get('module')}")
+        if metadata.get("version") not in ("", version):
+            errors.append(f"wrong version metadata in {path}: {metadata.get('version')}")
+        if metadata.get("status") == "approved":
+            for key in ("approved_by", "approved_at"):
+                if not metadata.get(key, "").strip():
+                    errors.append(f"approved document missing {key} in {path}")
+        if name in REQUIRED_DIRECT_MAPPING_SECTIONS and module not in LEGACY_DIRECT_MAPPING_EXEMPT_MODULES:
+            required_section = REQUIRED_DIRECT_MAPPING_SECTIONS[name]
+            if required_section not in text:
+                errors.append(f"missing section {required_section} in {path}")
+
+    for name in OPTIONAL_PACKET_FILES:
+        path = module_dir / name
+        if not path.exists():
             continue
         if name.endswith(".md") and name != "acceptance.md":
             text = path.read_text(encoding="utf-8")

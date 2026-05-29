@@ -2382,6 +2382,7 @@ mod tests {
     use crate::tunnel::DefaultP2pConnectionInfoCache;
     use crate::types::{Sequence, TunnelCandidateId, TunnelIdGenerator};
     use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
+    use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
     use std::sync::Once;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3031,12 +3032,12 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_millis(200),
             Duration::from_secs(5),
+            ServerRuntime::start(ServerRuntimeConfig::default()).unwrap(),
         );
         server_listener
-            .bind(loopback_tcp_ep(), None, None, false)
+            .start(loopback_tcp_ep(), None, None, false)
             .await
             .unwrap();
-        server_listener.start();
 
         let _opened = caller_network
             .create_tunnel(

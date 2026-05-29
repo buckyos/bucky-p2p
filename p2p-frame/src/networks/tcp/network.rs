@@ -14,6 +14,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelCandidateId, TunnelIdGenerator};
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +29,7 @@ pub struct TcpTunnelNetwork {
     heartbeat_timeout: Duration,
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
+    server_runtime: ServerRuntime,
 }
 
 impl TcpTunnelNetwork {
@@ -52,6 +54,26 @@ impl TcpTunnelNetwork {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
     ) -> Self {
+        let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default())
+            .expect("sfo reuseport server runtime should start");
+        Self::new_with_server_runtime(
+            cert_resolver,
+            cert_factory,
+            timeout,
+            heartbeat_interval,
+            heartbeat_timeout,
+            server_runtime,
+        )
+    }
+
+    pub fn new_with_server_runtime(
+        cert_resolver: ServerCertResolverRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        timeout: Duration,
+        heartbeat_interval: Duration,
+        heartbeat_timeout: Duration,
+        server_runtime: ServerRuntime,
+    ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
             registry: TcpTunnelRegistry::new(),
@@ -62,6 +84,7 @@ impl TcpTunnelNetwork {
             heartbeat_timeout,
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
             reuse_address: AtomicBool::new(false),
+            server_runtime,
         }
     }
 
@@ -180,16 +203,16 @@ impl TunnelNetwork for TcpTunnelNetwork {
             self.timeout,
             self.heartbeat_interval,
             self.heartbeat_timeout,
+            self.server_runtime.clone(),
         );
         listener
-            .bind(
+            .start(
                 *local,
                 out,
                 mapping_port,
                 self.reuse_address.load(Ordering::Relaxed),
             )
             .await?;
-        listener.start();
         self.listeners.lock().unwrap().push(listener.clone());
         Ok(listener)
     }

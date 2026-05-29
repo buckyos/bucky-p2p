@@ -22,6 +22,7 @@ use log::*;
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
 use sfo_cmd_server::server::{CmdServer, CmdTunnelService, DefaultCmdServerService};
 use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::{
     sync::{
         Arc, Mutex,
@@ -606,6 +607,8 @@ impl SnServer {
             congestion_algorithm,
             Duration::from_secs(30),
             Duration::from_secs(30),
+            ServerRuntime::start(ServerRuntimeConfig::default())
+                .expect("sfo reuseport server runtime should start"),
         ));
         TunnelNetwork::set_reuse_address(quic_network.as_ref(), reuse_address);
         let tunnel_networks = vec![
