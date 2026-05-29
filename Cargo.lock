@@ -3429,9 +3429,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-reuseport"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb18741ac43047f16bcdbd88eb0db7f656a37242576babd08e4891d3ddcecbeb"
+checksum = "1baa3f409532b66c94565f76592e0a461333d7ba5103ac37482401f16766929c"
 dependencies = [
  "getrandom 0.3.4",
  "num_cpus",

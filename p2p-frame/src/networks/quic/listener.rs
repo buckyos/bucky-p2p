@@ -31,7 +31,7 @@ use tokio::sync::{Notify, mpsc};
 
 const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
 const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
-const UDP_PUNCH_NON_QUIC_FIXED_BIT: u8 = 0x40;
+const UDP_PUNCH_MAGIC: &[u8] = b"\x00#@$QUIC";
 const UDP_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 const UDP_PUNCH_ACTIVE_START_OFFSET: Duration = Duration::from_millis(250);
 const UDP_PUNCH_REVERSE_START_OFFSET: Duration = Duration::ZERO;
@@ -77,10 +77,10 @@ fn quic_packet_prefix<'a>(
     len: usize,
     out: &'a mut Vec<u8>,
 ) -> &'a [u8] {
-    if let Some(first) = bufs.first()
-        && first.len() >= len
-    {
-        return &first[..len];
+    if let Some(first) = bufs.first() {
+        if first.len() >= len {
+            return &first[..len];
+        }
     }
 
     out.clear();
@@ -95,6 +95,10 @@ fn quic_packet_prefix<'a>(
         remaining -= copy_len;
     }
     out.as_slice()
+}
+
+fn is_udp_punch_payload(packet: &[u8]) -> bool {
+    packet.starts_with(UDP_PUNCH_MAGIC)
 }
 
 impl std::fmt::Debug for SfoQuicUdpSocket {
@@ -147,28 +151,32 @@ impl quinn::AsyncUdpSocket for SfoQuicUdpSocket {
         if bufs.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        match self.socket.poll_recv_from_vectored(cx, bufs) {
-            Poll::Ready(Ok((len, peer_addr))) => {
-                let mut packet = Vec::new();
-                if let Some(worker_index) =
-                    quic_packet_worker_index_prefix(quic_packet_prefix(bufs, len, &mut packet))
-                {
-                    assert_eq!(
-                        worker_index, self.worker_id,
-                        "quic packet dcid worker index does not match sfo worker socket"
-                    );
+        loop {
+            match self.socket.poll_recv_from_vectored(cx, bufs) {
+                Poll::Ready(Ok((len, peer_addr))) => {
+                    let mut packet = Vec::new();
+                    let packet = quic_packet_prefix(bufs, len, &mut packet);
+                    if is_udp_punch_payload(packet) {
+                        continue;
+                    }
+                    if let Some(worker_index) = quic_packet_worker_index_prefix(packet) {
+                        assert_eq!(
+                            worker_index, self.worker_id,
+                            "quic packet dcid worker index does not match sfo worker socket"
+                        );
+                    }
+                    meta[0] = quinn::udp::RecvMeta {
+                        addr: peer_addr,
+                        len,
+                        stride: len,
+                        ecn: None,
+                        dst_ip: None,
+                    };
+                    return Poll::Ready(Ok(1));
                 }
-                meta[0] = quinn::udp::RecvMeta {
-                    addr: peer_addr,
-                    len,
-                    stride: len,
-                    ecn: None,
-                    dst_ip: None,
-                };
-                Poll::Ready(Ok(1))
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -644,7 +652,6 @@ impl QuicTunnelListener {
         )
         .await?)
     }
-
 }
 
 fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
@@ -656,10 +663,11 @@ fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
 
 fn udp_punch_payload(intent: TunnelConnectIntent) -> Vec<u8> {
     let _ = intent;
-    let payload_len =
-        rand::rng().random_range(UDP_PUNCH_PAYLOAD_MIN_LEN..=UDP_PUNCH_PAYLOAD_MAX_LEN);
+    let payload_len = rand::rng().random_range(
+        UDP_PUNCH_PAYLOAD_MIN_LEN.max(UDP_PUNCH_MAGIC.len())..=UDP_PUNCH_PAYLOAD_MAX_LEN,
+    );
     let mut payload = random::<[u8; UDP_PUNCH_PAYLOAD_MAX_LEN]>();
-    payload[0] &= !UDP_PUNCH_NON_QUIC_FIXED_BIT;
+    payload[..UDP_PUNCH_MAGIC.len()].copy_from_slice(UDP_PUNCH_MAGIC);
     payload[..payload_len].to_vec()
 }
 
@@ -930,14 +938,24 @@ mod udp_punch_tests {
         assert!(
             payloads
                 .iter()
-                .all(|payload| payload[0] & UDP_PUNCH_NON_QUIC_FIXED_BIT == 0)
+                .all(|payload| payload.starts_with(UDP_PUNCH_MAGIC))
         );
+        assert!(payloads.iter().all(|payload| payload[0] == 0));
         assert!(
             payloads
                 .windows(2)
                 .any(|pair| pair[0].len() != pair[1].len())
         );
         assert!(payloads.windows(2).any(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn udp_punch_payload_magic_identifies_only_private_probe_data() {
+        let payload = udp_punch_payload(TunnelConnectIntent::active_logical(TunnelId::from(7)));
+        assert!(is_udp_punch_payload(&payload));
+        assert!(!is_udp_punch_payload(&[0xc0, 0, 0, 0, 1, 8, 1, 2]));
+        assert!(!is_udp_punch_payload(&[0x40, 0, 1, 2, 3]));
+        assert!(!is_udp_punch_payload(b"\x00P2"));
     }
 
     #[test]
