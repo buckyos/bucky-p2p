@@ -1,12 +1,10 @@
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
-    NetManagerRef, TunnelAcceptor, TunnelDatagramWrite, TunnelPurpose, TunnelRef, TunnelStreamRead,
+    NetManagerRef, TunnelDatagramWrite, TunnelPurpose, TunnelRef, TunnelStreamRead,
     TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
-use crate::runtime;
 use std::sync::{Arc, Mutex};
-use tokio::task::JoinHandle;
 
 use super::client::{TtpConnector, is_tunnel_available, match_target};
 use super::listener::{TtpDatagramListenerRef, TtpListenerRef, TtpPortListener};
@@ -18,7 +16,6 @@ pub struct TtpServer {
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
     tunnels: Mutex<Vec<TunnelRef>>,
-    accept_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 pub type TtpServerRef = Arc<TtpServer>;
@@ -28,66 +25,66 @@ impl TtpServer {
         local_identity: P2pIdentityRef,
         net_manager: NetManagerRef,
     ) -> P2pResult<TtpServerRef> {
-        let acceptor = net_manager.register_tunnel_acceptor(local_identity.get_id())?;
         let server = Arc::new(Self {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
             tunnels: Mutex::new(Vec::new()),
-            accept_task: Mutex::new(None),
         });
-        server.start_accept_loop(acceptor);
+        server.register_accept_callback()?;
         Ok(server)
     }
 
-    fn start_accept_loop(self: &Arc<Self>, mut acceptor: TunnelAcceptor) {
+    fn register_accept_callback(self: &Arc<Self>) -> P2pResult<()> {
         let weak = Arc::downgrade(self);
-        let handle = runtime::task::spawn(async move {
-            loop {
-                let tunnel = match acceptor.accept_tunnel().await {
+        self.net_manager.register_incoming_tunnel_subscriber(
+            self.local_identity.get_id(),
+            Arc::new(move |result| {
+                let Some(server) = weak.upgrade() else {
+                    return Box::pin(async { false });
+                };
+                let tunnel = match result {
                     Ok(tunnel) => tunnel,
                     Err(err) => {
-                        log::debug!("ttp server accept tunnel finished: {:?}", err);
-                        break;
+                        log::debug!("ttp server accept tunnel failed: {:?}", err);
+                        return Box::pin(async { true });
                     }
                 };
 
-                let Some(server) = weak.upgrade() else {
-                    break;
-                };
-
-                log::debug!(
-                    "ttp server accepted incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
-                    tunnel.local_id(),
-                    tunnel.remote_id(),
-                    tunnel.protocol(),
-                    tunnel.tunnel_id(),
-                    tunnel.candidate_id()
-                );
-                if let Err(err) = server.runtime.attach_tunnel(tunnel.clone()).await {
-                    log::warn!(
-                        "ttp attach incoming tunnel failed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} err={:?}",
+                Box::pin(async move {
+                    log::debug!(
+                        "ttp server accepted incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
                         tunnel.local_id(),
                         tunnel.remote_id(),
                         tunnel.protocol(),
                         tunnel.tunnel_id(),
-                        tunnel.candidate_id(),
-                        err
+                        tunnel.candidate_id()
                     );
-                    continue;
-                }
-                log::debug!(
-                    "ttp attach incoming tunnel success local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
-                    tunnel.local_id(),
-                    tunnel.remote_id(),
-                    tunnel.protocol(),
-                    tunnel.tunnel_id(),
-                    tunnel.candidate_id()
-                );
-                server.remember_tunnel(tunnel);
-            }
-        });
-        *self.accept_task.lock().unwrap() = Some(handle);
+                    if let Err(err) = server.runtime.attach_tunnel(tunnel.clone()).await {
+                        log::warn!(
+                            "ttp attach incoming tunnel failed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} err={:?}",
+                            tunnel.local_id(),
+                            tunnel.remote_id(),
+                            tunnel.protocol(),
+                            tunnel.tunnel_id(),
+                            tunnel.candidate_id(),
+                            err
+                        );
+                        return true;
+                    }
+                    log::debug!(
+                        "ttp attach incoming tunnel success local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                        tunnel.local_id(),
+                        tunnel.remote_id(),
+                        tunnel.protocol(),
+                        tunnel.tunnel_id(),
+                        tunnel.candidate_id()
+                    );
+                    server.remember_tunnel(tunnel);
+                    true
+                })
+            }),
+        )
     }
 
     fn remember_tunnel(&self, tunnel: TunnelRef) {
@@ -227,9 +224,6 @@ impl TtpConnector for TtpServer {
 impl Drop for TtpServer {
     fn drop(&mut self) {
         self.net_manager
-            .unregister_tunnel_acceptor(&self.local_identity.get_id());
-        if let Some(task) = self.accept_task.lock().unwrap().take() {
-            task.abort();
-        }
+            .unregister_incoming_tunnel_subscriber(&self.local_identity.get_id());
     }
 }

@@ -19,6 +19,7 @@ approved_at: 2026-05-29
 - 本轮新增需求是进一步收窄 QUIC NAT 打洞辅助的触发条件：同源 UDP punch 只应面向 `EndpointArea::ServerReflexive` 的 QUIC endpoint 发起，不再面向普通 `Lan`、`Wan`、`Mapped` 或仅凭公网 IP 判断的 endpoint 发起；同时，现有 QUIC tunnel 控制心跳发送间隔保持不变，但心跳超时阈值应调整为 30 秒，降低弱网或调度抖动下的误关闭概率。
 - 本轮新增需求是收紧 reverse tunnel 入站可见性语义：reverse incoming tunnel 只有命中本地正在等待的同 `(remote_id, tunnel_id)` reverse waiter 时才可被接收；如果没有 waiter，说明本地并未等待或已经放弃该 reverse 结果，必须直接关闭，不得作为普通 tunnel 向上发布。
 - 本轮新增需求是将 `p2p-frame/src/networks/**` 的 TCP 与 QUIC listener 实现基于 `sfo-reuseport` 重构：TCP listener 必须直接使用 `sfo_reuseport::TcpServer` 接收入站连接，QUIC listener 必须直接使用 `sfo_reuseport::QuicServer::serve_socket(...)` 取得每个 worker 的 `sfo_reuseport::UdpSocket`，并为每个 worker socket 创建一个 `quinn::Endpoint::new_with_abstract_socket(...)`；`ServerRuntime` 必须允许由外部显式设置，同时保持默认构造路径可用。
+- 本轮新增需求是调整 `TunnelNetwork` 的入站 tunnel 暴露模型：`TunnelNetwork` 不再向外导出 `TunnelListener` 对象，不再提供 `listeners()` 查询方法；`listen(...)` 必须由调用方传入接收新 `Tunnel` 的异步回调函数，返回值改为 `P2pResult<()>`，新进入的 tunnel 通过该回调通知外部。
 
 ## 范围
 ### 范围内
@@ -58,6 +59,9 @@ approved_at: 2026-05-29
 - QUIC listener 必须使用 `sfo_reuseport::QuicCidGenerator` 或等价内部适配，把 Quinn endpoint 生成的 connection ID 前 2 字节设置为对应 worker shard，确保后续 QUIC packet 稳定回到同一 worker endpoint
 - QUIC 主动 connect 可在同一 listener 的 worker endpoint 集合中选择任一 endpoint 发起；同源 UDP punch 必须使用 `serve_socket` 回调取得的任一 listener socket，优先保存第一个可用 socket，不得退回独立 UDP socket或破坏既有同源端口语义
 - `ServerRuntime` 必须能由 `p2p-frame` 外部通过明确配置入口设置；未设置时 `p2p-frame` 仍负责创建默认 `sfo_reuseport::ServerRuntime`
+- `TunnelNetwork::listen(...)` 必须接收一个可克隆、线程安全的入站 tunnel 回调；TCP、QUIC 与 PN network 在 listener 内部 accept 到新 tunnel 后直接调用该回调，调用方不再通过返回的 `TunnelListener` 对象自行启动 accept loop
+- `TunnelNetwork::listen(...)` 成功只表示 listener 已注册并开始向回调投递后续入站 tunnel；返回值不得携带 `TunnelListenerRef`
+- `TunnelNetwork` 公共 trait 不再包含 `listeners()`；调用方若只需要监听元数据，继续通过 `listener_infos()` 获取
 
 ### 范围外
 - 重写当前协议实现
@@ -85,7 +89,7 @@ approved_at: 2026-05-29
 - 引入 reverse tunnel 过期表或跨进程状态；本轮只以当前 pending reverse waiter 作为接收入站 reverse 的依据
 - 新增 `NetworkServerRuntime`、socket factory trait 或其他包裹 `sfo-reuseport` 的通用运行时抽象；本轮必须直接使用 `sfo_reuseport::ServerRuntime`、`TcpServer` 和 `QuicServer`
 - 将 QUIC listener 重构为独立 raw UDP 业务协议，或要求上层解析 UDP punch payload
-- 改变 TCP/QUIC tunnel 线协议、TLS 身份校验语义、`TunnelNetwork` 公共 trait 签名或 tunnel candidate publish 规则
+- 改变 TCP/QUIC tunnel 线协议、TLS 身份校验语义或 tunnel candidate publish 规则；除本轮明确批准的 `listen` 回调化、返回值改为 `P2pResult<()>` 和移除 `listeners()` 外，不再扩大 `TunnelNetwork` 公共 trait 变更
 - 因引入 `sfo-reuseport` 而移除现有 QUIC NAT punch 的 `ServerReflexive` 准入条件、50ms cadence、active/reverse 起发时机或 1 秒默认截止
 
 ### 与相邻模块的边界
@@ -144,7 +148,7 @@ approved_at: 2026-05-29
 - QUIC/UDP NAT 打洞场景下，reverse 不应被固定为 direct 失败后的长延迟补救；具体延迟与触发条件必须由 design 明确，并可由 unit 测试验证。
 - QUIC/UDP NAT 打洞场景下，同源 UDP punch 必须在本次连接开始后按固定 50ms cadence 发送，默认持续到 1 秒截止；active path 只能从 `250ms` offset 开始发首包，reverse path 必须从 `0ms` 立即发首包。若本次 NAT hedged window 更短，则只能在更短窗口内裁剪，禁止无限重发或跨 candidate 共享重试状态。
 - QUIC/UDP NAT 打洞场景下，同源 UDP punch 的候选准入必须以 endpoint area 为准：只有 `EndpointArea::ServerReflexive` 且满足 QUIC、非 LAN IPv4、非 0 端口等基本发送条件时才可开启；`Wan`、`Mapped`、`Lan` 和未标记为 `ServerReflexive` 的公网 endpoint 不得触发 punch。
-- QUIC tunnel 控制心跳必须保持现有发送间隔不变，仅将 heartbeat timeout 调整为 30 秒；该策略不得改变通用 `TunnelNetwork` trait 签名，也不得要求下游调用方显式传入 NAT 类型。
+- QUIC tunnel 控制心跳必须保持现有发送间隔不变，仅将 heartbeat timeout 调整为 30 秒；该策略不得新增 `TunnelNetwork` NAT 专用参数，也不得要求下游调用方显式传入 NAT 类型。
 - `SnCall` 携带的反连候选必须来自本次可解释的本地 listener、SN 观察端点或映射端口集合，且必须避免重复候选。
 - SN 服务端生成或扩展观察端点时，若观察到的外网地址与节点自上报地址相同，才允许把该 endpoint 标记为 `Wan`；若不同，必须标记为 `ServerReflexive`。
 - `EndpointArea::ServerReflexive` 的文本编码必须使用 `S`，`Display`、`FromStr` 和 raw codec 的 area 语义必须同步；原 `is_sys_default()` system-default 语义不再保留为公开判定入口。
@@ -152,6 +156,7 @@ approved_at: 2026-05-29
 - `ServerRuntime` 注入必须是显式配置能力；默认路径仍必须在不要求调用方传入 runtime 的情况下启动 TCP/QUIC listener。
 - TCP listener 的 `close()` 必须能停止本 listener 关联的 `TcpServer` 服务或至少停止其继续向当前 listener 投递入站 tunnel；不得只关闭上层接收队列而让旧服务继续生成可见 tunnel。
 - QUIC listener 的 `close()` 必须关闭 `QuicServer`、所有 worker Quinn endpoint 和 punch 发送句柄；关闭后不得继续向已关闭 listener 投递 packet 或 tunnel。
+- listener 关闭后不得继续调用已注册的入站 tunnel 回调；如果关闭与入站 accept 并发，迟到 tunnel 必须被关闭或丢弃，不得发布给已关闭 listener 的外部回调。
 - Quinn `AsyncUdpSocket` 适配器必须只属于 `p2p-frame/src/networks/quic/**` 内部实现；它不得成为公共 `TunnelNetwork` trait 的新要求，也不得暴露 raw UDP 业务接口。
 - Quinn `AsyncUdpSocket::try_send()` 必须使用其 worker `sfo_reuseport::UdpSocket::try_send_to(...)` 发送 QUIC packet；同源 UDP punch 必须使用同一 listener 的任一 `serve_socket` worker socket 来源。
 - Quinn `AsyncUdpSocket::poll_recv()` 必须只从其 worker `sfo_reuseport::UdpSocket` 接收 QUIC packet；UDP punch 私有短载荷仍不得被接收侧解析或传递给上层业务。
@@ -179,6 +184,7 @@ approved_at: 2026-05-29
 - TCP listener 的底层 accept 分发由 `sfo_reuseport::TcpServer` 承担，但入站 tunnel 的 TLS accept、control/data connection 分流、registry/publish 语义保持现有协议行为。
 - QUIC listener 的底层 UDP packet 分发由 `sfo_reuseport::QuicServer` 承担，Quinn 仍通过 `Endpoint::new_with_abstract_socket(...)` 管理 QUIC connection 和 incoming tunnel；每个 worker socket 拥有一个 Quinn endpoint，主动 QUIC connect 可随机或轮询选择一个 endpoint，同源 UDP punch 使用首个可用 worker socket。
 - `ServerRuntime` 可由外部设置并复用于 TCP/QUIC listener；未设置时仍由 `p2p-frame` 默认创建，保持现有调用方无需显式 runtime 的兼容启动路径。
+- 通用 `TunnelNetwork` 调用方通过 `listen(local, out, mapping_port, on_incoming_tunnel)` 注册入站回调并接收 `P2pResult<TunnelRef>`；`NetManager` 负责把该回调接到原有 incoming validator、订阅发布和 reject close 路径，保持外部 tunnel publish 语义不变。
 
 ## 风险
 - 旧设计说明与未来实现之间的协议漂移
@@ -246,5 +252,6 @@ approved_at: 2026-05-29
 | P-ENDPOINT-AREA-1 | endpoint_area_server_reflexive | `EndpointArea::Default` 重命名为 `ServerReflexive`，SN 观察到的节点外网地址只有与节点自上报地址一致时标记为 `Wan`，否则标记为 `ServerReflexive`；文本编码使用 `S`，不再保留 `is_sys_default()` system-default 判定。 | 不引入 STUN/TURN、多 SN NAT 类型推断或新的 endpoint area；不继续把 `D` 作为 `ServerReflexive` 的文本标记；不把 SN 反射地址静默等同于节点自声明公网地址。 | unit 能覆盖 SN 观察地址一致/不一致时的 area 分类，覆盖 `Display`/`FromStr`/raw codec 的 `ServerReflexive` / `S` 编解码，并确认 `is_sys_default()` 不再作为公开方法存在。 |
 | P-QUIC-SR-NAT-KEEPALIVE-1 | server_reflexive_quic_nat_keepalive | QUIC 同源 UDP punch 只对 `EndpointArea::ServerReflexive` candidate 开启；QUIC tunnel 保持现有控制心跳发送间隔不变，但 heartbeat timeout 调整为 30 秒。 | 不对 `Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口或默认 intent 发起 punch；不新增 raw UDP keepalive 协议、业务载荷解析或公共 `TunnelNetwork` trait 参数；不改变 QUIC tunnel 现有心跳发送间隔。 | unit 能覆盖 punch candidate policy 只接受 `ServerReflexive` QUIC endpoint，覆盖非 `ServerReflexive` endpoint 不开启 punch；unit 能覆盖 QUIC heartbeat interval 保持现有值且 heartbeat timeout 为 30 秒，且 heartbeat timeout 仍收敛到既有关闭路径。 |
 | P-REV-TIMEOUT-1 | reverse_timeout_close_late_tunnel | reverse incoming tunnel 只有命中同 `(remote_id, tunnel_id)` reverse waiter 时才可接收；无 waiter 时必须关闭，不得作为普通 tunnel publish。 | 不改变 direct、proxy、普通 incoming tunnel 的 publish 规则；不改变 SN call/called 协议；不引入 reverse 过期表或跨进程状态；不按 remote 粗粒度关闭其他 tunnel。 | unit 能覆盖无 waiter reverse tunnel 被 close、未 register、未 publish、订阅者收不到、`get_tunnel()` 不返回；unit 能覆盖命中 waiter 的 reverse tunnel 仍正常交付并延后 publish。 |
-| P-SFO-TCP-LISTENER-1 | networks_sfo_reuseport_tcp_listener | TCP tunnel listener 基于 `sfo_reuseport::TcpServer` 重构，入站 `sfo_reuseport::TcpStream` 接入现有 TLS accept、TCP control/data connection 分流、registry 和 tunnel publish 流程；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 `NetworkServerRuntime` 或 socket factory trait；不改变 TCP tunnel 线协议、TLS 身份校验、`TunnelNetwork` trait 或 tunnel publish 语义；不把 close 后的旧服务继续暴露为当前 listener 的入站 tunnel。 | unit 能覆盖外部 `ServerRuntime` 被 TCP listener 使用、默认 runtime 可用、`TcpServer` handler 的 stream 进入现有 control/data 分流路径、listener close 后不再发布新 tunnel；integration 能覆盖 TCP tunnel 仍可建立并传输。 |
-| P-SFO-QUIC-LISTENER-1 | networks_sfo_reuseport_quic_listener_socket | QUIC tunnel listener 基于 `sfo_reuseport::QuicServer::serve_socket(...)` 重构，使用内部 Quinn `AsyncUdpSocket` 适配器把每个 worker `sfo_reuseport::UdpSocket` 交给对应 `quinn::Endpoint`，并使用 worker-shard CID generator 保持连接路由稳定；主动 connect 可选择任一 worker endpoint，同源 UDP punch 使用首个可用 worker socket；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 raw UDP tunnel、业务载荷解析、公共 `TunnelNetwork` trait 参数或 `NetworkServerRuntime`；不改变 QUIC tunnel 线协议、TLS 身份校验、NAT punch candidate policy、50ms cadence、active/reverse 起发时机、截止规则或 heartbeat 语义。 | unit 能覆盖 worker socket `try_send_to` / `poll_recv_from` 被 Quinn `AsyncUdpSocket` 使用、worker CID generator 绑定对应 worker shard、UDP punch 本地端口与 QUIC listener 端口一致、listener close 后关闭 `QuicServer` 和所有 Quinn endpoint；integration 能覆盖 QUIC tunnel 仍可建立并传输。 |
+| P-SFO-TCP-LISTENER-1 | networks_sfo_reuseport_tcp_listener | TCP tunnel listener 基于 `sfo_reuseport::TcpServer` 重构，入站 `sfo_reuseport::TcpStream` 接入现有 TLS accept、TCP control/data connection 分流、registry 和 tunnel publish 流程；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 `NetworkServerRuntime` 或 socket factory trait；不改变 TCP tunnel 线协议、TLS 身份校验或 tunnel publish 语义；不把 close 后的旧服务继续暴露为当前 listener 的入站 tunnel。 | unit 能覆盖外部 `ServerRuntime` 被 TCP listener 使用、默认 runtime 可用、`TcpServer` handler 的 stream 进入现有 control/data 分流路径、listener close 后不再发布新 tunnel；integration 能覆盖 TCP tunnel 仍可建立并传输。 |
+| P-SFO-QUIC-LISTENER-1 | networks_sfo_reuseport_quic_listener_socket | QUIC tunnel listener 基于 `sfo_reuseport::QuicServer::serve_socket(...)` 重构，使用内部 Quinn `AsyncUdpSocket` 适配器把每个 worker `sfo_reuseport::UdpSocket` 交给对应 `quinn::Endpoint`，并使用 worker-shard CID generator 保持连接路由稳定；主动 connect 可选择任一 worker endpoint，同源 UDP punch 使用首个可用 worker socket；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 raw UDP tunnel、业务载荷解析、公共 `TunnelNetwork` NAT 参数或 `NetworkServerRuntime`；不改变 QUIC tunnel 线协议、TLS 身份校验、NAT punch candidate policy、50ms cadence、active/reverse 起发时机、截止规则或 heartbeat 语义。 | unit 能覆盖 worker socket `try_send_to` / `poll_recv_from` 被 Quinn `AsyncUdpSocket` 使用、worker CID generator 绑定对应 worker shard、UDP punch 本地端口与 QUIC listener 端口一致、listener close 后关闭 `QuicServer` 和所有 Quinn endpoint；integration 能覆盖 QUIC tunnel 仍可建立并传输。 |
+| P-TUNNEL-NETWORK-CALLBACK-1 | tunnel_network_listen_callback | `TunnelNetwork::listen(...)` 改为由调用方传入入站 tunnel 回调并返回 `P2pResult<()>`；`TunnelNetwork` 不再导出 `TunnelListener` 或提供 `listeners()`，新 tunnel 通过回调通知外部。 | 不改变 `TunnelListener` 内部实现类型可被 TCP/QUIC/PN listener 复用；不改变 tunnel publish、incoming validator、TLS 身份校验、TCP/QUIC/PN 线协议、QUIC NAT punch 策略或 `listener_infos()` 语义；不要求调用方轮询 listener。 | unit 能覆盖 `NetManager::listen(...)` 注册回调后仍走 incoming validator、订阅发布和 reject close 路径；unit 或编译覆盖 TCP/QUIC/PN `listen(...)` 返回 `P2pResult<()>` 且不再暴露 `listeners()`；integration 能覆盖 workspace 调用方迁移后仍可建立入站 tunnel。 |

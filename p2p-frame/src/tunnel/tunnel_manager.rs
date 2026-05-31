@@ -1,5 +1,5 @@
 use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
-use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
 use crate::pn::pn_virtual_endpoint;
@@ -39,13 +39,6 @@ const PROXY_UPGRADE_SHORT_INTERVALS: [Duration; 4] = [
     Duration::from_secs(60),
     Duration::from_secs(120),
 ];
-
-fn should_stop_accept_loop(err: &P2pError) -> bool {
-    matches!(
-        err.code(),
-        P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
-    )
-}
 
 async fn race_with_delay<T, FD, FR>(
     direct_future: FD,
@@ -230,8 +223,6 @@ pub struct TunnelManager {
     tunnels: RwLock<HashMap<P2pId, TunnelEntries>>,
     state: Mutex<ManagerState>,
     subscriptions: Mutex<Vec<mpsc::UnboundedSender<P2pResult<TunnelRef>>>>,
-    incoming_task: SpawnHandle<()>,
-    proxy_incoming_task: Option<SpawnHandle<()>>,
     cleanup_task: SpawnHandle<()>,
     proxy_upgrade_notify: Arc<AsyncNotify>,
     proxy_upgrade_task: SpawnHandle<()>,
@@ -253,10 +244,7 @@ impl TunnelManager {
         idle_timeout: Duration,
         proxy_upgrade_initial_interval: Duration,
     ) -> P2pResult<TunnelManagerRef> {
-        let mut incoming_acceptor =
-            net_manager.register_tunnel_acceptor(local_identity.get_id())?;
         let sn_service_for_listener = sn_service.clone();
-        let pn_network_for_listener = pn_network.clone();
         let proxy_upgrade_notify = Arc::new(AsyncNotify::new());
         let manager = Arc::new_cyclic(|weak: &std::sync::Weak<Self>| Self {
             self_weak: weak.clone(),
@@ -277,79 +265,6 @@ impl TunnelManager {
                 proxy_upgrade_states: HashMap::new(),
             }),
             subscriptions: Mutex::new(Vec::new()),
-            incoming_task: Executor::spawn_with_handle({
-                let weak = weak.clone();
-                async move {
-                    loop {
-                        match incoming_acceptor.accept_tunnel().await {
-                            Ok(tunnel) => {
-                                let Some(manager) = weak.upgrade() else {
-                                    break;
-                                };
-                                if let Err(err) = manager.on_incoming_tunnel(tunnel).await {
-                                    log::warn!("register incoming tunnel failed: {:?}", err);
-                                }
-                            }
-                            Err(err) => {
-                                log::warn!("receive incoming tunnel failed: {:?}", err);
-                                break;
-                            }
-                        }
-                    }
-                }
-            })
-            .unwrap(),
-            proxy_incoming_task: pn_network_for_listener.as_ref().and_then(|pn_network| {
-                let listeners = pn_network.listeners();
-                if listeners.is_empty() {
-                    log::warn!(
-                        "proxy incoming disabled local_id={} protocol={:?} reason=no pn listener",
-                        local_identity.get_id(),
-                        pn_network.protocol()
-                    );
-                    return None;
-                }
-                log::debug!(
-                    "proxy incoming enabled local_id={} protocol={:?} listener_count={}",
-                    local_identity.get_id(),
-                    pn_network.protocol(),
-                    listeners.len()
-                );
-                let listener = listeners.into_iter().next()?;
-                let weak = weak.clone();
-                Some(
-                    Executor::spawn_with_handle(async move {
-                        loop {
-                            match listener.accept_tunnel().await {
-                                Ok(tunnel) => {
-                                    let Some(manager) = weak.upgrade() else {
-                                        break;
-                                    };
-                                    if let Err(err) =
-                                        manager.register_tunnel_and_publish(tunnel).await
-                                    {
-                                        log::warn!(
-                                            "register incoming proxy tunnel failed: {:?}",
-                                            err
-                                        );
-                                    }
-                                }
-                                Err(err) => {
-                                    if should_stop_accept_loop(&err) {
-                                        log::debug!(
-                                            "receive incoming proxy tunnel stopped: {:?}",
-                                            err
-                                        );
-                                        break;
-                                    }
-                                    log::warn!("receive incoming proxy tunnel failed: {:?}", err);
-                                }
-                            }
-                        }
-                    })
-                    .unwrap(),
-                )
-            }),
             cleanup_task: Executor::spawn_with_handle({
                 let weak = weak.clone();
                 async move {
@@ -394,6 +309,28 @@ impl TunnelManager {
             })
             .unwrap(),
         });
+        let weak = Arc::downgrade(&manager);
+        manager.net_manager.register_incoming_tunnel_subscriber(
+            local_identity.get_id(),
+            Arc::new(move |result| {
+                let Some(manager) = weak.upgrade() else {
+                    return Box::pin(async { false });
+                };
+                let tunnel = match result {
+                    Ok(tunnel) => tunnel,
+                    Err(err) => {
+                        log::warn!("receive incoming tunnel failed: {:?}", err);
+                        return Box::pin(async { true });
+                    }
+                };
+                Box::pin(async move {
+                    if let Err(err) = manager.on_incoming_tunnel(tunnel).await {
+                        log::warn!("register incoming tunnel failed: {:?}", err);
+                    }
+                    true
+                })
+            }),
+        )?;
         if let Some(sn_service) = sn_service_for_listener {
             let weak = Arc::downgrade(&manager);
             sn_service.set_listener(move |called: SnCalled| {
@@ -1718,11 +1655,7 @@ impl Drop for TunnelManager {
             .flat_map(|(_, entries)| entries.into_iter().map(|entry| entry.tunnel))
             .collect::<Vec<_>>();
         self.net_manager
-            .unregister_tunnel_acceptor(&self.local_identity.get_id());
-        self.incoming_task.abort();
-        if let Some(task) = self.proxy_incoming_task.take() {
-            task.abort();
-        }
+            .unregister_incoming_tunnel_subscriber(&self.local_identity.get_id());
         self.cleanup_task.abort();
         self.proxy_upgrade_task.abort();
         for tunnel in tunnels {
@@ -2375,8 +2308,10 @@ mod tests {
     use super::*;
     use crate::endpoint::{EndpointArea, Protocol};
     use crate::executor::Executor;
+    use crate::networks::{
+        IncomingTunnelCallback, TunnelListener, TunnelListenerInfo, TunnelNetwork,
+    };
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
-    use crate::networks::{TunnelListener, TunnelListenerInfo, TunnelNetwork};
     use crate::sn::protocol::v0::{SnCalled, TunnelType};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::tunnel::DefaultP2pConnectionInfoCache;
@@ -2420,6 +2355,10 @@ mod tests {
 
     fn loopback_tcp_ep() -> Endpoint {
         Endpoint::from((Protocol::Tcp, "127.0.0.1:0".parse().unwrap()))
+    }
+
+    fn ignore_incoming() -> IncomingTunnelCallback {
+        Arc::new(|_| Box::pin(async {}))
     }
 
     fn ext_ep(protocol: u8, port: u16) -> Endpoint {
@@ -2558,7 +2497,8 @@ mod tests {
             _local: &Endpoint,
             _out: Option<Endpoint>,
             _mapping_port: Option<u16>,
-        ) -> P2pResult<crate::networks::TunnelListenerRef> {
+            _on_incoming_tunnel: IncomingTunnelCallback,
+        ) -> P2pResult<()> {
             Err(p2p_err!(
                 P2pErrorCode::NotSupport,
                 "mock proxy listen not supported"
@@ -2567,10 +2507,6 @@ mod tests {
 
         async fn close_all_listener(&self) -> P2pResult<()> {
             Ok(())
-        }
-
-        fn listeners(&self) -> Vec<crate::networks::TunnelListenerRef> {
-            vec![]
         }
 
         fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
@@ -2631,7 +2567,8 @@ mod tests {
             _local: &Endpoint,
             _out: Option<Endpoint>,
             _mapping_port: Option<u16>,
-        ) -> P2pResult<crate::networks::TunnelListenerRef> {
+            _on_incoming_tunnel: IncomingTunnelCallback,
+        ) -> P2pResult<()> {
             Err(p2p_err!(
                 P2pErrorCode::NotSupport,
                 "mock listen not supported"
@@ -2640,10 +2577,6 @@ mod tests {
 
         async fn close_all_listener(&self) -> P2pResult<()> {
             Ok(())
-        }
-
-        fn listeners(&self) -> Vec<crate::networks::TunnelListenerRef> {
-            vec![]
         }
 
         fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
@@ -3016,7 +2949,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         caller_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 

@@ -2,9 +2,11 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pResult;
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use crate::types::{TunnelCandidateId, TunnelId};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use super::{TunnelListenerRef, TunnelRef};
+use super::TunnelRef;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct TunnelListenerInfo {
@@ -53,6 +55,9 @@ impl TunnelConnectIntent {
     }
 }
 
+pub type IncomingTunnelCallback =
+    Arc<dyn Fn(P2pResult<TunnelRef>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[async_trait::async_trait]
 pub trait TunnelNetwork: Send + Sync + 'static {
     fn protocol(&self) -> Protocol;
@@ -64,10 +69,10 @@ pub trait TunnelNetwork: Send + Sync + 'static {
         local: &Endpoint,
         out: Option<Endpoint>,
         mapping_port: Option<u16>,
-    ) -> P2pResult<TunnelListenerRef>;
+        on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> P2pResult<()>;
 
     async fn close_all_listener(&self) -> P2pResult<()>;
-    fn listeners(&self) -> Vec<TunnelListenerRef>;
     fn listener_infos(&self) -> Vec<TunnelListenerInfo>;
 
     async fn create_tunnel(

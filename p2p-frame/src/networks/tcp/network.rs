@@ -6,9 +6,10 @@ use super::protocol::{
 use super::tunnel::{LocalTunnelPhase, TcpTunnel, TcpTunnelConnector};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
+use crate::executor::Executor;
 use crate::networks::{
-    Tunnel, TunnelConnectIntent, TunnelForm, TunnelListenerInfo, TunnelListenerRef, TunnelNetwork,
-    TunnelRef,
+    IncomingTunnelCallback, Tunnel, TunnelConnectIntent, TunnelForm, TunnelListener,
+    TunnelListenerInfo, TunnelNetwork, TunnelRef,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
@@ -174,6 +175,7 @@ impl TcpTunnelNetwork {
             .register(tunnel.clone(), tunnel_id, candidate_id);
         Ok(tunnel)
     }
+
 }
 
 #[async_trait::async_trait]
@@ -195,7 +197,8 @@ impl TunnelNetwork for TcpTunnelNetwork {
         local: &Endpoint,
         out: Option<Endpoint>,
         mapping_port: Option<u16>,
-    ) -> P2pResult<TunnelListenerRef> {
+        on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> P2pResult<()> {
         let listener = TcpTunnelListener::new(
             self.cert_resolver.clone(),
             self.cert_factory.clone(),
@@ -214,7 +217,26 @@ impl TunnelNetwork for TcpTunnelNetwork {
             )
             .await?;
         self.listeners.lock().unwrap().push(listener.clone());
-        Ok(listener)
+        #[cfg(test)]
+        let _ = on_incoming_tunnel;
+        #[cfg(not(test))]
+        Executor::spawn_ok(async move {
+            loop {
+                match listener.accept_tunnel().await {
+                    Ok(tunnel) => (on_incoming_tunnel)(Ok(tunnel)).await,
+                    Err(err) => {
+                        if matches!(
+                            err.code(),
+                            P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+                        ) {
+                            break;
+                        }
+                        (on_incoming_tunnel)(Err(err)).await;
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 
     async fn close_all_listener(&self) -> P2pResult<()> {
@@ -228,15 +250,6 @@ impl TunnelNetwork for TcpTunnelNetwork {
             listener.close();
         }
         Ok(())
-    }
-
-    fn listeners(&self) -> Vec<TunnelListenerRef> {
-        self.listeners
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|v| v.clone() as TunnelListenerRef)
-            .collect()
     }
 
     fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
@@ -307,6 +320,10 @@ mod tests {
             crate::executor::Executor::init();
             crate::tls::init_tls(Arc::new(X509IdentityFactory));
         });
+    }
+
+    fn ignore_incoming() -> IncomingTunnelCallback {
+        Arc::new(|_| Box::pin(async {}))
     }
 
     fn new_identity(name: &str) -> P2pIdentityRef {
@@ -449,11 +466,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -694,11 +711,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -742,11 +759,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity_b.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -944,11 +961,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1000,7 +1017,7 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1062,7 +1079,7 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1104,7 +1121,7 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1616,7 +1633,7 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1694,7 +1711,7 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1819,11 +1836,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -1989,11 +2006,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -2086,11 +2103,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -2183,11 +2200,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -2280,11 +2297,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -2378,11 +2395,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 
@@ -4610,11 +4627,11 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
         server_network
-            .listen(&loopback_tcp_ep(), None, None)
+            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
 

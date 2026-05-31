@@ -25,7 +25,8 @@ approved_at: 2026-05-29
 - 为本轮单 SN NAT 打洞优化建立可执行设计边界，包括 direct/reverse 统一 300ms 短延迟竞速、`SnCall` 本次反连候选、QUIC listener 同源 UDP punch burst、proxy 短窗口脱代理升级，以及按协议拆分的 endpoint 评分。
 - 为本轮 endpoint area 语义变更建立可执行设计边界：`EndpointArea::Default` 重命名为 `ServerReflexive`，`Display`/`FromStr` 和 raw codec 使用 `S` 编码，SN 观察地址只有与节点自上报地址一致时才标记为 `Wan`，否则标记为 `ServerReflexive`，并移除 `is_sys_default()` 的公开判定入口。
 - 为本轮 `ServerReflexive` QUIC NAT keepalive 需求建立可执行设计边界：UDP punch 只对 `EndpointArea::ServerReflexive` QUIC candidate 开启，QUIC tunnel 控制心跳发送间隔保持现有值，heartbeat timeout 调整为 30 秒。
-- 为本轮 networks 基于 `sfo-reuseport` 的 listener 重构建立可执行设计边界：TCP listener 直接使用 `sfo_reuseport::TcpServer`，QUIC listener 直接使用 `sfo_reuseport::QuicServer::serve_socket(...)`、每 worker 一个 Quinn endpoint、`sfo_reuseport::QuicCidGenerator` worker shard 和 `sfo_reuseport::UdpSocket` Quinn helper 接口，外部可显式设置 `ServerRuntime`，且不新增 `NetworkServerRuntime` 或改变公共 `TunnelNetwork` trait。
+- 为本轮 networks 基于 `sfo-reuseport` 的 listener 重构建立可执行设计边界：TCP listener 直接使用 `sfo_reuseport::TcpServer`，QUIC listener 直接使用 `sfo_reuseport::QuicServer::serve_socket(...)`、每 worker 一个 Quinn endpoint、`sfo_reuseport::QuicCidGenerator` worker shard 和 `sfo_reuseport::UdpSocket` Quinn helper 接口，外部可显式设置 `ServerRuntime`，且不新增 `NetworkServerRuntime`。
+- 为本轮 `TunnelNetwork` listener 暴露模型变更建立可执行设计边界：`listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`，不再返回 `TunnelListenerRef`，公共 trait 移除 `listeners()`，`NetManager` 负责在回调中执行原有 incoming validator、订阅发布和 reject close 逻辑。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -34,7 +35,7 @@ approved_at: 2026-05-29
 - 引入可被上层消费的原生 UDP tunnel、UDP payload 业务协议、raw UDP 接收解析器或独立于 QUIC listener 端口的新 UDP 打洞 socket
 - 保留 `Default` 作为 endpoint area 名称、继续接受 `D` 作为新语义编码，或把 SN 观察地址无条件提升为静态 `Wan`
 - 新增 `NetworkServerRuntime`、socket factory trait 或其他通用运行时抽象来包裹 `sfo-reuseport`
-- 因 `sfo-reuseport` 重构而改变 TCP/QUIC tunnel 线协议、TLS 身份校验、QUIC NAT punch 策略、heartbeat 语义或 tunnel publish 规则
+- 因 `sfo-reuseport` 重构或 listener 回调化而改变 TCP/QUIC tunnel 线协议、TLS 身份校验、QUIC NAT punch 策略、heartbeat 语义或 tunnel publish 规则
 
 ## 总体方案
 - 将 `p2p-frame` 视为 Tier 0 核心模块。
@@ -109,6 +110,12 @@ approved_at: 2026-05-29
 - UDP punch burst 必须有严格上限：reverse burst 在启动后立即发送第一包，active burst 则从 `250ms` offset 才发送第一包；之后两者都固定每 `50ms` 一包，默认最晚到 `1s` 截止，并受 NAT hedged window 约束裁剪，避免在弱网或 proxy 脱代理重试中形成无限重发或发送风暴。
 - QUIC tunnel 控制心跳发送间隔保持现有默认值；heartbeat timeout 调整为 30 秒。该调整只改变失活判定阈值，不新增上层业务心跳、raw UDP keepalive 协议或公共 `TunnelNetwork` 参数；心跳超时后的关闭仍走既有 QUIC tunnel close/error 路径。
 - `SNClientService::call(...)` 必须支持调用方传入本次建链的 `reverse_endpoint_array`；若调用方不传，仍保持现有兼容语义。候选来源和去重由 `tunnel` / `sn/client` 设计补充文档定义。
+- `TunnelNetwork::listen(...)` 的公共签名调整为接收 `IncomingTunnelCallback` 或等价类型：回调必须可在线程间安全克隆，输入为 `P2pResult<TunnelRef>`，返回异步 `()` 或等价 future。该回调是唯一的公共入站 tunnel 通知路径。
+- `TunnelNetwork::listen(...)` 成功返回 `P2pResult<()>`，表示 listener 已绑定或已复用并会把后续入站 tunnel 投递给回调；失败仍按原有 bind/listen 错误返回。
+- `TunnelNetwork` 公共 trait 移除 `listeners()`。`TcpTunnelListener`、`QuicTunnelListener` 和 `PnListener` 可继续作为各 network 内部实现对象存在，但不再由 `TunnelNetwork` trait 导出给上层。
+- `NetManager::listen(...)` 必须为每个 network listen 调用注册一个回调，回调中调用 `dispatch_tunnel_result(...)` 或等价路径，保持原有 `spawn_listener_loop` 中的错误处理、incoming validator、订阅发布和 reject close 行为。
+- `NetManager::get_listener(...)` 与 `listener_entries(...)` 不再属于公共 manager 能力；需要监听地址和映射端口的调用方继续使用 `get_listener_info(...)` 与 `listener_info_entries(...)`。
+- proxy client 启动不得通过 `listeners().is_empty()` 判断是否已监听，应使用 `listener_infos().is_empty()` 或 PN client 内部幂等 listen 语义。
 - `EndpointArea::ServerReflexive` 是 SN 观察到的 server-reflexive endpoint 标记，不代表系统默认绑定地址。`Endpoint` 的文本编码必须用 `S` 表示该 area，字符串解析只把 `S` 映射到 `ServerReflexive`；raw codec 继续复用原 area bit 位置，但语义名改为 `ServerReflexive`。
 - `Endpoint::is_sys_default()` 不再属于公开接口；实现阶段应删除该方法并修正调用点。若发现下游依赖该方法，应退回 design 明确兼容策略，而不是保留旧 system-default 语义。
 - SN 服务端扩展观察 endpoint 时必须比较 SN 观察到的 socket address 与节点自上报 endpoint 集合：协议、IP 和端口均匹配时可标记为 `Wan`；否则标记为 `ServerReflexive`。`Mapped` 仍表示明确映射端口构造出的 WAN 类候选，不与 `ServerReflexive` 合并。
@@ -181,6 +188,7 @@ p2p-frame/src
 | `EndpointArea::ServerReflexive` endpoint area 语义 | endpoint enum 命名、`S` 文本/codec 编码、SN 观察地址 `Wan` / `ServerReflexive` 分类、删除 `is_sys_default()` | `p2p-frame/src/endpoint.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/tunnel/**` | 若实现阶段发现必须继续兼容 `D` 或 `is_sys_default()`，应退回 design 明确兼容策略；若需要 STUN/TURN 或跨 SN NAT 类型推断，应退回 proposal。 |
 | TCP listener 基于 `sfo-reuseport` 重构 | `TcpTunnelListener` 由本地 `TcpListener::accept()` 循环改为 `sfo_reuseport::TcpServer` handler 接收入站 `TcpStream`；stream 继续进入现有 TLS accept、control/data 分流、registry 和 publish 流程；`ServerRuntime` 从 stack/network 构造传入，未设置时默认创建。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/tcp/connection.rs`、`p2p-frame/src/networks/tcp/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 若实现阶段需要改变 TCP tunnel 线协议、TLS 身份校验或公共 `TunnelNetwork` trait，应退回 proposal；若只是 close/task 语义不清，应退回 design。 |
 | QUIC listener 基于 `sfo-reuseport` 重构 | `QuicTunnelListener` 使用 `sfo_reuseport::QuicServer::serve_socket(...)` 接收每个 worker 的 UDP socket，内部 Quinn `AsyncUdpSocket` 适配器直接包裹 `sfo_reuseport::UdpSocket` 并创建 per-worker `quinn::Endpoint::new_with_abstract_socket(...)`；worker endpoint 使用 `sfo_reuseport::QuicCidGenerator` 生成匹配 worker shard 的 CID；主动 connect 从 worker endpoint 集合选择一个 endpoint；同源 UDP punch 使用首个可用 worker socket。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 若实现阶段需要新增 raw UDP tunnel、解析 punch payload、改变 QUIC NAT punch policy 或 heartbeat 语义，应退回 proposal；若只是 waker/backpressure/close 细节不清，应退回 design。 |
+| `TunnelNetwork` listener 回调化 | 公共 `TunnelNetwork::listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`；公共 trait 移除 `listeners()`；`NetManager` 把回调接入原有 dispatch、validator、订阅发布和 reject close；TCP/QUIC/PN listener 对象降为 network 内部实现细节。 | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/pn/client/pn_client.rs`、必要调用点 | 若实现阶段发现仍有外部调用方必须直接持有 `TunnelListenerRef`，应退回 design 明确替代接口；不得保留 `listeners()` 作为兼容旁路。 |
 
 ## Directly Mapped Change Items
 | change_id | proposal_id | Design Coverage | Scope Paths | Risk / Rollback Notes |
@@ -190,6 +198,7 @@ p2p-frame/src
 | reverse_timeout_close_late_tunnel | P-REV-TIMEOUT-1 | `TunnelManager` 对 incoming reverse 先消费同 `(remote_id, tunnel_id)` pending waiter；命中 waiter 时只 notify，后续由 reverse open 接收方 register 并 publish；无 waiter 时关闭 tunnel 并跳过 register/publish。 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-publish-lifecycle.md` | 该变更收窄 reverse incoming 可见性；若回滚，应恢复无 waiter reverse publish，但不得影响正常 waiter 命中后 publish 或非 reverse incoming publish。 |
 | networks_sfo_reuseport_tcp_listener | P-SFO-TCP-LISTENER-1 | TCP listener 使用 `sfo_reuseport::TcpServer` 注册服务，handler 接收 `sfo_reuseport::TcpStream` 后调用现有 TLS accept 与 TCP control/data 分流；`TcpTunnelListener` 保存 `TcpServer` handle 并在 close 时停止服务；`P2pStackConfig` 可显式注入 `sfo_reuseport::ServerRuntime`，默认路径自动创建 runtime。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/tcp/connection.rs`、`p2p-frame/src/networks/tcp/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 回滚时恢复本地 `TcpListener` bind/accept 路径和旧 `reuse_address` 设置，但不得改变 TCP tunnel 线协议或 publish 语义。 |
 | networks_sfo_reuseport_quic_listener_socket | P-SFO-QUIC-LISTENER-1 | QUIC listener 使用 `sfo_reuseport::QuicServer::serve_socket(...)` 注册服务；每个 `(UdpSocket, worker_id)` 回调创建一个 Quinn endpoint，`AsyncUdpSocket::poll_recv()` / `try_send()` / `UdpPoller` 分别委托给 `UdpSocket::poll_recv_from_vectored(...)`、`try_send_to(...)` 和 `poll_send_ready(...)`；endpoint CID generator 使用 `QuicCidGenerator::for_worker(worker_id)`；所有 endpoint accept 结果汇入同一 listener 队列；主动 connect 可选择任一 endpoint；UDP punch 保存第一个 worker socket；`QuicTunnelListener` close 同时关闭 `QuicServer` 和所有 Quinn endpoint。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 回滚时恢复直接 UDP socket + `quinn::Endpoint::new(...)` 路径，但不得引入独立 punch socket、raw UDP tunnel 或改变 NAT punch/heartbeat 语义。 |
+| tunnel_network_listen_callback | P-TUNNEL-NETWORK-CALLBACK-1 | `TunnelNetwork::listen(...)` 由返回 `TunnelListenerRef` 改为接收 `IncomingTunnelCallback` 并返回 `P2pResult<()>`；TCP/QUIC/PN network 保存内部 listener 并在 accept 到新 tunnel 后调用回调；`NetManager` 注册回调并复用原有 dispatch/validator/publish 逻辑；公共 trait 删除 `listeners()`。 | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/stack.rs`、相关 tests | 回滚时恢复 `listen(...) -> P2pResult<TunnelListenerRef>` 和 `listeners()`，但必须同步回滚 NetManager/stack 调用点；不得改变 tunnel publish 或线协议语义。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。

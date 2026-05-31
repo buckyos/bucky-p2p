@@ -4,7 +4,8 @@ use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::networks::{
-    QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelListener, TunnelRef,
+    IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm,
+    TunnelRef,
 };
 use crate::p2p_identity::{
     P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
@@ -22,12 +23,11 @@ use sfo_reuseport::{
 };
 use std::io::{self, IoSliceMut};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 
 const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
 const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
@@ -41,11 +41,16 @@ const QUIC_ENDPOINT_READY_TIMEOUT: Duration = Duration::from_secs(2);
 struct SfoQuicUdpSocket {
     socket: SfoUdpSocket,
     worker_id: usize,
+    worker_count: Arc<AtomicUsize>,
 }
 
 impl SfoQuicUdpSocket {
-    fn new(socket: SfoUdpSocket, worker_id: usize) -> Self {
-        Self { socket, worker_id }
+    fn new(socket: SfoUdpSocket, worker_id: usize, worker_count: Arc<AtomicUsize>) -> Self {
+        Self {
+            socket,
+            worker_id,
+            worker_count,
+        }
     }
 }
 
@@ -70,6 +75,13 @@ fn quic_packet_worker_index_prefix(packet: &[u8]) -> Option<usize> {
     let high = *dcid.first()?;
     let low = *dcid.get(1)?;
     Some((usize::from(high) << 8) | usize::from(low))
+}
+
+fn quic_packet_worker_index(packet: &[u8], worker_count: usize) -> Option<usize> {
+    if worker_count == 0 {
+        return None;
+    }
+    quic_packet_worker_index_prefix(packet).map(|worker_index| worker_index % worker_count)
 }
 
 fn quic_packet_prefix<'a>(
@@ -159,7 +171,8 @@ impl quinn::AsyncUdpSocket for SfoQuicUdpSocket {
                     if is_udp_punch_payload(packet) {
                         continue;
                     }
-                    if let Some(worker_index) = quic_packet_worker_index_prefix(packet) {
+                    let worker_count = self.worker_count.load(Ordering::Acquire);
+                    if let Some(worker_index) = quic_packet_worker_index(packet, worker_count) {
                         assert_eq!(
                             worker_index, self.worker_id,
                             "quic packet dcid worker index does not match sfo worker socket"
@@ -264,13 +277,7 @@ async fn wait_quic_accept_loop(listener: Arc<QuicTunnelListener>, endpoint: quin
         match endpoint.accept().await {
             Some(conn) => {
                 let result = listener.accept_connection(conn).await;
-                let sender = listener.accepted_tx.lock().unwrap().clone();
-                let Some(tx) = sender else {
-                    break;
-                };
-                if tx.send(result).is_err() {
-                    break;
-                }
+                (listener.on_incoming_tunnel)(result).await;
             }
             None => break,
         }
@@ -293,11 +300,11 @@ pub(crate) struct QuicTunnelListener {
     cert_factory: P2pIdentityCertFactoryRef,
     congestion_algorithm: QuicCongestionAlgorithm,
     state: RwLock<QuicTunnelListenerState>,
-    accepted: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
-    accepted_tx: Mutex<Option<mpsc::UnboundedSender<P2pResult<TunnelRef>>>>,
+    on_incoming_tunnel: IncomingTunnelCallback,
     close_notify: Notify,
     endpoint_ready: Notify,
     closed: AtomicBool,
+    worker_count: Arc<AtomicUsize>,
     server_runtime: ServerRuntime,
 }
 
@@ -308,8 +315,8 @@ impl QuicTunnelListener {
         cert_factory: P2pIdentityCertFactoryRef,
         congestion_algorithm: QuicCongestionAlgorithm,
         server_runtime: ServerRuntime,
+        on_incoming_tunnel: IncomingTunnelCallback,
     ) -> Arc<Self> {
-        let (accepted_tx, accepted_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             cert_cache,
             cert_resolver,
@@ -324,11 +331,11 @@ impl QuicTunnelListener {
                 mapping_port: None,
                 reuse_address: false,
             }),
-            accepted: AsyncMutex::new(accepted_rx),
-            accepted_tx: Mutex::new(Some(accepted_tx)),
+            on_incoming_tunnel,
             close_notify: Notify::new(),
             endpoint_ready: Notify::new(),
             closed: AtomicBool::new(false),
+            worker_count: Arc::new(AtomicUsize::new(0)),
             server_runtime,
         })
     }
@@ -414,7 +421,6 @@ impl QuicTunnelListener {
             return;
         }
         self.close_notify.notify_waiters();
-        self.accepted_tx.lock().unwrap().take();
         let (endpoints, server) = {
             let mut state = self.state.write().unwrap();
             let server = state.server.take();
@@ -566,12 +572,18 @@ impl QuicTunnelListener {
         if self.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
+        self.worker_count
+            .fetch_max(worker_id.saturating_add(1), Ordering::AcqRel);
         let endpoint_config = new_quic_endpoint_config(worker_id)
             .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             endpoint_config,
             Some(server_config),
-            Arc::new(SfoQuicUdpSocket::new(socket.clone(), worker_id)),
+            Arc::new(SfoQuicUdpSocket::new(
+                socket.clone(),
+                worker_id,
+                self.worker_count.clone(),
+            )),
             Arc::new(quinn::TokioRuntime),
         )
         .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
@@ -717,29 +729,6 @@ async fn try_send_udp_punch_packet(
     match socket.send_to(payload, remote).await {
         Ok(_) => true,
         Err(_) => false,
-    }
-}
-
-#[async_trait::async_trait]
-impl TunnelListener for QuicTunnelListener {
-    async fn accept_tunnel(&self) -> P2pResult<TunnelRef> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel listener closed"));
-        }
-        let mut accepted = self.accepted.lock().await;
-        let closed = self.close_notify.notified();
-        tokio::pin!(closed);
-        tokio::select! {
-            result = accepted.recv() => {
-                match result {
-                    Some(result) => result,
-                    None => Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel listener closed")),
-                }
-            }
-            _ = &mut closed => {
-                Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel listener closed"))
-            }
-        }
     }
 }
 

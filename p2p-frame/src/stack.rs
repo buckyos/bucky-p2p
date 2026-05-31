@@ -721,7 +721,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         .listen(config.env.endpoints(), config.env.port_mapping().clone())
         .await?;
     if let Some(proxy_client) = proxy_client.as_ref() {
-        if proxy_client.listeners().is_empty() {
+        if proxy_client.listener_infos().is_empty() {
             let proxy_ep = pn_virtual_endpoint();
             log::debug!(
                 "stack start proxy listener local_id={} protocol={:?} local_ep={}",
@@ -729,7 +729,9 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
                 proxy_client.protocol(),
                 proxy_ep
             );
-            let _ = proxy_client.listen(&proxy_ep, None, None).await?;
+            proxy_client
+                .listen(&proxy_ep, None, None, net_manager.incoming_tunnel_callback())
+                .await?;
         }
     }
     let tunnel_manager = NetworkTunnelManager::new(

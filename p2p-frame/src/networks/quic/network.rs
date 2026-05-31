@@ -3,8 +3,8 @@ use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
-    QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelListenerInfo,
-    TunnelListenerRef, TunnelNetwork, TunnelRef,
+    IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm,
+    TunnelListenerInfo, TunnelNetwork, TunnelRef,
 };
 use crate::p2p_identity::{
     P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
@@ -233,6 +233,7 @@ impl QuicTunnelNetwork {
         )
         .await?)
     }
+
 }
 
 #[async_trait::async_trait]
@@ -254,13 +255,15 @@ impl TunnelNetwork for QuicTunnelNetwork {
         local: &Endpoint,
         out: Option<Endpoint>,
         mapping_port: Option<u16>,
-    ) -> P2pResult<TunnelListenerRef> {
+        on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> P2pResult<()> {
         let listener = QuicTunnelListener::new(
             self.cert_cache.clone(),
             self.cert_resolver.clone(),
             self.cert_factory.clone(),
             self.congestion_algorithm,
             self.server_runtime.clone(),
+            on_incoming_tunnel,
         );
         listener
             .bind(
@@ -272,7 +275,7 @@ impl TunnelNetwork for QuicTunnelNetwork {
             .await?;
         listener.start().await?;
         self.listeners.lock().unwrap().push(listener.clone());
-        Ok(listener)
+        Ok(())
     }
 
     async fn close_all_listener(&self) -> P2pResult<()> {
@@ -286,15 +289,6 @@ impl TunnelNetwork for QuicTunnelNetwork {
             listener.close();
         }
         Ok(())
-    }
-
-    fn listeners(&self) -> Vec<TunnelListenerRef> {
-        self.listeners
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|v| v.clone() as TunnelListenerRef)
-            .collect()
     }
 
     fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
@@ -468,9 +462,7 @@ mod udp_punch_timeout_tests {
 mod tests {
     use super::*;
     use crate::finder::{DeviceCache, DeviceCacheConfig};
-    use crate::networks::{
-        ListenVPortRegistry, Tunnel, TunnelListener, TunnelPurpose, allow_all_listen_vports,
-    };
+    use crate::networks::{ListenVPortRegistry, Tunnel, TunnelPurpose, allow_all_listen_vports};
     use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::x509::{
@@ -479,6 +471,7 @@ mod tests {
     };
     use std::sync::Arc;
     use std::sync::Once;
+    use tokio::sync::{Mutex as AsyncMutex, mpsc};
     use tokio::time::timeout;
 
     static TLS_INIT: Once = Once::new();
@@ -490,6 +483,7 @@ mod tests {
         server_network: QuicTunnelNetwork,
         server_identity: P2pIdentityRef,
         server_local_ep: Endpoint,
+        server_incoming: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
     }
 
     fn init_tls_once() {
@@ -497,6 +491,36 @@ mod tests {
             crate::executor::Executor::init();
             crate::tls::init_tls(Arc::new(X509IdentityFactory));
         });
+    }
+
+    fn incoming_channel() -> (
+        IncomingTunnelCallback,
+        mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let callback = Arc::new(move |result| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(result);
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        });
+        (callback, rx)
+    }
+
+    fn ignore_incoming() -> IncomingTunnelCallback {
+        incoming_channel().0
+    }
+
+    async fn accept_incoming(
+        rx: &AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
+    ) -> TunnelRef {
+        accept_incoming_rx(&mut rx.lock().await).await
+    }
+
+    async fn accept_incoming_rx(
+        rx: &mut mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+    ) -> TunnelRef {
+        rx.recv().await.unwrap().unwrap()
     }
 
     fn new_identity(name: &str) -> P2pIdentityRef {
@@ -566,11 +590,12 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_callback, server_incoming) = incoming_channel();
         server_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, server_callback)
             .await
             .unwrap();
 
@@ -584,14 +609,12 @@ mod tests {
             server_network,
             server_identity,
             server_local_ep,
+            server_incoming: AsyncMutex::new(server_incoming),
         }
     }
 
     impl TestNetworkPair {
         async fn connect(&self) -> (TunnelRef, TunnelRef) {
-            let server_listener = self.server_network.listeners()[0].clone();
-            let accept_task =
-                tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
             let opened = self
                 .client_network
                 .create_tunnel_with_local_ep(
@@ -603,7 +626,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let accepted = accept_task.await.unwrap();
+            let accepted = accept_incoming(&self.server_incoming).await;
             (opened, accepted)
         }
     }
@@ -621,19 +644,17 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_callback, mut server_incoming) = incoming_channel();
         server_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, server_callback)
             .await
             .unwrap();
 
-        let server_listener = server_network.listeners()[0].clone();
         let server_ep = server_network.listener_infos()[0].local;
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let opened = client_network
             .create_tunnel(
                 &client_identity,
@@ -643,7 +664,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted = accept_task.await.unwrap();
+        let accepted = accept_incoming_rx(&mut server_incoming).await;
 
         assert_eq!(opened.local_id(), client_identity.get_id());
         assert_eq!(opened.remote_id(), server_identity.get_id());
@@ -669,21 +690,17 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity_b.clone()).await;
 
         client_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_callback, mut server_incoming) = incoming_channel();
         server_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, server_callback)
             .await
             .unwrap();
 
-        let server_listener = server_network.listeners()[0].clone();
         let server_ep = server_network.listener_infos()[0].local;
 
-        let accept_a = tokio::spawn({
-            let server_listener = server_listener.clone();
-            async move { server_listener.accept_tunnel().await.unwrap() }
-        });
         let opened_a = client_network
             .create_tunnel(
                 &client_identity,
@@ -693,11 +710,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted_a = accept_a.await.unwrap();
+        let accepted_a = accept_incoming_rx(&mut server_incoming).await;
         assert_eq!(opened_a.remote_id(), server_identity_a.get_id());
         assert_eq!(accepted_a.local_id(), server_identity_a.get_id());
 
-        let accept_b = tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let opened_b = client_network
             .create_tunnel(
                 &client_identity,
@@ -707,7 +723,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted_b = accept_b.await.unwrap();
+        let accepted_b = accept_incoming_rx(&mut server_incoming).await;
         assert_eq!(opened_b.remote_id(), server_identity_b.get_id());
         assert_eq!(accepted_b.local_id(), server_identity_b.get_id());
 
@@ -925,9 +941,6 @@ mod tests {
     async fn quic_tunnel_create_tunnel_opens_new_connection_each_time() {
         let pair = setup_network_pair().await;
 
-        let server_listener = pair.server_network.listeners()[0].clone();
-        let first_accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let first_opened = pair
             .client_network
             .create_tunnel_with_local_ep(
@@ -939,11 +952,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let first_accepted = first_accept_task.await.unwrap();
+        let first_accepted = accept_incoming(&pair.server_incoming).await;
 
-        let server_listener = pair.server_network.listeners()[0].clone();
-        let second_accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let second_opened = pair
             .client_network
             .create_tunnel_with_local_ep(
@@ -955,7 +965,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let second_accepted = second_accept_task.await.unwrap();
+        let second_accepted = accept_incoming(&pair.server_incoming).await;
 
         assert_ne!(Arc::as_ptr(&first_opened), Arc::as_ptr(&second_opened));
         assert_ne!(Arc::as_ptr(&first_accepted), Arc::as_ptr(&second_accepted));
@@ -970,9 +980,6 @@ mod tests {
     async fn quic_tunnel_close_all_listener_clears_listeners() {
         let pair = setup_network_pair().await;
 
-        let server_listener = pair.server_network.listeners()[0].clone();
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let _ = pair
             .client_network
             .create_tunnel_with_local_ep(
@@ -984,10 +991,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted = accept_task.await.unwrap();
+        let accepted = accept_incoming(&pair.server_incoming).await;
 
         pair.client_network.close_all_listener().await.unwrap();
-        assert!(pair.client_network.listeners().is_empty());
         assert!(pair.client_network.listener_infos().is_empty());
 
         accepted.close().await.unwrap();
@@ -1039,7 +1045,6 @@ mod tests {
 
         assert_eq!(pair.client_network.protocol(), Protocol::Quic);
         assert!(pair.client_network.is_udp());
-        assert_eq!(pair.client_network.listeners().len(), 1);
 
         let infos = pair.client_network.listener_infos();
         assert_eq!(infos.len(), 1);
@@ -1060,19 +1065,17 @@ mod tests {
         register_listener_identity(&server_resolver, server_identity.clone()).await;
 
         client_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_callback, mut server_incoming) = incoming_channel();
         server_network
-            .listen(&loopback_quic_ep(), None, None)
+            .listen(&loopback_quic_ep(), None, None, server_callback)
             .await
             .unwrap();
 
         let client_local_ep = client_network.listener_infos()[0].local;
         let server_local_ep = server_network.listener_infos()[0].local;
-        let server_listener = server_network.listeners()[0].clone();
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let opened = client_network
             .create_tunnel_with_local_ep(
                 &client_identity,
@@ -1083,7 +1086,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted = accept_task.await.unwrap();
+        let accepted = accept_incoming_rx(&mut server_incoming).await;
 
         assert_eq!(opened.remote_id(), server_identity.get_id());
         assert_eq!(accepted.local_id(), server_identity.get_id());

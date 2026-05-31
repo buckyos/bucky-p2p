@@ -1,42 +1,27 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
-use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use crate::tls::ServerCertResolverRef;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 
 use super::{
-    IncomingTunnelValidateContext, IncomingTunnelValidatorRef, TunnelListenerInfo,
-    TunnelListenerRef, TunnelNetworkRef, ValidateResult, allow_all_incoming_tunnel_validator,
+    IncomingTunnelCallback, IncomingTunnelValidateContext, IncomingTunnelValidatorRef,
+    TunnelListenerInfo, TunnelNetworkRef, ValidateResult, allow_all_incoming_tunnel_validator,
 };
 
-pub struct TunnelAcceptor {
-    rx: mpsc::UnboundedReceiver<P2pResult<super::TunnelRef>>,
-}
-
-impl TunnelAcceptor {
-    pub async fn accept_tunnel(&mut self) -> P2pResult<super::TunnelRef> {
-        match self.rx.recv().await {
-            Some(result) => result,
-            None => Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "tunnel acceptor closed"
-            )),
-        }
-    }
-}
+pub type IncomingTunnelSubscriber =
+    Arc<dyn Fn(P2pResult<super::TunnelRef>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
 pub struct NetManager {
     cert_resolver: ServerCertResolverRef,
     incoming_tunnel_validator: IncomingTunnelValidatorRef,
     tunnel_networks: HashMap<Protocol, TunnelNetworkRef>,
     listener_meta: Mutex<HashMap<Protocol, Vec<TunnelListenerInfo>>>,
-    subscriptions: Mutex<HashMap<P2pId, mpsc::UnboundedSender<P2pResult<super::TunnelRef>>>>,
-    listener_tasks: Mutex<Vec<SpawnHandle<()>>>,
+    subscriptions: RwLock<HashMap<P2pId, IncomingTunnelSubscriber>>,
     is_listening: AtomicBool,
 }
 
@@ -68,8 +53,7 @@ impl NetManager {
             incoming_tunnel_validator,
             tunnel_networks,
             listener_meta: Mutex::new(HashMap::new()),
-            subscriptions: Mutex::new(HashMap::new()),
-            listener_tasks: Mutex::new(Vec::new()),
+            subscriptions: RwLock::new(HashMap::new()),
             is_listening: AtomicBool::new(false),
         }))
     }
@@ -91,8 +75,6 @@ impl NetManager {
 
         let mut port_mapping = port_mapping.unwrap_or_default();
         let mut ep_index = 0;
-        let mut listeners = Vec::new();
-
         while ep_index < ep_len {
             let ep = &endpoints[ep_index];
             let ep_pair = if ep.is_mapped_wan() {
@@ -131,16 +113,13 @@ impl NetManager {
             let network = self
                 .get_network(local.protocol())
                 .map_err(|_| p2p_err!(P2pErrorCode::NotFound, "network not found: {}", local))?;
-            let listener = network.listen(&local, out, mapping_port).await?;
-            listeners.push(listener);
+            let on_incoming_tunnel = self.incoming_tunnel_callback();
+            network
+                .listen(&local, out, mapping_port, on_incoming_tunnel)
+                .await?;
         }
 
         self.refresh_listener_meta();
-        let mut tasks = Vec::new();
-        for listener in listeners {
-            tasks.push(self.spawn_listener_loop(listener));
-        }
-        self.listener_tasks.lock().unwrap().extend(tasks);
         self.is_listening.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -153,20 +132,6 @@ impl NetManager {
                 protocol
             )
         })
-    }
-
-    pub fn get_listener(&self, protocol: Protocol) -> Vec<TunnelListenerRef> {
-        self.tunnel_networks
-            .get(&protocol)
-            .map(|network| network.listeners())
-            .unwrap_or_default()
-    }
-
-    pub fn listener_entries(&self) -> Vec<(Protocol, Vec<TunnelListenerRef>)> {
-        self.tunnel_networks
-            .iter()
-            .map(|(protocol, network)| (*protocol, network.listeners()))
-            .collect()
     }
 
     pub fn get_listener_info(&self, protocol: Protocol) -> Vec<TunnelListenerInfo> {
@@ -191,6 +156,16 @@ impl NetManager {
         self.tunnel_networks.keys().copied().collect()
     }
 
+    pub fn incoming_tunnel_callback(self: &Arc<Self>) -> IncomingTunnelCallback {
+        let manager = self.clone();
+        Arc::new(move |result| {
+            let manager = manager.clone();
+            Box::pin(async move {
+                manager.dispatch_tunnel_result(result).await;
+            })
+        })
+    }
+
     pub async fn add_listen_device(&self, device: P2pIdentityRef) -> P2pResult<()> {
         self.cert_resolver.add_server_identity(device).await
     }
@@ -203,9 +178,12 @@ impl NetManager {
         self.cert_resolver.get_server_identity(device_id).await
     }
 
-    pub fn register_tunnel_acceptor(&self, local_id: P2pId) -> P2pResult<TunnelAcceptor> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut subscriptions = self.subscriptions.lock().unwrap();
+    pub fn register_incoming_tunnel_subscriber(
+        &self,
+        local_id: P2pId,
+        callback: IncomingTunnelSubscriber,
+    ) -> P2pResult<()> {
+        let mut subscriptions = self.subscriptions.write().unwrap();
         if subscriptions.contains_key(&local_id) {
             return Err(p2p_err!(
                 P2pErrorCode::AlreadyExists,
@@ -213,14 +191,17 @@ impl NetManager {
                 local_id
             ));
         }
-        log::debug!("register tunnel acceptor local_id={}", local_id);
-        subscriptions.insert(local_id, tx);
-        Ok(TunnelAcceptor { rx })
+        log::debug!("register incoming tunnel subscriber local_id={}", local_id);
+        subscriptions.insert(local_id, callback);
+        Ok(())
     }
 
-    pub fn unregister_tunnel_acceptor(&self, local_id: &P2pId) {
-        log::debug!("unregister tunnel acceptor local_id={}", local_id);
-        self.subscriptions.lock().unwrap().remove(local_id);
+    pub fn unregister_incoming_tunnel_subscriber(&self, local_id: &P2pId) {
+        log::debug!(
+            "unregister incoming tunnel subscriber local_id={}",
+            local_id
+        );
+        self.subscriptions.write().unwrap().remove(local_id);
     }
 
     fn refresh_listener_meta(&self) {
@@ -231,23 +212,11 @@ impl NetManager {
         }
     }
 
-    fn spawn_listener_loop(self: &Arc<Self>, listener: TunnelListenerRef) -> SpawnHandle<()> {
-        let manager = self.clone();
-        Executor::spawn_with_handle(async move {
-            loop {
-                match listener.accept_tunnel().await {
-                    Ok(tunnel) => manager.dispatch_tunnel(tunnel).await,
-                    Err(err) => {
-                        if should_stop_listener_loop(&err) {
-                            log::debug!("accept tunnel loop stopped: {:?}", err);
-                            break;
-                        }
-                        log::warn!("accept tunnel failed: {:?}", err);
-                    }
-                }
-            }
-        })
-        .unwrap()
+    async fn dispatch_tunnel_result(&self, result: P2pResult<super::TunnelRef>) {
+        match result {
+            Ok(tunnel) => self.dispatch_tunnel(tunnel).await,
+            Err(err) => log::warn!("accept tunnel failed: {:?}", err),
+        }
     }
 
     async fn dispatch_tunnel(&self, tunnel: super::TunnelRef) {
@@ -264,7 +233,7 @@ impl NetManager {
             ctx.remote_ep
         );
         match self.incoming_tunnel_validator.validate(&ctx).await {
-            Ok(ValidateResult::Accept) => self.publish_tunnel(ctx.local_id, tunnel),
+            Ok(ValidateResult::Accept) => self.publish_tunnel(ctx.local_id, tunnel).await,
             Ok(ValidateResult::Reject(reason)) => {
                 log::warn!(
                     "incoming tunnel rejected local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} reason={}",
@@ -306,9 +275,9 @@ impl NetManager {
         }
     }
 
-    fn publish_tunnel(&self, local_id: P2pId, tunnel: super::TunnelRef) {
-        let mut subscriptions = self.subscriptions.lock().unwrap();
-        if let Some(subscriber) = subscriptions.get(&local_id) {
+    async fn publish_tunnel(&self, local_id: P2pId, tunnel: super::TunnelRef) {
+        let subscriber = { self.subscriptions.read().unwrap().get(&local_id).cloned() };
+        if let Some(subscriber) = subscriber {
             log::debug!(
                 "publish incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
                 local_id,
@@ -317,12 +286,17 @@ impl NetManager {
                 tunnel.tunnel_id(),
                 tunnel.candidate_id()
             );
-            if subscriber.send(Ok(tunnel)).is_err() {
+            if !subscriber(Ok(tunnel)).await {
                 log::warn!(
                     "publish incoming tunnel failed because subscriber closed local={}",
                     local_id
                 );
-                subscriptions.remove(&local_id);
+                let mut subscriptions = self.subscriptions.write().unwrap();
+                if let Some(current) = subscriptions.get(&local_id) {
+                    if Arc::ptr_eq(current, &subscriber) {
+                        subscriptions.remove(&local_id);
+                    }
+                }
             }
         } else {
             log::warn!(
@@ -350,30 +324,14 @@ impl NetManager {
     }
 }
 
-impl Drop for NetManager {
-    fn drop(&mut self) {
-        for task in self.listener_tasks.lock().unwrap().drain(..) {
-            task.abort();
-        }
-    }
-}
-
 fn take_mapping_port(port_mapping: &mut Vec<(Endpoint, u16)>, src: &Endpoint) -> Option<u16> {
     let index = port_mapping.iter().position(|(ep, _)| ep == src)?;
     Some(port_mapping.remove(index).1)
 }
 
-fn should_stop_listener_loop(err: &P2pError) -> bool {
-    matches!(
-        err.code(),
-        P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::Executor;
     use crate::networks::{
         IncomingTunnelValidator, ListenVPortsRef, Tunnel, TunnelDatagramRead, TunnelDatagramWrite,
         TunnelForm, TunnelPurpose, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
@@ -381,7 +339,7 @@ mod tests {
     use crate::tls::DefaultTlsServerCertResolver;
     use crate::types::{TunnelCandidateId, TunnelId};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
     enum TestDecision {
@@ -530,20 +488,6 @@ mod tests {
         }
     }
 
-    struct TestListener {
-        rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::networks::TunnelListener for TestListener {
-        async fn accept_tunnel(&self) -> P2pResult<TunnelRef> {
-            let mut rx = self.rx.lock().await;
-            rx.recv()
-                .await
-                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "test listener closed"))?
-        }
-    }
-
     fn test_id(seed: u8) -> P2pId {
         P2pId::from(vec![seed; 32])
     }
@@ -557,18 +501,44 @@ mod tests {
         .unwrap()
     }
 
+    fn register_test_acceptor(
+        manager: &NetManagerRef,
+        local_id: P2pId,
+    ) -> mpsc::UnboundedReceiver<P2pResult<TunnelRef>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        manager
+            .register_incoming_tunnel_subscriber(
+                local_id,
+                Arc::new(move |result| {
+                    let ok = tx.send(result).is_ok();
+                    Box::pin(async move { ok })
+                }),
+            )
+            .unwrap();
+        rx
+    }
+
+    async fn accept_test_tunnel(
+        acceptor: &mut mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+    ) -> P2pResult<TunnelRef> {
+        acceptor
+            .recv()
+            .await
+            .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "test acceptor closed"))?
+    }
+
     #[tokio::test]
     async fn dispatch_tunnel_accepts_when_validator_allows() {
         let manager = new_test_manager(TestValidator::new(HashMap::new()));
         let local_id = test_id(1);
         let remote_id = test_id(2);
-        let mut acceptor = manager.register_tunnel_acceptor(local_id.clone()).unwrap();
+        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
         let tunnel = TestTunnel::new(local_id, remote_id, 1, 11);
         let tunnel_ref: TunnelRef = tunnel.clone();
 
         manager.dispatch_tunnel(tunnel_ref.clone()).await;
 
-        let accepted = acceptor.accept_tunnel().await.unwrap();
+        let accepted = accept_test_tunnel(&mut acceptor).await.unwrap();
         assert!(Arc::ptr_eq(&accepted, &tunnel_ref));
         assert_eq!(tunnel.close_count(), 0);
     }
@@ -581,15 +551,18 @@ mod tests {
             remote_id.clone(),
             TestDecision::Reject,
         )])));
-        let mut acceptor = manager.register_tunnel_acceptor(local_id.clone()).unwrap();
+        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
         let tunnel = TestTunnel::new(local_id, remote_id, 2, 12);
 
         manager.dispatch_tunnel(tunnel.clone()).await;
 
         assert!(
-            timeout(Duration::from_millis(100), acceptor.accept_tunnel())
-                .await
-                .is_err()
+            timeout(
+                Duration::from_millis(100),
+                accept_test_tunnel(&mut acceptor)
+            )
+            .await
+            .is_err()
         );
         assert_eq!(tunnel.close_count(), 1);
     }
@@ -603,7 +576,7 @@ mod tests {
             (error_remote_id.clone(), TestDecision::Error),
             (accepted_remote_id.clone(), TestDecision::Accept),
         ])));
-        let mut acceptor = manager.register_tunnel_acceptor(local_id.clone()).unwrap();
+        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
         let failed_tunnel = TestTunnel::new(local_id.clone(), error_remote_id, 3, 13);
         let accepted_tunnel = TestTunnel::new(local_id, accepted_remote_id, 4, 14);
         let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
@@ -611,36 +584,32 @@ mod tests {
         manager.dispatch_tunnel(failed_tunnel.clone()).await;
         manager.dispatch_tunnel(accepted_tunnel_ref.clone()).await;
 
-        let accepted = acceptor.accept_tunnel().await.unwrap();
+        let accepted = accept_test_tunnel(&mut acceptor).await.unwrap();
         assert!(Arc::ptr_eq(&accepted, &accepted_tunnel_ref));
         assert_eq!(failed_tunnel.close_count(), 1);
         assert_eq!(accepted_tunnel.close_count(), 0);
     }
 
     #[tokio::test]
-    async fn listener_loop_continues_after_recoverable_accept_error() {
-        Executor::init();
+    async fn dispatch_tunnel_result_continues_after_recoverable_accept_error() {
         let manager = new_test_manager(TestValidator::new(HashMap::new()));
         let local_id = test_id(8);
         let remote_id = test_id(9);
-        let mut acceptor = manager.register_tunnel_acceptor(local_id.clone()).unwrap();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let listener: TunnelListenerRef = Arc::new(TestListener {
-            rx: AsyncMutex::new(rx),
-        });
-        let _task = manager.spawn_listener_loop(listener);
+        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
         let accepted_tunnel = TestTunnel::new(local_id, remote_id, 5, 15);
         let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
 
-        tx.send(Err(P2pError::new(
-            P2pErrorCode::QuicError,
-            "transient accept failure".to_owned(),
-        )))
-        .unwrap();
-        tx.send(Ok(accepted_tunnel_ref.clone())).unwrap();
-        drop(tx);
+        manager
+            .dispatch_tunnel_result(Err(P2pError::new(
+                P2pErrorCode::QuicError,
+                "transient accept failure".to_owned(),
+            )))
+            .await;
+        manager
+            .dispatch_tunnel_result(Ok(accepted_tunnel_ref.clone()))
+            .await;
 
-        let accepted = timeout(Duration::from_secs(1), acceptor.accept_tunnel())
+        let accepted = timeout(Duration::from_secs(1), accept_test_tunnel(&mut acceptor))
             .await
             .unwrap()
             .unwrap();
@@ -648,19 +617,28 @@ mod tests {
         assert_eq!(accepted_tunnel.close_count(), 0);
     }
 
-    #[test]
-    fn listener_loop_stops_only_for_close_like_errors() {
-        assert!(!should_stop_listener_loop(&P2pError::new(
+    #[tokio::test]
+    async fn incoming_tunnel_callback_dispatches_results() {
+        let manager = new_test_manager(TestValidator::new(HashMap::new()));
+        let local_id = test_id(10);
+        let remote_id = test_id(11);
+        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
+        let callback = manager.incoming_tunnel_callback();
+        let accepted_tunnel = TestTunnel::new(local_id, remote_id, 6, 16);
+        let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
+
+        callback(Err(P2pError::new(
             P2pErrorCode::QuicError,
-            "recoverable".to_owned(),
-        )));
-        assert!(should_stop_listener_loop(&P2pError::new(
-            P2pErrorCode::Interrupted,
-            "closed".to_owned(),
-        )));
-        assert!(should_stop_listener_loop(&P2pError::new(
-            P2pErrorCode::ErrorState,
-            "closed".to_owned(),
-        )));
+            "transient accept failure".to_owned(),
+        )))
+        .await;
+        callback(Ok(accepted_tunnel_ref.clone())).await;
+
+        let accepted = timeout(Duration::from_secs(1), accept_test_tunnel(&mut acceptor))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&accepted, &accepted_tunnel_ref));
+        assert_eq!(accepted_tunnel.close_count(), 0);
     }
 }

@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::executor::Executor;
 use crate::networks::{
-    Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult, TunnelListenerInfo,
-    TunnelListenerRef, TunnelNetwork, TunnelPurpose, TunnelRef, TunnelStreamRead,
+    IncomingTunnelCallback, Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult,
+    TunnelListener, TunnelListenerInfo, TunnelListenerRef, TunnelNetwork, TunnelPurpose, TunnelRef,
+    TunnelStreamRead,
     TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
@@ -383,10 +385,7 @@ impl PnClient {
                 tunnels: Mutex::new(HashMap::new()),
             }),
             listener: Mutex::new(None),
-            listener_infos: Mutex::new(vec![TunnelListenerInfo {
-                local: pn_virtual_endpoint(),
-                mapping_port: None,
-            }]),
+            listener_infos: Mutex::new(Vec::new()),
         })
     }
 
@@ -497,10 +496,11 @@ impl TunnelNetwork for PnClient {
         local: &Endpoint,
         _out: Option<Endpoint>,
         mapping_port: Option<u16>,
-    ) -> P2pResult<TunnelListenerRef> {
+        on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> P2pResult<()> {
         {
             let listener = self.listener.lock().unwrap();
-            if let Some(listener) = listener.as_ref() {
+            if listener.is_some() {
                 log::debug!(
                     "pn client listen reuse local_id={} local_ep={} proxy_service={} mapping_port={:?}",
                     self.shared.local_id(),
@@ -508,7 +508,7 @@ impl TunnelNetwork for PnClient {
                     PROXY_SERVICE,
                     mapping_port
                 );
-                return Ok(listener.clone());
+                return Ok(());
             }
         }
         log::debug!(
@@ -530,6 +530,22 @@ impl TunnelNetwork for PnClient {
             mapping_port,
         }];
         *self.listener.lock().unwrap() = Some(listener.clone());
+        Executor::spawn_ok(async move {
+            loop {
+                match listener.accept_tunnel().await {
+                    Ok(tunnel) => (on_incoming_tunnel)(Ok(tunnel)).await,
+                    Err(err) => {
+                        if matches!(
+                            err.code(),
+                            P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+                        ) {
+                            break;
+                        }
+                        (on_incoming_tunnel)(Err(err)).await;
+                    }
+                }
+            }
+        });
         log::debug!(
             "pn client listen ready local_id={} local_ep={} proxy_service={} protocol={:?}",
             self.shared.local_id(),
@@ -537,7 +553,7 @@ impl TunnelNetwork for PnClient {
             PROXY_SERVICE,
             self.protocol()
         );
-        Ok(listener)
+        Ok(())
     }
 
     async fn close_all_listener(&self) -> P2pResult<()> {
@@ -552,22 +568,13 @@ impl TunnelNetwork for PnClient {
             .unlisten_stream(&TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
             .await?;
         *self.listener.lock().unwrap() = None;
+        self.listener_infos.lock().unwrap().clear();
         log::debug!(
             "pn client listener closed local_id={} proxy_service={}",
             self.shared.local_id(),
             PROXY_SERVICE
         );
         Ok(())
-    }
-
-    fn listeners(&self) -> Vec<TunnelListenerRef> {
-        self.listener
-            .lock()
-            .unwrap()
-            .as_ref()
-            .cloned()
-            .into_iter()
-            .collect()
     }
 
     fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
@@ -832,6 +839,32 @@ mod tests {
         async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "no datagram"))
         }
+    }
+
+    #[tokio::test]
+    async fn pn_client_listener_infos_empty_until_listen() {
+        Executor::init();
+        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(9));
+        let net_manager =
+            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity, net_manager);
+        let client = PnClient::new(ttp_client);
+
+        assert!(client.listener_infos().is_empty());
+
+        let local = pn_virtual_endpoint();
+        client
+            .listen(&local, None, None, Arc::new(|_| Box::pin(async {})))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.listener_infos(),
+            vec![TunnelListenerInfo {
+                local,
+                mapping_port: None
+            }]
+        );
     }
 
     #[tokio::test]

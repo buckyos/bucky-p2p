@@ -827,9 +827,10 @@ mod tests {
     use super::*;
     use crate::endpoint::{Endpoint, Protocol};
     use crate::error::p2p_err;
+    use crate::executor::Executor;
     use crate::networks::{
-        NetManager, Tunnel, TunnelCommand, TunnelListener, TunnelListenerInfo, TunnelListenerRef,
-        TunnelNetwork, TunnelNetworkRef, TunnelState,
+        IncomingTunnelCallback, NetManager, Tunnel, TunnelCommand, TunnelListener,
+        TunnelListenerInfo, TunnelListenerRef, TunnelNetwork, TunnelNetworkRef, TunnelState,
     };
     use crate::p2p_identity::{
         EncodedP2pIdentity, P2pIdentity, P2pIdentityCertRef, P2pIdentityRef, P2pSignature,
@@ -1146,20 +1147,34 @@ mod tests {
             local: &Endpoint,
             _out: Option<Endpoint>,
             mapping_port: Option<u16>,
-        ) -> P2pResult<TunnelListenerRef> {
+            on_incoming_tunnel: IncomingTunnelCallback,
+        ) -> P2pResult<()> {
             *self.infos.lock().unwrap() = vec![TunnelListenerInfo {
                 local: *local,
                 mapping_port,
             }];
-            Ok(self.listener.clone())
+            let listener = self.listener.clone();
+            Executor::spawn_ok(async move {
+                loop {
+                    match listener.accept_tunnel().await {
+                        Ok(tunnel) => on_incoming_tunnel(Ok(tunnel)).await,
+                        Err(err) => {
+                            if matches!(
+                                err.code(),
+                                P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+                            ) {
+                                break;
+                            }
+                            on_incoming_tunnel(Err(err)).await;
+                        }
+                    }
+                }
+            });
+            Ok(())
         }
 
         async fn close_all_listener(&self) -> P2pResult<()> {
             Ok(())
-        }
-
-        fn listeners(&self) -> Vec<TunnelListenerRef> {
-            vec![self.listener.clone()]
         }
 
         fn listener_infos(&self) -> Vec<TunnelListenerInfo> {

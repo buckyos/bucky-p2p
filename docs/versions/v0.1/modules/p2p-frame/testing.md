@@ -103,9 +103,11 @@ approved_at: 2026-05-29
 | reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-DV | dv |  | 当前无自动 DV 入口；`cyfs-p2p-test all-in-one` 不作为模块 DV 证据。 | yes | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
 | reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 reverse incoming 无 waiter close 不改变公开 trait、SN 协议或下游构造路径。 | no | |
 | networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 `TcpTunnelNetwork` / stack 编译路径、`P2pConfig::set_server_runtime` 公开注入入口、`TcpTunnelListener` 以 `TcpServer::serve(...)` 接管 accept handler，且 unit 套件保持现有 TCP/网络调用方兼容。 | no | |
-| networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 `ServerRuntime` 注入和 `TcpServer` listener 不改变 `TunnelNetwork` trait 或下游构造边界。 | no | |
+| networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 `ServerRuntime` 注入和 `TcpServer` listener 不改变下游构造边界或 tunnel publish 语义。 | no | |
 | networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 `QuicTunnelNetwork` / stack 编译路径、`QuicTunnelListener` 以 `QuicServer::serve_socket(...)` 接收 worker socket、自定义 `AsyncUdpSocket` 委托 `UdpSocket::poll_recv_from_vectored` / `try_send_to` / `poll_send_ready`、per-worker CID generator 使用对应 worker shard、UDP punch 使用首个可用 worker socket。 | no | |
-| networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 QUIC listener socket 抽象不要求下游处理 raw UDP payload 或修改公开 trait。 | no | |
+| networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 QUIC listener socket 抽象不要求下游处理 raw UDP payload 或修改 NAT 专用公开参数。 | no | |
+| tunnel_network_listen_callback | V-TUNNEL-NETWORK-CALLBACK-UNIT | unit | p2p-frame-unit | 覆盖 `TunnelNetwork::listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`，`NetManager::listen(...)` 通过回调继续执行 incoming validator、订阅发布和 reject close，PN listener 幂等 listen 不依赖 `listeners()`。 | no | |
+| tunnel_network_listen_callback | V-TUNNEL-NETWORK-CALLBACK-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认移除公共 `listeners()` 和 `listen(...) -> TunnelListenerRef` 后，下游仍可通过 `NetManager`/stack 接收入站 tunnel。 | no | |
 
 ## 完成定义
 - [ ] 直接子模块至少映射到一个验证面
