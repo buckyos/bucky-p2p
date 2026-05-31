@@ -1,4 +1,4 @@
-use super::listener::{QuicTunnelListener, connect_with_ep, udp_punch_burst_window};
+use super::listener::{QuicTunnelListener, udp_punch_burst_window};
 use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
@@ -152,18 +152,18 @@ impl QuicTunnelNetwork {
                     remote
                 ));
             }
-            match connect_with_ep(
-                listener.quic_ep(),
-                local_identity.clone(),
-                self.cert_factory.clone(),
-                remote_id.clone(),
-                remote_name.clone(),
-                *remote,
-                self.congestion_algorithm,
-                attempt_timeout,
-                self.idle_timeout,
-            )
-            .await
+            match listener
+                .connect_with_owner_runtime(
+                    local_identity.clone(),
+                    self.cert_factory.clone(),
+                    remote_id.clone(),
+                    remote_name.clone(),
+                    *remote,
+                    self.congestion_algorithm,
+                    attempt_timeout,
+                    self.idle_timeout,
+                )
+                .await
             {
                 Ok(socket) => break socket,
                 Err(err) => {
@@ -199,13 +199,7 @@ impl QuicTunnelNetwork {
                 }
             }
         };
-        let local_ep = Endpoint::from((
-            Protocol::Quic,
-            listener
-                .quic_ep()
-                .local_addr()
-                .map_err(crate::error::into_p2p_err!(P2pErrorCode::TlsError))?,
-        ));
+        let local_ep = listener.bound_local();
         let remote_ep = Endpoint::from((Protocol::Quic, socket.remote_address()));
         let resolved_remote_id = self
             .resolve_remote_identity(&socket, remote_id, remote_name)
@@ -233,7 +227,6 @@ impl QuicTunnelNetwork {
         )
         .await?)
     }
-
 }
 
 #[async_trait::async_trait]

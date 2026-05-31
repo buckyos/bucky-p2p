@@ -175,7 +175,6 @@ impl TcpTunnelNetwork {
             .register(tunnel.clone(), tunnel_id, candidate_id);
         Ok(tunnel)
     }
-
 }
 
 #[async_trait::async_trait]

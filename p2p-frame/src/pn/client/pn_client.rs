@@ -9,8 +9,8 @@ use crate::executor::Executor;
 use crate::networks::{
     IncomingTunnelCallback, Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult,
     TunnelListener, TunnelListenerInfo, TunnelListenerRef, TunnelNetwork, TunnelPurpose, TunnelRef,
-    TunnelStreamRead,
-    TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
+    TunnelStreamRead, TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header,
+    write_tunnel_command,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{

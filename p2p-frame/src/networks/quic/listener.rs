@@ -4,8 +4,7 @@ use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::networks::{
-    IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm,
-    TunnelRef,
+    IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelRef,
 };
 use crate::p2p_identity::{
     P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
@@ -27,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc, oneshot};
 
 const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
 const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
@@ -272,14 +271,59 @@ async fn wait_quic_endpoint_ready(listener: &QuicTunnelListener) -> P2pResult<()
     }
 }
 
-async fn wait_quic_accept_loop(listener: Arc<QuicTunnelListener>, endpoint: quinn::Endpoint) {
+struct QuicConnectRequest {
+    local_identity_ref: P2pIdentityRef,
+    cert_factory: P2pIdentityCertFactoryRef,
+    remote_identity_id: P2pId,
+    remote_name: Option<String>,
+    remote: Endpoint,
+    congestion_algorithm: QuicCongestionAlgorithm,
+    timeout: Duration,
+    idle_timeout: Duration,
+    response: oneshot::Sender<P2pResult<quinn::Connection>>,
+}
+
+#[derive(Clone)]
+struct WorkerQuicEndpoint {
+    endpoint: quinn::Endpoint,
+    connect_tx: mpsc::UnboundedSender<QuicConnectRequest>,
+}
+
+async fn wait_quic_endpoint_loop(
+    listener: Arc<QuicTunnelListener>,
+    endpoint: quinn::Endpoint,
+    mut connect_rx: mpsc::UnboundedReceiver<QuicConnectRequest>,
+) {
     loop {
-        match endpoint.accept().await {
-            Some(conn) => {
+        tokio::select! {
+            conn = endpoint.accept() => match conn {
+                Some(conn) => {
                 let result = listener.accept_connection(conn).await;
                 (listener.on_incoming_tunnel)(result).await;
             }
-            None => break,
+                None => break,
+            },
+            request = connect_rx.recv() => {
+                let Some(request) = request else {
+                    break;
+                };
+                let endpoint = endpoint.clone();
+                tokio::spawn(async move {
+                    let result = connect_with_ep(
+                        endpoint,
+                        request.local_identity_ref,
+                        request.cert_factory,
+                        request.remote_identity_id,
+                        request.remote_name,
+                        request.remote,
+                        request.congestion_algorithm,
+                        request.timeout,
+                        request.idle_timeout,
+                    )
+                    .await;
+                    let _ = request.response.send(result);
+                });
+            }
         }
     }
 }
@@ -287,7 +331,7 @@ async fn wait_quic_accept_loop(listener: Arc<QuicTunnelListener>, endpoint: quin
 struct QuicTunnelListenerState {
     local: Option<Endpoint>,
     outer: Option<Endpoint>,
-    endpoints: Vec<quinn::Endpoint>,
+    endpoints: Vec<WorkerQuicEndpoint>,
     server: Option<QuicServer>,
     punch_socket: Option<SfoUdpSocket>,
     mapping_port: Option<u16>,
@@ -355,7 +399,7 @@ impl QuicTunnelListener {
             .unwrap();
         Endpoint::from((
             crate::endpoint::Protocol::Quic,
-            endpoint.local_addr().unwrap(),
+            endpoint.endpoint.local_addr().unwrap(),
         ))
     }
 
@@ -363,10 +407,40 @@ impl QuicTunnelListener {
         self.state.read().unwrap().mapping_port
     }
 
-    pub(crate) fn quic_ep(&self) -> quinn::Endpoint {
-        let state = self.state.read().unwrap();
-        let index = rand::rng().random_range(0..state.endpoints.len());
-        state.endpoints[index].clone()
+    pub(crate) async fn connect_with_owner_runtime(
+        &self,
+        local_identity_ref: P2pIdentityRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        remote_identity_id: P2pId,
+        remote_name: Option<String>,
+        remote: Endpoint,
+        congestion_algorithm: QuicCongestionAlgorithm,
+        timeout: Duration,
+        idle_timeout: Duration,
+    ) -> P2pResult<quinn::Connection> {
+        let endpoint = {
+            let state = self.state.read().unwrap();
+            let index = rand::rng().random_range(0..state.endpoints.len());
+            state.endpoints[index].clone()
+        };
+
+        let (response, rx) = oneshot::channel();
+        endpoint
+            .connect_tx
+            .send(QuicConnectRequest {
+                local_identity_ref,
+                cert_factory,
+                remote_identity_id,
+                remote_name,
+                remote,
+                congestion_algorithm,
+                timeout,
+                idle_timeout,
+                response,
+            })
+            .map_err(|_| p2p_err!(P2pErrorCode::ErrorState, "quic endpoint worker closed"))?;
+        rx.await
+            .map_err(|_| p2p_err!(P2pErrorCode::ErrorState, "quic endpoint worker closed"))?
     }
 
     pub(crate) fn start_udp_punch_burst(
@@ -429,7 +503,7 @@ impl QuicTunnelListener {
             (endpoints, server)
         };
         for ep in endpoints {
-            ep.close(0_u32.into(), b"close all listeners");
+            ep.endpoint.close(0_u32.into(), b"close all listeners");
         }
         if let Some(server) = server {
             let _ = server.close();
@@ -555,7 +629,7 @@ impl QuicTunnelListener {
                 std::mem::take(&mut state.endpoints)
             };
             for endpoint in endpoints {
-                endpoint.close(0_u32.into(), b"close listener");
+                endpoint.endpoint.close(0_u32.into(), b"close listener");
             }
             return Err(err);
         }
@@ -588,15 +662,21 @@ impl QuicTunnelListener {
         )
         .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
 
-        if !self.register_worker_endpoint(endpoint.clone(), socket) {
+        let (connect_tx, connect_rx) = mpsc::unbounded_channel();
+        if !self.register_worker_endpoint(endpoint.clone(), connect_tx, socket) {
             endpoint.close(0_u32.into(), b"close listener");
             return Ok(());
         }
-        wait_quic_accept_loop(self, endpoint).await;
+        wait_quic_endpoint_loop(self, endpoint, connect_rx).await;
         Ok(())
     }
 
-    fn register_worker_endpoint(&self, endpoint: quinn::Endpoint, socket: SfoUdpSocket) -> bool {
+    fn register_worker_endpoint(
+        &self,
+        endpoint: quinn::Endpoint,
+        connect_tx: mpsc::UnboundedSender<QuicConnectRequest>,
+        socket: SfoUdpSocket,
+    ) -> bool {
         if self.closed.load(Ordering::SeqCst) {
             return false;
         }
@@ -604,7 +684,10 @@ impl QuicTunnelListener {
         if state.punch_socket.is_none() {
             state.punch_socket = Some(socket);
         }
-        state.endpoints.push(endpoint);
+        state.endpoints.push(WorkerQuicEndpoint {
+            endpoint,
+            connect_tx,
+        });
         drop(state);
         self.endpoint_ready.notify_waiters();
         true

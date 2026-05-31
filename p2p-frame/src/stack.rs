@@ -730,7 +730,12 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
                 proxy_ep
             );
             proxy_client
-                .listen(&proxy_ep, None, None, net_manager.incoming_tunnel_callback())
+                .listen(
+                    &proxy_ep,
+                    None,
+                    None,
+                    net_manager.incoming_tunnel_callback(),
+                )
                 .await?;
         }
     }

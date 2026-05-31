@@ -13,8 +13,9 @@ use super::{
     TunnelListenerInfo, TunnelNetworkRef, ValidateResult, allow_all_incoming_tunnel_validator,
 };
 
-pub type IncomingTunnelSubscriber =
-    Arc<dyn Fn(P2pResult<super::TunnelRef>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+pub type IncomingTunnelSubscriber = Arc<
+    dyn Fn(P2pResult<super::TunnelRef>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
+>;
 
 pub struct NetManager {
     cert_resolver: ServerCertResolverRef,
