@@ -5,8 +5,8 @@ use super::protocol::{
 use super::tunnel::{TcpIncomingControlDecision, TcpTunnel, TcpTunnelConnector};
 use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
-use crate::executor::{Executor, SpawnHandle};
-use crate::networks::{Tunnel, TunnelForm, TunnelListener, TunnelRef};
+use crate::executor::Executor;
+use crate::networks::{IncomingTunnelCallback, Tunnel, TunnelForm, TunnelRef};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
 type TunnelKey = (P2pId, P2pId, TunnelId, TunnelCandidateId);
 const REGISTRY_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
@@ -130,10 +129,7 @@ pub(crate) struct TcpTunnelListener {
     cert_factory: P2pIdentityCertFactoryRef,
     acceptor: crate::runtime::TlsAcceptor,
     state: Mutex<TcpTunnelListenerState>,
-    accepted_tx: Mutex<Option<mpsc::Sender<P2pResult<TunnelRef>>>>,
-    accepted_rx: AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>,
-    accept_task: Mutex<Option<SpawnHandle<()>>>,
-    close_notify: Notify,
+    on_incoming_tunnel: IncomingTunnelCallback,
     closed: AtomicBool,
     registry: Arc<TcpTunnelRegistry>,
     timeout: Duration,
@@ -154,10 +150,10 @@ impl TcpTunnelListener {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
         server_runtime: ServerRuntime,
-        listener_accept_capacity: usize,
+        _listener_accept_capacity: usize,
+        on_incoming_tunnel: IncomingTunnelCallback,
         tunnel_accept_capacity: usize,
     ) -> Arc<Self> {
-        let (accepted_tx, accepted_rx) = mpsc::channel(listener_accept_capacity);
         Arc::new(Self {
             acceptor: build_acceptor(cert_resolver.clone(), cert_factory.clone()),
             cert_resolver,
@@ -169,10 +165,7 @@ impl TcpTunnelListener {
                 bound_local: None,
                 mapping_port: None,
             }),
-            accepted_tx: Mutex::new(Some(accepted_tx)),
-            accepted_rx: AsyncMutex::new(accepted_rx),
-            accept_task: Mutex::new(None),
-            close_notify: Notify::new(),
+            on_incoming_tunnel,
             closed: AtomicBool::new(false),
             registry,
             timeout,
@@ -243,11 +236,6 @@ impl TcpTunnelListener {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.close_notify.notify_waiters();
-        self.accepted_tx.lock().unwrap().take();
-        if let Some(task) = self.accept_task.lock().unwrap().take() {
-            task.abort();
-        }
         let server = {
             let mut state = self.state.lock().unwrap();
             state.server.take()
@@ -255,22 +243,6 @@ impl TcpTunnelListener {
         if let Some(server) = server {
             let _ = server.close();
         }
-    }
-
-    fn send_accepted(&self, result: P2pResult<TunnelRef>) -> P2pResult<()> {
-        let Some(tx) = self.accepted_tx.lock().unwrap().clone() else {
-            return Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "tcp tunnel listener accept queue closed"
-            ));
-        };
-        tx.try_send(result).map_err(|err| {
-            p2p_err!(
-                P2pErrorCode::OutOfLimit,
-                "tcp tunnel listener accept queue full or closed: {}",
-                err
-            )
-        })
     }
 
     fn validate_control_hello(&self, hello: &TcpConnectionHello) -> TcpIncomingControlDecision {
@@ -357,6 +329,16 @@ impl TcpTunnelListener {
         tunnel.on_incoming_data_connection(hello, connection).await
     }
 
+    async fn deliver_incoming(&self, result: P2pResult<TunnelRef>) {
+        if self.closed.load(Ordering::SeqCst) {
+            if let Ok(tunnel) = result {
+                let _ = tunnel.close().await;
+            }
+            return;
+        }
+        (self.on_incoming_tunnel)(result).await;
+    }
+
     async fn handle_accepted_stream(self: Arc<Self>, stream: crate::runtime::TcpStream) {
         match accept_connection(
             &self.acceptor,
@@ -370,15 +352,11 @@ impl TcpTunnelListener {
                 TcpConnectionRole::Control => {
                     match self.on_control_connection(hello, connection).await {
                         Ok(Some(tunnel)) => {
-                            if let Err(err) = self.send_accepted(Ok(tunnel)) {
-                                log::warn!("tcp tunnel accept deliver failed: {:?}", err);
-                            }
+                            self.deliver_incoming(Ok(tunnel)).await;
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            if let Err(err) = self.send_accepted(Err(err)) {
-                                log::warn!("tcp tunnel accept error deliver failed: {:?}", err);
-                            }
+                            self.deliver_incoming(Err(err)).await;
                         }
                     }
                 }
@@ -410,24 +388,4 @@ fn resolve_tcp_bind_endpoint(local: Endpoint) -> P2pResult<Endpoint> {
     ))?;
     drop(probe);
     Ok(Endpoint::from((crate::endpoint::Protocol::Tcp, bound_addr)))
-}
-
-#[async_trait::async_trait]
-impl TunnelListener for TcpTunnelListener {
-    async fn accept_tunnel(&self) -> P2pResult<TunnelRef> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(p2p_err!(P2pErrorCode::Interrupted, "accept tunnel closed"));
-        }
-        let mut rx = self.accepted_rx.lock().await;
-        let closed = self.close_notify.notified();
-        tokio::pin!(closed);
-        tokio::select! {
-            result = rx.recv() => {
-                result.ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "accept tunnel closed"))?
-            }
-            _ = &mut closed => {
-                Err(p2p_err!(P2pErrorCode::Interrupted, "accept tunnel closed"))
-            }
-        }
-    }
 }

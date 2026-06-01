@@ -6,10 +6,9 @@ use super::protocol::{
 use super::tunnel::{LocalTunnelPhase, TcpTunnel, TcpTunnelConnector};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
-use crate::executor::Executor;
 use crate::networks::{
-    IncomingTunnelCallback, Tunnel, TunnelConnectIntent, TunnelForm, TunnelListener,
-    TunnelListenerInfo, TunnelNetwork, TunnelRef,
+    IncomingTunnelCallback, Tunnel, TunnelConnectIntent, TunnelForm, TunnelListenerInfo,
+    TunnelNetwork, TunnelRef,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
@@ -218,6 +217,7 @@ impl TunnelNetwork for TcpTunnelNetwork {
             self.heartbeat_timeout,
             self.server_runtime.clone(),
             self.listener_accept_capacity,
+            on_incoming_tunnel,
             self.tunnel_accept_capacity,
         );
         listener
@@ -229,25 +229,6 @@ impl TunnelNetwork for TcpTunnelNetwork {
             )
             .await?;
         self.listeners.lock().unwrap().push(listener.clone());
-        #[cfg(test)]
-        let _ = on_incoming_tunnel;
-        #[cfg(not(test))]
-        Executor::spawn_ok(async move {
-            loop {
-                match listener.accept_tunnel().await {
-                    Ok(tunnel) => (on_incoming_tunnel)(Ok(tunnel)).await,
-                    Err(err) => {
-                        if matches!(
-                            err.code(),
-                            P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
-                        ) {
-                            break;
-                        }
-                        (on_incoming_tunnel)(Err(err)).await;
-                    }
-                }
-            }
-        });
         Ok(())
     }
 
@@ -312,9 +293,7 @@ impl TunnelNetwork for TcpTunnelNetwork {
 #[cfg(all(test, feature = "x509"))]
 mod tests {
     use super::*;
-    use crate::networks::{
-        ListenVPortRegistry, Tunnel, TunnelListener, TunnelPurpose, allow_all_listen_vports,
-    };
+    use crate::networks::{ListenVPortRegistry, Tunnel, TunnelPurpose, allow_all_listen_vports};
     use crate::runtime::{AsyncReadExt, AsyncWriteExt};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
     use crate::x509::{
@@ -323,6 +302,7 @@ mod tests {
     };
     use std::sync::Arc;
     use std::sync::Once;
+    use tokio::sync::mpsc;
     use tokio::time::{Instant, sleep, timeout};
 
     static TLS_INIT: Once = Once::new();
@@ -337,6 +317,24 @@ mod tests {
 
     fn ignore_incoming() -> IncomingTunnelCallback {
         Arc::new(|_| Box::pin(async {}))
+    }
+
+    fn collect_incoming() -> (IncomingTunnelCallback, mpsc::Receiver<P2pResult<TunnelRef>>) {
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let callback = Arc::new(move |result| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(result).await;
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        });
+        (callback, rx)
+    }
+
+    async fn recv_incoming(rx: &mut mpsc::Receiver<P2pResult<TunnelRef>>) -> TunnelRef {
+        rx.recv()
+            .await
+            .expect("incoming tunnel callback should deliver")
+            .expect("incoming tunnel should be accepted")
     }
 
     fn new_identity(name: &str) -> P2pIdentityRef {
@@ -484,8 +482,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -495,8 +494,7 @@ mod tests {
         let server_bound_local = server_listener.bound_local();
 
         let remote_ep = server_bound_local;
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,
@@ -729,16 +727,16 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
         let server_listener = server_network.listeners.lock().unwrap()[0].clone();
         let server_ep = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let opened = client_network
             .create_tunnel(
                 &client_identity,
@@ -777,18 +775,15 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
         let server_listener = server_network.listeners.lock().unwrap()[0].clone();
         let server_ep = server_listener.bound_local();
 
-        let accept_a = tokio::spawn({
-            let server_listener = server_listener.clone();
-            async move { server_listener.accept_tunnel().await.unwrap() }
-        });
         let opened_a = client_network
             .create_tunnel(
                 &client_identity,
@@ -798,10 +793,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted_a = accept_a.await.unwrap();
+        let accepted_a = recv_incoming(&mut server_incoming_rx).await;
         assert_eq!(accepted_a.local_id(), server_identity_a.get_id());
 
-        let accept_b = tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
         let opened_b = client_network
             .create_tunnel(
                 &client_identity,
@@ -811,7 +805,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let accepted_b = accept_b.await.unwrap();
+        let accepted_b = recv_incoming(&mut server_incoming_rx).await;
         assert_eq!(accepted_b.local_id(), server_identity_b.get_id());
 
         opened_a.close().await.unwrap();
@@ -979,8 +973,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -1864,8 +1859,7 @@ mod tests {
         let client_bound_local = client_listener.bound_local();
         let server_bound_local = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,
@@ -2024,8 +2018,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -2034,8 +2029,7 @@ mod tests {
         let client_bound_local = client_listener.bound_local();
         let server_bound_local = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,
@@ -2121,8 +2115,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -2131,8 +2126,7 @@ mod tests {
         let client_bound_local = client_listener.bound_local();
         let server_bound_local = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,
@@ -2218,8 +2212,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -2228,8 +2223,7 @@ mod tests {
         let client_bound_local = client_listener.bound_local();
         let server_bound_local = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,
@@ -2315,8 +2309,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -2325,8 +2320,7 @@ mod tests {
         let client_bound_local = client_listener.bound_local();
         let server_bound_local = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,
@@ -2413,8 +2407,9 @@ mod tests {
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
             .await
             .unwrap();
+        let (server_incoming, mut server_incoming_rx) = collect_incoming();
         server_network
-            .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
+            .listen(&loopback_tcp_ep(), None, None, server_incoming)
             .await
             .unwrap();
 
@@ -2423,8 +2418,7 @@ mod tests {
         let client_bound_local = client_listener.bound_local();
         let server_bound_local = server_listener.bound_local();
 
-        let accept_task =
-            tokio::spawn(async move { server_listener.accept_tunnel().await.unwrap() });
+        let accept_task = tokio::spawn(async move { recv_incoming(&mut server_incoming_rx).await });
         let _ = client_network
             .create_tunnel(
                 &client_identity,

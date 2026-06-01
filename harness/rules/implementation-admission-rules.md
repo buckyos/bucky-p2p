@@ -72,7 +72,8 @@
 
 ## Rust Formatting Default
 - For Rust repositories, agents MUST NOT automatically run `cargo fmt`.
-- `cargo fmt` may run only when the user explicitly requests formatting or repo-local rules explicitly require it for the current task.
+- Agents MUST NOT run global/workspace Rust formatting in this project at any time, including `cargo fmt`, `cargo fmt --all`, `cargo fmt --workspace`, or any equivalent invocation that formats the whole workspace.
+- If formatting is explicitly requested or required, use only the narrowest file-, crate-, or package-scoped formatting command that matches the admitted task, and state the exact scope before running it.
 
 ## Return Routing
 - Missing or draft proposal: return to proposal task
