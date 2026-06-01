@@ -197,6 +197,7 @@ impl PnShared {
         let net_manager = crate::networks::NetManager::new(
             vec![],
             crate::tls::DefaultTlsServerCertResolver::new(),
+            crate::stack::DEFAULT_CHANNEL_CAPACITY,
         )
         .unwrap();
         Arc::new(Self {
@@ -364,12 +365,21 @@ pub struct PnClient {
 
 impl PnClient {
     pub fn new(ttp_client: TtpClientRef) -> Arc<Self> {
-        Self::new_with_tls_context(ttp_client, None)
+        let channel_capacity = ttp_client.channel_capacity();
+        Self::new_with_tls_context(ttp_client, None, channel_capacity)
+    }
+
+    pub fn new_with_channel_capacity(
+        ttp_client: TtpClientRef,
+        channel_capacity: usize,
+    ) -> Arc<Self> {
+        Self::new_with_tls_context(ttp_client, None, channel_capacity)
     }
 
     fn new_with_tls_context(
         ttp_client: TtpClientRef,
         tls_context: Option<PnTlsContext>,
+        _channel_capacity: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             shared: Arc::new(PnShared {
@@ -394,12 +404,28 @@ impl PnClient {
         local_identity: P2pIdentityRef,
         cert_factory: P2pIdentityCertFactoryRef,
     ) -> Arc<Self> {
+        let channel_capacity = ttp_client.channel_capacity();
+        Self::new_with_tls_material_and_channel_capacity(
+            ttp_client,
+            local_identity,
+            cert_factory,
+            channel_capacity,
+        )
+    }
+
+    pub fn new_with_tls_material_and_channel_capacity(
+        ttp_client: TtpClientRef,
+        local_identity: P2pIdentityRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        channel_capacity: usize,
+    ) -> Arc<Self> {
         Self::new_with_tls_context(
             ttp_client,
             Some(PnTlsContext {
                 local_identity,
                 cert_factory,
             }),
+            channel_capacity,
         )
     }
 
@@ -684,6 +710,8 @@ mod tests {
     use tokio::io::split;
     use tokio::time::{Duration, timeout};
 
+    const TEST_CHANNEL_CAPACITY: usize = 8;
+
     #[derive(Clone)]
     struct FakeIdentity {
         id: P2pId,
@@ -845,8 +873,12 @@ mod tests {
     async fn pn_client_listener_infos_empty_until_listen() {
         Executor::init();
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(9));
-        let net_manager =
-            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let net_manager = NetManager::new(
+            vec![],
+            crate::tls::DefaultTlsServerCertResolver::new(),
+            TEST_CHANNEL_CAPACITY,
+        )
+        .unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity, net_manager);
         let client = PnClient::new(ttp_client);
 
@@ -871,8 +903,12 @@ mod tests {
     async fn pn_tunnel_create_waits_for_control_ready() {
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(1));
         let remote_id = P2pId::from(vec![2; 32]);
-        let net_manager =
-            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let net_manager = NetManager::new(
+            vec![],
+            crate::tls::DefaultTlsServerCertResolver::new(),
+            TEST_CHANNEL_CAPACITY,
+        )
+        .unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
         let (cached, mut relay_read, mut relay_write) =
             FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
@@ -934,8 +970,12 @@ mod tests {
     async fn pn_tunnel_control_ready_failure_fails_create() {
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(3));
         let remote_id = P2pId::from(vec![4; 32]);
-        let net_manager =
-            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let net_manager = NetManager::new(
+            vec![],
+            crate::tls::DefaultTlsServerCertResolver::new(),
+            TEST_CHANNEL_CAPACITY,
+        )
+        .unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
         let (cached, mut relay_read, mut relay_write) =
             FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());

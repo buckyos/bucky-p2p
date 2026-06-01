@@ -124,9 +124,11 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
     use tokio::time::{Duration, timeout};
 
+    const TEST_CHANNEL_CAPACITY: usize = 8;
+
     struct FakeTtpListener {
         rx: AsyncMutex<
-            mpsc::UnboundedReceiver<
+            mpsc::Receiver<
                 P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>,
             >,
         >,
@@ -222,9 +224,9 @@ mod tests {
         shared: Arc<PnShared>,
     ) -> (
         Arc<PnListener>,
-        mpsc::UnboundedSender<P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>,
+        mpsc::Sender<P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>,
     ) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         let ttp_listener = Arc::new(FakeTtpListener {
             rx: AsyncMutex::new(rx),
         });
@@ -248,6 +250,17 @@ mod tests {
         )
     }
 
+    fn send_ttp_stream(
+        tx: &mpsc::Sender<P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>,
+        meta: TtpStreamMeta,
+        read: TunnelStreamRead,
+        write: TunnelStreamWrite,
+    ) -> P2pResult<()> {
+        tx.try_send(Ok((meta, read, write))).map_err(|err| {
+            p2p_err!(P2pErrorCode::OutOfLimit, "test ttp stream queue failed: {}", err)
+        })
+    }
+
     #[tokio::test]
     async fn pn_tunnel_control_open_creates_passive_tunnel() {
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(91));
@@ -258,11 +271,12 @@ mod tests {
         let (listener_read, listener_write, mut peer_read, mut peer_write) = make_stream_pair();
         let tunnel_id = crate::types::TunnelId::from(91);
 
-        tx.send(Ok((
+        send_ttp_stream(
+            &tx,
             meta(local_id.clone(), remote_id.clone()),
             listener_read,
             listener_write,
-        )))
+        )
         .unwrap();
         write_pn_command(
             &mut peer_write,
@@ -305,11 +319,12 @@ mod tests {
         let (listener_read, listener_write, mut peer_read, mut peer_write) = make_stream_pair();
         let tunnel_id = crate::types::TunnelId::from(92);
 
-        tx.send(Ok((
+        send_ttp_stream(
+            &tx,
             meta(local_id.clone(), remote_id.clone()),
             listener_read,
             listener_write,
-        )))
+        )
         .unwrap();
         write_pn_command(
             &mut peer_write,
@@ -344,11 +359,12 @@ mod tests {
 
         let (business_read, business_write, mut business_peer_read, mut business_peer_write) =
             make_stream_pair();
-        tx.send(Ok((
+        send_ttp_stream(
+            &tx,
             meta(local_id.clone(), remote_id.clone()),
             business_read,
             business_write,
-        )))
+        )
         .unwrap();
         write_pn_command(
             &mut business_peer_write,

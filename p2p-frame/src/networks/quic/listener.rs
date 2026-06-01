@@ -286,13 +286,13 @@ struct QuicConnectRequest {
 #[derive(Clone)]
 struct WorkerQuicEndpoint {
     endpoint: quinn::Endpoint,
-    connect_tx: mpsc::UnboundedSender<QuicConnectRequest>,
+    connect_tx: mpsc::Sender<QuicConnectRequest>,
 }
 
 async fn wait_quic_endpoint_loop(
     listener: Arc<QuicTunnelListener>,
     endpoint: quinn::Endpoint,
-    mut connect_rx: mpsc::UnboundedReceiver<QuicConnectRequest>,
+    mut connect_rx: mpsc::Receiver<QuicConnectRequest>,
 ) {
     loop {
         tokio::select! {
@@ -350,6 +350,9 @@ pub(crate) struct QuicTunnelListener {
     closed: AtomicBool,
     worker_count: Arc<AtomicUsize>,
     server_runtime: ServerRuntime,
+    listener_accept_capacity: usize,
+    listener_connect_capacity: usize,
+    tunnel_accept_capacity: usize,
 }
 
 impl QuicTunnelListener {
@@ -360,6 +363,9 @@ impl QuicTunnelListener {
         congestion_algorithm: QuicCongestionAlgorithm,
         server_runtime: ServerRuntime,
         on_incoming_tunnel: IncomingTunnelCallback,
+        listener_accept_capacity: usize,
+        listener_connect_capacity: usize,
+        tunnel_accept_capacity: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             cert_cache,
@@ -381,6 +387,9 @@ impl QuicTunnelListener {
             closed: AtomicBool::new(false),
             worker_count: Arc::new(AtomicUsize::new(0)),
             server_runtime,
+            listener_accept_capacity,
+            listener_connect_capacity,
+            tunnel_accept_capacity,
         })
     }
 
@@ -438,6 +447,7 @@ impl QuicTunnelListener {
                 idle_timeout,
                 response,
             })
+            .await
             .map_err(|_| p2p_err!(P2pErrorCode::ErrorState, "quic endpoint worker closed"))?;
         rx.await
             .map_err(|_| p2p_err!(P2pErrorCode::ErrorState, "quic endpoint worker closed"))?
@@ -475,14 +485,15 @@ impl QuicTunnelListener {
                 if !sleep_duration.is_zero() {
                     runtime::sleep(sleep_duration).await;
                 }
-                let sent =
+                if let Err(err) =
                     try_send_udp_punch_packet(&punch_socket, *remote.addr(), payload.as_slice())
-                        .await;
-                if !sent {
+                        .await
+                {
                     log::trace!(
-                        "quic udp punch send failed remote={} index={}",
+                        "quic udp punch send failed remote={} index={} error={}",
                         remote,
-                        index
+                        index,
+                        err
                     );
                 }
                 last_offset = offset;
@@ -662,7 +673,7 @@ impl QuicTunnelListener {
         )
         .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
 
-        let (connect_tx, connect_rx) = mpsc::unbounded_channel();
+        let (connect_tx, connect_rx) = mpsc::channel(self.listener_connect_capacity);
         if !self.register_worker_endpoint(endpoint.clone(), connect_tx, socket) {
             endpoint.close(0_u32.into(), b"close listener");
             return Ok(());
@@ -674,7 +685,7 @@ impl QuicTunnelListener {
     fn register_worker_endpoint(
         &self,
         endpoint: quinn::Endpoint,
-        connect_tx: mpsc::UnboundedSender<QuicConnectRequest>,
+        connect_tx: mpsc::Sender<QuicConnectRequest>,
         socket: SfoUdpSocket,
     ) -> bool {
         if self.closed.load(Ordering::SeqCst) {
@@ -744,6 +755,7 @@ impl QuicTunnelListener {
             remote_identity.get_id(),
             self.local(),
             Endpoint::from((Protocol::Quic, remote_addr)),
+            self.tunnel_accept_capacity,
         )
         .await?)
     }
@@ -808,11 +820,8 @@ async fn try_send_udp_punch_packet(
     socket: &SfoUdpSocket,
     remote: std::net::SocketAddr,
     payload: &[u8],
-) -> bool {
-    match socket.send_to(payload, remote).await {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+) -> Result<(), SfoReuseportError> {
+    socket.send_to(payload, remote).await.map(|_| ())
 }
 
 fn validate_server_name(server_name: String) -> String {
@@ -1132,6 +1141,10 @@ mod udp_punch_tests {
         let invalid_remote = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
         let payload = udp_punch_payload(TunnelConnectIntent::active_logical(TunnelId::from(7)));
 
-        assert!(!try_send_udp_punch_packet(&socket, invalid_remote, payload.as_slice()).await);
+        assert!(
+            try_send_udp_punch_packet(&socket, invalid_remote, payload.as_slice())
+                .await
+                .is_err()
+        );
     }
 }

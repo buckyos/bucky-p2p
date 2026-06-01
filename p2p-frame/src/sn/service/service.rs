@@ -7,6 +7,7 @@ use crate::networks::{
     NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
     TunnelNetwork, TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite,
 };
+use crate::stack::DEFAULT_CHANNEL_CAPACITY;
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
 };
@@ -598,6 +599,8 @@ impl SnServer {
             Duration::from_secs(30),
             Duration::from_secs(5),
             Duration::from_secs(15),
+            DEFAULT_CHANNEL_CAPACITY,
+            DEFAULT_CHANNEL_CAPACITY,
         ));
         TunnelNetwork::set_reuse_address(tcp_network.as_ref(), reuse_address);
         let quic_network = Arc::new(QuicTunnelNetwork::new(
@@ -609,6 +612,9 @@ impl SnServer {
             Duration::from_secs(30),
             ServerRuntime::start(ServerRuntimeConfig::default())
                 .expect("sfo reuseport server runtime should start"),
+            DEFAULT_CHANNEL_CAPACITY,
+            DEFAULT_CHANNEL_CAPACITY,
+            DEFAULT_CHANNEL_CAPACITY,
         ));
         TunnelNetwork::set_reuse_address(quic_network.as_ref(), reuse_address);
         let tunnel_networks = vec![
@@ -616,7 +622,8 @@ impl SnServer {
             quic_network as TunnelNetworkRef,
         ];
 
-        let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
+        let net_manager =
+            NetManager::new(tunnel_networks, cert_resolver, DEFAULT_CHANNEL_CAPACITY).unwrap();
         let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
         let service = SnService::new(cert_factory, contract);
 
@@ -864,6 +871,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, WriteHalf, split};
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
     use tokio::time::{Duration, timeout};
+
+    const TEST_CHANNEL_CAPACITY: usize = 8;
 
     struct DummyIdentity {
         id: P2pId,
@@ -1291,6 +1300,7 @@ mod tests {
         let net_manager = NetManager::new(
             vec![fake_network.clone() as TunnelNetworkRef],
             DefaultTlsServerCertResolver::new(),
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
         net_manager.listen(&[local_ep], None).await.unwrap();

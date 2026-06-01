@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-29
+approved_at: 2026-06-01T11:09:20+08:00
 ---
 
 # p2p-frame 测试
@@ -30,13 +30,14 @@ approved_at: 2026-05-29
 ## 子模块测试
 | 子模块 | 职责 | 详细测试文档 | 必需行为 | 边界/失败场景 | 测试类型 | 测试文件 |
 |--------|------|--------------|----------|----------------|----------|----------|
-| `networks` | TCP/QUIC 传输和 listener 行为 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sfo-reuseport-listeners.md` | 连接建立、复用、地址处理、network manager 行为、TCP listener 由 `sfo_reuseport::TcpServer` 驱动、QUIC listener 由 `sfo_reuseport::QuicServer::serve_socket(...)` 驱动并通过 per-worker 自定义 `AsyncUdpSocket` 交给 Quinn | listener 失败、连接复用边界、协议不匹配、`ServerRuntime` 注入/default 启动失败、QUIC worker CID 路由不稳定、主动发送 socket 获取失败 | unit + integration | `p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/listener.rs` |
+| `networks` | TCP/QUIC 传输和 listener 行为 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sfo-reuseport-listeners.md` | 连接建立、复用、地址处理、network manager 行为、TCP listener 由 `sfo_reuseport::TcpServer` 驱动、QUIC listener 由 `sfo_reuseport::QuicServer::serve_socket(...)` 驱动并通过 per-worker 自定义 `AsyncUdpSocket` 交给 Quinn，内部 accept/connect queue 使用顶层按位置传入的 bounded channel | listener 失败、连接复用边界、协议不匹配、`ServerRuntime` 注入/default 启动失败、QUIC worker CID 路由不稳定、主动发送 socket 获取失败，bounded queue 满载时不得无限缓存 | unit + integration | `p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/listener.rs` |
 | `endpoint` | endpoint area、协议和地址编解码 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | `ServerReflexive` enum 命名、`S` 文本编解码、raw codec area 映射、`is_sys_default()` 移除 | 旧 `D` 文本不得继续作为新语义输入，`ServerReflexive` 不得被 `is_static_wan()` 判定为静态公网 | unit | `p2p-frame/src/endpoint.rs` |
 | `tunnel` | tunnel 生命周期和 manager 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-publish-lifecycle.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | active/passive/proxy tunnel 创建、统一 register/publish 生命周期、reverse waiter 命中时的延后 publish 和完成后的 publish、reverse incoming 无 waiter close、proxy tunnel 发布后的后台 direct/reverse 升级重试、已有多个 candidate 时非 proxy 优先复用、direct/reverse 统一 300ms 短延迟竞速、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启同源 UDP punch 调度、proxy 短窗口脱代理、按协议隔离 endpoint 评分、`ServerReflexive` 与静态 `Wan` / `Mapped` 区分 | 同时存在多个 tunnel、选择回退、后注册 proxy 不得覆盖已有可用非 proxy candidate、reverse waiter 命中时的延后 publish、无 waiter reverse incoming close 且不 register/publish、失败清理、proxy 升级路径持续失败后的退避封顶，升级流程不得回退成 proxy，TCP 失败不得拖累 QUIC/UDP 候选，默认 intent、无 SN service 和非 `ServerReflexive` 路径不得发送 punch，punch 发送失败不得改变建链结果，SN 反射地址不得被误判为静态公网 | unit | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/tunnel.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client 协议交互 | 无效命令流、channel 关闭 | unit | `p2p-frame/src/ttp/tests.rs` |
 | `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | 注册、查询、呼叫路由、`SnCall` 携带本次 `reverse_endpoint_array`、SN called 转发保留调用方候选并扩展单 SN 观察候选、SN 观察地址按节点自上报地址一致性标记 `Wan` 或 `ServerReflexive` | 对端缺失、并发、候选去重和单 SN 边界，观察地址不一致时不得标记为 `Wan` | unit + integration | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/client/sn_service.rs`、`p2p-frame/src/sn/service/*.rs` |
 | `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-control-channel.md` | PN tunnel relay、请求校验、响应转发、source/target 双边用户流量统计、仅 source 侧生效的 server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照、`datagram` 在 `TlsRequired` 下继续保持明文兼容、`PnTunnel` idle timeout 本地关闭，以及 `PnTunnel` control channel ready gate、heartbeat 和远端关闭感知 | relay 启动失败、validator 拒绝、target 打开失败、control ready 失败或超时、control 与业务 channel 混淆、control EOF/decode/write 失败未关闭 tunnel、heartbeat timeout 不收敛、remote close 后 open/accept 仍挂起、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、idle close 误关闭 active channel、idle close 后 accept 不醒、open 继续等待 timeout、迟到 inbound open 被错误投递到 closed tunnel、统计失真、source/target 串户、target 统计错误触发限速、限速背压异常 | unit + integration | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
 | `identity_tls` | 身份、TLS、X509 辅助逻辑 | none | 证书处理和身份正确性 | 无效证书、握手不匹配、feature-gated 路径 | unit | `p2p-frame/src/x509.rs`、`p2p-frame/src/tls/**` |
+| `channel_capacity_config` | 顶层 bounded channel 容量配置 | `design.md` | `P2pConfig` 默认构造时各位置容量均为 `1024`，可只覆盖单个位置；`P2pStackConfig` 从 `P2pEnv` 继承分位置容量且可覆盖，生产路径不再存在 unbounded mpsc 类型 | 显式容量未下发、底层残留默认值、测试替身继续使用 unbounded queue | unit + integration | `p2p-frame/src/stack.rs`、`p2p-frame/src/**/*.rs` 搜索证据 |
 
 ## 模块级测试
 | 测试项 | 覆盖边界 | 入口 | 预期结果 | 测试类型 | 测试文件/脚本 |
@@ -89,6 +90,7 @@ approved_at: 2026-05-29
 | 多个已有 candidate 的非 proxy 优先复用 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 `get_tunnel()` 选择策略 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言同一远端同时存在 published 非 proxy 和更新时间更晚的 published proxy 时，默认复用路径仍返回非 proxy；只有没有可用非 proxy candidate 时才返回 proxy |
 | reverse incoming 无 waiter 关闭 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 incoming reverse 分支 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言无 waiter reverse tunnel 被关闭，不 register、不 publish，订阅者收不到，`get_tunnel()` 不返回；命中 waiter 时 incoming 分支只交付、不注册，waiter 接收方随后 register/publish |
 | endpoint 评分按协议隔离 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 endpoint score | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 TCP 失败不会降低 QUIC/UDP 候选优先级 |
+| bounded channel 容量配置化 | `p2p-frame/src/stack.rs` 顶层配置、各生产路径 mpsc queue 和测试替身 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit`；search: `rg -n 'unbounded_channel|UnboundedSender|UnboundedReceiver' p2p-frame/src -g '*.rs'` | unit 测试断言 `P2pConfig` 默认用户不配置时各位置容量均为 `1024`、单个位置覆盖不影响其他位置、`P2pStackConfig` 从 `P2pEnv` 继承分位置容量且可覆盖；代码搜索确认源码中不再存在 unbounded mpsc 类型或构造函数 |
 
 ## Direct Change Coverage
 | change_id | validation_id | testplan_level | testplan_step_id | Coverage | gap | gap_manual_reason |
@@ -108,6 +110,9 @@ approved_at: 2026-05-29
 | networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 QUIC listener socket 抽象不要求下游处理 raw UDP payload 或修改 NAT 专用公开参数。 | no | |
 | tunnel_network_listen_callback | V-TUNNEL-NETWORK-CALLBACK-UNIT | unit | p2p-frame-unit | 覆盖 `TunnelNetwork::listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`，`NetManager::listen(...)` 通过回调继续执行 incoming validator、订阅发布和 reject close，PN listener 幂等 listen 不依赖 `listeners()`。 | no | |
 | tunnel_network_listen_callback | V-TUNNEL-NETWORK-CALLBACK-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认移除公共 `listeners()` 和 `listen(...) -> TunnelListenerRef` 后，下游仍可通过 `NetManager`/stack 接收入站 tunnel。 | no | |
+| bounded_channel_capacity_config | V-BOUNDED-CHANNELS-UNIT | unit | p2p-frame-unit | 覆盖 `P2pConfig` 默认用户不配置时各位置 `DEFAULT_CHANNEL_CAPACITY == 1024`，覆盖单个位置显式覆盖不影响其他位置，覆盖 `P2pStackConfig` 从 `P2pEnv` 继承分位置容量并可显式覆盖；`cargo test -p p2p-frame` 编译并运行所有 bounded sender/receiver 测试替身。 | no | |
+| bounded_channel_capacity_config | V-BOUNDED-CHANNELS-SEARCH | unit | p2p-frame-unit | 通过 `rg -n 'unbounded_channel|UnboundedSender|UnboundedReceiver' p2p-frame/src -g '*.rs'` 确认源码内不再存在 unbounded mpsc 类型和构造函数。 | no | |
+| bounded_channel_capacity_config | V-BOUNDED-CHANNELS-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认顶层分位置配置 API、默认无需用户配置和 bounded channel 迁移不破坏下游 crate 编译与运行入口。 | no | |
 
 ## 完成定义
 - [ ] 直接子模块至少映射到一个验证面
@@ -126,3 +131,4 @@ approved_at: 2026-05-29
 - [ ] `PnTunnel` idle close 的 channel lease 计数、accept 唤醒、open 立即失败、active channel 未归零不触发 idle，以及关闭后重新创建已映射到 unit 证据
 - [ ] 单 SN NAT 打洞优化的 direct/reverse 300ms 短延迟竞速、`SnCall` 本次候选、同源 UDP punch burst、proxy 短窗口脱代理、endpoint 评分隔离和无多 SN fanout 边界已映射到 unit/integration 证据
 - [ ] `ServerReflexive` endpoint area 的 enum/codec、SN 观察地址分类和下游兼容性已映射到 unit/integration 证据
+- [ ] bounded channel 分位置容量默认值、单项自定义覆盖、源码 unbounded 搜索和下游兼容性已映射到 unit/integration 证据

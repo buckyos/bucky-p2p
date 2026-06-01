@@ -30,6 +30,9 @@ pub struct QuicTunnelNetwork {
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
     server_runtime: ServerRuntime,
+    listener_accept_capacity: usize,
+    listener_connect_capacity: usize,
+    tunnel_accept_capacity: usize,
 }
 
 fn connect_timeout_for_intent(base_timeout: Duration, intent: TunnelConnectIntent) -> Duration {
@@ -64,6 +67,9 @@ impl QuicTunnelNetwork {
         timeout: Duration,
         idle_timeout: Duration,
         server_runtime: ServerRuntime,
+        listener_accept_capacity: usize,
+        listener_connect_capacity: usize,
+        tunnel_accept_capacity: usize,
     ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
@@ -76,6 +82,9 @@ impl QuicTunnelNetwork {
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
             reuse_address: AtomicBool::new(false),
             server_runtime,
+            listener_accept_capacity,
+            listener_connect_capacity,
+            tunnel_accept_capacity,
         }
     }
 
@@ -224,6 +233,7 @@ impl QuicTunnelNetwork {
             resolved_remote_id,
             local_ep,
             remote_ep,
+            self.tunnel_accept_capacity,
         )
         .await?)
     }
@@ -257,6 +267,9 @@ impl TunnelNetwork for QuicTunnelNetwork {
             self.congestion_algorithm,
             self.server_runtime.clone(),
             on_incoming_tunnel,
+            self.listener_accept_capacity,
+            self.listener_connect_capacity,
+            self.tunnel_accept_capacity,
         );
         listener
             .bind(
@@ -468,6 +481,7 @@ mod tests {
     use tokio::time::timeout;
 
     static TLS_INIT: Once = Once::new();
+    const TEST_CHANNEL_CAPACITY: usize = 8;
 
     struct TestNetworkPair {
         client_network: QuicTunnelNetwork,
@@ -476,7 +490,7 @@ mod tests {
         server_network: QuicTunnelNetwork,
         server_identity: P2pIdentityRef,
         server_local_ep: Endpoint,
-        server_incoming: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
+        server_incoming: AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>,
     }
 
     fn init_tls_once() {
@@ -488,13 +502,13 @@ mod tests {
 
     fn incoming_channel() -> (
         IncomingTunnelCallback,
-        mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+        mpsc::Receiver<P2pResult<TunnelRef>>,
     ) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         let callback = Arc::new(move |result| {
             let tx = tx.clone();
             Box::pin(async move {
-                let _ = tx.send(result);
+                let _ = tx.send(result).await;
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         });
         (callback, rx)
@@ -505,13 +519,13 @@ mod tests {
     }
 
     async fn accept_incoming(
-        rx: &AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
+        rx: &AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>,
     ) -> TunnelRef {
         accept_incoming_rx(&mut rx.lock().await).await
     }
 
     async fn accept_incoming_rx(
-        rx: &mut mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+        rx: &mut mpsc::Receiver<P2pResult<TunnelRef>>,
     ) -> TunnelRef {
         rx.recv().await.unwrap().unwrap()
     }
@@ -565,6 +579,9 @@ mod tests {
                 Duration::from_secs(10),
                 ServerRuntime::start(sfo_reuseport::ServerRuntimeConfig::default())
                     .expect("sfo reuseport server runtime should start"),
+                TEST_CHANNEL_CAPACITY,
+                TEST_CHANNEL_CAPACITY,
+                TEST_CHANNEL_CAPACITY,
             ),
             resolver,
         )

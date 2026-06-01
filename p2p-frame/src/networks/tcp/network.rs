@@ -31,6 +31,8 @@ pub struct TcpTunnelNetwork {
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
     server_runtime: ServerRuntime,
+    listener_accept_capacity: usize,
+    tunnel_accept_capacity: usize,
 }
 
 impl TcpTunnelNetwork {
@@ -54,6 +56,8 @@ impl TcpTunnelNetwork {
         timeout: Duration,
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
+        listener_accept_capacity: usize,
+        tunnel_accept_capacity: usize,
     ) -> Self {
         let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default())
             .expect("sfo reuseport server runtime should start");
@@ -64,6 +68,8 @@ impl TcpTunnelNetwork {
             heartbeat_interval,
             heartbeat_timeout,
             server_runtime,
+            listener_accept_capacity,
+            tunnel_accept_capacity,
         )
     }
 
@@ -74,6 +80,8 @@ impl TcpTunnelNetwork {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
         server_runtime: ServerRuntime,
+        listener_accept_capacity: usize,
+        tunnel_accept_capacity: usize,
     ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
@@ -86,6 +94,8 @@ impl TcpTunnelNetwork {
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
             reuse_address: AtomicBool::new(false),
             server_runtime,
+            listener_accept_capacity,
+            tunnel_accept_capacity,
         }
     }
 
@@ -170,6 +180,7 @@ impl TcpTunnelNetwork {
             self.heartbeat_interval,
             self.heartbeat_timeout,
             LocalTunnelPhase::Connected,
+            self.tunnel_accept_capacity,
         );
         self.registry
             .register(tunnel.clone(), tunnel_id, candidate_id);
@@ -206,6 +217,8 @@ impl TunnelNetwork for TcpTunnelNetwork {
             self.heartbeat_interval,
             self.heartbeat_timeout,
             self.server_runtime.clone(),
+            self.listener_accept_capacity,
+            self.tunnel_accept_capacity,
         );
         listener
             .start(
@@ -313,6 +326,7 @@ mod tests {
     use tokio::time::{Instant, sleep, timeout};
 
     static TLS_INIT: Once = Once::new();
+    const TEST_CHANNEL_CAPACITY: usize = 8;
 
     fn init_tls_once() {
         TLS_INIT.call_once(|| {
@@ -398,6 +412,8 @@ mod tests {
                 timeout,
                 heartbeat_interval,
                 heartbeat_timeout,
+                TEST_CHANNEL_CAPACITY,
+                TEST_CHANNEL_CAPACITY,
             ),
             resolver,
         )

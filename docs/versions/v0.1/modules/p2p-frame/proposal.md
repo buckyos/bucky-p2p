@@ -2,8 +2,8 @@
 module: p2p-frame
 version: v0.1
 status: approved
-approved_by: auto-pipeline
-approved_at: 2026-05-29
+approved_by: user
+approved_at: 2026-06-01T11:09:20+08:00
 ---
 
 # p2p-frame 提案
@@ -20,6 +20,7 @@ approved_at: 2026-05-29
 - 本轮新增需求是收紧 reverse tunnel 入站可见性语义：reverse incoming tunnel 只有命中本地正在等待的同 `(remote_id, tunnel_id)` reverse waiter 时才可被接收；如果没有 waiter，说明本地并未等待或已经放弃该 reverse 结果，必须直接关闭，不得作为普通 tunnel 向上发布。
 - 本轮新增需求是将 `p2p-frame/src/networks/**` 的 TCP 与 QUIC listener 实现基于 `sfo-reuseport` 重构：TCP listener 必须直接使用 `sfo_reuseport::TcpServer` 接收入站连接，QUIC listener 必须直接使用 `sfo_reuseport::QuicServer::serve_socket(...)` 取得每个 worker 的 `sfo_reuseport::UdpSocket`，并为每个 worker socket 创建一个 `quinn::Endpoint::new_with_abstract_socket(...)`；`ServerRuntime` 必须允许由外部显式设置，同时保持默认构造路径可用。
 - 本轮新增需求是调整 `TunnelNetwork` 的入站 tunnel 暴露模型：`TunnelNetwork` 不再向外导出 `TunnelListener` 对象，不再提供 `listeners()` 查询方法；`listen(...)` 必须由调用方传入接收新 `Tunnel` 的异步回调函数，返回值改为 `P2pResult<()>`，新进入的 tunnel 通过该回调通知外部。
+- 本轮新增需求是清理 `p2p-frame` 内部所有 `tokio::sync::mpsc::unbounded_channel` 使用点，改为容量受限的 bounded channel；容量必须由外部配置向下传入，最上层配置提供按队列用途或位置拆分的容量配置，每个配置项默认值为 `1024`，调用方默认不需要显式设置；底层组件只接收对应位置已解析后的容量而不自行定义或兜底默认值。
 
 ## 范围
 ### 范围内
@@ -62,6 +63,11 @@ approved_at: 2026-05-29
 - `TunnelNetwork::listen(...)` 必须接收一个可克隆、线程安全的入站 tunnel 回调；TCP、QUIC 与 PN network 在 listener 内部 accept 到新 tunnel 后直接调用该回调，调用方不再通过返回的 `TunnelListener` 对象自行启动 accept loop
 - `TunnelNetwork::listen(...)` 成功只表示 listener 已注册并开始向回调投递后续入站 tunnel；返回值不得携带 `TunnelListenerRef`
 - `TunnelNetwork` 公共 trait 不再包含 `listeners()`；调用方若只需要监听元数据，继续通过 `listener_infos()` 获取
+- `p2p-frame` 内部事件、accept、listener、stream/datagram 和 tunnel 订阅队列必须由 unbounded channel 改为 bounded channel，避免无上限内存增长
+- bounded channel 容量必须从顶层配置入口向下传递；顶层配置必须按不同队列用途或位置提供可独立覆盖的容量项，各项默认值均为 `1024`，调用方不设置时使用默认容量即可启动
+- 不同位置的 channel 容量不得强制共用同一个配置值；至少应能区分 listener/tunnel accept 队列、stream/datagram inbound 队列、TTP listener registry、TunnelManager subscription、NetManager incoming subscriber、PN 内部队列和 QUIC listener connect/punch 相关内部队列等设计阶段确认的类别
+- 底层 network、tunnel、PN、TTP 等组件不得定义自己的 channel 容量默认值；缺少容量时必须由构造路径上传入，而不是在底层 silently fallback
+- 当 bounded channel 满载时，设计阶段必须为各路径明确背压、拒绝、关闭或错误传播语义，且不得通过重新引入 unbounded buffer 绕开容量限制
 
 ### 范围外
 - 重写当前协议实现
@@ -91,6 +97,8 @@ approved_at: 2026-05-29
 - 将 QUIC listener 重构为独立 raw UDP 业务协议，或要求上层解析 UDP punch payload
 - 改变 TCP/QUIC tunnel 线协议、TLS 身份校验语义或 tunnel candidate publish 规则；除本轮明确批准的 `listen` 回调化、返回值改为 `P2pResult<()>` 和移除 `listeners()` 外，不再扩大 `TunnelNetwork` 公共 trait 变更
 - 因引入 `sfo-reuseport` 而移除现有 QUIC NAT punch 的 `ServerReflexive` 准入条件、50ms cadence、active/reverse 起发时机或 1 秒默认截止
+- 在底层组件中散落硬编码 channel 容量默认值，或保留 `unbounded_channel` 作为容量限制的旁路
+- 借本轮 bounded channel 改造改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式
 
 ### 与相邻模块的边界
 - `cyfs-p2p` 可以适配 `p2p-frame`，但不拥有 `p2p-frame` 的协议语义。
@@ -106,6 +114,7 @@ approved_at: 2026-05-29
 - SN 观察地址分类属于 `p2p-frame` 的 SN/tunnel endpoint 语义边界；下游适配层不得把 `ServerReflexive` 与节点自声明 `Wan` 静默合并成同一类地址。
 - `sfo-reuseport` 负责 listener socket 绑定、reuse-port worker 分发、`TcpServer`/`QuicServer` 服务注册、`serve_socket` worker socket 回调、`UdpSocket` Quinn helper 接口和 QUIC worker-shard CID 生成辅助；`p2p-frame` 负责把这些 socket/stream/packet 接入已有 tunnel、TLS、QUIC 和 NAT punch 语义，不得把 `p2p-frame` 的协议语义下沉到 `sfo-reuseport`。
 - 外部设置 `ServerRuntime` 是 `p2p-frame` 的配置责任边界；`cyfs-p2p` 可透传或组合该配置，但不得在适配层另行定义 listener 分发策略。
+- bounded channel 容量属于 `p2p-frame` 顶层运行时配置责任边界；`cyfs-p2p` 可以透传或组合该配置，但不得在适配层为 `p2p-frame` 底层队列另行定义一套默认值。顶层配置必须提供完整默认配置，因此普通调用方不需要为了启用 bounded channel 而显式填写任一容量项。
 
 ## 约束
 - 允许使用的库/组件：
@@ -123,11 +132,15 @@ approved_at: 2026-05-29
   - 通过增加多 SN 依赖来解决本轮单 SN 打洞问题
   - 将 SN 观察端点或本地映射端口提升为跨 SN NAT 类型推断依据
   - 因 TCP direct 失败而全局惩罚同一远端的 QUIC/UDP 打洞候选
+  - 为规避 bounded channel 满载而在任一路径保留或重新引入 `unbounded_channel`
 - 系统约束：
   - 保持当前以 tokio 为优先的运行时策略
   - 保持混合 edition 的工作区布局
   - 保持当前协议说明中记录的兼容性预期
   - 保持现有 crate 边界，不因为本次需求把 `pn_server` 的 relay 语义迁移到其他 crate
+  - bounded channel 各位置默认容量只能出现在顶层配置定义中，默认值均为 `1024`；底层构造函数、listener、tunnel、registry 和测试替身必须接收对应位置的显式容量或配置快照，不得自行选择默认值
+  - 顶层配置必须能在用户不传任何 channel 容量参数时构造完整默认配置；显式配置时，调用方可以只覆盖某一类队列容量，不应被迫同时覆盖所有队列容量
+  - channel 容量配置必须覆盖所有由当前 unbounded channel 承载的内部队列；设计阶段若发现某个路径不能直接背压，必须明确满载时的错误或关闭语义后才能实现
   - 流量统计口径必须与 relay 实际成功转发的字节数一致；仅进入用户态缓冲但未成功写出的字节不得提前计入
   - source 与 target 两个统计视图都必须以各自“成功写到对端”的字节为准；不得把同一批字节重复累计到同一用户视图，也不得因为双边都可见而丢失任何一侧的记账
   - 限速应作用于 relay 成功握手后的桥接数据路径，不改变握手前 `ProxyOpenReq`/`ProxyOpenResp` 的控制流时序
@@ -185,6 +198,7 @@ approved_at: 2026-05-29
 - QUIC listener 的底层 UDP packet 分发由 `sfo_reuseport::QuicServer` 承担，Quinn 仍通过 `Endpoint::new_with_abstract_socket(...)` 管理 QUIC connection 和 incoming tunnel；每个 worker socket 拥有一个 Quinn endpoint，主动 QUIC connect 可随机或轮询选择一个 endpoint，同源 UDP punch 使用首个可用 worker socket。
 - `ServerRuntime` 可由外部设置并复用于 TCP/QUIC listener；未设置时仍由 `p2p-frame` 默认创建，保持现有调用方无需显式 runtime 的兼容启动路径。
 - 通用 `TunnelNetwork` 调用方通过 `listen(local, out, mapping_port, on_incoming_tunnel)` 注册入站回调并接收 `P2pResult<TunnelRef>`；`NetManager` 负责把该回调接到原有 incoming validator、订阅发布和 reject close 路径，保持外部 tunnel publish 语义不变。
+- 所有原 `unbounded_channel` 队列均具备容量上限，默认从顶层配置取得对应位置的 `1024`；外部调用方可以按队列类别或位置独立覆盖容量，不需要为未覆盖位置重复填写默认值；底层组件只消费对应位置已解析容量，并在队列满载时按设计定义的背压、拒绝、关闭或错误路径收敛。
 
 ## 风险
 - 旧设计说明与未来实现之间的协议漂移
@@ -216,6 +230,9 @@ approved_at: 2026-05-29
 - Quinn `AsyncUdpSocket` 适配器需要正确处理 `poll_recv` waker、`try_send` backpressure、local addr、关闭唤醒和 packet metadata；若实现不完整，可能导致 QUIC handshake 卡住、主动 connect 失败或 CPU 空转。
 - per-worker Quinn endpoint 依赖 `sfo-reuseport` QUIC route key 与 `QuicCidGenerator` 生成的 worker shard 保持一致；若 CID 生成或 Initial/0-RTT fallback 路由与后续 short-header shard 不一致，可能导致同一 QUIC connection 的 packet 分裂到不同 endpoint。
 - 外部注入 `ServerRuntime` 会改变 listener 生命周期所有权；若默认 runtime 与外部 runtime 混用边界不清，可能造成重复 worker、提前 drop 或服务无法关闭。
+- unbounded channel 改为 bounded channel 会把原先隐藏的积压转化为背压或错误；如果容量传递遗漏、满载语义不一致，可能导致 accept/open 等待路径卡住、过早关闭或错误传播不清。
+- 若底层组件继续保留局部默认值，实际容量会与顶层配置漂移，造成不同 transport 或测试替身的内存上限不可预测。
+- 若不同队列位置继续共用单一容量配置，调用方无法针对高吞吐 tunnel accept、TTP registry、subscription fanout 或 PN 内部队列分别调参，可能在某些路径容量不足时被迫整体放大所有队列上限。
 
 ## 验收锚点
 - source 侧用户能够通过 `pn_server` 的查询入口看到属于自己这条 bridge 的累计统计，且记账主体使用 relay 规范化后的已认证 `req.from`，不受源端伪造 `from` 影响。
@@ -245,6 +262,10 @@ approved_at: 2026-05-29
 - QUIC listener 必须通过 `sfo_reuseport::QuicServer::serve_socket(...)` 接收入站 worker socket，并通过 Quinn `AsyncUdpSocket` 适配器交给每个 worker 的 `quinn::Endpoint`；acceptance 必须确认 worker endpoint 的 `accept()` 仍能产出 incoming QUIC tunnel，且不新增 raw UDP tunnel 或业务载荷解析路径。
 - QUIC 主动 connect 可使用任一 worker endpoint；同源 UDP punch 必须使用首个可用 worker socket；acceptance 必须确认 punch 的本地端口与 QUIC listener 端口一致，且 `ServerReflexive` candidate policy、50ms cadence、active/reverse 起发时机和截止规则保持不变。
 - 外部设置 `ServerRuntime` 时，TCP/QUIC listener 必须使用该 runtime；未设置时默认 runtime 路径必须仍可启动 TCP/QUIC listener。
+- `p2p-frame` 代码中不得继续存在生产路径 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；对应队列必须使用 bounded channel，并由顶层配置传入容量。
+- 顶层配置未显式设置 channel 容量时，每个队列类别或位置的默认值必须为 `1024`；显式设置某一位置容量时，只有对应 network、tunnel、PN、TTP 等底层队列使用该覆盖值，其他位置继续使用顶层默认值，且底层不得自行覆盖默认值。
+- 验收必须确认用户可以不设置任何 channel 容量并获得完整默认配置，也可以只覆盖单个位置容量而不影响其他位置容量。
+- bounded channel 满载路径必须有可验收行为：按设计定义背压等待、返回错误、关闭迟到 tunnel/channel 或丢弃已关闭 listener 的迟到事件，不得静默无限缓存。
 
 ## Proposal Items
 | proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
@@ -255,3 +276,11 @@ approved_at: 2026-05-29
 | P-SFO-TCP-LISTENER-1 | networks_sfo_reuseport_tcp_listener | TCP tunnel listener 基于 `sfo_reuseport::TcpServer` 重构，入站 `sfo_reuseport::TcpStream` 接入现有 TLS accept、TCP control/data connection 分流、registry 和 tunnel publish 流程；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 `NetworkServerRuntime` 或 socket factory trait；不改变 TCP tunnel 线协议、TLS 身份校验或 tunnel publish 语义；不把 close 后的旧服务继续暴露为当前 listener 的入站 tunnel。 | unit 能覆盖外部 `ServerRuntime` 被 TCP listener 使用、默认 runtime 可用、`TcpServer` handler 的 stream 进入现有 control/data 分流路径、listener close 后不再发布新 tunnel；integration 能覆盖 TCP tunnel 仍可建立并传输。 |
 | P-SFO-QUIC-LISTENER-1 | networks_sfo_reuseport_quic_listener_socket | QUIC tunnel listener 基于 `sfo_reuseport::QuicServer::serve_socket(...)` 重构，使用内部 Quinn `AsyncUdpSocket` 适配器把每个 worker `sfo_reuseport::UdpSocket` 交给对应 `quinn::Endpoint`，并使用 worker-shard CID generator 保持连接路由稳定；主动 connect 可选择任一 worker endpoint，同源 UDP punch 使用首个可用 worker socket；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 raw UDP tunnel、业务载荷解析、公共 `TunnelNetwork` NAT 参数或 `NetworkServerRuntime`；不改变 QUIC tunnel 线协议、TLS 身份校验、NAT punch candidate policy、50ms cadence、active/reverse 起发时机、截止规则或 heartbeat 语义。 | unit 能覆盖 worker socket `try_send_to` / `poll_recv_from` 被 Quinn `AsyncUdpSocket` 使用、worker CID generator 绑定对应 worker shard、UDP punch 本地端口与 QUIC listener 端口一致、listener close 后关闭 `QuicServer` 和所有 Quinn endpoint；integration 能覆盖 QUIC tunnel 仍可建立并传输。 |
 | P-TUNNEL-NETWORK-CALLBACK-1 | tunnel_network_listen_callback | `TunnelNetwork::listen(...)` 改为由调用方传入入站 tunnel 回调并返回 `P2pResult<()>`；`TunnelNetwork` 不再导出 `TunnelListener` 或提供 `listeners()`，新 tunnel 通过回调通知外部。 | 不改变 `TunnelListener` 内部实现类型可被 TCP/QUIC/PN listener 复用；不改变 tunnel publish、incoming validator、TLS 身份校验、TCP/QUIC/PN 线协议、QUIC NAT punch 策略或 `listener_infos()` 语义；不要求调用方轮询 listener。 | unit 能覆盖 `NetManager::listen(...)` 注册回调后仍走 incoming validator、订阅发布和 reject close 路径；unit 或编译覆盖 TCP/QUIC/PN `listen(...)` 返回 `P2pResult<()>` 且不再暴露 `listeners()`；integration 能覆盖 workspace 调用方迁移后仍可建立入站 tunnel。 |
+| P-BOUNDED-CHANNELS-1 | bounded_channel_capacity_config | `p2p-frame` 内部所有 `unbounded_channel` 队列改为 bounded channel；容量由顶层配置按队列类别或位置独立向下传递，每个容量项默认值为 `1024`，用户默认不需要设置，外部可只覆盖某一位置容量，底层组件不定义默认值。 | 不改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不在底层散落硬编码默认容量；不强制所有队列共用一个容量配置；不通过额外 unbounded buffer 绕开容量限制。 | schema/admission 能以 `bounded_channel_capacity_config` 建立后续准入；unit 或编译覆盖默认用户不设置时各容量默认 `1024`、单个位置自定义容量只影响对应底层构造路径；代码搜索确认生产路径不再存在 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；满载路径具备按设计定义的错误、关闭或背压覆盖。 |
+
+## Downstream Follow-up
+- 本次 proposal 已按用户确认从“统一一个容量配置”调整为“按队列类别或位置独立配置，并且用户默认不需要设置”，并重新进入 `approved` 状态。
+- Design 已补齐独立容量配置结构、默认构造规则、每个底层队列应消费的配置项，以及只覆盖单一位置容量时的继承行为。
+- Testing 已补齐默认用户不配置、单项覆盖不影响其他位置、底层不保留默认值、满载错误传播和无 unbounded mpsc 的验证映射。
+- Implementation 必须在 proposal/design/testing 均 approved 且 admission 通过后，把当前统一 `channel_capacity` 改为分位置配置下发。
+- Acceptance 必须重新审计新的独立容量配置是否覆盖所有原 unbounded channel 使用点，且没有通过单一全局容量或底层默认值绕过本 proposal。

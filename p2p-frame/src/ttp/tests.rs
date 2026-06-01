@@ -19,6 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, split};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::time::{Duration, timeout};
 
+const TEST_CHANNEL_CAPACITY: usize = 8;
+
 fn purpose_of(value: u16) -> crate::networks::TunnelPurpose {
     crate::networks::TunnelPurpose::from_value(&value).unwrap()
 }
@@ -75,7 +77,7 @@ struct FakeTunnel {
     local_ep: Endpoint,
     remote_ep: Endpoint,
     incoming_stream_rx: AsyncMutex<
-        mpsc::UnboundedReceiver<
+        mpsc::Receiver<
             P2pResult<(
                 crate::networks::TunnelPurpose,
                 TunnelStreamRead,
@@ -83,7 +85,7 @@ struct FakeTunnel {
             )>,
         >,
     >,
-    incoming_stream_tx: mpsc::UnboundedSender<
+    incoming_stream_tx: mpsc::Sender<
         P2pResult<(
             crate::networks::TunnelPurpose,
             TunnelStreamRead,
@@ -91,10 +93,10 @@ struct FakeTunnel {
         )>,
     >,
     incoming_datagram_rx: AsyncMutex<
-        mpsc::UnboundedReceiver<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
+        mpsc::Receiver<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
     >,
     incoming_datagram_tx:
-        mpsc::UnboundedSender<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
+        mpsc::Sender<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
     opened_stream_vports: Mutex<Vec<u16>>,
     opened_datagram_vports: Mutex<Vec<u16>>,
 }
@@ -106,8 +108,8 @@ impl FakeTunnel {
         local_ep: Endpoint,
         remote_ep: Endpoint,
     ) -> Arc<Self> {
-        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-        let (datagram_tx, datagram_rx) = mpsc::unbounded_channel();
+        let (stream_tx, stream_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let (datagram_tx, datagram_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         Arc::new(Self {
             tunnel_id: crate::types::TunnelId::from(1),
             candidate_id: crate::types::TunnelCandidateId::from(1),
@@ -124,26 +126,26 @@ impl FakeTunnel {
         })
     }
 
-    fn push_stream(&self, vport: u16) {
+    fn push_stream(&self, vport: u16) -> P2pResult<()> {
         let (peer_end, tunnel_end) = tokio::io::duplex(64);
         let (tunnel_read, tunnel_write) = split(tunnel_end);
         drop(peer_end);
-        let _ = self.incoming_stream_tx.send(Ok((
+        self.incoming_stream_tx.try_send(Ok((
             purpose_of(vport),
             Box::pin(tunnel_read),
             Box::pin(tunnel_write),
-        )));
+        ))).map_err(|err| p2p_err!(P2pErrorCode::OutOfLimit, "test stream queue failed: {}", err))
     }
 
-    fn push_datagram(&self, vport: u16, payload: &'static [u8]) {
+    fn push_datagram(&self, vport: u16, payload: &'static [u8]) -> P2pResult<()> {
         let (mut peer_end, tunnel_end) = tokio::io::duplex(64);
         let (tunnel_read, _tunnel_write) = split(tunnel_end);
         tokio::spawn(async move {
             let _ = peer_end.write_all(payload).await;
         });
-        let _ = self
-            .incoming_datagram_tx
-            .send(Ok((purpose_of(vport), Box::pin(tunnel_read))));
+        self.incoming_datagram_tx
+            .try_send(Ok((purpose_of(vport), Box::pin(tunnel_read))))
+            .map_err(|err| p2p_err!(P2pErrorCode::OutOfLimit, "test datagram queue failed: {}", err))
     }
 
     fn opened_stream_vports(&self) -> Vec<u16> {
@@ -261,7 +263,7 @@ impl Tunnel for FakeTunnel {
 }
 
 struct FakeTunnelListener {
-    rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
+    rx: AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>,
 }
 
 #[async_trait::async_trait]
@@ -277,7 +279,7 @@ impl TunnelListener for FakeTunnelListener {
 struct FakeTunnelNetwork {
     protocol: Protocol,
     listener: TunnelListenerRef,
-    tx: mpsc::UnboundedSender<P2pResult<TunnelRef>>,
+    tx: mpsc::Sender<P2pResult<TunnelRef>>,
     infos: Mutex<Vec<TunnelListenerInfo>>,
     created_tunnel: Mutex<Option<TunnelRef>>,
     create_count: AtomicUsize,
@@ -285,7 +287,7 @@ struct FakeTunnelNetwork {
 
 impl FakeTunnelNetwork {
     fn new(protocol: Protocol) -> Arc<Self> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         Arc::new(Self {
             protocol,
             listener: Arc::new(FakeTunnelListener {
@@ -302,8 +304,10 @@ impl FakeTunnelNetwork {
         *self.created_tunnel.lock().unwrap() = Some(tunnel);
     }
 
-    fn push_tunnel(&self, tunnel: TunnelRef) {
-        let _ = self.tx.send(Ok(tunnel));
+    fn push_tunnel(&self, tunnel: TunnelRef) -> P2pResult<()> {
+        self.tx
+            .try_send(Ok(tunnel))
+            .map_err(|err| p2p_err!(P2pErrorCode::OutOfLimit, "test tunnel queue failed: {}", err))
     }
 
     fn create_count(&self) -> usize {
@@ -399,7 +403,12 @@ fn make_identity(id: u8, name: &str, endpoint: Endpoint) -> P2pIdentityRef {
 }
 
 fn make_manager(network: TunnelNetworkRef) -> NetManagerRef {
-    NetManager::new(vec![network], DefaultTlsServerCertResolver::new()).unwrap()
+    NetManager::new(
+        vec![network],
+        DefaultTlsServerCertResolver::new(),
+        TEST_CHANNEL_CAPACITY,
+    )
+    .unwrap()
 }
 
 fn init_executor() {
@@ -455,9 +464,9 @@ async fn server_listeners_receive_incoming_stream_and_datagram() {
     let datagram_listener = server.listen_datagram(purpose_of(2002)).await.unwrap();
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
 
-    network.push_tunnel(tunnel.clone());
-    tunnel.push_stream(2001);
-    tunnel.push_datagram(2002, b"abc");
+    network.push_tunnel(tunnel.clone()).unwrap();
+    tunnel.push_stream(2001).unwrap();
+    tunnel.push_datagram(2002, b"abc").unwrap();
 
     let (stream_meta, _stream_read, _stream_write) =
         timeout(Duration::from_secs(1), stream_listener.accept())
@@ -519,8 +528,8 @@ async fn server_open_stream_and_datagram_reuse_existing_incoming_tunnel() {
     let listener = server.listen_stream(purpose_of(4001)).await.unwrap();
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
 
-    network.push_tunnel(tunnel.clone());
-    tunnel.push_stream(4001);
+    network.push_tunnel(tunnel.clone()).unwrap();
+    tunnel.push_stream(4001).unwrap();
     let _ = timeout(Duration::from_secs(1), listener.accept())
         .await
         .unwrap()

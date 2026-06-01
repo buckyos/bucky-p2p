@@ -16,10 +16,10 @@ pub(crate) struct TtpRuntime {
 }
 
 impl TtpRuntime {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(channel_capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            stream_registry: TtpQueueRegistry::new(),
-            datagram_registry: TtpQueueRegistry::new(),
+            stream_registry: TtpQueueRegistry::new(channel_capacity),
+            datagram_registry: TtpQueueRegistry::new(channel_capacity),
             attached_tunnels: Mutex::new(Vec::new()),
         })
     }
@@ -162,7 +162,7 @@ impl TtpRuntime {
                         let Some(runtime) = weak.upgrade() else {
                             break;
                         };
-                        runtime.stream_registry.deliver(
+                        if let Err(err) = runtime.stream_registry.deliver(
                             &purpose,
                             Ok((
                                 TtpStreamMeta {
@@ -176,7 +176,9 @@ impl TtpRuntime {
                                 read,
                                 write,
                             )),
-                        );
+                        ) {
+                            log::warn!("ttp stream deliver failed purpose={}: {:?}", purpose, err);
+                        }
                     }
                     Err(err) => {
                         if err.code() != P2pErrorCode::NotSupport {
@@ -198,7 +200,7 @@ impl TtpRuntime {
                         let Some(runtime) = weak.upgrade() else {
                             break;
                         };
-                        runtime.datagram_registry.deliver(
+                        if let Err(err) = runtime.datagram_registry.deliver(
                             &purpose,
                             Ok(TtpDatagram {
                                 meta: TtpDatagramMeta {
@@ -211,7 +213,9 @@ impl TtpRuntime {
                                 },
                                 read,
                             }),
-                        );
+                        ) {
+                            log::warn!("ttp datagram deliver failed purpose={}: {:?}", purpose, err);
+                        }
                     }
                     Err(err) => {
                         if err.code() != P2pErrorCode::NotSupport {

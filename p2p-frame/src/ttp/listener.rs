@@ -30,16 +30,12 @@ pub trait TtpPortListener: Send + Sync + 'static {
 }
 
 pub(crate) struct QueueTtpListener {
-    rx: AsyncMutex<
-        mpsc::UnboundedReceiver<P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>,
-    >,
+    rx: AsyncMutex<mpsc::Receiver<P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>>,
 }
 
 impl QueueTtpListener {
     pub(crate) fn new(
-        rx: mpsc::UnboundedReceiver<
-            P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>,
-        >,
+        rx: mpsc::Receiver<P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>,
     ) -> TtpListenerRef {
         Arc::new(Self {
             rx: AsyncMutex::new(rx),
@@ -62,13 +58,11 @@ impl TtpListener for QueueTtpListener {
 }
 
 pub(crate) struct QueueTtpDatagramListener {
-    rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TtpDatagram>>>,
+    rx: AsyncMutex<mpsc::Receiver<P2pResult<TtpDatagram>>>,
 }
 
 impl QueueTtpDatagramListener {
-    pub(crate) fn new(
-        rx: mpsc::UnboundedReceiver<P2pResult<TtpDatagram>>,
-    ) -> TtpDatagramListenerRef {
+    pub(crate) fn new(rx: mpsc::Receiver<P2pResult<TtpDatagram>>) -> TtpDatagramListenerRef {
         Arc::new(Self {
             rx: AsyncMutex::new(rx),
         })

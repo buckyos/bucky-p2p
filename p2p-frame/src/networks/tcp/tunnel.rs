@@ -195,10 +195,10 @@ pub(crate) struct TcpTunnel {
     next_channel_seq: AtomicU32,
     next_request_seq: AtomicU32,
     next_ping_seq: AtomicU64,
-    stream_rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<AcceptedChannel>>>,
-    stream_tx: mpsc::UnboundedSender<P2pResult<AcceptedChannel>>,
-    datagram_rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<AcceptedChannel>>>,
-    datagram_tx: mpsc::UnboundedSender<P2pResult<AcceptedChannel>>,
+    stream_rx: AsyncMutex<mpsc::Receiver<P2pResult<AcceptedChannel>>>,
+    stream_tx: mpsc::Sender<P2pResult<AcceptedChannel>>,
+    datagram_rx: AsyncMutex<mpsc::Receiver<P2pResult<AcceptedChannel>>>,
+    datagram_tx: mpsc::Sender<P2pResult<AcceptedChannel>>,
     stream_accept_limit: AtomicU64,
     stream_accept_pending: AtomicU64,
     datagram_accept_limit: AtomicU64,
@@ -538,6 +538,7 @@ impl TcpTunnel {
         decision: TcpIncomingControlDecision,
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
+        channel_capacity: usize,
     ) -> P2pResult<Option<Arc<Self>>> {
         let result = match decision {
             TcpIncomingControlDecision::Accept => ControlConnReadyResult::Success,
@@ -570,6 +571,7 @@ impl TcpTunnel {
             heartbeat_interval,
             heartbeat_timeout,
             LocalTunnelPhase::PassiveReady,
+            channel_capacity,
         )))
     }
 
@@ -583,10 +585,11 @@ impl TcpTunnel {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
         initial_phase: LocalTunnelPhase,
+        channel_capacity: usize,
     ) -> Arc<Self> {
         let (control_read, control_write) = runtime::split(control.stream);
-        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-        let (datagram_tx, datagram_rx) = mpsc::unbounded_channel();
+        let (stream_tx, stream_rx) = mpsc::channel(channel_capacity);
+        let (datagram_tx, datagram_rx) = mpsc::channel(channel_capacity);
         let tunnel = Arc::new(Self {
             tunnel_id,
             candidate_id,
@@ -799,10 +802,26 @@ impl TcpTunnel {
             }
         }
 
-        let _ = self.stream_tx.send(Err(p2p_err!(reason, "tunnel closed")));
-        let _ = self
+        let mut first_send_error = None;
+        if let Err(err) = self.stream_tx.try_send(Err(p2p_err!(reason, "tunnel closed"))) {
+            first_send_error = Some(p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "tcp stream accept close notification failed: {}",
+                err
+            ));
+        }
+        if let Err(err) = self
             .datagram_tx
-            .send(Err(p2p_err!(reason, "tunnel closed")));
+            .try_send(Err(p2p_err!(reason, "tunnel closed")))
+        {
+            if first_send_error.is_none() {
+                first_send_error = Some(p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "tcp datagram accept close notification failed: {}",
+                    err
+                ));
+            }
+        }
 
         {
             let mut rx = self.stream_rx.lock().await;
@@ -815,6 +834,9 @@ impl TcpTunnel {
 
         let mut write = self.control_write.lock().await;
         let _ = runtime::AsyncWriteExt::shutdown(&mut *write).await;
+        if let Some(err) = first_send_error {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -2776,13 +2798,21 @@ impl TcpTunnel {
 
     fn enqueue_accepted(&self, kind: TcpChannelKind, accepted: AcceptedChannel) -> P2pResult<()> {
         match kind {
-            TcpChannelKind::Stream => self.stream_tx.send(Ok(accepted)).map_err(|_| {
+            TcpChannelKind::Stream => self.stream_tx.try_send(Ok(accepted)).map_err(|err| {
                 self.release_accept_slot(TcpChannelKind::Stream);
-                p2p_err!(P2pErrorCode::Interrupted, "stream accept queue closed")
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "stream accept queue failed: {}",
+                    err
+                )
             }),
-            TcpChannelKind::Datagram => self.datagram_tx.send(Ok(accepted)).map_err(|_| {
+            TcpChannelKind::Datagram => self.datagram_tx.try_send(Ok(accepted)).map_err(|err| {
                 self.release_accept_slot(TcpChannelKind::Datagram);
-                p2p_err!(P2pErrorCode::Interrupted, "datagram accept queue closed")
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "datagram accept queue failed: {}",
+                    err
+                )
             }),
         }
     }

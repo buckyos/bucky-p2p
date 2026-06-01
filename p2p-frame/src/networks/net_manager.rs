@@ -24,6 +24,7 @@ pub struct NetManager {
     listener_meta: Mutex<HashMap<Protocol, Vec<TunnelListenerInfo>>>,
     subscriptions: RwLock<HashMap<P2pId, IncomingTunnelSubscriber>>,
     is_listening: AtomicBool,
+    channel_capacity: usize,
 }
 
 pub type NetManagerRef = Arc<NetManager>;
@@ -32,11 +33,13 @@ impl NetManager {
     pub fn new(
         tunnel_networks: Vec<TunnelNetworkRef>,
         cert_resolver: ServerCertResolverRef,
+        channel_capacity: usize,
     ) -> P2pResult<NetManagerRef> {
         Self::new_with_incoming_tunnel_validator(
             tunnel_networks,
             cert_resolver,
             allow_all_incoming_tunnel_validator(),
+            channel_capacity,
         )
     }
 
@@ -44,6 +47,7 @@ impl NetManager {
         tunnel_networks: Vec<TunnelNetworkRef>,
         cert_resolver: ServerCertResolverRef,
         incoming_tunnel_validator: IncomingTunnelValidatorRef,
+        channel_capacity: usize,
     ) -> P2pResult<NetManagerRef> {
         let tunnel_networks = tunnel_networks
             .into_iter()
@@ -56,7 +60,12 @@ impl NetManager {
             listener_meta: Mutex::new(HashMap::new()),
             subscriptions: RwLock::new(HashMap::new()),
             is_listening: AtomicBool::new(false),
+            channel_capacity,
         }))
+    }
+
+    pub fn channel_capacity(&self) -> usize {
+        self.channel_capacity
     }
 
     pub async fn listen(
@@ -343,6 +352,8 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
+    const TEST_CHANNEL_CAPACITY: usize = 8;
+
     enum TestDecision {
         Accept,
         Reject,
@@ -498,6 +509,7 @@ mod tests {
             vec![],
             DefaultTlsServerCertResolver::new(),
             validator,
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap()
     }
@@ -505,14 +517,14 @@ mod tests {
     fn register_test_acceptor(
         manager: &NetManagerRef,
         local_id: P2pId,
-    ) -> mpsc::UnboundedReceiver<P2pResult<TunnelRef>> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    ) -> mpsc::Receiver<P2pResult<TunnelRef>> {
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         manager
             .register_incoming_tunnel_subscriber(
                 local_id,
                 Arc::new(move |result| {
-                    let ok = tx.send(result).is_ok();
-                    Box::pin(async move { ok })
+                    let tx = tx.clone();
+                    Box::pin(async move { tx.send(result).await.is_ok() })
                 }),
             )
             .unwrap();
@@ -520,7 +532,7 @@ mod tests {
     }
 
     async fn accept_test_tunnel(
-        acceptor: &mut mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+        acceptor: &mut mpsc::Receiver<P2pResult<TunnelRef>>,
     ) -> P2pResult<TunnelRef> {
         acceptor
             .recv()

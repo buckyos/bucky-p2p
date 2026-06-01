@@ -80,7 +80,7 @@ where
 }
 
 pub struct TunnelSubscription {
-    rx: mpsc::UnboundedReceiver<P2pResult<TunnelRef>>,
+    rx: mpsc::Receiver<P2pResult<TunnelRef>>,
 }
 
 impl TunnelSubscription {
@@ -222,7 +222,8 @@ pub struct TunnelManager {
     proxy_upgrade_initial_interval: Duration,
     tunnels: RwLock<HashMap<P2pId, TunnelEntries>>,
     state: Mutex<ManagerState>,
-    subscriptions: Mutex<Vec<mpsc::UnboundedSender<P2pResult<TunnelRef>>>>,
+    subscriptions: Mutex<Vec<mpsc::Sender<P2pResult<TunnelRef>>>>,
+    channel_capacity: usize,
     cleanup_task: SpawnHandle<()>,
     proxy_upgrade_notify: Arc<AsyncNotify>,
     proxy_upgrade_task: SpawnHandle<()>,
@@ -243,6 +244,7 @@ impl TunnelManager {
         conn_timeout: Duration,
         idle_timeout: Duration,
         proxy_upgrade_initial_interval: Duration,
+        channel_capacity: usize,
     ) -> P2pResult<TunnelManagerRef> {
         let sn_service_for_listener = sn_service.clone();
         let proxy_upgrade_notify = Arc::new(AsyncNotify::new());
@@ -265,6 +267,7 @@ impl TunnelManager {
                 proxy_upgrade_states: HashMap::new(),
             }),
             subscriptions: Mutex::new(Vec::new()),
+            channel_capacity,
             cleanup_task: Executor::spawn_with_handle({
                 let weak = weak.clone();
                 async move {
@@ -351,7 +354,7 @@ impl TunnelManager {
     }
 
     pub fn subscribe(&self) -> TunnelSubscription {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(self.channel_capacity);
         self.subscriptions.lock().unwrap().push(tx);
         TunnelSubscription { rx }
     }
@@ -561,7 +564,7 @@ impl TunnelManager {
             return Ok(());
         }
         let tunnel = self.register_tunnel(tunnel).await?;
-        self.publish_registered_tunnel(&tunnel);
+        self.publish_registered_tunnel(&tunnel)?;
         log::debug!(
             "incoming tunnel remote={} tunnel_id={:?} ignore reverse waiter because reverse=false",
             remote_id,
@@ -1039,7 +1042,7 @@ impl TunnelManager {
         let tunnel = tunnel.map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
         waiter_registration.dismiss();
         let tunnel = self.register_tunnel(tunnel).await?;
-        self.publish_registered_tunnel(&tunnel);
+        self.publish_registered_tunnel(&tunnel)?;
         log::debug!(
             "reverse path remote={} tunnel_id={:?} incoming tunnel ready local_ep={:?} remote_ep={:?}",
             remote_id,
@@ -1556,11 +1559,11 @@ impl TunnelManager {
 
     async fn register_tunnel_and_publish(&self, tunnel: TunnelRef) -> P2pResult<TunnelRef> {
         let tunnel = self.register_tunnel(tunnel).await?;
-        self.publish_registered_tunnel(&tunnel);
+        self.publish_registered_tunnel(&tunnel)?;
         Ok(tunnel)
     }
 
-    fn publish_registered_tunnel(&self, tunnel: &TunnelRef) {
+    fn publish_registered_tunnel(&self, tunnel: &TunnelRef) -> P2pResult<()> {
         let mut should_publish = false;
         {
             let mut tunnels = self.tunnels.write().unwrap();
@@ -1570,7 +1573,7 @@ impl TunnelManager {
                         && entry.tunnel.candidate_id() == tunnel.candidate_id()
                 }) {
                     if entry.published {
-                        return;
+                        return Ok(());
                     }
                     entry.published = true;
                     entry.updated_at = Instant::now();
@@ -1586,12 +1589,18 @@ impl TunnelManager {
                 tunnel.candidate_id(),
                 tunnel.form()
             );
-            return;
+            return Err(p2p_err!(
+                P2pErrorCode::NotFound,
+                "publish unregistered tunnel remote={} tunnel_id={:?} candidate_id={:?}",
+                tunnel.remote_id(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id()
+            ));
         }
-        self.publish_tunnel(tunnel.clone());
+        self.publish_tunnel(tunnel.clone())
     }
 
-    fn publish_tunnel(&self, tunnel: TunnelRef) {
+    fn publish_tunnel(&self, tunnel: TunnelRef) -> P2pResult<()> {
         log::debug!(
             "publish tunnel remote={} form={:?} protocol={:?}",
             tunnel.remote_id(),
@@ -1599,7 +1608,24 @@ impl TunnelManager {
             tunnel.protocol()
         );
         let mut subscriptions = self.subscriptions.lock().unwrap();
-        subscriptions.retain(|tx| tx.send(Ok(tunnel.clone())).is_ok());
+        let mut first_error = None;
+        subscriptions.retain(|tx| match tx.try_send(Ok(tunnel.clone())) {
+            Ok(()) => true,
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(p2p_err!(
+                        P2pErrorCode::OutOfLimit,
+                        "publish tunnel subscriber queue failed: {}",
+                        err
+                    ));
+                }
+                false
+            }
+        });
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn is_registered_tunnel_published(&self, remote_id: &P2pId, tunnel: &TunnelRef) -> bool {
@@ -1894,6 +1920,7 @@ mod nat_strategy_tests {
             crate::networks::NetManager::new(
                 Vec::new(),
                 crate::tls::DefaultTlsServerCertResolver::new(),
+                crate::stack::DEFAULT_CHANNEL_CAPACITY,
             )
             .unwrap(),
             None,
@@ -1904,6 +1931,7 @@ mod nat_strategy_tests {
             Duration::from_millis(200),
             Duration::from_secs(30),
             PROXY_UPGRADE_INITIAL_INTERVAL,
+            crate::stack::DEFAULT_CHANNEL_CAPACITY,
         )
         .unwrap()
     }
@@ -2205,7 +2233,7 @@ mod nat_strategy_tests {
         );
         let tunnel_ref: TunnelRef = tunnel.clone();
 
-        manager.publish_registered_tunnel(&tunnel_ref);
+        assert!(manager.publish_registered_tunnel(&tunnel_ref).is_err());
 
         assert!(manager.get_tunnel(&remote.get_id()).is_none());
         assert!(
@@ -2323,6 +2351,7 @@ mod tests {
 
     static TLS_INIT: Once = Once::new();
     static TEST_TUNNEL_ID_SEQ: AtomicUsize = AtomicUsize::new(1);
+    const TEST_CHANNEL_CAPACITY: usize = 8;
 
     struct StaticDeviceFinder {
         devices: HashMap<P2pId, P2pIdentityCertRef>,
@@ -2388,7 +2417,11 @@ mod tests {
         TunnelManager::new(
             local_identity,
             Some(Arc::new(StaticDeviceFinder { devices })),
-            crate::networks::NetManager::new(networks, DefaultTlsServerCertResolver::new())
+            crate::networks::NetManager::new(
+                networks,
+                DefaultTlsServerCertResolver::new(),
+                TEST_CHANNEL_CAPACITY,
+            )
                 .unwrap(),
             None,
             Arc::new(X509IdentityCertFactory),
@@ -2398,6 +2431,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(30),
             PROXY_UPGRADE_INITIAL_INTERVAL,
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap()
     }
@@ -2913,8 +2947,11 @@ mod tests {
                 Duration::from_secs(3),
                 Duration::from_millis(200),
                 Duration::from_secs(5),
+                TEST_CHANNEL_CAPACITY,
+                TEST_CHANNEL_CAPACITY,
             ))],
             DefaultTlsServerCertResolver::new(),
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
 
@@ -2932,6 +2969,7 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(30),
             PROXY_UPGRADE_INITIAL_INTERVAL,
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
         let mut callee_sub = callee_manager.subscribe();
@@ -2947,6 +2985,8 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_millis(200),
             Duration::from_secs(5),
+            TEST_CHANNEL_CAPACITY,
+            TEST_CHANNEL_CAPACITY,
         ));
         caller_network
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())
@@ -2984,7 +3024,7 @@ mod tests {
 
         let accepted = server_listener.accept_tunnel().await.unwrap();
         let accepted = callee_manager.register_tunnel(accepted).await.unwrap();
-        callee_manager.publish_registered_tunnel(&accepted);
+        callee_manager.publish_registered_tunnel(&accepted).unwrap();
 
         let subscribed = callee_sub.accept_tunnel().await.unwrap();
         assert_eq!(subscribed.remote_id(), caller_identity.get_id());
@@ -3444,7 +3484,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let notified = manager.register_tunnel(notified).await.unwrap();
-        manager.publish_registered_tunnel(&notified);
+        manager.publish_registered_tunnel(&notified).unwrap();
 
         let published = sub.accept_tunnel().await.unwrap();
         let reverse_ref: TunnelRef = reverse.clone();
@@ -3697,8 +3737,8 @@ mod tests {
         let tunnel_ref: TunnelRef = tunnel.clone();
 
         manager.register_tunnel(tunnel_ref.clone()).await.unwrap();
-        manager.publish_registered_tunnel(&tunnel_ref);
-        manager.publish_registered_tunnel(&tunnel_ref);
+        manager.publish_registered_tunnel(&tunnel_ref).unwrap();
+        manager.publish_registered_tunnel(&tunnel_ref).unwrap();
 
         let published = sub.accept_tunnel().await.unwrap();
         assert!(Arc::ptr_eq(&published, &tunnel_ref));
@@ -4439,7 +4479,12 @@ mod tests {
             Some(Arc::new(StaticDeviceFinder {
                 devices: HashMap::new(),
             })),
-            crate::networks::NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
+            crate::networks::NetManager::new(
+                vec![],
+                DefaultTlsServerCertResolver::new(),
+                TEST_CHANNEL_CAPACITY,
+            )
+            .unwrap(),
             None,
             Arc::new(X509IdentityCertFactory),
             None,
@@ -4448,6 +4493,7 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(30),
             configured_interval,
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
         let proxy = TrackableTunnel::new(

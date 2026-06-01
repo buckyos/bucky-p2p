@@ -40,14 +40,19 @@ pub type TtpClientRef = Arc<TtpClient>;
 
 impl TtpClient {
     pub fn new(local_identity: P2pIdentityRef, net_manager: NetManagerRef) -> TtpClientRef {
+        let channel_capacity = net_manager.channel_capacity();
         Arc::new(Self {
             local_identity,
             net_manager,
-            runtime: TtpRuntime::new(),
+            runtime: TtpRuntime::new(channel_capacity),
             tunnels: Mutex::new(Vec::new()),
             maintained_targets: Mutex::new(Vec::new()),
             maintain_started: AtomicBool::new(false),
         })
+    }
+
+    pub fn channel_capacity(&self) -> usize {
+        self.net_manager.channel_capacity()
     }
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {

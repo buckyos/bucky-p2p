@@ -844,6 +844,8 @@ mod tests {
     use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, split};
     use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+
+    const TEST_CHANNEL_CAPACITY: usize = 8;
     use tokio::time::{Duration, timeout};
 
     struct DummyIdentity {
@@ -898,14 +900,14 @@ mod tests {
         local_ep: Endpoint,
         remote_ep: Endpoint,
         incoming_rx: AsyncMutex<
-            mpsc::UnboundedReceiver<(
+            mpsc::Receiver<(
                 crate::networks::TunnelPurpose,
                 TunnelStreamRead,
                 TunnelStreamWrite,
             )>,
         >,
         opened_tx: Option<
-            mpsc::UnboundedSender<(
+            mpsc::Sender<(
                 crate::networks::TunnelPurpose,
                 ReadHalf<DuplexStream>,
                 WriteHalf<DuplexStream>,
@@ -922,14 +924,14 @@ mod tests {
             remote_ep: Endpoint,
         ) -> (
             Arc<Self>,
-            mpsc::UnboundedSender<(
+            mpsc::Sender<(
                 crate::networks::TunnelPurpose,
                 TunnelStreamRead,
                 TunnelStreamWrite,
             )>,
             oneshot::Receiver<()>,
         ) {
-            let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+            let (incoming_tx, incoming_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
             let (attached_tx, attached_rx) = oneshot::channel();
             (
                 Arc::new(Self {
@@ -955,14 +957,14 @@ mod tests {
             remote_ep: Endpoint,
         ) -> (
             Arc<Self>,
-            mpsc::UnboundedReceiver<(
+            mpsc::Receiver<(
                 crate::networks::TunnelPurpose,
                 ReadHalf<DuplexStream>,
                 WriteHalf<DuplexStream>,
             )>,
             oneshot::Receiver<()>,
         ) {
-            let (opened_tx, opened_rx) = mpsc::unbounded_channel();
+            let (opened_tx, opened_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
             let (attached_tx, attached_rx) = oneshot::channel();
             (
                 Arc::new(Self {
@@ -972,7 +974,7 @@ mod tests {
                     remote_id,
                     local_ep,
                     remote_ep,
-                    incoming_rx: AsyncMutex::new(mpsc::unbounded_channel().1),
+                    incoming_rx: AsyncMutex::new(mpsc::channel(TEST_CHANNEL_CAPACITY).1),
                     opened_tx: Some(opened_tx),
                     attached_tx: StdMutex::new(Some(attached_tx)),
                 }),
@@ -1053,9 +1055,13 @@ mod tests {
             let ((local_read, local_write), (remote_read, remote_write)) = make_stream_pair();
             if let Some(opened_tx) = &self.opened_tx {
                 opened_tx
-                    .send((purpose, remote_read, remote_write))
-                    .map_err(|_| {
-                        p2p_err!(P2pErrorCode::Interrupted, "open stream observer closed")
+                    .try_send((purpose, remote_read, remote_write))
+                    .map_err(|err| {
+                        p2p_err!(
+                            P2pErrorCode::OutOfLimit,
+                            "open stream observer queue failed: {}",
+                            err
+                        )
                     })?;
                 Ok((local_read, local_write))
             } else {
@@ -1094,7 +1100,7 @@ mod tests {
     }
 
     struct FakeTunnelListener {
-        rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<crate::networks::TunnelRef>>>,
+        rx: AsyncMutex<mpsc::Receiver<P2pResult<crate::networks::TunnelRef>>>,
     }
 
     #[async_trait::async_trait]
@@ -1110,13 +1116,13 @@ mod tests {
     struct FakeTunnelNetwork {
         protocol: Protocol,
         listener: TunnelListenerRef,
-        tx: mpsc::UnboundedSender<P2pResult<crate::networks::TunnelRef>>,
+        tx: mpsc::Sender<P2pResult<crate::networks::TunnelRef>>,
         infos: Mutex<Vec<TunnelListenerInfo>>,
     }
 
     impl FakeTunnelNetwork {
         fn new(protocol: Protocol) -> Arc<Self> {
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
             Arc::new(Self {
                 protocol,
                 listener: Arc::new(FakeTunnelListener {
@@ -1127,8 +1133,10 @@ mod tests {
             })
         }
 
-        fn push_tunnel(&self, tunnel: crate::networks::TunnelRef) {
-            let _ = self.tx.send(Ok(tunnel));
+        fn push_tunnel(&self, tunnel: crate::networks::TunnelRef) -> P2pResult<()> {
+            self.tx.try_send(Ok(tunnel)).map_err(|err| {
+                p2p_err!(P2pErrorCode::OutOfLimit, "test tunnel queue failed: {}", err)
+            })
         }
     }
 
@@ -1942,6 +1950,7 @@ mod tests {
         let net_manager = NetManager::new(
             vec![fake_network.clone() as TunnelNetworkRef],
             DefaultTlsServerCertResolver::new(),
+            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
         net_manager.listen(&[local_ep], None).await.unwrap();
@@ -1956,7 +1965,7 @@ mod tests {
             local_ep,
             target_ep,
         );
-        fake_network.push_tunnel(target_tunnel);
+        fake_network.push_tunnel(target_tunnel).unwrap();
         timeout(Duration::from_secs(1), target_attached)
             .await
             .unwrap()
@@ -1964,7 +1973,7 @@ mod tests {
 
         let (source_tunnel, source_stream_tx, source_attached) =
             FakeTunnel::new(identity.get_id(), source_id.clone(), local_ep, source_ep);
-        fake_network.push_tunnel(source_tunnel);
+        fake_network.push_tunnel(source_tunnel).unwrap();
         timeout(Duration::from_secs(1), source_attached)
             .await
             .unwrap()
@@ -1972,11 +1981,18 @@ mod tests {
 
         let ((server_read, server_write), (mut source_read, mut source_write)) = make_stream_pair();
         source_stream_tx
-            .send((
+            .try_send((
                 crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
                 server_read,
                 server_write,
             ))
+            .map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "test source stream queue failed: {}",
+                    err
+                )
+            })
             .unwrap();
 
         let req = ProxyOpenReq {

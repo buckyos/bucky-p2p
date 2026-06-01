@@ -5,13 +5,15 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 pub(crate) struct TtpQueueRegistry<T> {
-    listeners: RwLock<HashMap<TunnelPurpose, Arc<mpsc::UnboundedSender<P2pResult<T>>>>>,
+    listeners: RwLock<HashMap<TunnelPurpose, Arc<mpsc::Sender<P2pResult<T>>>>>,
+    channel_capacity: usize,
 }
 
 impl<T> TtpQueueRegistry<T> {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(channel_capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             listeners: RwLock::new(HashMap::new()),
+            channel_capacity,
         })
     }
 
@@ -25,8 +27,8 @@ impl<T> TtpQueueRegistry<T> {
     pub(crate) fn register(
         &self,
         purpose: TunnelPurpose,
-    ) -> P2pResult<mpsc::UnboundedReceiver<P2pResult<T>>> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    ) -> P2pResult<mpsc::Receiver<P2pResult<T>>> {
+        let (tx, rx) = mpsc::channel(self.channel_capacity);
         let mut listeners = self.listeners.write().unwrap();
         if listeners.contains_key(&purpose) {
             return Err(p2p_err!(
@@ -43,13 +45,23 @@ impl<T> TtpQueueRegistry<T> {
         self.listeners.write().unwrap().remove(purpose);
     }
 
-    pub(crate) fn deliver(&self, purpose: &TunnelPurpose, item: P2pResult<T>) {
-        let sender = self.listeners.read().unwrap().get(purpose).cloned();
-        if let Some(sender) = sender {
-            if sender.send(item).is_err() {
-                self.listeners.write().unwrap().remove(purpose);
-            }
-        }
+    pub(crate) fn deliver(&self, purpose: &TunnelPurpose, item: P2pResult<T>) -> P2pResult<()> {
+        let Some(sender) = self.listeners.read().unwrap().get(purpose).cloned() else {
+            return Err(p2p_err!(
+                P2pErrorCode::NotFound,
+                "ttp purpose {} not listening",
+                purpose
+            ));
+        };
+        sender.try_send(item).map_err(|err| {
+            self.listeners.write().unwrap().remove(purpose);
+            p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "ttp purpose {} listener queue full or closed: {}",
+                purpose,
+                err
+            )
+        })
     }
 }
 

@@ -164,10 +164,10 @@ pub(crate) struct QuicTunnel {
     uni_accept_started: AtomicBool,
     stream_vports: RwLock<Option<ListenVPortsRef>>,
     datagram_vports: RwLock<Option<ListenVPortsRef>>,
-    stream_rx: AsyncMutex<mpsc::UnboundedReceiver<QuicAcceptedStream>>,
-    stream_tx: mpsc::UnboundedSender<QuicAcceptedStream>,
-    datagram_rx: AsyncMutex<mpsc::UnboundedReceiver<QuicAcceptedDatagram>>,
-    datagram_tx: mpsc::UnboundedSender<QuicAcceptedDatagram>,
+    stream_rx: AsyncMutex<mpsc::Receiver<QuicAcceptedStream>>,
+    stream_tx: mpsc::Sender<QuicAcceptedStream>,
+    datagram_rx: AsyncMutex<mpsc::Receiver<QuicAcceptedDatagram>>,
+    datagram_tx: mpsc::Sender<QuicAcceptedDatagram>,
 }
 
 impl QuicTunnel {
@@ -201,6 +201,7 @@ impl QuicTunnel {
         remote_id: P2pId,
         local_ep: Endpoint,
         remote_ep: Endpoint,
+        channel_capacity: usize,
     ) -> P2pResult<Arc<Self>> {
         log::debug!(
             "quic tunnel connect start tunnel_id={} candidate_id={:?} reverse={} local_id={} local_ep={} remote_id={} remote_ep={}",
@@ -259,6 +260,7 @@ impl QuicTunnel {
             remote_ep,
             command_read,
             command_write,
+            channel_capacity,
         );
         log::debug!("quic tunnel connect established {}", tunnel.log_ctx());
         Ok(tunnel)
@@ -270,6 +272,7 @@ impl QuicTunnel {
         remote_id: P2pId,
         local_ep: Endpoint,
         remote_ep: Endpoint,
+        channel_capacity: usize,
     ) -> P2pResult<Arc<Self>> {
         log::debug!(
             "quic tunnel accept start local_id={} local_ep={} remote_id={} remote_ep={}",
@@ -307,6 +310,7 @@ impl QuicTunnel {
             remote_ep,
             command_read,
             command_write,
+            channel_capacity,
         );
         log::debug!("quic tunnel accept established {}", tunnel.log_ctx());
         Ok(tunnel)
@@ -324,9 +328,10 @@ impl QuicTunnel {
         remote_ep: Endpoint,
         command_read: quinn::RecvStream,
         command_write: quinn::SendStream,
+        channel_capacity: usize,
     ) -> Arc<Self> {
-        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-        let (datagram_tx, datagram_rx) = mpsc::unbounded_channel();
+        let (stream_tx, stream_rx) = mpsc::channel(channel_capacity);
+        let (datagram_tx, datagram_rx) = mpsc::channel(channel_capacity);
         let tunnel = Arc::new_cyclic(|weak| Self {
             socket,
             tunnel_id,
@@ -742,7 +747,9 @@ impl QuicTunnel {
             log::debug!("quic bi accepted raw stream {}", self.log_ctx());
             let tunnel = self.clone();
             Executor::spawn_ok(async move {
-                tunnel.handle_incoming_stream_open(send, recv).await;
+                if let Err(err) = tunnel.handle_incoming_stream_open(send, recv).await {
+                    log::warn!("quic incoming stream open failed: {:?}", err);
+                }
             });
         }
         log::debug!("quic bi accept loop stop {}", self.log_ctx());
@@ -767,7 +774,9 @@ impl QuicTunnel {
             log::debug!("quic uni accepted raw stream {}", self.log_ctx());
             let tunnel = self.clone();
             Executor::spawn_ok(async move {
-                tunnel.handle_incoming_datagram_open(recv).await;
+                if let Err(err) = tunnel.handle_incoming_datagram_open(recv).await {
+                    log::warn!("quic incoming datagram open failed: {:?}", err);
+                }
             });
         }
         log::debug!("quic uni accept loop stop {}", self.log_ctx());
@@ -793,7 +802,7 @@ impl QuicTunnel {
         self: Arc<Self>,
         mut send: quinn::SendStream,
         mut recv: quinn::RecvStream,
-    ) {
+    ) -> P2pResult<()> {
         let req = match Self::read_channel_command::<_, TunnelOpenChannelReq>(
             &mut recv,
             QuicTunnelCommandId::OpenChannelReq,
@@ -807,7 +816,7 @@ impl QuicTunnel {
                     P2pErrorCode::InvalidData,
                     format!("quic decode stream open req failed: {:?}", err),
                 );
-                return;
+                return Err(err);
             }
         };
         log::debug!(
@@ -840,7 +849,11 @@ impl QuicTunnel {
                 },
             )
             .await;
-            return;
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "quic incoming stream open rejected result={:?}",
+                result
+            ));
         }
 
         if self.stream_tx.is_closed() {
@@ -858,7 +871,10 @@ impl QuicTunnel {
                 },
             )
             .await;
-            return;
+            return Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "quic incoming stream open queue closed"
+            ));
         }
 
         if Self::write_channel_command(
@@ -877,35 +893,40 @@ impl QuicTunnel {
                 req.request_id,
                 req.purpose
             );
-            return;
+            return Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "quic incoming stream open ack write failed"
+            ));
         }
 
-        if self
-            .stream_tx
-            .send(QuicAcceptedStream {
+        self.stream_tx
+            .try_send(QuicAcceptedStream {
                 purpose: req.purpose.clone(),
                 read: recv,
                 write: send,
             })
-            .is_err()
-        {
-            log::warn!(
-                "quic incoming stream open deliver failed {} request_id={} purpose={}",
-                self.log_ctx(),
-                req.request_id,
-                req.purpose
-            );
-            return;
-        }
+            .map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "quic incoming stream open deliver failed request_id={} purpose={} error={}",
+                    req.request_id,
+                    req.purpose,
+                    err
+                )
+            })?;
         log::debug!(
             "quic incoming stream open accepted {} request_id={} purpose={}",
             self.log_ctx(),
             req.request_id,
             req.purpose
         );
+        Ok(())
     }
 
-    async fn handle_incoming_datagram_open(self: Arc<Self>, mut recv: quinn::RecvStream) {
+    async fn handle_incoming_datagram_open(
+        self: Arc<Self>,
+        mut recv: quinn::RecvStream,
+    ) -> P2pResult<()> {
         let req = match Self::read_channel_command::<_, TunnelOpenChannelReq>(
             &mut recv,
             QuicTunnelCommandId::OpenChannelReq,
@@ -919,7 +940,7 @@ impl QuicTunnel {
                     P2pErrorCode::InvalidData,
                     format!("quic decode datagram open req failed: {:?}", err),
                 );
-                return;
+                return Err(err);
             }
         };
         log::debug!(
@@ -936,16 +957,26 @@ impl QuicTunnel {
             self.incoming_open_result(req.kind, &req.purpose)
         };
 
-        if result == TunnelCommandResult::Success
-            && self
-                .datagram_tx
-                .send(QuicAcceptedDatagram {
+        if result == TunnelCommandResult::Success {
+            if let Err(err) = self.datagram_tx.try_send(QuicAcceptedDatagram {
                     purpose: req.purpose.clone(),
                     read: recv,
-                })
-                .is_err()
-        {
-            result = TunnelCommandResult::ListenerClosed;
+                }) {
+                result = TunnelCommandResult::ListenerClosed;
+                let _ = self
+                    .send_command(TunnelOpenChannelResp {
+                        request_id: req.request_id,
+                        result,
+                    })
+                    .await;
+                return Err(p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "quic incoming datagram open deliver failed request_id={} purpose={} error={}",
+                    req.request_id,
+                    req.purpose,
+                    err
+                ));
+            }
         }
 
         if result != TunnelCommandResult::Success {
@@ -970,6 +1001,15 @@ impl QuicTunnel {
                 result,
             })
             .await;
+        if result == TunnelCommandResult::Success {
+            Ok(())
+        } else {
+            Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "quic incoming datagram open rejected result={:?}",
+                result
+            ))
+        }
     }
 
     fn begin_open_channel(&self) -> (u64, oneshot::Receiver<P2pResult<()>>) {

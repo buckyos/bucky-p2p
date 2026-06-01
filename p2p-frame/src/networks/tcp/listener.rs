@@ -130,8 +130,8 @@ pub(crate) struct TcpTunnelListener {
     cert_factory: P2pIdentityCertFactoryRef,
     acceptor: crate::runtime::TlsAcceptor,
     state: Mutex<TcpTunnelListenerState>,
-    accepted_tx: Mutex<Option<mpsc::UnboundedSender<P2pResult<TunnelRef>>>>,
-    accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<TunnelRef>>>,
+    accepted_tx: Mutex<Option<mpsc::Sender<P2pResult<TunnelRef>>>>,
+    accepted_rx: AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>,
     accept_task: Mutex<Option<SpawnHandle<()>>>,
     close_notify: Notify,
     closed: AtomicBool,
@@ -140,6 +140,7 @@ pub(crate) struct TcpTunnelListener {
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
     server_runtime: ServerRuntime,
+    tunnel_accept_capacity: usize,
     #[cfg(test)]
     forced_control_decision: Mutex<Option<TcpIncomingControlDecision>>,
 }
@@ -153,8 +154,10 @@ impl TcpTunnelListener {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
         server_runtime: ServerRuntime,
+        listener_accept_capacity: usize,
+        tunnel_accept_capacity: usize,
     ) -> Arc<Self> {
-        let (accepted_tx, accepted_rx) = mpsc::unbounded_channel();
+        let (accepted_tx, accepted_rx) = mpsc::channel(listener_accept_capacity);
         Arc::new(Self {
             acceptor: build_acceptor(cert_resolver.clone(), cert_factory.clone()),
             cert_resolver,
@@ -176,6 +179,7 @@ impl TcpTunnelListener {
             heartbeat_interval,
             heartbeat_timeout,
             server_runtime,
+            tunnel_accept_capacity,
             #[cfg(test)]
             forced_control_decision: Mutex::new(None),
         })
@@ -253,10 +257,20 @@ impl TcpTunnelListener {
         }
     }
 
-    fn send_accepted(&self, result: P2pResult<TunnelRef>) {
-        if let Some(tx) = self.accepted_tx.lock().unwrap().clone() {
-            let _ = tx.send(result);
-        }
+    fn send_accepted(&self, result: P2pResult<TunnelRef>) -> P2pResult<()> {
+        let Some(tx) = self.accepted_tx.lock().unwrap().clone() else {
+            return Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "tcp tunnel listener accept queue closed"
+            ));
+        };
+        tx.try_send(result).map_err(|err| {
+            p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "tcp tunnel listener accept queue full or closed: {}",
+                err
+            )
+        })
     }
 
     fn validate_control_hello(&self, hello: &TcpConnectionHello) -> TcpIncomingControlDecision {
@@ -307,6 +321,7 @@ impl TcpTunnelListener {
             decision,
             self.heartbeat_interval,
             self.heartbeat_timeout,
+            self.tunnel_accept_capacity,
         )
         .await?;
 
@@ -354,9 +369,17 @@ impl TcpTunnelListener {
             Ok((connection, hello)) => match hello.role {
                 TcpConnectionRole::Control => {
                     match self.on_control_connection(hello, connection).await {
-                        Ok(Some(tunnel)) => self.send_accepted(Ok(tunnel)),
+                        Ok(Some(tunnel)) => {
+                            if let Err(err) = self.send_accepted(Ok(tunnel)) {
+                                log::warn!("tcp tunnel accept deliver failed: {:?}", err);
+                            }
+                        }
                         Ok(None) => {}
-                        Err(err) => self.send_accepted(Err(err)),
+                        Err(err) => {
+                            if let Err(err) = self.send_accepted(Err(err)) {
+                                log::warn!("tcp tunnel accept error deliver failed: {:?}", err);
+                            }
+                        }
                     }
                 }
                 TcpConnectionRole::Data => {

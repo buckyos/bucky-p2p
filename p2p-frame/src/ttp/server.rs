@@ -25,10 +25,11 @@ impl TtpServer {
         local_identity: P2pIdentityRef,
         net_manager: NetManagerRef,
     ) -> P2pResult<TtpServerRef> {
+        let channel_capacity = net_manager.channel_capacity();
         let server = Arc::new(Self {
             local_identity,
             net_manager,
-            runtime: TtpRuntime::new(),
+            runtime: TtpRuntime::new(channel_capacity),
             tunnels: Mutex::new(Vec::new()),
         });
         server.register_accept_callback()?;
