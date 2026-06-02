@@ -860,8 +860,8 @@ mod tests {
     use crate::error::{P2pErrorCode, p2p_err};
     use crate::executor::Executor;
     use crate::networks::{
-        IncomingTunnelCallback, Tunnel, TunnelListener, TunnelListenerInfo, TunnelListenerRef,
-        TunnelNetwork, TunnelNetworkRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+        IncomingTunnelCallback, Tunnel, TunnelListenerInfo, TunnelNetwork, TunnelNetworkRef,
+        TunnelState, TunnelStreamRead, TunnelStreamWrite,
     };
     use crate::p2p_identity::{
         EncodedP2pIdentity, P2pIdentity, P2pIdentityCertRef, P2pIdentityRef, P2pSignature,
@@ -1062,23 +1062,9 @@ mod tests {
         }
     }
 
-    struct FakeTunnelListener {
-        rx: AsyncMutex<mpsc::UnboundedReceiver<P2pResult<crate::networks::TunnelRef>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl TunnelListener for FakeTunnelListener {
-        async fn accept_tunnel(&self) -> P2pResult<crate::networks::TunnelRef> {
-            let mut rx = self.rx.lock().await;
-            rx.recv()
-                .await
-                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "tunnel listener closed"))?
-        }
-    }
-
     struct FakeTunnelNetwork {
         protocol: Protocol,
-        listener: TunnelListenerRef,
+        rx: AsyncMutex<Option<mpsc::UnboundedReceiver<P2pResult<crate::networks::TunnelRef>>>>,
         tx: mpsc::UnboundedSender<P2pResult<crate::networks::TunnelRef>>,
         infos: Mutex<Vec<TunnelListenerInfo>>,
     }
@@ -1088,9 +1074,7 @@ mod tests {
             let (tx, rx) = mpsc::unbounded_channel();
             Arc::new(Self {
                 protocol,
-                listener: Arc::new(FakeTunnelListener {
-                    rx: AsyncMutex::new(rx),
-                }),
+                rx: AsyncMutex::new(Some(rx)),
                 tx,
                 infos: Mutex::new(Vec::new()),
             })
@@ -1122,20 +1106,17 @@ mod tests {
                 local: *local,
                 mapping_port,
             }];
-            let listener = self.listener.clone();
+            let mut rx = self
+                .rx
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "fake listener already used"))?;
             Executor::spawn_ok(async move {
                 loop {
-                    match listener.accept_tunnel().await {
-                        Ok(tunnel) => on_incoming_tunnel(Ok(tunnel)).await,
-                        Err(err) => {
-                            if matches!(
-                                err.code(),
-                                P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
-                            ) {
-                                break;
-                            }
-                            on_incoming_tunnel(Err(err)).await;
-                        }
+                    match rx.recv().await {
+                        Some(result) => on_incoming_tunnel(result).await,
+                        None => break,
                     }
                 }
             });

@@ -17,8 +17,8 @@ use rand::{Rng, random};
 use rustls::pki_types::CertificateDer;
 use rustls::version::TLS13;
 use sfo_reuseport::{
-    Error as SfoReuseportError, QuicCidGenerator, QuicServer, ServerRuntime, ServiceConfig,
-    SocketOptions, UdpSocket as SfoUdpSocket,
+    Error as SfoReuseportError, QuicCidGenerator, QuicServer, ServerRuntime, SocketOptions,
+    UdpServiceConfig, UdpSocket as SfoUdpSocket,
 };
 use std::io::{self, IoSliceMut};
 use std::pin::Pin;
@@ -606,7 +606,7 @@ impl QuicTunnelListener {
         };
 
         let server_config = self.build_server_config()?;
-        let config = ServiceConfig::new(*local.addr()).with_socket_options(SocketOptions {
+        let config = UdpServiceConfig::new(*local.addr()).with_socket_options(SocketOptions {
             reuse_address,
             ..SocketOptions::default()
         });
@@ -1110,7 +1110,7 @@ mod udp_punch_tests {
     async fn sfo_udp_socket() -> (ServerRuntime, UdpServer, SfoUdpSocket) {
         let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap());
+        let config = UdpServiceConfig::new("127.0.0.1:0".parse().unwrap());
         let server = UdpServer::serve_socket(&runtime, config, move |socket, _worker_id| {
             let tx = tx.clone();
             async move {

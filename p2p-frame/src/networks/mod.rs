@@ -1,5 +1,4 @@
 mod command;
-mod listener;
 mod net_manager;
 mod network;
 mod quic;
@@ -14,7 +13,6 @@ pub use crate::tunnel::{
 };
 pub use command::*;
 use futures::FutureExt;
-pub use listener::*;
 pub use net_manager::*;
 pub use network::*;
 pub use quic::*;

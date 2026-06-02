@@ -2336,9 +2336,7 @@ mod tests {
     use super::*;
     use crate::endpoint::{EndpointArea, Protocol};
     use crate::executor::Executor;
-    use crate::networks::{
-        IncomingTunnelCallback, TunnelListener, TunnelListenerInfo, TunnelNetwork,
-    };
+    use crate::networks::{IncomingTunnelCallback, TunnelListenerInfo, TunnelNetwork};
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
     use crate::sn::protocol::v0::{SnCalled, TunnelType};
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};

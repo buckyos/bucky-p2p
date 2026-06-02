@@ -11,7 +11,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
 use crate::types::{TunnelCandidateId, TunnelId};
-use sfo_reuseport::{ServerRuntime, ServiceConfig, SocketOptions, TcpServer};
+use sfo_reuseport::{ServerRuntime, SocketOptions, TcpServer, TcpServiceConfig};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -195,7 +195,7 @@ impl TcpTunnelListener {
     ) -> P2pResult<()> {
         let listener = self.clone();
         let bind_local = resolve_tcp_bind_endpoint(local)?;
-        let config = ServiceConfig::new(*bind_local.addr()).with_socket_options(SocketOptions {
+        let config = TcpServiceConfig::new(*bind_local.addr()).with_socket_options(SocketOptions {
             reuse_address,
             ..SocketOptions::default()
         });

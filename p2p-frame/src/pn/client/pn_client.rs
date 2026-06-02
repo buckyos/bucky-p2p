@@ -8,9 +8,8 @@ use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
     IncomingTunnelCallback, Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult,
-    TunnelListener, TunnelListenerInfo, TunnelListenerRef, TunnelNetwork, TunnelPurpose, TunnelRef,
-    TunnelStreamRead, TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header,
-    write_tunnel_command,
+    TunnelListenerInfo, TunnelNetwork, TunnelPurpose, TunnelRef, TunnelStreamRead,
+    TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header, write_tunnel_command,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::pn::{
@@ -359,7 +358,7 @@ pub(super) enum PassiveTunnelDispatch {
 
 pub struct PnClient {
     shared: Arc<PnShared>,
-    listener: Mutex<Option<TunnelListenerRef>>,
+    listener: Mutex<Option<Arc<PnListener>>>,
     listener_infos: Mutex<Vec<TunnelListenerInfo>>,
 }
 
@@ -549,8 +548,7 @@ impl TunnelNetwork for PnClient {
             .ttp_client
             .listen_stream(TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
             .await?;
-        let listener: TunnelListenerRef =
-            Arc::new(PnListener::new(self.shared.clone(), ttp_listener));
+        let listener = Arc::new(PnListener::new(self.shared.clone(), ttp_listener));
         *self.listener_infos.lock().unwrap() = vec![TunnelListenerInfo {
             local: *local,
             mapping_port,

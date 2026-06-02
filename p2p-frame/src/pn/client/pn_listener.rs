@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::error::P2pResult;
 use crate::networks::{
-    Tunnel, TunnelCommandBody, TunnelCommandResult, TunnelListener, TunnelRef,
-    read_tunnel_command_body, read_tunnel_command_header,
+    Tunnel, TunnelCommandBody, TunnelCommandResult, TunnelRef, read_tunnel_command_body,
+    read_tunnel_command_header,
 };
 use crate::pn::{ProxyControlOpenReq, ProxyControlOpenResp, ProxyOpenReq};
 use crate::ttp::TtpListenerRef;
@@ -25,9 +25,8 @@ impl PnListener {
     }
 }
 
-#[async_trait::async_trait]
-impl TunnelListener for PnListener {
-    async fn accept_tunnel(&self) -> P2pResult<TunnelRef> {
+impl PnListener {
+    pub(super) async fn accept_tunnel(&self) -> P2pResult<TunnelRef> {
         loop {
             let (_meta, mut read, write) = self.ttp_listener.accept().await?;
             let header = read_tunnel_command_header(&mut read).await?;
