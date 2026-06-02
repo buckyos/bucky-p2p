@@ -350,9 +350,7 @@ pub(crate) struct QuicTunnelListener {
     closed: AtomicBool,
     worker_count: Arc<AtomicUsize>,
     server_runtime: ServerRuntime,
-    listener_accept_capacity: usize,
     listener_connect_capacity: usize,
-    tunnel_accept_capacity: usize,
 }
 
 impl QuicTunnelListener {
@@ -363,9 +361,7 @@ impl QuicTunnelListener {
         congestion_algorithm: QuicCongestionAlgorithm,
         server_runtime: ServerRuntime,
         on_incoming_tunnel: IncomingTunnelCallback,
-        listener_accept_capacity: usize,
         listener_connect_capacity: usize,
-        tunnel_accept_capacity: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             cert_cache,
@@ -387,9 +383,7 @@ impl QuicTunnelListener {
             closed: AtomicBool::new(false),
             worker_count: Arc::new(AtomicUsize::new(0)),
             server_runtime,
-            listener_accept_capacity,
             listener_connect_capacity,
-            tunnel_accept_capacity,
         })
     }
 
@@ -755,7 +749,6 @@ impl QuicTunnelListener {
             remote_identity.get_id(),
             self.local(),
             Endpoint::from((Protocol::Quic, remote_addr)),
-            self.tunnel_accept_capacity,
         )
         .await?)
     }
@@ -1037,6 +1030,26 @@ mod udp_punch_tests {
         assert!(!is_udp_punch_payload(&[0xc0, 0, 0, 0, 1, 8, 1, 2]));
         assert!(!is_udp_punch_payload(&[0x40, 0, 1, 2, 3]));
         assert!(!is_udp_punch_payload(b"\x00P2"));
+    }
+
+    #[test]
+    fn quic_packet_worker_index_uses_dcid_prefix_for_long_and_short_packets() {
+        let long_packet = [0xe0, 0, 0, 0, 1, 4, 0x12, 0x34, 0xaa, 0xbb];
+        let short_packet = [0x40, 0x12, 0x35, 0xcc, 0xdd];
+
+        assert_eq!(quic_packet_worker_index_prefix(&long_packet), Some(0x1234));
+        assert_eq!(quic_packet_worker_index(&long_packet, 7), Some(0x1234 % 7));
+        assert_eq!(quic_packet_worker_index_prefix(&short_packet), Some(0x1235));
+        assert_eq!(quic_packet_worker_index(&short_packet, 7), Some(0x1235 % 7));
+        assert_eq!(quic_packet_worker_index(&short_packet, 0), None);
+        assert_eq!(
+            quic_packet_worker_index_prefix(&[0xe0, 0, 0, 0, 1, 0]),
+            None
+        );
+        assert_eq!(
+            quic_packet_worker_index_prefix(&[0xc0, 0, 0, 0, 1, 2]),
+            None
+        );
     }
 
     #[test]

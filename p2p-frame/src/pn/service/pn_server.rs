@@ -27,7 +27,7 @@ use crate::pn::{
     ProxyOpenResp,
 };
 use crate::runtime;
-use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
+use crate::ttp::{TtpPortListener, TtpServer, TtpServerRef};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -727,46 +727,47 @@ impl PnServer {
             return Ok(());
         }
 
-        let listener = match self
+        let weak = Arc::downgrade(self);
+        let callback = Arc::new(move |accepted: P2pResult<crate::ttp::TtpIncomingStream>| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let Some(server) = weak.upgrade() else {
+                    return;
+                };
+                if server.is_stopped() {
+                    return;
+                }
+                let service = server.service.clone();
+                let (meta, read, write) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
+                        log::warn!("pn server accept stopped: {:?}", err);
+                        return;
+                    }
+                };
+                Executor::spawn(async move {
+                    service
+                        .handle_proxy_connection(meta.remote_id, read, write)
+                        .await;
+                });
+            }) as crate::ttp::TtpIncomingStreamCallbackFuture
+        });
+
+        match self
             .ttp_server
             .listen_stream(
                 crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
+                callback,
             )
             .await
         {
-            Ok(listener) => listener,
+            Ok(()) => {}
             Err(err) => {
                 self.started.store(false, atomic::Ordering::SeqCst);
                 return Err(err);
             }
         };
-
-        let this = self.clone();
-        let task = Executor::spawn_with_handle(async move {
-            this.run_accept_loop(listener).await;
-        })
-        .unwrap();
-        *self.accept_task.lock().unwrap() = Some(task);
         Ok(())
-    }
-
-    async fn run_accept_loop(self: Arc<Self>, listener: TtpListenerRef) {
-        loop {
-            let (meta, read, write) = match listener.accept().await {
-                Ok(accepted) => accepted,
-                Err(err) => {
-                    log::warn!("pn server accept stopped: {:?}", err);
-                    break;
-                }
-            };
-
-            let service = self.service.clone();
-            Executor::spawn(async move {
-                service
-                    .handle_proxy_connection(meta.remote_id, read, write)
-                    .await;
-            });
-        }
     }
 
     pub fn stop(&self) {
@@ -899,12 +900,14 @@ mod tests {
         remote_id: P2pId,
         local_ep: Endpoint,
         remote_ep: Endpoint,
-        incoming_rx: AsyncMutex<
-            mpsc::Receiver<(
-                crate::networks::TunnelPurpose,
-                TunnelStreamRead,
-                TunnelStreamWrite,
-            )>,
+        incoming_rx: Arc<
+            AsyncMutex<
+                mpsc::Receiver<(
+                    crate::networks::TunnelPurpose,
+                    TunnelStreamRead,
+                    TunnelStreamWrite,
+                )>,
+            >,
         >,
         opened_tx: Option<
             mpsc::Sender<(
@@ -941,7 +944,7 @@ mod tests {
                     remote_id,
                     local_ep,
                     remote_ep,
-                    incoming_rx: AsyncMutex::new(incoming_rx),
+                    incoming_rx: Arc::new(AsyncMutex::new(incoming_rx)),
                     opened_tx: None,
                     attached_tx: StdMutex::new(Some(attached_tx)),
                 }),
@@ -974,7 +977,7 @@ mod tests {
                     remote_id,
                     local_ep,
                     remote_ep,
-                    incoming_rx: AsyncMutex::new(mpsc::channel(TEST_CHANNEL_CAPACITY).1),
+                    incoming_rx: Arc::new(AsyncMutex::new(mpsc::channel(TEST_CHANNEL_CAPACITY).1)),
                     opened_tx: Some(opened_tx),
                     attached_tx: StdMutex::new(Some(attached_tx)),
                 }),
@@ -1034,16 +1037,28 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             if let Some(tx) = self.attached_tx.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+            let incoming_rx = self.incoming_rx.clone();
+            tokio::spawn(async move {
+                let mut incoming_rx = incoming_rx.lock().await;
+                while let Some((purpose, read, write)) = incoming_rx.recv().await {
+                    callback(Ok((purpose, read, write))).await;
+                }
+            });
             Ok(())
         }
 
         async fn listen_datagram(
             &self,
             _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
         ) -> P2pResult<()> {
             Ok(())
         }
@@ -1069,32 +1084,10 @@ mod tests {
             }
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            TunnelStreamRead,
-            TunnelStreamWrite,
-        )> {
-            let mut rx = self.incoming_rx.lock().await;
-            rx.recv()
-                .await
-                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream closed"))
-        }
-
         async fn open_datagram(
             &self,
             _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<crate::networks::TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
-        }
-
-        async fn accept_datagram(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            crate::networks::TunnelDatagramRead,
-        )> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
     }
@@ -1119,7 +1112,11 @@ mod tests {
 
         fn push_tunnel(&self, tunnel: crate::networks::TunnelRef) -> P2pResult<()> {
             self.tx.try_send(Ok(tunnel)).map_err(|err| {
-                p2p_err!(P2pErrorCode::OutOfLimit, "test tunnel queue failed: {}", err)
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "test tunnel queue failed: {}",
+                    err
+                )
             })
         }
     }
@@ -1145,12 +1142,10 @@ mod tests {
                 local: *local,
                 mapping_port,
             }];
-            let mut rx = self
-                .rx
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "fake listener already used"))?;
+            let mut rx =
+                self.rx.lock().await.take().ok_or_else(|| {
+                    p2p_err!(P2pErrorCode::ErrorState, "fake listener already used")
+                })?;
             Executor::spawn_ok(async move {
                 loop {
                     match rx.recv().await {

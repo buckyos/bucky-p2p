@@ -191,8 +191,7 @@ impl PnShared {
         Ok(tunnel)
     }
 
-    #[cfg(test)]
-    pub(super) fn new_for_test(local_identity: P2pIdentityRef) -> Arc<Self> {
+    pub(super) fn new_local(local_identity: P2pIdentityRef) -> Arc<Self> {
         let net_manager = crate::networks::NetManager::new(
             vec![],
             crate::tls::DefaultTlsServerCertResolver::new(),
@@ -494,16 +493,6 @@ impl PnClient {
     pub fn tunnel_idle_timeout(&self) -> Option<Duration> {
         self.shared.tunnel_idle_timeout()
     }
-
-    #[cfg(test)]
-    pub(super) fn get_tunnel_for_test(
-        &self,
-        remote_id: &P2pId,
-        tunnel_id: TunnelId,
-    ) -> Option<Arc<PnTunnel>> {
-        self.shared
-            .get_tunnel(&PnShared::tunnel_key(remote_id.clone(), tunnel_id))
-    }
 }
 
 #[async_trait::async_trait]
@@ -543,33 +532,51 @@ impl TunnelNetwork for PnClient {
             PROXY_SERVICE,
             mapping_port
         );
-        let ttp_listener = self
-            .shared
+        let listener = Arc::new(PnListener::new(self.shared.clone()));
+        let callback_listener = listener.clone();
+        let callback_on_incoming = on_incoming_tunnel.clone();
+        let callback = Arc::new(move |accepted: P2pResult<crate::ttp::TtpIncomingStream>| {
+            let listener = callback_listener.clone();
+            let on_incoming_tunnel = callback_on_incoming.clone();
+            Box::pin(async move {
+                let (_meta, read, write) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
+                        if !matches!(
+                            err.code(),
+                            P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+                        ) {
+                            (on_incoming_tunnel)(Err(err)).await;
+                        }
+                        return;
+                    }
+                };
+                match listener.handle_stream(read, write).await {
+                    Ok(Some(tunnel)) => (on_incoming_tunnel)(Ok(tunnel)).await,
+                    Ok(None) => {}
+                    Err(err) => {
+                        if !matches!(
+                            err.code(),
+                            P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
+                        ) {
+                            (on_incoming_tunnel)(Err(err)).await;
+                        }
+                    }
+                }
+            }) as crate::ttp::TtpIncomingStreamCallbackFuture
+        });
+        self.shared
             .ttp_client
-            .listen_stream(TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
+            .listen_stream(
+                TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?,
+                callback,
+            )
             .await?;
-        let listener = Arc::new(PnListener::new(self.shared.clone(), ttp_listener));
         *self.listener_infos.lock().unwrap() = vec![TunnelListenerInfo {
             local: *local,
             mapping_port,
         }];
         *self.listener.lock().unwrap() = Some(listener.clone());
-        Executor::spawn_ok(async move {
-            loop {
-                match listener.accept_tunnel().await {
-                    Ok(tunnel) => (on_incoming_tunnel)(Ok(tunnel)).await,
-                    Err(err) => {
-                        if matches!(
-                            err.code(),
-                            P2pErrorCode::Interrupted | P2pErrorCode::ErrorState
-                        ) {
-                            break;
-                        }
-                        (on_incoming_tunnel)(Err(err)).await;
-                    }
-                }
-            }
-        });
         log::debug!(
             "pn client listen ready local_id={} local_ep={} proxy_service={} protocol={:?}",
             self.shared.local_id(),
@@ -833,11 +840,19 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
-        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_datagram(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
@@ -852,17 +867,7 @@ mod tests {
                 .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream already opened"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "no accept"))
-        }
-
         async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "no datagram"))
-        }
-
-        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "no datagram"))
         }
     }
@@ -910,7 +915,7 @@ mod tests {
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
         let (cached, mut relay_read, mut relay_write) =
             FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
-        ttp_client.remember_tunnel_for_test(cached);
+        ttp_client.remember_tunnel(cached);
         let client = PnClient::new(ttp_client);
 
         let create_task = tokio::spawn({
@@ -937,7 +942,8 @@ mod tests {
         assert!(!create_task.is_finished());
         assert!(
             client
-                .get_tunnel_for_test(&remote_id, req.tunnel_id)
+                .shared
+                .get_tunnel(&PnShared::tunnel_key(remote_id.clone(), req.tunnel_id))
                 .is_none()
         );
 
@@ -959,7 +965,8 @@ mod tests {
         assert_eq!(tunnel.tunnel_id(), req.tunnel_id);
         assert!(
             client
-                .get_tunnel_for_test(&remote_id, req.tunnel_id)
+                .shared
+                .get_tunnel(&PnShared::tunnel_key(remote_id.clone(), req.tunnel_id))
                 .is_some()
         );
     }
@@ -977,7 +984,7 @@ mod tests {
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
         let (cached, mut relay_read, mut relay_write) =
             FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
-        ttp_client.remember_tunnel_for_test(cached);
+        ttp_client.remember_tunnel(cached);
         let client = PnClient::new(ttp_client);
 
         let create_task = tokio::spawn({
@@ -1019,7 +1026,8 @@ mod tests {
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
         assert!(
             client
-                .get_tunnel_for_test(&remote_id, req.tunnel_id)
+                .shared
+                .get_tunnel(&PnShared::tunnel_key(remote_id.clone(), req.tunnel_id))
                 .is_none()
         );
     }

@@ -3,8 +3,8 @@ use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
-    IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm,
-    TunnelListenerInfo, TunnelNetwork, TunnelRef,
+    IncomingDatagram, IncomingStream, IncomingTunnelCallback, QuicCongestionAlgorithm,
+    TunnelConnectIntent, TunnelForm, TunnelListenerInfo, TunnelNetwork, TunnelRef,
 };
 use crate::p2p_identity::{
     P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
@@ -30,9 +30,7 @@ pub struct QuicTunnelNetwork {
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
     server_runtime: ServerRuntime,
-    listener_accept_capacity: usize,
     listener_connect_capacity: usize,
-    tunnel_accept_capacity: usize,
 }
 
 fn connect_timeout_for_intent(base_timeout: Duration, intent: TunnelConnectIntent) -> Duration {
@@ -67,9 +65,7 @@ impl QuicTunnelNetwork {
         timeout: Duration,
         idle_timeout: Duration,
         server_runtime: ServerRuntime,
-        listener_accept_capacity: usize,
         listener_connect_capacity: usize,
-        tunnel_accept_capacity: usize,
     ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
@@ -82,9 +78,7 @@ impl QuicTunnelNetwork {
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
             reuse_address: AtomicBool::new(false),
             server_runtime,
-            listener_accept_capacity,
             listener_connect_capacity,
-            tunnel_accept_capacity,
         }
     }
 
@@ -233,7 +227,6 @@ impl QuicTunnelNetwork {
             resolved_remote_id,
             local_ep,
             remote_ep,
-            self.tunnel_accept_capacity,
         )
         .await?)
     }
@@ -267,9 +260,7 @@ impl TunnelNetwork for QuicTunnelNetwork {
             self.congestion_algorithm,
             self.server_runtime.clone(),
             on_incoming_tunnel,
-            self.listener_accept_capacity,
             self.listener_connect_capacity,
-            self.tunnel_accept_capacity,
         );
         listener
             .bind(
@@ -475,13 +466,92 @@ mod tests {
         X509IdentityCertFactory, X509IdentityFactory, generate_ed25519_x509_identity,
         generate_rsa_x509_identity,
     };
-    use std::sync::Arc;
-    use std::sync::Once;
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock};
+    use std::sync::{Mutex as StdMutex, Once};
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
     use tokio::time::timeout;
 
     static TLS_INIT: Once = Once::new();
+    type TestStreamRx = mpsc::Receiver<P2pResult<IncomingStream>>;
+    type TestDatagramRx = mpsc::Receiver<P2pResult<IncomingDatagram>>;
+    static TEST_STREAM_RX: LazyLock<StdMutex<HashMap<String, TestStreamRx>>> =
+        LazyLock::new(|| StdMutex::new(HashMap::new()));
+    static TEST_DATAGRAM_RX: LazyLock<StdMutex<HashMap<String, TestDatagramRx>>> =
+        LazyLock::new(|| StdMutex::new(HashMap::new()));
     const TEST_CHANNEL_CAPACITY: usize = 8;
+
+    fn test_tunnel_key(tunnel: &dyn Tunnel) -> String {
+        format!(
+            "{}:{}:{:?}:{:?}",
+            tunnel.local_id(),
+            tunnel.remote_id(),
+            tunnel.tunnel_id(),
+            tunnel.candidate_id()
+        )
+    }
+
+    async fn listen_stream_collect(tunnel: &dyn Tunnel, vports: crate::networks::ListenVPortsRef) {
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let callback: crate::networks::IncomingStreamCallback = Arc::new(move |accepted| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(accepted).await;
+            })
+        });
+        TEST_STREAM_RX
+            .lock()
+            .unwrap()
+            .insert(test_tunnel_key(tunnel), rx);
+        tunnel.listen_stream(vports, callback).await.unwrap();
+    }
+
+    async fn listen_datagram_collect(
+        tunnel: &dyn Tunnel,
+        vports: crate::networks::ListenVPortsRef,
+    ) {
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let callback: crate::networks::IncomingDatagramCallback = Arc::new(move |accepted| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(accepted).await;
+            })
+        });
+        TEST_DATAGRAM_RX
+            .lock()
+            .unwrap()
+            .insert(test_tunnel_key(tunnel), rx);
+        tunnel.listen_datagram(vports, callback).await.unwrap();
+    }
+
+    async fn recv_stream(tunnel: &dyn Tunnel) -> P2pResult<IncomingStream> {
+        let key = test_tunnel_key(tunnel);
+        let mut rx =
+            TEST_STREAM_RX.lock().unwrap().remove(&key).ok_or_else(|| {
+                p2p_err!(P2pErrorCode::Interrupted, "test stream receiver missing")
+            })?;
+        let accepted = rx
+            .recv()
+            .await
+            .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "test stream receiver closed"))?;
+        TEST_STREAM_RX.lock().unwrap().insert(key, rx);
+        accepted
+    }
+
+    async fn recv_datagram(tunnel: &dyn Tunnel) -> P2pResult<IncomingDatagram> {
+        let key = test_tunnel_key(tunnel);
+        let mut rx = TEST_DATAGRAM_RX
+            .lock()
+            .unwrap()
+            .remove(&key)
+            .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "test datagram receiver missing"))?;
+        let accepted = rx
+            .recv()
+            .await
+            .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "test datagram receiver closed"))?;
+        TEST_DATAGRAM_RX.lock().unwrap().insert(key, rx);
+        accepted
+    }
 
     struct TestNetworkPair {
         client_network: QuicTunnelNetwork,
@@ -500,10 +570,7 @@ mod tests {
         });
     }
 
-    fn incoming_channel() -> (
-        IncomingTunnelCallback,
-        mpsc::Receiver<P2pResult<TunnelRef>>,
-    ) {
+    fn incoming_channel() -> (IncomingTunnelCallback, mpsc::Receiver<P2pResult<TunnelRef>>) {
         let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         let callback = Arc::new(move |result| {
             let tx = tx.clone();
@@ -518,15 +585,12 @@ mod tests {
         incoming_channel().0
     }
 
-    async fn accept_incoming(
-        rx: &AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>,
-    ) -> TunnelRef {
-        accept_incoming_rx(&mut rx.lock().await).await
+    async fn accept_incoming(rx: &AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>) -> TunnelRef {
+        let mut rx = rx.lock().await;
+        accept_incoming_rx(&mut rx).await
     }
 
-    async fn accept_incoming_rx(
-        rx: &mut mpsc::Receiver<P2pResult<TunnelRef>>,
-    ) -> TunnelRef {
+    async fn accept_incoming_rx(rx: &mut mpsc::Receiver<P2pResult<TunnelRef>>) -> TunnelRef {
         rx.recv().await.unwrap().unwrap()
     }
 
@@ -758,14 +822,11 @@ mod tests {
         assert!(!opened.is_reverse());
         assert!(!accepted.is_reverse());
 
-        accepted
-            .listen_stream(allow_all_listen_vports())
-            .await
-            .unwrap();
+        listen_stream_collect(&*accepted, allow_all_listen_vports()).await;
 
         let (opened_stream, accepted_stream) = tokio::join!(
             opened.open_stream(purpose_of(1001)),
-            accepted.accept_stream()
+            recv_stream(&*accepted)
         );
         let (mut read, mut write) = opened_stream.unwrap();
         let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
@@ -773,14 +834,45 @@ mod tests {
         assert_eq!(purpose, purpose_of(1001));
 
         write.write_all(b"ping").await.unwrap();
-        let mut buf = [0u8; 4];
-        peer_read.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"ping");
+        write.shutdown().await.unwrap();
+        let mut buf = Vec::new();
+        peer_read.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"ping");
 
         peer_write.write_all(b"pong").await.unwrap();
-        let mut reply = [0u8; 4];
-        read.read_exact(&mut reply).await.unwrap();
-        assert_eq!(&reply, b"pong");
+        peer_write.shutdown().await.unwrap();
+        let mut reply = Vec::new();
+        read.read_to_end(&mut reply).await.unwrap();
+        assert_eq!(reply, b"pong");
+
+        opened.close().await.unwrap();
+        accepted.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn quic_tunnel_can_open_new_stream_channel_after_previous_channel_closes() {
+        let pair = setup_network_pair().await;
+        let (opened, accepted) = pair.connect().await;
+
+        listen_stream_collect(&*accepted, allow_all_listen_vports()).await;
+
+        for (vport, payload) in [(1051, b"first".as_slice()), (1052, b"second".as_slice())] {
+            let (opened_stream, accepted_stream) = tokio::join!(
+                opened.open_stream(purpose_of(vport)),
+                recv_stream(&*accepted)
+            );
+            let (_read, mut write) = opened_stream.unwrap();
+            let (purpose, mut peer_read, _peer_write) = accepted_stream.unwrap();
+
+            assert_eq!(purpose, purpose_of(vport));
+
+            write.write_all(payload).await.unwrap();
+            write.shutdown().await.unwrap();
+
+            let mut received = Vec::new();
+            peer_read.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, payload);
+        }
 
         opened.close().await.unwrap();
         accepted.close().await.unwrap();
@@ -791,14 +883,11 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        accepted
-            .listen_datagram(allow_all_listen_vports())
-            .await
-            .unwrap();
+        listen_datagram_collect(&*accepted, allow_all_listen_vports()).await;
 
         let (opened_datagram, accepted_datagram) = tokio::join!(
             opened.open_datagram(purpose_of(2002)),
-            accepted.accept_datagram()
+            recv_datagram(&*accepted)
         );
         let mut writer = opened_datagram.unwrap();
         let (purpose, mut peer_read) = accepted_datagram.unwrap();
@@ -893,10 +982,7 @@ mod tests {
         let (opened, accepted) = pair.connect().await;
         let empty_vports = ListenVPortRegistry::<()>::new();
 
-        accepted
-            .listen_stream(empty_vports.as_listen_vports_ref())
-            .await
-            .unwrap();
+        listen_stream_collect(&*accepted, empty_vports.as_listen_vports_ref()).await;
 
         let err = opened.open_stream(purpose_of(6553)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
@@ -911,10 +997,7 @@ mod tests {
         let (opened, accepted) = pair.connect().await;
         let empty_vports = ListenVPortRegistry::<()>::new();
 
-        accepted
-            .listen_datagram(empty_vports.as_listen_vports_ref())
-            .await
-            .unwrap();
+        listen_datagram_collect(&*accepted, empty_vports.as_listen_vports_ref()).await;
 
         let err = opened.open_datagram(purpose_of(6554)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
@@ -928,7 +1011,7 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        let err = accepted.accept_stream().await.err().unwrap();
+        let err = recv_stream(&*accepted).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
 
         opened.close().await.unwrap();
@@ -940,7 +1023,7 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        let err = accepted.accept_datagram().await.err().unwrap();
+        let err = recv_datagram(&*accepted).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
 
         opened.close().await.unwrap();

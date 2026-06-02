@@ -5,6 +5,7 @@ use crate::runtime;
 use crate::types::{TunnelCandidateId, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -12,6 +13,15 @@ pub type TunnelStreamRead = Pin<Box<dyn runtime::AsyncRead + Send + Unpin + 'sta
 pub type TunnelStreamWrite = Pin<Box<dyn runtime::AsyncWrite + Send + Unpin + 'static>>;
 pub type TunnelDatagramRead = Pin<Box<dyn runtime::AsyncRead + Send + Unpin + 'static>>;
 pub type TunnelDatagramWrite = Pin<Box<dyn runtime::AsyncWrite + Send + Unpin + 'static>>;
+pub type IncomingStream = (TunnelPurpose, TunnelStreamRead, TunnelStreamWrite);
+pub type IncomingDatagram = (TunnelPurpose, TunnelDatagramRead);
+pub type IncomingStreamCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub type IncomingDatagramCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub type IncomingStreamCallback =
+    Arc<dyn Fn(P2pResult<IncomingStream>) -> IncomingStreamCallbackFuture + Send + Sync + 'static>;
+pub type IncomingDatagramCallback = Arc<
+    dyn Fn(P2pResult<IncomingDatagram>) -> IncomingDatagramCallbackFuture + Send + Sync + 'static,
+>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, RawEncode, RawDecode)]
 pub struct TunnelPurpose(Vec<u8>);
@@ -261,19 +271,23 @@ pub trait Tunnel: Send + Sync + 'static {
 
     async fn close(&self) -> P2pResult<()>;
 
-    async fn listen_stream(&self, vports: ListenVPortsRef) -> P2pResult<()>;
-    async fn listen_datagram(&self, vports: ListenVPortsRef) -> P2pResult<()>;
+    async fn listen_stream(
+        &self,
+        vports: ListenVPortsRef,
+        callback: IncomingStreamCallback,
+    ) -> P2pResult<()>;
+    async fn listen_datagram(
+        &self,
+        vports: ListenVPortsRef,
+        callback: IncomingDatagramCallback,
+    ) -> P2pResult<()>;
 
     async fn open_stream(
         &self,
         purpose: TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)>;
-    async fn accept_stream(
-        &self,
-    ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)>;
 
     async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite>;
-    async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)>;
 }
 
 pub type TunnelRef = Arc<dyn Tunnel>;

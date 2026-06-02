@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::listener::{TtpDatagramListenerRef, TtpListenerRef, TtpPortListener};
+use super::listener::{TtpIncomingDatagramCallback, TtpIncomingStreamCallback, TtpPortListener};
 use super::runtime::TtpRuntime;
 use super::{TtpDatagramMeta, TtpStreamMeta, TtpTarget};
 
@@ -65,17 +65,12 @@ impl TtpClient {
             .cloned()
     }
 
-    fn remember_tunnel(&self, tunnel: TunnelRef) {
+    pub(crate) fn remember_tunnel(&self, tunnel: TunnelRef) {
         let mut tunnels = self.tunnels.lock().unwrap();
         tunnels.retain(|existing| {
             is_tunnel_available(existing.as_ref()) && !Arc::ptr_eq(existing, &tunnel)
         });
         tunnels.push(tunnel);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn remember_tunnel_for_test(&self, tunnel: TunnelRef) {
-        self.remember_tunnel(tunnel);
     }
 
     fn latest_available_tunnel(&self) -> Option<TunnelRef> {
@@ -185,8 +180,12 @@ impl TtpClient {
 
 #[async_trait::async_trait]
 impl TtpPortListener for TtpClient {
-    async fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef> {
-        self.runtime.listen_stream(purpose)
+    async fn listen_stream(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingStreamCallback,
+    ) -> P2pResult<()> {
+        self.runtime.listen_stream(purpose, callback)
     }
 
     async fn unlisten_stream(&self, purpose: &TunnelPurpose) -> P2pResult<()> {
@@ -194,8 +193,12 @@ impl TtpPortListener for TtpClient {
         Ok(())
     }
 
-    async fn listen_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TtpDatagramListenerRef> {
-        self.runtime.listen_datagram(purpose)
+    async fn listen_datagram(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingDatagramCallback,
+    ) -> P2pResult<()> {
+        self.runtime.listen_datagram(purpose, callback)
     }
 
     async fn unlisten_datagram(&self, purpose: &TunnelPurpose) -> P2pResult<()> {

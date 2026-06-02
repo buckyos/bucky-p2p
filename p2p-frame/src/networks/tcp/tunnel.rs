@@ -9,8 +9,9 @@ use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
-    ListenVPortsRef, Tunnel, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelPurpose,
-    TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    IncomingDatagramCallback, IncomingStreamCallback, ListenVPortsRef, Tunnel, TunnelDatagramRead,
+    TunnelDatagramWrite, TunnelForm, TunnelPurpose, TunnelState, TunnelStreamRead,
+    TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
@@ -22,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
 const FIRST_LISTEN_WAIT_TIMEOUT: Duration = Duration::from_millis(300);
 const FIRST_LISTEN_WAIT_NOT_STARTED: u8 = 0;
@@ -195,34 +196,22 @@ pub(crate) struct TcpTunnel {
     next_channel_seq: AtomicU32,
     next_request_seq: AtomicU32,
     next_ping_seq: AtomicU64,
-    stream_rx: AsyncMutex<mpsc::Receiver<P2pResult<AcceptedChannel>>>,
-    stream_tx: mpsc::Sender<P2pResult<AcceptedChannel>>,
-    datagram_rx: AsyncMutex<mpsc::Receiver<P2pResult<AcceptedChannel>>>,
-    datagram_tx: mpsc::Sender<P2pResult<AcceptedChannel>>,
     stream_accept_limit: AtomicU64,
     stream_accept_pending: AtomicU64,
     datagram_accept_limit: AtomicU64,
     datagram_accept_pending: AtomicU64,
     stream_vports: std::sync::RwLock<Option<ListenVPortsRef>>,
+    stream_callback: std::sync::RwLock<Option<IncomingStreamCallback>>,
     stream_first_listen_wait_state: AtomicU8,
     stream_vports_notify: Notify,
     datagram_vports: std::sync::RwLock<Option<ListenVPortsRef>>,
+    datagram_callback: std::sync::RwLock<Option<IncomingDatagramCallback>>,
     datagram_first_listen_wait_state: AtomicU8,
     datagram_vports_notify: Notify,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
     unclaimed_data_conn_budget: AtomicU64,
     connected_notify: Notify,
-    #[cfg(test)]
-    reverse_open_delay: Mutex<Duration>,
-    #[cfg(test)]
-    claim_req_delay: Mutex<Duration>,
-    #[cfg(test)]
-    suppress_pong: AtomicBool,
-    #[cfg(test)]
-    suppress_ping: AtomicBool,
-    #[cfg(test)]
-    fail_next_control_send: AtomicBool,
 }
 
 impl DataConnEntry {
@@ -481,54 +470,6 @@ impl TcpTunnel {
         self.candidate_id
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_data_remote_ep_for_test(&self, remote_ep: Endpoint) {
-        *self.connector.remote_ep.lock().unwrap() = remote_ep;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_reverse_open_delay_for_test(&self, delay: Duration) {
-        *self.reverse_open_delay.lock().unwrap() = delay;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_claim_req_delay_for_test(&self, delay: Duration) {
-        *self.claim_req_delay.lock().unwrap() = delay;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_suppress_pong_for_test(&self, suppress: bool) {
-        self.suppress_pong.store(suppress, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_suppress_ping_for_test(&self, suppress: bool) {
-        self.suppress_ping.store(suppress, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_control_send_for_test(&self) {
-        self.fail_next_control_send.store(true, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_unclaimed_data_conn_budget_for_test(&self, budget: usize) {
-        self.unclaimed_data_conn_budget
-            .store(budget as u64, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_accept_queue_limit_for_test(&self, kind: TcpChannelKind, limit: usize) {
-        match kind {
-            TcpChannelKind::Stream => self
-                .stream_accept_limit
-                .store(limit as u64, Ordering::SeqCst),
-            TcpChannelKind::Datagram => self
-                .datagram_accept_limit
-                .store(limit as u64, Ordering::SeqCst),
-        }
-    }
-
     pub(crate) async fn accept_control_connection(
         mut control: TcpTlsConnection,
         connector: TcpTunnelConnector,
@@ -538,7 +479,6 @@ impl TcpTunnel {
         decision: TcpIncomingControlDecision,
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
-        channel_capacity: usize,
     ) -> P2pResult<Option<Arc<Self>>> {
         let result = match decision {
             TcpIncomingControlDecision::Accept => ControlConnReadyResult::Success,
@@ -571,7 +511,6 @@ impl TcpTunnel {
             heartbeat_interval,
             heartbeat_timeout,
             LocalTunnelPhase::PassiveReady,
-            channel_capacity,
         )))
     }
 
@@ -585,11 +524,8 @@ impl TcpTunnel {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
         initial_phase: LocalTunnelPhase,
-        channel_capacity: usize,
     ) -> Arc<Self> {
         let (control_read, control_write) = runtime::split(control.stream);
-        let (stream_tx, stream_rx) = mpsc::channel(channel_capacity);
-        let (datagram_tx, datagram_rx) = mpsc::channel(channel_capacity);
         let tunnel = Arc::new(Self {
             tunnel_id,
             candidate_id,
@@ -616,34 +552,22 @@ impl TcpTunnel {
             next_channel_seq: AtomicU32::new(1),
             next_request_seq: AtomicU32::new(1),
             next_ping_seq: AtomicU64::new(1),
-            stream_rx: AsyncMutex::new(stream_rx),
-            stream_tx,
-            datagram_rx: AsyncMutex::new(datagram_rx),
-            datagram_tx,
             stream_accept_limit: AtomicU64::new(16),
             stream_accept_pending: AtomicU64::new(0),
             datagram_accept_limit: AtomicU64::new(16),
             datagram_accept_pending: AtomicU64::new(0),
             stream_vports: std::sync::RwLock::new(None),
+            stream_callback: std::sync::RwLock::new(None),
             stream_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
             stream_vports_notify: Notify::new(),
             datagram_vports: std::sync::RwLock::new(None),
+            datagram_callback: std::sync::RwLock::new(None),
             datagram_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
             datagram_vports_notify: Notify::new(),
             heartbeat_interval,
             heartbeat_timeout,
             unclaimed_data_conn_budget: AtomicU64::new(8),
             connected_notify: Notify::new(),
-            #[cfg(test)]
-            reverse_open_delay: Mutex::new(Duration::from_millis(0)),
-            #[cfg(test)]
-            claim_req_delay: Mutex::new(Duration::from_millis(0)),
-            #[cfg(test)]
-            suppress_pong: AtomicBool::new(false),
-            #[cfg(test)]
-            suppress_ping: AtomicBool::new(false),
-            #[cfg(test)]
-            fail_next_control_send: AtomicBool::new(false),
         });
         *tunnel.self_weak.lock().unwrap() = Arc::downgrade(&tunnel);
         Self::start_loops(tunnel.clone(), control_read);
@@ -696,13 +620,6 @@ impl TcpTunnel {
     }
 
     async fn send_control(&self, cmd: &TcpControlCmd) -> P2pResult<()> {
-        #[cfg(test)]
-        if self.fail_next_control_send.swap(false, Ordering::SeqCst) {
-            return Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "injected control send failure"
-            ));
-        }
         let mut write = self.control_write.lock().await;
         write_raw_frame(&mut *write, cmd).await
     }
@@ -753,6 +670,8 @@ impl TcpTunnel {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        *self.stream_callback.write().unwrap() = None;
+        *self.datagram_callback.write().unwrap() = None;
 
         let (pending_open_requests, pending_claims, data_conns) = {
             let mut state = self.state.lock().unwrap();
@@ -802,41 +721,8 @@ impl TcpTunnel {
             }
         }
 
-        let mut first_send_error = None;
-        if let Err(err) = self.stream_tx.try_send(Err(p2p_err!(reason, "tunnel closed"))) {
-            first_send_error = Some(p2p_err!(
-                P2pErrorCode::OutOfLimit,
-                "tcp stream accept close notification failed: {}",
-                err
-            ));
-        }
-        if let Err(err) = self
-            .datagram_tx
-            .try_send(Err(p2p_err!(reason, "tunnel closed")))
-        {
-            if first_send_error.is_none() {
-                first_send_error = Some(p2p_err!(
-                    P2pErrorCode::OutOfLimit,
-                    "tcp datagram accept close notification failed: {}",
-                    err
-                ));
-            }
-        }
-
-        {
-            let mut rx = self.stream_rx.lock().await;
-            rx.close();
-        }
-        {
-            let mut rx = self.datagram_rx.lock().await;
-            rx.close();
-        }
-
         let mut write = self.control_write.lock().await;
         let _ = runtime::AsyncWriteExt::shutdown(&mut *write).await;
-        if let Some(err) = first_send_error {
-            return Err(err);
-        }
         Ok(())
     }
 
@@ -882,10 +768,6 @@ impl TcpTunnel {
     async fn handle_control_cmd(self: &Arc<Self>, cmd: TcpControlCmd) -> P2pResult<()> {
         match cmd {
             TcpControlCmd::Ping(ping) => {
-                #[cfg(test)]
-                if self.suppress_pong.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
                 self.send_control(&TcpControlCmd::Pong(PongCmd {
                     seq: ping.seq,
                     send_time: ping.send_time,
@@ -985,61 +867,6 @@ impl TcpTunnel {
             .into_iter()
             .filter(|entry| matches!(entry.inner.lock().unwrap().state, DataConnEntryState::Idle))
             .count()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn idle_pool_len_for_test(&self) -> usize {
-        self.idle_pool_len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn data_conn_states_for_test(&self) -> Vec<String> {
-        let entries = self
-            .state
-            .lock()
-            .unwrap()
-            .data_conns
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        entries
-            .into_iter()
-            .map(|entry| {
-                let inner = entry.inner.lock().unwrap();
-                let state = match &inner.state {
-                    DataConnEntryState::FirstClaimPending => "FirstClaimPending",
-                    DataConnEntryState::Idle => "Idle",
-                    DataConnEntryState::Claiming(_) => "Claiming",
-                    DataConnEntryState::Bound(_) => "Bound",
-                    DataConnEntryState::Draining(_) => "Draining",
-                    DataConnEntryState::Retired => "Retired",
-                };
-                let lease_debug = match &inner.state {
-                    DataConnEntryState::Bound(lease) | DataConnEntryState::Draining(lease) => {
-                        let lease = lease.lock().unwrap();
-                        format!(
-                            " tx={} rx={} local_fin={} peer_fin={} local_done={} peer_done={} read_rel={} write_rel={} peer_final={:?} read_some={} write_some={}",
-                            lease.tx_bytes,
-                            lease.rx_bytes,
-                            lease.local_write_fin_sent,
-                            lease.peer_write_fin_received,
-                            lease.local_read_done_sent,
-                            lease.peer_read_done_received,
-                            lease.read_released,
-                            lease.write_released,
-                            lease.peer_final_tx_bytes,
-                            lease.read.is_some(),
-                            lease.write.is_some(),
-                        )
-                    }
-                    _ => String::new(),
-                };
-                format!(
-                    "conn={} state={} lease={}{}",
-                    entry.conn_id, state, inner.committed_lease_seq, lease_debug
-                )
-            })
-            .collect()
     }
 
     fn claim_result_to_error(result: ClaimConnAckResult) -> P2pErrorCode {
@@ -1277,21 +1104,15 @@ impl TcpTunnel {
     }
 
     fn reserve_accept_slot(&self, kind: TcpChannelKind) -> Result<(), ClaimConnAckResult> {
-        let (sender_closed, pending, limit) = match kind {
-            TcpChannelKind::Stream => (
-                self.stream_tx.is_closed(),
-                &self.stream_accept_pending,
-                &self.stream_accept_limit,
-            ),
-            TcpChannelKind::Datagram => (
-                self.datagram_tx.is_closed(),
-                &self.datagram_accept_pending,
-                &self.datagram_accept_limit,
-            ),
-        };
-        if sender_closed {
+        if self.is_closed() {
             return Err(ClaimConnAckResult::ListenerClosed);
         }
+        let (pending, limit) = match kind {
+            TcpChannelKind::Stream => (&self.stream_accept_pending, &self.stream_accept_limit),
+            TcpChannelKind::Datagram => {
+                (&self.datagram_accept_pending, &self.datagram_accept_limit)
+            }
+        };
         loop {
             let cur = pending.load(Ordering::SeqCst);
             let max = limit.load(Ordering::SeqCst);
@@ -1385,21 +1206,15 @@ impl TcpTunnel {
         kind: TcpChannelKind,
         purpose: &TunnelPurpose,
     ) -> Result<(), ClaimConnAckResult> {
-        let (sender_closed, pending, limit) = match kind {
-            TcpChannelKind::Stream => (
-                self.stream_tx.is_closed(),
-                &self.stream_accept_pending,
-                &self.stream_accept_limit,
-            ),
-            TcpChannelKind::Datagram => (
-                self.datagram_tx.is_closed(),
-                &self.datagram_accept_pending,
-                &self.datagram_accept_limit,
-            ),
-        };
-        if sender_closed {
+        if self.is_closed() {
             return Err(ClaimConnAckResult::ListenerClosed);
         }
+        let (pending, limit) = match kind {
+            TcpChannelKind::Stream => (&self.stream_accept_pending, &self.stream_accept_limit),
+            TcpChannelKind::Datagram => {
+                (&self.datagram_accept_pending, &self.datagram_accept_limit)
+            }
+        };
         self.wait_first_listen_if_needed(kind).await;
         let vports = self
             .current_listen_vports(kind)
@@ -1413,19 +1228,20 @@ impl TcpTunnel {
         Ok(())
     }
 
-    fn has_listener_registration(&self, kind: TcpChannelKind) -> bool {
-        match kind {
-            TcpChannelKind::Stream => self.stream_vports.read().unwrap().is_some(),
-            TcpChannelKind::Datagram => self.datagram_vports.read().unwrap().is_some(),
-        }
-    }
-
     fn release_accept_slot(&self, kind: TcpChannelKind) {
         let pending = match kind {
             TcpChannelKind::Stream => &self.stream_accept_pending,
             TcpChannelKind::Datagram => &self.datagram_accept_pending,
         };
         pending.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn current_stream_callback(&self) -> Option<IncomingStreamCallback> {
+        self.stream_callback.read().unwrap().clone()
+    }
+
+    fn current_datagram_callback(&self) -> Option<IncomingDatagramCallback> {
+        self.datagram_callback.read().unwrap().clone()
     }
 
     fn start_first_claim_timeout(self: &Arc<Self>, entry: Arc<DataConnEntry>) {
@@ -2534,13 +2350,6 @@ impl TcpTunnel {
     }
 
     async fn handle_claim_req(self: &Arc<Self>, req: ClaimConnReq) -> P2pResult<()> {
-        #[cfg(test)]
-        {
-            let delay = *self.claim_req_delay.lock().unwrap();
-            if !delay.is_zero() {
-                runtime::sleep(delay).await;
-            }
-        }
         let processing = self.process_claim_req(req).await?;
         if let Some(local_channel_id) = processing.local_conflict_channel {
             self.send_pending_claim_result(
@@ -2554,266 +2363,33 @@ impl TcpTunnel {
         self.send_control(&processing.response).await
     }
 
-    #[cfg(test)]
-    pub(crate) fn first_conn_id_for_test(&self) -> Option<TcpConnId> {
-        self.state.lock().unwrap().data_conns.keys().copied().next()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn current_lease_for_test(
-        &self,
-        conn_id: TcpConnId,
-    ) -> Option<(TcpChannelId, TcpLeaseSeq, u64, u64)> {
-        let entry = self.get_entry(conn_id)?;
-        let inner = entry.inner.lock().unwrap();
-        let lease = match &inner.state {
-            DataConnEntryState::Bound(lease) | DataConnEntryState::Draining(lease) => lease.clone(),
-            _ => return None,
-        };
-        let lease = lease.lock().unwrap();
-        Some((
-            lease.channel_id,
-            lease.lease_seq,
-            lease.tx_bytes,
-            lease.rx_bytes,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn current_claiming_for_test(
-        &self,
-        conn_id: TcpConnId,
-    ) -> Option<(
-        TcpChannelId,
-        TcpLeaseSeq,
-        u64,
-        TcpChannelKind,
-        TunnelPurpose,
-    )> {
-        let entry = self.get_entry(conn_id)?;
-        let inner = entry.inner.lock().unwrap();
-        match &inner.state {
-            DataConnEntryState::Claiming(claiming) => Some((
-                claiming.channel_id,
-                claiming.lease_seq,
-                claiming.claim_nonce,
-                claiming.kind,
-                claiming.purpose.clone(),
-            )),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn create_data_connection_for_test(self: &Arc<Self>) -> P2pResult<TcpConnId> {
-        let entry = self.create_data_connection(None).await?;
-        Ok(entry.conn_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn start_claim_for_test(
-        &self,
-        conn_id: TcpConnId,
-        kind: TcpChannelKind,
-        purpose: TunnelPurpose,
-        claim_nonce: u64,
-    ) -> P2pResult<(TcpChannelId, TcpLeaseSeq)> {
-        let entry = self
-            .get_entry(conn_id)
-            .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "conn not found"))?;
-        let channel_id = self.next_local_channel_id();
-        let lease_seq = {
-            let mut inner = entry.inner.lock().unwrap();
-            let expected_next = Self::next_lease_seq(inner.committed_lease_seq);
-            match &inner.state {
-                DataConnEntryState::FirstClaimPending if entry.created_by_local => {
-                    inner.state = DataConnEntryState::Claiming(ClaimingState {
-                        lease_seq: TcpLeaseSeq::from(1),
-                        channel_id,
-                        claim_nonce,
-                        kind,
-                        purpose: purpose.clone(),
-                    });
-                    TcpLeaseSeq::from(1)
-                }
-                DataConnEntryState::Idle => {
-                    inner.state = DataConnEntryState::Claiming(ClaimingState {
-                        lease_seq: expected_next,
-                        channel_id,
-                        claim_nonce,
-                        kind,
-                        purpose,
-                    });
-                    expected_next
-                }
-                _ => {
-                    return Err(p2p_err!(
-                        P2pErrorCode::ErrorState,
-                        "connection not claimable"
-                    ));
-                }
-            }
-        };
-        Ok((channel_id, lease_seq))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn register_pending_claim_for_test(
-        &self,
-        channel_id: TcpChannelId,
-    ) -> oneshot::Receiver<P2pResult<()>> {
-        let (tx, rx) = oneshot::channel();
-        let (inner_tx, inner_rx) = oneshot::channel();
-        self.state
-            .lock()
-            .unwrap()
-            .pending_claims
-            .insert(channel_id, inner_tx);
-        let _ = Executor::spawn(async move {
-            let mapped = match inner_rx.await {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(p2p_err!(
-                    P2pErrorCode::Interrupted,
-                    "test pending claim waiter dropped"
-                )),
-            };
-            let _ = tx.send(mapped);
-        });
-        rx
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn simulate_claim_req_for_test(
-        self: &Arc<Self>,
-        req: ClaimConnReq,
-    ) -> P2pResult<TcpControlCmd> {
-        let processing = self.process_claim_req(req).await?;
-        if let Some(local_channel_id) = processing.local_conflict_channel {
-            self.send_pending_claim_result(
-                local_channel_id,
-                Err(p2p_err!(P2pErrorCode::Conflict, "claim conflict lost")),
-            );
-        }
-        if let Some((kind, accepted)) = processing.accepted {
-            self.enqueue_accepted(kind, accepted)?;
-        }
-        Ok(processing.response)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn simulate_write_fin_for_test(&self, fin: WriteFin) {
-        self.handle_write_fin(fin).unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn simulate_read_done_for_test(&self, done: ReadDone) {
-        self.handle_read_done(done).unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn simulate_control_cmd_for_test(
-        self: &Arc<Self>,
-        cmd: TcpControlCmd,
-    ) -> P2pResult<()> {
-        if let Err(err) = self.handle_control_cmd(cmd).await {
-            let _ = self
-                .close_impl(LocalTunnelPhase::Error, P2pErrorCode::Interrupted)
-                .await;
-            return Err(err);
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn write_hidden_bytes_for_test(
-        &self,
-        conn_id: TcpConnId,
-        data: &[u8],
-    ) -> P2pResult<()> {
-        let entry = self
-            .get_entry(conn_id)
-            .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "conn not found"))?;
-        let lease = {
-            let inner = entry.inner.lock().unwrap();
-            match &inner.state {
-                DataConnEntryState::Bound(lease) | DataConnEntryState::Draining(lease) => {
-                    lease.clone()
-                }
-                _ => return Err(p2p_err!(P2pErrorCode::ErrorState, "conn not bound")),
-            }
-        };
-        let mut taken = {
-            let mut lease_inner = lease.lock().unwrap();
-            let write = lease_inner
-                .write
-                .take()
-                .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "hidden write missing"))?;
-            (write, lease_inner.tx_bytes)
-        };
-        runtime::AsyncWriteExt::write_all(&mut taken.0, data)
-            .await
-            .map_err(|_| p2p_err!(P2pErrorCode::IoError, "hidden write failed"))?;
-        runtime::AsyncWriteExt::flush(&mut taken.0)
-            .await
-            .map_err(|_| p2p_err!(P2pErrorCode::IoError, "hidden flush failed"))?;
-        let mut lease_inner = lease.lock().unwrap();
-        lease_inner.tx_bytes = taken.1 + data.len() as u64;
-        lease_inner.write = Some(taken.0);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn simulate_claim_ack_for_test(
-        self: &Arc<Self>,
-        ack: ClaimConnAck,
-    ) -> P2pResult<()> {
-        self.handle_claim_ack(ack).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn simulate_claim_error_for_test(
-        self: &Arc<Self>,
-        channel_id: TcpChannelId,
-        conn_id: TcpConnId,
-        lease_seq: TcpLeaseSeq,
-        result: ClaimConnAckResult,
-    ) -> P2pResult<()> {
-        self.handle_claim_ack(ClaimConnAck {
-            channel_id,
-            conn_id,
-            lease_seq,
-            result: result as u8,
-        })
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn close_accept_queue_for_test(&self, kind: TcpChannelKind) {
-        match kind {
-            TcpChannelKind::Stream => self.stream_rx.lock().await.close(),
-            TcpChannelKind::Datagram => self.datagram_rx.lock().await.close(),
-        }
-    }
-
     fn enqueue_accepted(&self, kind: TcpChannelKind, accepted: AcceptedChannel) -> P2pResult<()> {
+        self.release_accept_slot(kind);
+        if self.is_closed() {
+            return Ok(());
+        }
+
         match kind {
-            TcpChannelKind::Stream => self.stream_tx.try_send(Ok(accepted)).map_err(|err| {
-                self.release_accept_slot(TcpChannelKind::Stream);
-                p2p_err!(
-                    P2pErrorCode::OutOfLimit,
-                    "stream accept queue failed: {}",
-                    err
-                )
-            }),
-            TcpChannelKind::Datagram => self.datagram_tx.try_send(Ok(accepted)).map_err(|err| {
-                self.release_accept_slot(TcpChannelKind::Datagram);
-                p2p_err!(
-                    P2pErrorCode::OutOfLimit,
-                    "datagram accept queue failed: {}",
-                    err
-                )
-            }),
+            TcpChannelKind::Stream => {
+                let Some(callback) = self.current_stream_callback() else {
+                    return Ok(());
+                };
+                let (read, write) = self.make_stream_channel(accepted.lease);
+                Executor::spawn_ok(async move {
+                    callback(Ok((accepted.purpose, read, write))).await;
+                });
+                Ok(())
+            }
+            TcpChannelKind::Datagram => {
+                let Some(callback) = self.current_datagram_callback() else {
+                    return Ok(());
+                };
+                let read = self.make_datagram_read(accepted.lease);
+                Executor::spawn_ok(async move {
+                    callback(Ok((accepted.purpose, read))).await;
+                });
+                Ok(())
+            }
         }
     }
 
@@ -2862,16 +2438,6 @@ impl TcpTunnel {
     fn allow_late_open_request_connection(&self) -> bool {
         self.unclaimed_entry_count()
             < self.unclaimed_data_conn_budget.load(Ordering::SeqCst) as usize
-    }
-
-    #[cfg(test)]
-    pub(crate) fn data_conn_count_for_test(&self) -> usize {
-        self.state.lock().unwrap().data_conns.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_drain_count_for_test(&self) -> usize {
-        self.state.lock().unwrap().pending_drains.len()
     }
 
     async fn create_data_connection(
@@ -2933,13 +2499,6 @@ impl TcpTunnel {
     fn spawn_reverse_data_connection(self: &Arc<Self>, request_id: TcpRequestId) {
         let this = self.clone();
         let _ = Executor::spawn(async move {
-            #[cfg(test)]
-            {
-                let delay = *this.reverse_open_delay.lock().unwrap();
-                if !delay.is_zero() {
-                    runtime::sleep(delay).await;
-                }
-            }
             if let Err(err) = this.create_data_connection(Some(request_id)).await {
                 log::warn!(
                     "tcp tunnel {} reverse data connection failed: {:?}",
@@ -2991,14 +2550,6 @@ impl TcpTunnel {
                 ))
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn request_reverse_data_connection_for_test(
-        self: &Arc<Self>,
-    ) -> P2pResult<()> {
-        let _ = self.request_remote_data_connection().await?;
-        Ok(())
     }
 
     pub(crate) async fn on_incoming_data_connection(
@@ -3207,10 +2758,6 @@ impl TcpTunnel {
                 state.last_recv_at.elapsed() >= self.heartbeat_interval
             };
             if should_ping {
-                #[cfg(test)]
-                if self.suppress_ping.load(Ordering::SeqCst) {
-                    continue;
-                }
                 if let Err(err) = self.send_ping().await {
                     log::warn!(
                         "tcp tunnel {} heartbeat send failed: {:?}",
@@ -3289,14 +2836,30 @@ impl Tunnel for TcpTunnel {
             .await
     }
 
-    async fn listen_stream(&self, vports: ListenVPortsRef) -> P2pResult<()> {
+    async fn listen_stream(
+        &self,
+        vports: ListenVPortsRef,
+        callback: IncomingStreamCallback,
+    ) -> P2pResult<()> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
+        }
         *self.stream_vports.write().unwrap() = Some(vports);
+        *self.stream_callback.write().unwrap() = Some(callback);
         self.stream_vports_notify.notify_waiters();
         Ok(())
     }
 
-    async fn listen_datagram(&self, vports: ListenVPortsRef) -> P2pResult<()> {
+    async fn listen_datagram(
+        &self,
+        vports: ListenVPortsRef,
+        callback: IncomingDatagramCallback,
+    ) -> P2pResult<()> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
+        }
         *self.datagram_vports.write().unwrap() = Some(vports);
+        *self.datagram_callback.write().unwrap() = Some(callback);
         self.datagram_vports_notify.notify_waiters();
         Ok(())
     }
@@ -3318,28 +2881,6 @@ impl Tunnel for TcpTunnel {
         Ok(self.make_stream_channel(lease))
     }
 
-    async fn accept_stream(
-        &self,
-    ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
-        if self.is_closed() {
-            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
-        }
-        if !self.has_listener_registration(TcpChannelKind::Stream) {
-            return Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "tcp accept requires listen before accept"
-            ));
-        }
-        let mut rx = self.stream_rx.lock().await;
-        let accepted = rx
-            .recv()
-            .await
-            .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream accept queue closed"))??;
-        self.release_accept_slot(TcpChannelKind::Stream);
-        let (read, write) = self.make_stream_channel(accepted.lease);
-        Ok((accepted.purpose, read, write))
-    }
-
     async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
@@ -3352,25 +2893,6 @@ impl Tunnel for TcpTunnel {
             .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "tunnel dropped"))?;
         let lease = this.open_channel(TcpChannelKind::Datagram, purpose).await?;
         Ok(self.make_datagram_write(lease))
-    }
-
-    async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
-        if self.is_closed() {
-            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
-        }
-        if !self.has_listener_registration(TcpChannelKind::Datagram) {
-            return Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "tcp accept requires listen before accept"
-            ));
-        }
-        let mut rx = self.datagram_rx.lock().await;
-        let accepted = rx
-            .recv()
-            .await
-            .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "datagram accept queue closed"))??;
-        self.release_accept_slot(TcpChannelKind::Datagram);
-        Ok((accepted.purpose, self.make_datagram_read(accepted.lease)))
     }
 }
 

@@ -1,33 +1,33 @@
 use crate::error::{P2pErrorCode, P2pResult};
 use crate::networks::{Tunnel, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite};
-use crate::runtime;
 use std::sync::{Arc, Mutex, Weak};
 
-use super::listener::{
-    QueueTtpDatagramListener, QueueTtpListener, TtpDatagramListenerRef, TtpListenerRef,
-};
+use super::listener::{TtpIncomingDatagramCallback, TtpIncomingStream, TtpIncomingStreamCallback};
 use super::registry::TtpQueueRegistry;
 use super::{TtpDatagram, TtpDatagramMeta, TtpStreamMeta};
 
 pub(crate) struct TtpRuntime {
-    stream_registry: Arc<TtpQueueRegistry<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>>,
+    stream_registry: Arc<TtpQueueRegistry<TtpIncomingStream>>,
     datagram_registry: Arc<TtpQueueRegistry<TtpDatagram>>,
     attached_tunnels: Mutex<Vec<Weak<dyn Tunnel>>>,
 }
 
 impl TtpRuntime {
-    pub(crate) fn new(channel_capacity: usize) -> Arc<Self> {
+    pub(crate) fn new(_channel_capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            stream_registry: TtpQueueRegistry::new(channel_capacity),
-            datagram_registry: TtpQueueRegistry::new(channel_capacity),
+            stream_registry: TtpQueueRegistry::new(),
+            datagram_registry: TtpQueueRegistry::new(),
             attached_tunnels: Mutex::new(Vec::new()),
         })
     }
 
-    pub(crate) fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef> {
+    pub(crate) fn listen_stream(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingStreamCallback,
+    ) -> P2pResult<()> {
         log::debug!("ttp listen stream register purpose={}", purpose);
-        let rx = self.stream_registry.register(purpose)?;
-        Ok(QueueTtpListener::new(rx))
+        self.stream_registry.register(purpose, callback)
     }
 
     pub(crate) fn unlisten_stream(&self, purpose: &TunnelPurpose) {
@@ -38,10 +38,10 @@ impl TtpRuntime {
     pub(crate) fn listen_datagram(
         &self,
         purpose: TunnelPurpose,
-    ) -> P2pResult<TtpDatagramListenerRef> {
+        callback: TtpIncomingDatagramCallback,
+    ) -> P2pResult<()> {
         log::debug!("ttp listen datagram register purpose={}", purpose);
-        let rx = self.datagram_registry.register(purpose)?;
-        Ok(QueueTtpDatagramListener::new(rx))
+        self.datagram_registry.register(purpose, callback)
     }
 
     pub(crate) fn unlisten_datagram(&self, purpose: &TunnelPurpose) {
@@ -70,8 +70,45 @@ impl TtpRuntime {
             return Ok(());
         }
 
+        let stream_tunnel = tunnel.clone();
+        let stream_weak = Arc::downgrade(self);
+        let stream_callback: crate::networks::IncomingStreamCallback = Arc::new(move |accepted| {
+            let tunnel = stream_tunnel.clone();
+            let weak = stream_weak.clone();
+            Box::pin(async move {
+                match accepted {
+                    Ok((purpose, read, write)) => {
+                        let Some(runtime) = weak.upgrade() else {
+                            return;
+                        };
+                        if let Err(err) = runtime.stream_registry.deliver(
+                            &purpose,
+                            Ok((
+                                TtpStreamMeta {
+                                    local_ep: tunnel.local_ep(),
+                                    remote_ep: tunnel.remote_ep(),
+                                    local_id: tunnel.local_id(),
+                                    remote_id: tunnel.remote_id(),
+                                    remote_name: None,
+                                    purpose: purpose.clone(),
+                                },
+                                read,
+                                write,
+                            )),
+                        ) {
+                            log::warn!("ttp stream deliver failed purpose={}: {:?}", purpose, err);
+                        }
+                    }
+                    Err(err) => {
+                        if err.code() != P2pErrorCode::NotSupport {
+                            log::debug!("ttp stream callback finished: {:?}", err);
+                        }
+                    }
+                }
+            }) as crate::networks::IncomingStreamCallbackFuture
+        });
         match tunnel
-            .listen_stream(self.stream_registry.as_listen_vports_ref())
+            .listen_stream(self.stream_registry.as_listen_vports_ref(), stream_callback)
             .await
         {
             Ok(()) => {
@@ -97,8 +134,52 @@ impl TtpRuntime {
             Err(err) => return Err(err),
         }
 
+        let datagram_tunnel = tunnel.clone();
+        let datagram_weak = Arc::downgrade(self);
+        let datagram_callback: crate::networks::IncomingDatagramCallback =
+            Arc::new(move |accepted| {
+                let tunnel = datagram_tunnel.clone();
+                let weak = datagram_weak.clone();
+                Box::pin(async move {
+                    match accepted {
+                        Ok((purpose, read)) => {
+                            let Some(runtime) = weak.upgrade() else {
+                                return;
+                            };
+                            if let Err(err) = runtime.datagram_registry.deliver(
+                                &purpose,
+                                Ok(TtpDatagram {
+                                    meta: TtpDatagramMeta {
+                                        local_ep: tunnel.local_ep(),
+                                        remote_ep: tunnel.remote_ep(),
+                                        local_id: tunnel.local_id(),
+                                        remote_id: tunnel.remote_id(),
+                                        remote_name: None,
+                                        purpose: purpose.clone(),
+                                    },
+                                    read,
+                                }),
+                            ) {
+                                log::warn!(
+                                    "ttp datagram deliver failed purpose={}: {:?}",
+                                    purpose,
+                                    err
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            if err.code() != P2pErrorCode::NotSupport {
+                                log::debug!("ttp datagram callback finished: {:?}", err);
+                            }
+                        }
+                    }
+                }) as crate::networks::IncomingDatagramCallbackFuture
+            });
         match tunnel
-            .listen_datagram(self.datagram_registry.as_listen_vports_ref())
+            .listen_datagram(
+                self.datagram_registry.as_listen_vports_ref(),
+                datagram_callback,
+            )
             .await
         {
             Ok(()) => {
@@ -123,9 +204,6 @@ impl TtpRuntime {
             }
             Err(err) => return Err(err),
         }
-
-        self.spawn_stream_loop(tunnel.clone());
-        self.spawn_datagram_loop(tunnel.clone());
         log::debug!(
             "ttp attach tunnel completed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
             tunnel.local_id(),
@@ -151,80 +229,5 @@ impl TtpRuntime {
 
         attached.push(Arc::downgrade(tunnel));
         true
-    }
-
-    fn spawn_stream_loop(self: &Arc<Self>, tunnel: TunnelRef) {
-        let weak = Arc::downgrade(self);
-        runtime::task::spawn(async move {
-            loop {
-                match tunnel.accept_stream().await {
-                    Ok((purpose, read, write)) => {
-                        let Some(runtime) = weak.upgrade() else {
-                            break;
-                        };
-                        if let Err(err) = runtime.stream_registry.deliver(
-                            &purpose,
-                            Ok((
-                                TtpStreamMeta {
-                                    local_ep: tunnel.local_ep(),
-                                    remote_ep: tunnel.remote_ep(),
-                                    local_id: tunnel.local_id(),
-                                    remote_id: tunnel.remote_id(),
-                                    remote_name: None,
-                                    purpose: purpose.clone(),
-                                },
-                                read,
-                                write,
-                            )),
-                        ) {
-                            log::warn!("ttp stream deliver failed purpose={}: {:?}", purpose, err);
-                        }
-                    }
-                    Err(err) => {
-                        if err.code() != P2pErrorCode::NotSupport {
-                            log::debug!("ttp accept stream finished: {:?}", err);
-                        }
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    fn spawn_datagram_loop(self: &Arc<Self>, tunnel: TunnelRef) {
-        let weak = Arc::downgrade(self);
-        runtime::task::spawn(async move {
-            loop {
-                match tunnel.accept_datagram().await {
-                    Ok((purpose, read)) => {
-                        let Some(runtime) = weak.upgrade() else {
-                            break;
-                        };
-                        if let Err(err) = runtime.datagram_registry.deliver(
-                            &purpose,
-                            Ok(TtpDatagram {
-                                meta: TtpDatagramMeta {
-                                    local_ep: tunnel.local_ep(),
-                                    remote_ep: tunnel.remote_ep(),
-                                    local_id: tunnel.local_id(),
-                                    remote_id: tunnel.remote_id(),
-                                    remote_name: None,
-                                    purpose: purpose.clone(),
-                                },
-                                read,
-                            }),
-                        ) {
-                            log::warn!("ttp datagram deliver failed purpose={}: {:?}", purpose, err);
-                        }
-                    }
-                    Err(err) => {
-                        if err.code() != P2pErrorCode::NotSupport {
-                            log::debug!("ttp accept datagram finished: {:?}", err);
-                        }
-                        break;
-                    }
-                }
-            }
-        });
     }
 }

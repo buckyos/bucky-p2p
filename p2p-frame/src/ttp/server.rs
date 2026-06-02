@@ -7,7 +7,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use std::sync::{Arc, Mutex};
 
 use super::client::{TtpConnector, is_tunnel_available, match_target};
-use super::listener::{TtpDatagramListenerRef, TtpListenerRef, TtpPortListener};
+use super::listener::{TtpIncomingDatagramCallback, TtpIncomingStreamCallback, TtpPortListener};
 use super::runtime::TtpRuntime;
 use super::{TtpDatagramMeta, TtpStreamMeta, TtpTarget};
 
@@ -159,8 +159,12 @@ impl TtpServer {
 
 #[async_trait::async_trait]
 impl TtpPortListener for TtpServer {
-    async fn listen_stream(&self, purpose: TunnelPurpose) -> P2pResult<TtpListenerRef> {
-        self.runtime.listen_stream(purpose)
+    async fn listen_stream(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingStreamCallback,
+    ) -> P2pResult<()> {
+        self.runtime.listen_stream(purpose, callback)
     }
 
     async fn unlisten_stream(&self, purpose: &TunnelPurpose) -> P2pResult<()> {
@@ -168,8 +172,12 @@ impl TtpPortListener for TtpServer {
         Ok(())
     }
 
-    async fn listen_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TtpDatagramListenerRef> {
-        self.runtime.listen_datagram(purpose)
+    async fn listen_datagram(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingDatagramCallback,
+    ) -> P2pResult<()> {
+        self.runtime.listen_datagram(purpose, callback)
     }
 
     async fn unlisten_datagram(&self, purpose: &TunnelPurpose) -> P2pResult<()> {

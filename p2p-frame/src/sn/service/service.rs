@@ -7,15 +7,15 @@ use crate::networks::{
     NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
     TunnelNetwork, TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite,
 };
-use crate::stack::DEFAULT_CHANNEL_CAPACITY;
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
 };
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SN_CMD_SERVICE, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
+use crate::stack::DEFAULT_CHANNEL_CAPACITY;
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
-use crate::ttp::{TtpListenerRef, TtpPortListener, TtpServer, TtpServerRef};
+use crate::ttp::{TtpPortListener, TtpServer, TtpServerRef};
 use crate::types::{SequenceGenerator, Timestamp, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
@@ -599,8 +599,6 @@ impl SnServer {
             Duration::from_secs(30),
             Duration::from_secs(5),
             Duration::from_secs(15),
-            DEFAULT_CHANNEL_CAPACITY,
-            DEFAULT_CHANNEL_CAPACITY,
         ));
         TunnelNetwork::set_reuse_address(tcp_network.as_ref(), reuse_address);
         let quic_network = Arc::new(QuicTunnelNetwork::new(
@@ -612,8 +610,6 @@ impl SnServer {
             Duration::from_secs(30),
             ServerRuntime::start(ServerRuntimeConfig::default())
                 .expect("sfo reuseport server runtime should start"),
-            DEFAULT_CHANNEL_CAPACITY,
-            DEFAULT_CHANNEL_CAPACITY,
             DEFAULT_CHANNEL_CAPACITY,
         ));
         TunnelNetwork::set_reuse_address(quic_network.as_ref(), reuse_address);
@@ -713,38 +709,31 @@ impl SnServer {
             self.local_identity.get_id(),
             purpose
         );
-        let listener = self.ttp_server.listen_stream(purpose).await?;
-        let server = self.clone();
-        let task = Executor::spawn_with_handle(async move {
-            server.run_cmd_accept_loop(listener).await;
-        })
-        .unwrap();
-        *self.cmd_accept_task.lock().unwrap() = Some(task);
+        let service = self.service.clone();
+        let callback = Arc::new(move |accepted| {
+            let service = service.clone();
+            Box::pin(async move {
+                let accepted = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
+                        warn!("sn server cmd accept stopped: {:?}", err);
+                        return;
+                    }
+                };
+                let tunnel = Self::into_cmd_tunnel(accepted);
+                Executor::spawn(async move {
+                    if let Err(err) = service.handle_tunnel(tunnel).await {
+                        error!("sn server handle cmd tunnel failed: {:?}", err);
+                    }
+                });
+            }) as crate::ttp::TtpIncomingStreamCallbackFuture
+        });
+        self.ttp_server.listen_stream(purpose, callback).await?;
         log::debug!(
             "sn server cmd accept loop started local_id={}",
             self.local_identity.get_id()
         );
         Ok(())
-    }
-
-    async fn run_cmd_accept_loop(self: Arc<Self>, listener: TtpListenerRef) {
-        loop {
-            let accepted = match listener.accept().await {
-                Ok(accepted) => accepted,
-                Err(err) => {
-                    warn!("sn server cmd accept stopped: {:?}", err);
-                    break;
-                }
-            };
-
-            let tunnel = Self::into_cmd_tunnel(accepted);
-            let service = self.service.clone();
-            Executor::spawn(async move {
-                if let Err(err) = service.handle_tunnel(tunnel).await {
-                    error!("sn server handle cmd tunnel failed: {:?}", err);
-                }
-            });
-        }
     }
 
     fn into_cmd_tunnel(
@@ -925,12 +914,14 @@ mod tests {
         remote_id: P2pId,
         local_ep: Endpoint,
         remote_ep: Endpoint,
-        incoming_rx: AsyncMutex<
-            mpsc::UnboundedReceiver<(
-                crate::networks::TunnelPurpose,
-                TunnelStreamRead,
-                TunnelStreamWrite,
-            )>,
+        incoming_rx: Arc<
+            AsyncMutex<
+                mpsc::UnboundedReceiver<(
+                    crate::networks::TunnelPurpose,
+                    TunnelStreamRead,
+                    TunnelStreamWrite,
+                )>,
+            >,
         >,
     }
 
@@ -957,7 +948,7 @@ mod tests {
                     remote_id,
                     local_ep,
                     remote_ep,
-                    incoming_rx: AsyncMutex::new(rx),
+                    incoming_rx: Arc::new(AsyncMutex::new(rx)),
                 }),
                 tx,
             )
@@ -1014,13 +1005,25 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
+            let incoming_rx = self.incoming_rx.clone();
+            tokio::spawn(async move {
+                let mut incoming_rx = incoming_rx.lock().await;
+                while let Some((purpose, read, write)) = incoming_rx.recv().await {
+                    callback(Ok((purpose, read, write))).await;
+                }
+            });
             Ok(())
         }
 
         async fn listen_datagram(
             &self,
             _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
         ) -> P2pResult<()> {
             Ok(())
         }
@@ -1032,32 +1035,10 @@ mod tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            TunnelStreamRead,
-            TunnelStreamWrite,
-        )> {
-            let mut rx = self.incoming_rx.lock().await;
-            rx.recv()
-                .await
-                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "stream closed"))
-        }
-
         async fn open_datagram(
             &self,
             _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<crate::networks::TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
-        }
-
-        async fn accept_datagram(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            crate::networks::TunnelDatagramRead,
-        )> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
         }
     }
@@ -1106,12 +1087,10 @@ mod tests {
                 local: *local,
                 mapping_port,
             }];
-            let mut rx = self
-                .rx
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "fake listener already used"))?;
+            let mut rx =
+                self.rx.lock().await.take().ok_or_else(|| {
+                    p2p_err!(P2pErrorCode::ErrorState, "fake listener already used")
+                })?;
             Executor::spawn_ok(async move {
                 loop {
                     match rx.recv().await {
@@ -1286,9 +1265,17 @@ mod tests {
         .unwrap();
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
-        let listener = ttp_server
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(1);
+        let callback: crate::ttp::TtpIncomingStreamCallback = Arc::new(move |accepted| {
+            let accepted_tx = accepted_tx.clone();
+            Box::pin(async move {
+                let _ = accepted_tx.send(accepted).await;
+            }) as crate::ttp::TtpIncomingStreamCallbackFuture
+        });
+        ttp_server
             .listen_stream(
                 crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
+                callback,
             )
             .await
             .unwrap();
@@ -1305,8 +1292,9 @@ mod tests {
             .unwrap();
         fake_network.push_tunnel(tunnel);
 
-        let accepted = timeout(Duration::from_secs(1), listener.accept())
+        let accepted = timeout(Duration::from_secs(1), accepted_rx.recv())
             .await
+            .unwrap()
             .unwrap()
             .unwrap();
         let cmd_tunnel = SnServer::into_cmd_tunnel(accepted);

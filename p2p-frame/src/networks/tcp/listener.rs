@@ -93,27 +93,6 @@ impl TcpTunnelRegistry {
             None => None,
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn find_tunnels_for_test(
-        &self,
-        local_id: &P2pId,
-        remote_id: &P2pId,
-    ) -> Vec<Arc<TcpTunnel>> {
-        let _ = self.cleanup_stale();
-        let by_tunnel = self.by_tunnel.lock().unwrap();
-        let mut tunnels = Vec::new();
-        for ((key_local_id, key_remote_id, _, _), weak) in by_tunnel.iter() {
-            if key_local_id != local_id || key_remote_id != remote_id {
-                continue;
-            }
-            if let Some(tunnel) = weak.upgrade() {
-                tunnels.push(tunnel);
-            }
-        }
-        tunnels.sort_by_key(|tunnel| (tunnel.tunnel_id().value(), tunnel.candidate_id().value()));
-        tunnels
-    }
 }
 
 struct TcpTunnelListenerState {
@@ -136,9 +115,6 @@ pub(crate) struct TcpTunnelListener {
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
     server_runtime: ServerRuntime,
-    tunnel_accept_capacity: usize,
-    #[cfg(test)]
-    forced_control_decision: Mutex<Option<TcpIncomingControlDecision>>,
 }
 
 impl TcpTunnelListener {
@@ -150,9 +126,7 @@ impl TcpTunnelListener {
         heartbeat_interval: Duration,
         heartbeat_timeout: Duration,
         server_runtime: ServerRuntime,
-        _listener_accept_capacity: usize,
         on_incoming_tunnel: IncomingTunnelCallback,
-        tunnel_accept_capacity: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             acceptor: build_acceptor(cert_resolver.clone(), cert_factory.clone()),
@@ -172,18 +146,7 @@ impl TcpTunnelListener {
             heartbeat_interval,
             heartbeat_timeout,
             server_runtime,
-            tunnel_accept_capacity,
-            #[cfg(test)]
-            forced_control_decision: Mutex::new(None),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_incoming_control_decision_for_test(
-        &self,
-        decision: Option<TcpIncomingControlDecision>,
-    ) {
-        *self.forced_control_decision.lock().unwrap() = decision;
     }
 
     pub(crate) async fn start(
@@ -246,10 +209,6 @@ impl TcpTunnelListener {
     }
 
     fn validate_control_hello(&self, hello: &TcpConnectionHello) -> TcpIncomingControlDecision {
-        #[cfg(test)]
-        if let Some(decision) = *self.forced_control_decision.lock().unwrap() {
-            return decision;
-        }
         if hello.role != TcpConnectionRole::Control
             || hello.conn_id.is_some()
             || hello.open_request_id.is_some()
@@ -293,7 +252,6 @@ impl TcpTunnelListener {
             decision,
             self.heartbeat_interval,
             self.heartbeat_timeout,
-            self.tunnel_accept_capacity,
         )
         .await?;
 
@@ -388,4 +346,142 @@ fn resolve_tcp_bind_endpoint(local: Endpoint) -> P2pResult<Endpoint> {
     ))?;
     drop(probe);
     Ok(Endpoint::from((crate::endpoint::Protocol::Tcp, bound_addr)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p2p_identity::{
+        EncodedP2pIdentityCert, P2pIdentityCert, P2pIdentityCertFactory, P2pIdentityCertRef,
+        P2pIdentitySignType, P2pSignature,
+    };
+    use crate::tls::DefaultTlsServerCertResolver;
+    use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
+    use std::sync::{Arc, Once};
+
+    static EXECUTOR_INIT: Once = Once::new();
+
+    struct TestCertFactory;
+
+    impl P2pIdentityCertFactory for TestCertFactory {
+        fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
+            Ok(Arc::new(TestCert {
+                id: P2pId::from(cert.clone()),
+            }))
+        }
+    }
+
+    struct TestCert {
+        id: P2pId,
+    }
+
+    impl P2pIdentityCert for TestCert {
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            self.id.to_string()
+        }
+
+        fn sign_type(&self) -> P2pIdentitySignType {
+            P2pIdentitySignType::Ed25519
+        }
+
+        fn verify(&self, _message: &[u8], _sign: &P2pSignature) -> bool {
+            true
+        }
+
+        fn verify_cert(&self, _name: &str) -> bool {
+            true
+        }
+
+        fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
+            Ok(self.id.as_slice().to_vec())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            Vec::new()
+        }
+
+        fn sn_list(&self) -> Vec<crate::p2p_identity::P2pSn> {
+            Vec::new()
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityCertRef {
+            Arc::new(TestCert {
+                id: self.id.clone(),
+            })
+        }
+    }
+
+    fn listener() -> Arc<TcpTunnelListener> {
+        EXECUTOR_INIT.call_once(crate::executor::Executor::init);
+        let callback: IncomingTunnelCallback = Arc::new(|_| Box::pin(async {}));
+        TcpTunnelListener::new(
+            DefaultTlsServerCertResolver::new(),
+            Arc::new(TestCertFactory),
+            TcpTunnelRegistry::new(),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            ServerRuntime::start(ServerRuntimeConfig::default())
+                .expect("sfo reuseport server runtime should start"),
+            callback,
+        )
+    }
+
+    fn control_hello() -> TcpConnectionHello {
+        TcpConnectionHello {
+            role: TcpConnectionRole::Control,
+            tunnel_id: TunnelId::from(7),
+            candidate_id: TunnelCandidateId::from(11),
+            is_reverse: false,
+            conn_id: None,
+            open_request_id: None,
+        }
+    }
+
+    #[test]
+    fn tcp_listener_accepts_only_control_hello_without_data_fields() {
+        let listener = listener();
+        let mut hello = control_hello();
+        assert_eq!(
+            listener.validate_control_hello(&hello),
+            TcpIncomingControlDecision::Accept
+        );
+
+        hello.role = TcpConnectionRole::Data;
+        assert_eq!(
+            listener.validate_control_hello(&hello),
+            TcpIncomingControlDecision::ProtocolError
+        );
+
+        hello = control_hello();
+        hello.conn_id = Some(TunnelId::from(12));
+        assert_eq!(
+            listener.validate_control_hello(&hello),
+            TcpIncomingControlDecision::ProtocolError
+        );
+
+        hello = control_hello();
+        hello.open_request_id = Some(TunnelId::from(13));
+        assert_eq!(
+            listener.validate_control_hello(&hello),
+            TcpIncomingControlDecision::ProtocolError
+        );
+    }
+
+    #[test]
+    fn tcp_listener_zero_port_bind_resolution_allocates_tcp_endpoint() {
+        let local = Endpoint::from((
+            crate::endpoint::Protocol::Tcp,
+            "127.0.0.1:0".parse().unwrap(),
+        ));
+        let resolved = resolve_tcp_bind_endpoint(local).unwrap();
+
+        assert_eq!(resolved.protocol(), crate::endpoint::Protocol::Tcp);
+        assert!(resolved.addr().is_ipv4());
+        assert_ne!(resolved.addr().port(), 0);
+    }
 }

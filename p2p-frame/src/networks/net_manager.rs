@@ -470,11 +470,19 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
-        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_datagram(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
@@ -485,17 +493,7 @@ mod tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
-        }
-
         async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
-        }
-
-        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
     }

@@ -355,8 +355,49 @@ impl DatagramManager {
                     tunnel.form(),
                     tunnel.protocol()
                 );
+                let callback_tunnel = tunnel.clone();
+                let callback_weak = weak.clone();
+                let callback: crate::networks::IncomingDatagramCallback =
+                    Arc::new(move |accepted| {
+                        let tunnel = callback_tunnel.clone();
+                        let weak = callback_weak.clone();
+                        Box::pin(async move {
+                            let Some(datagram) = weak.upgrade() else {
+                                return;
+                            };
+                            match accepted {
+                                Ok((purpose, read)) => {
+                                    let listener = datagram.listeners.get(&purpose);
+                                    if let Some(listener) = listener {
+                                        listener.waiter.set_result_with_cache(DatagramRead::new(
+                                            read,
+                                            Arc::downgrade(&tunnel),
+                                            datagram.session_gen.generate(),
+                                            purpose,
+                                        ));
+                                    }
+                                }
+                                Err(err) => {
+                                    if should_continue_accept_loop(&err) {
+                                        log::debug!(
+                                            "datagram callback continue remote {} err {:?}",
+                                            tunnel.remote_id(),
+                                            err
+                                        );
+                                    } else {
+                                        log::debug!(
+                                            "datagram callback ended remote {} err {:?}",
+                                            tunnel.remote_id(),
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+                        })
+                            as crate::networks::IncomingDatagramCallbackFuture
+                    });
                 if let Err(err) = tunnel
-                    .listen_datagram(datagram.listeners.as_listen_vports_ref())
+                    .listen_datagram(datagram.listeners.as_listen_vports_ref(), callback)
                     .await
                 {
                     log::warn!(
@@ -373,48 +414,6 @@ impl DatagramManager {
                     tunnel.form(),
                     tunnel.protocol()
                 );
-                datagram.start_tunnel_accept_loop(tunnel);
-            }
-        });
-    }
-
-    fn start_tunnel_accept_loop(self: &Arc<Self>, tunnel: TunnelRef) {
-        let weak = Arc::downgrade(self);
-        Executor::spawn_ok(async move {
-            loop {
-                let accepted = tunnel.accept_datagram().await;
-                let Some(datagram) = weak.upgrade() else {
-                    break;
-                };
-                match accepted {
-                    Ok((purpose, read)) => {
-                        let listener = datagram.listeners.get(&purpose);
-                        if let Some(listener) = listener {
-                            listener.waiter.set_result_with_cache(DatagramRead::new(
-                                read,
-                                Arc::downgrade(&tunnel),
-                                datagram.session_gen.generate(),
-                                purpose,
-                            ));
-                        }
-                    }
-                    Err(err) => {
-                        if should_continue_accept_loop(&err) {
-                            log::debug!(
-                                "datagram accept loop continue remote {} err {:?}",
-                                tunnel.remote_id(),
-                                err
-                            );
-                            continue;
-                        }
-                        log::debug!(
-                            "datagram accept loop ended remote {} err {:?}",
-                            tunnel.remote_id(),
-                            err
-                        );
-                        break;
-                    }
-                }
             }
         });
     }
@@ -490,13 +489,18 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
         async fn listen_datagram(
             &self,
             _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
         ) -> P2pResult<()> {
             Ok(())
         }
@@ -508,17 +512,7 @@ mod tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
-        }
-
         async fn open_datagram(&self, _purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
-        }
-
-        async fn accept_datagram(&self) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "not supported"))
         }
     }

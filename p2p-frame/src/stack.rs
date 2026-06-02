@@ -33,11 +33,7 @@ pub const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 pub struct ChannelCapacityConfig {
     pub net_manager_incoming: usize,
     pub tunnel_manager_subscription: usize,
-    pub tcp_listener_accept: usize,
-    pub tcp_tunnel_accept: usize,
-    pub quic_listener_accept: usize,
     pub quic_listener_connect: usize,
-    pub quic_tunnel_accept: usize,
     pub ttp_listener: usize,
     pub pn_internal: usize,
 }
@@ -47,11 +43,7 @@ impl Default for ChannelCapacityConfig {
         Self {
             net_manager_incoming: DEFAULT_CHANNEL_CAPACITY,
             tunnel_manager_subscription: DEFAULT_CHANNEL_CAPACITY,
-            tcp_listener_accept: DEFAULT_CHANNEL_CAPACITY,
-            tcp_tunnel_accept: DEFAULT_CHANNEL_CAPACITY,
-            quic_listener_accept: DEFAULT_CHANNEL_CAPACITY,
             quic_listener_connect: DEFAULT_CHANNEL_CAPACITY,
-            quic_tunnel_accept: DEFAULT_CHANNEL_CAPACITY,
             ttp_listener: DEFAULT_CHANNEL_CAPACITY,
             pn_internal: DEFAULT_CHANNEL_CAPACITY,
         }
@@ -62,11 +54,7 @@ impl ChannelCapacityConfig {
     fn normalize(mut self) -> Self {
         self.net_manager_incoming = self.net_manager_incoming.max(1);
         self.tunnel_manager_subscription = self.tunnel_manager_subscription.max(1);
-        self.tcp_listener_accept = self.tcp_listener_accept.max(1);
-        self.tcp_tunnel_accept = self.tcp_tunnel_accept.max(1);
-        self.quic_listener_accept = self.quic_listener_accept.max(1);
         self.quic_listener_connect = self.quic_listener_connect.max(1);
-        self.quic_tunnel_accept = self.quic_tunnel_accept.max(1);
         self.ttp_listener = self.ttp_listener.max(1);
         self.pn_internal = self.pn_internal.max(1);
         self
@@ -77,11 +65,7 @@ impl ChannelCapacityConfig {
         Self {
             net_manager_incoming: capacity,
             tunnel_manager_subscription: capacity,
-            tcp_listener_accept: capacity,
-            tcp_tunnel_accept: capacity,
-            quic_listener_accept: capacity,
             quic_listener_connect: capacity,
-            quic_tunnel_accept: capacity,
             ttp_listener: capacity,
             pn_internal: capacity,
         }
@@ -378,16 +362,6 @@ impl P2pConfig {
         self.channel_capacities.ttp_listener = channel_capacity.max(1);
         self
     }
-
-    pub fn set_tcp_tunnel_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities.tcp_tunnel_accept = channel_capacity.max(1);
-        self
-    }
-
-    pub fn set_quic_tunnel_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities.quic_tunnel_accept = channel_capacity.max(1);
-        self
-    }
 }
 
 pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
@@ -416,8 +390,6 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         Duration::from_secs(5),
         Duration::from_secs(15),
         server_runtime.clone(),
-        channel_capacities.tcp_listener_accept,
-        channel_capacities.tcp_tunnel_accept,
     ));
     TunnelNetwork::set_reuse_address(tcp_network.as_ref(), config.reuse_address());
     let quic_network = Arc::new(QuicTunnelNetwork::new(
@@ -428,9 +400,7 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         config.quic_connect_timeout,
         config.quic_idle_time,
         server_runtime,
-        channel_capacities.quic_listener_accept,
         channel_capacities.quic_listener_connect,
-        channel_capacities.quic_tunnel_accept,
     ));
     TunnelNetwork::set_reuse_address(quic_network.as_ref(), config.reuse_address());
     tunnel_networks.extend(vec![
@@ -1134,7 +1104,7 @@ mod tests {
         let config = config.set_ttp_channel_capacity(17);
         assert_eq!(config.channel_capacities().ttp_listener, 17);
         assert_eq!(
-            config.channel_capacities().tcp_tunnel_accept,
+            config.channel_capacities().quic_listener_connect,
             DEFAULT_CHANNEL_CAPACITY
         );
     }
@@ -1169,10 +1139,7 @@ mod tests {
 
         let config = P2pStackConfig::new(env, local_identity);
         assert_eq!(config.channel_capacity(), 19);
-        assert_eq!(
-            config.channel_capacities().tunnel_manager_subscription,
-            31
-        );
+        assert_eq!(config.channel_capacities().tunnel_manager_subscription, 31);
         let config = config.set_tunnel_manager_channel_capacity(23);
         assert_eq!(config.channel_capacities().tunnel_manager_subscription, 23);
         assert_eq!(config.channel_capacities().ttp_listener, 19);

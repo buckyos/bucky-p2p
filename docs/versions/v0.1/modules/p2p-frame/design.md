@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-01T11:09:20+08:00
+approved_at: 2026-06-02T11:14:58+08:00
 ---
 
 # p2p-frame 设计
@@ -27,7 +27,8 @@ approved_at: 2026-06-01T11:09:20+08:00
 - 为本轮 `ServerReflexive` QUIC NAT keepalive 需求建立可执行设计边界：UDP punch 只对 `EndpointArea::ServerReflexive` QUIC candidate 开启，QUIC tunnel 控制心跳发送间隔保持现有值，heartbeat timeout 调整为 30 秒。
 - 为本轮 networks 基于 `sfo-reuseport` 的 listener 重构建立可执行设计边界：TCP listener 直接使用 `sfo_reuseport::TcpServer`，QUIC listener 直接使用 `sfo_reuseport::QuicServer::serve_socket(...)`、每 worker 一个 Quinn endpoint、`sfo_reuseport::QuicCidGenerator` worker shard 和 `sfo_reuseport::UdpSocket` Quinn helper 接口，外部可显式设置 `ServerRuntime`，且不新增 `NetworkServerRuntime`。
 - 为本轮 `TunnelNetwork` listener 暴露模型变更建立可执行设计边界：`listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`，不再返回 `TunnelListenerRef`，公共 trait 移除 `listeners()`，`NetManager` 负责在回调中执行原有 incoming validator、订阅发布和 reject close 逻辑。
-- 为本轮 bounded channel 容量配置化需求建立可执行设计边界：`P2pConfig` / `P2pStackConfig` 作为顶层配置入口提供按位置拆分的容量配置，各项默认 `1024`，调用方默认无需设置；`NetManager`、`TunnelManager`、TCP/QUIC listener、TCP/QUIC tunnel、TTP registry、QUIC listener connect queue 和 PN 相关内部队列只接收对应位置已解析容量，不在底层定义默认值；所有生产路径 `tokio::sync::mpsc::unbounded_channel` 均替换为 bounded channel，并明确满载时的背压、错误或关闭语义。
+- 为本轮 `Tunnel` stream/datagram 入站 channel 暴露模型变更建立可执行设计边界：`listen_stream(...)` / `listen_datagram(...)` 接收入站 channel 回调，公共 trait 移除 `accept_stream()` / `accept_datagram()`，TCP/QUIC/PN tunnel 内部在入站处理路径中按 listen 规则触发回调，TTP、stream manager、datagram manager 和 PN server/client 不再通过公共 accept loop 消费 channel。
+- 为本轮 bounded channel 容量配置化需求建立可执行设计边界：`P2pConfig` / `P2pStackConfig` 作为顶层配置入口提供按位置拆分的容量配置，各项默认 `1024`，调用方默认无需设置；`NetManager`、`TunnelManager`、TTP registry、QUIC listener connect queue 和 PN 相关内部队列只接收对应位置已解析容量，不在底层定义默认值；TCP/QUIC tunnel 的入站 stream/datagram 已改为回调交付，不再保留旧 accept queue 容量参数；所有生产路径 `tokio::sync::mpsc::unbounded_channel` 均替换为 bounded channel，并明确满载时的背压、错误或关闭语义。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -37,6 +38,7 @@ approved_at: 2026-06-01T11:09:20+08:00
 - 保留 `Default` 作为 endpoint area 名称、继续接受 `D` 作为新语义编码，或把 SN 观察地址无条件提升为静态 `Wan`
 - 新增 `NetworkServerRuntime`、socket factory trait 或其他通用运行时抽象来包裹 `sfo-reuseport`
 - 因 `sfo-reuseport` 重构或 listener 回调化而改变 TCP/QUIC tunnel 线协议、TLS 身份校验、QUIC NAT punch 策略、heartbeat 语义或 tunnel publish 规则
+- 因 `Tunnel` stream/datagram 回调化而改变 TCP/QUIC/PN/TTP 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码或 tunnel publish 规则
 - 为 bounded channel 引入独立配置模块、全局静态默认值或底层局部默认值
 - 通过额外 unbounded buffer、后台无限 Vec 队列或隐藏转发任务绕开 bounded channel 容量限制
 
@@ -50,6 +52,7 @@ approved_at: 2026-06-01T11:09:20+08:00
 | 子模块 | 类型 | 职责 | 输入 | 输出 | 依赖 | 是否独立文档 |
 |--------|------|------|------|------|------|----------------|
 | `networks` | core transport | TCP/QUIC 监听器、endpoint、validator、QUIC listener 同源 UDP punch burst 和底层网络行为 | sockets、runtime、TLS | 传输事件和 tunnel plumbing | runtime、TLS | no |
+| `tunnel_channel_callback` | public tunnel API | `Tunnel` stream/datagram listen 回调类型、公共 trait 签名、入站 channel 回调交付和关闭/背压语义 | tunnel inbound channel、listen vports、callbacks | stream/datagram callback invocation | `networks`、`ttp`、`pn`、`stream`、`datagram` | no |
 | `tunnel` | orchestration | tunnel 生命周期、连接选择、统一 register/publish 生命周期、proxy 回退与后续脱代理升级行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | yes |
 | `ttp` | protocol | tunnel 上的命令和流复用协议 | tunnel IO | 带帧的命令/流行为 | `tunnel` | no |
 | `sn` | service | 对端注册、信令和调用转发 | tunnel/ttp、身份 | SN 服务行为 | `ttp`、`p2p_identity` | no |
@@ -71,6 +74,8 @@ approved_at: 2026-06-01T11:09:20+08:00
 ### 公共接口摘要
 - `p2p-frame` 暴露核心网络和 tunnel 栈，供 `cyfs-p2p` 与运行时二进制消费。
 - 直接子模块契约必须持续与当前协议说明和公开 crate 导出保持一致。
+- `Tunnel` 公共 trait 的入站 stream/datagram 消费入口为 `listen_stream(vports, callback)` 与 `listen_datagram(vports, callback)`；公共 trait 不再提供 `accept_stream()` 或 `accept_datagram()`。
+- stream 回调输入为 `P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)>` 或等价命名类型；datagram 回调输入为 `P2pResult<(TunnelPurpose, TunnelDatagramRead)>` 或等价命名类型。回调类型必须可 `Clone + Send + Sync + 'static`，返回 `Send + 'static` 的异步 future，且不得把 TLS、PN 加密模式或线协议参数加入通用 trait。
 
 ### 外部依赖
 - async/runtime crates
@@ -120,10 +125,16 @@ approved_at: 2026-06-01T11:09:20+08:00
 - `NetManager::listen(...)` 必须为每个 network listen 调用注册一个回调，回调中调用 `dispatch_tunnel_result(...)` 或等价路径，保持原有 `spawn_listener_loop` 中的错误处理、incoming validator、订阅发布和 reject close 行为。
 - `NetManager::get_listener(...)` 与 `listener_entries(...)` 不再属于公共 manager 能力；需要监听地址和映射端口的调用方继续使用 `get_listener_info(...)` 与 `listener_info_entries(...)`。
 - proxy client 启动不得通过 `listeners().is_empty()` 判断是否已监听，应使用 `listener_infos().is_empty()` 或 PN client 内部幂等 listen 语义。
-- `P2pConfig` 必须新增顶层 `ChannelCapacityConfig` 或等价配置快照，按队列用途至少区分 TCP listener accept、TCP tunnel accept、QUIC listener accept、QUIC listener connect、QUIC tunnel accept、TTP listener registry、TunnelManager subscription、NetManager incoming subscriber 和 PN 内部队列；每项默认值为 `1024`，调用方默认不需要设置，并可只覆盖单个位置。`create_p2p_env(...)` 必须把对应容量传入默认 TCP/QUIC network 和 `NetManager`。
+- `Tunnel::listen_stream(...)` 与 `Tunnel::listen_datagram(...)` 必须保存对应 vport/purpose listen 规则和回调，并返回 `P2pResult<()>`；重复 listen 默认替换同类回调和 listen 规则，旧回调不再接收后续 channel。
+- `Tunnel` 入站处理路径收到 stream/datagram channel 后，必须先检查 tunnel 状态和 listen 规则。未 listen 或不匹配 purpose 时，必须按现有 open 失败语义拒绝或关闭 channel，不得静默丢弃成功状态。
+- `Tunnel` 关闭后必须清空或禁用 stream/datagram 回调；关闭与入站投递并发时，迟到 channel 必须关闭、拒绝或返回错误，不得交付给已关闭 tunnel 的外部回调。
+- 回调 future 的调度不得阻塞 transport control loop、QUIC endpoint accept loop、PN control loop 或 TTP frame dispatch。TCP/QUIC/PN tunnel 可在对应 tunnel runtime 中 `spawn` 回调任务，或通过已配置 bounded channel 转交给专门分发任务；如果内部队列满载，必须返回 `P2pErrorCode::OutOfLimit` 或等价错误并关闭迟到 channel。
+- 对基于 `sfo-reuseport` worker 的 TCP/QUIC 入站路径，worker runtime 只负责把新 channel 交给 tunnel 内部 dispatch；外部回调 future 不得长期占用 worker socket accept/recv loop。具体实现可在 worker runtime spawn 轻量投递任务，但必须保持 bounded channel 背压和关闭后不回调语义。
+- TTP runtime attach tunnel 时不再 spawn `accept_stream()` / `accept_datagram()` loop，而是注册 stream/datagram 回调；回调中按 registry 查找 listener 并转交给 TTP listener bounded 队列。stream manager、datagram manager 和 PN server/client 同样改为注册回调并在回调中执行原有 listener lookup、统计或 bridge 分发逻辑。
+- `P2pConfig` 必须新增顶层 `ChannelCapacityConfig` 或等价配置快照，按队列用途至少区分 QUIC listener connect、TTP listener registry、TunnelManager subscription、NetManager incoming subscriber 和 PN 内部队列；每项默认值为 `1024`，调用方默认不需要设置，并可只覆盖单个位置。`create_p2p_env(...)` 必须把对应容量传入仍存在 bounded queue 的底层组件。
 - `P2pEnv` 必须保存已解析的分位置 channel 容量配置，作为 stack 层继续传递的唯一来源；`P2pStackConfig` 必须从 `P2pEnv` 继承该配置快照，并在创建默认 `PnClient`、`SNClientService`、`TunnelManager` 及其他 stack 组装路径时传入对应位置容量。底层构造函数只接收 `usize` 容量或显式配置快照，不得在构造函数内部使用 `unwrap_or(1024)`、`const DEFAULT_*` 或其他默认兜底。
-- TCP 与 QUIC tunnel 的 inbound stream/datagram accepted queue 使用 `mpsc::channel(channel_capacity)`。远端或控制循环投递 inbound channel 时，若队列已满，必须返回或记录 `P2pErrorCode::OutOfLimit` 等等价错误，并关闭或拒绝该迟到 channel；不得无限等待控制读循环导致整个 tunnel 控制面停滞。
-- `TunnelManager` 的 subscription receiver、`NetManager` incoming subscriber、TTP listener registry、TCP/QUIC listener accept queue、TCP/QUIC tunnel inbound queue、QUIC listener connect request queue 和 PN service/test 内部 accept queue 必须分别使用顶层配置中对应位置的容量。对不允许阻塞的同步分发路径使用 `try_send` 并把满载转化为错误、关闭或移除订阅；对天然异步且调用方可等待的路径可以使用 `send(...).await`，但不得持有会造成死锁的 mutex guard 跨 await。
+- TCP 与 QUIC tunnel 的 inbound stream/datagram 不再通过旧 accepted queue 暴露给调用方；实现不得保留旧 `channel_capacity` 构造参数或为该路径新增隐藏 queue 来模拟旧轮询入口。远端或控制循环投递 inbound channel 时，必须按 listen 回调、关闭状态和协议拒绝路径收敛。
+- `TunnelManager` 的 subscription receiver、`NetManager` incoming subscriber、TTP listener registry、QUIC listener connect request queue 和 PN service/test 内部 accept queue 必须分别使用顶层配置中对应位置的容量。对不允许阻塞的同步分发路径使用 `try_send` 并把满载转化为错误、关闭或移除订阅；对天然异步且调用方可等待的路径可以使用 `send(...).await`，但不得持有会造成死锁的 mutex guard 跨 await。
 - `TtpRegistry::register(...)` 必须接收 capacity 参数或在 `TtpClient` / listener 构造时绑定容量；同一 purpose 重复注册语义保持不变。满载时，新的 stream/datagram 投递必须返回错误给 tunnel/ttp 分发路径，而不是丢弃成功状态。
 - 测试替身和 `#[cfg(test)]` helper 可以使用显式小容量来验证满载行为；如果测试需要默认容量，必须从顶层配置或测试专用 helper 参数传入，不得在底层类型中新增默认值。
 - `EndpointArea::ServerReflexive` 是 SN 观察到的 server-reflexive endpoint 标记，不代表系统默认绑定地址。`Endpoint` 的文本编码必须用 `S` 表示该 area，字符串解析只把 `S` 映射到 `ServerReflexive`；raw codec 继续复用原 area bit 位置，但语义名改为 `ServerReflexive`。
@@ -176,6 +187,7 @@ p2p-frame/src
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-tunnel-control-channel.md` | `PnTunnel` 控制通道建立、ready gate、heartbeat、远端关闭感知和关闭状态机收敛设计补充 | `pn/client`、`pn/protocol`、必要 `pn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | relay 侧 PN server、`sfo-io` 流量统计与限速设计补充 | `pn/service` |
 | `docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | TCP/QUIC listener 基于 `sfo-reuseport` 重构、`ServerRuntime` 注入和 Quinn `AsyncUdpSocket` 适配设计补充 | `networks/tcp`、`networks/quic`、`stack_runtime` |
+| `docs/versions/v0.1/modules/p2p-frame/design/tunnel-channel-listen-callback.md` | `Tunnel` stream/datagram listen 回调化、公共 `accept_*` 移除、回调运行时与 manager 迁移设计补充 | `networks`、`ttp`、`stream`、`datagram`、`pn/client`、`pn/service` |
 | `p2p-frame/docs/tunnel_design.md` | tunnel 概念 | tunnel |
 | `p2p-frame/docs/tunnel_command_protocol_design.md` | tunnel 命令协议 | tunnel/ttp |
 | `p2p-frame/docs/tcp_tunnel_protocol_design.md` | TCP tunnel 协议 | networks/tunnel |
@@ -200,6 +212,7 @@ p2p-frame/src
 | TCP listener 基于 `sfo-reuseport` 重构 | `TcpTunnelListener` 由本地 `TcpListener::accept()` 循环改为 `sfo_reuseport::TcpServer` handler 接收入站 `TcpStream`；stream 继续进入现有 TLS accept、control/data 分流、registry 和 publish 流程；`ServerRuntime` 从 stack/network 构造传入，未设置时默认创建。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/tcp/connection.rs`、`p2p-frame/src/networks/tcp/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 若实现阶段需要改变 TCP tunnel 线协议、TLS 身份校验或公共 `TunnelNetwork` trait，应退回 proposal；若只是 close/task 语义不清，应退回 design。 |
 | QUIC listener 基于 `sfo-reuseport` 重构 | `QuicTunnelListener` 使用 `sfo_reuseport::QuicServer::serve_socket(...)` 接收每个 worker 的 UDP socket，内部 Quinn `AsyncUdpSocket` 适配器直接包裹 `sfo_reuseport::UdpSocket` 并创建 per-worker `quinn::Endpoint::new_with_abstract_socket(...)`；worker endpoint 使用 `sfo_reuseport::QuicCidGenerator` 生成匹配 worker shard 的 CID；主动 connect 从 worker endpoint 集合选择一个 endpoint；同源 UDP punch 使用首个可用 worker socket。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 若实现阶段需要新增 raw UDP tunnel、解析 punch payload、改变 QUIC NAT punch policy 或 heartbeat 语义，应退回 proposal；若只是 waker/backpressure/close 细节不清，应退回 design。 |
 | `TunnelNetwork` listener 回调化 | 公共 `TunnelNetwork::listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`；公共 trait 移除 `listeners()`；`NetManager` 把回调接入原有 dispatch、validator、订阅发布和 reject close；TCP/QUIC/PN listener 对象降为 network 内部实现细节。 | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/pn/client/pn_client.rs`、必要调用点 | 若实现阶段发现仍有外部调用方必须直接持有 `TunnelListenerRef`，应退回 design 明确替代接口；不得保留 `listeners()` 作为兼容旁路。 |
+| `Tunnel` stream/datagram listen 回调化 | 公共 `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`；`listen_stream(...)` / `listen_datagram(...)` 接收 stream/datagram 入站回调；TCP/QUIC/PN tunnel 在内部入站处理路径中触发回调；TTP、stream manager、datagram manager 和 PN server/client 迁移到回调模型。 | `p2p-frame/src/networks/tunnel.rs`、`p2p-frame/src/networks/tcp/tunnel.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/ttp/runtime.rs`、`p2p-frame/src/stream/stream_manager.rs`、`p2p-frame/src/datagram/datagram_manager.rs`、`p2p-frame/src/pn/service/pn_server.rs`、测试替身 | 若实现阶段需要保留公共 `accept_*`、改变线协议、改变 vport/purpose 编码或让回调阻塞 worker/control loop，应退回 design；不得以内部公共队列绕回旧轮询语义。 |
 | bounded channel 容量配置化 | 顶层配置按位置默认 `1024`，用户默认无需设置，外部可只覆盖某一位置；生产路径 `unbounded_channel` 替换为 bounded channel；底层构造只接收对应位置已解析容量，不定义默认值；满载时按路径返回错误、关闭迟到 channel/tunnel 或移除订阅。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/tcp/tunnel.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/ttp/registry.rs`、`p2p-frame/src/ttp/listener.rs`、`p2p-frame/src/pn/**` 中现有 mpsc queue 使用点 | 若某条路径需要无限缓存才能保持语义，应退回 proposal；若只是满载错误码、同步/异步发送边界或构造传参不清，应退回 design，而不是保留 unbounded channel。 |
 
 ## Directly Mapped Change Items
@@ -211,10 +224,12 @@ p2p-frame/src
 | networks_sfo_reuseport_tcp_listener | P-SFO-TCP-LISTENER-1 | TCP listener 使用 `sfo_reuseport::TcpServer` 注册服务，handler 接收 `sfo_reuseport::TcpStream` 后调用现有 TLS accept 与 TCP control/data 分流；`TcpTunnelListener` 保存 `TcpServer` handle 并在 close 时停止服务；`P2pStackConfig` 可显式注入 `sfo_reuseport::ServerRuntime`，默认路径自动创建 runtime。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/tcp/connection.rs`、`p2p-frame/src/networks/tcp/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 回滚时恢复本地 `TcpListener` bind/accept 路径和旧 `reuse_address` 设置，但不得改变 TCP tunnel 线协议或 publish 语义。 |
 | networks_sfo_reuseport_quic_listener_socket | P-SFO-QUIC-LISTENER-1 | QUIC listener 使用 `sfo_reuseport::QuicServer::serve_socket(...)` 注册服务；每个 `(UdpSocket, worker_id)` 回调创建一个 Quinn endpoint，`AsyncUdpSocket::poll_recv()` / `try_send()` / `UdpPoller` 分别委托给 `UdpSocket::poll_recv_from_vectored(...)`、`try_send_to(...)` 和 `poll_send_ready(...)`；endpoint CID generator 使用 `QuicCidGenerator::for_worker(worker_id)`；所有 endpoint accept 结果汇入同一 listener 队列；主动 connect 可选择任一 endpoint；UDP punch 保存第一个 worker socket；`QuicTunnelListener` close 同时关闭 `QuicServer` 和所有 Quinn endpoint。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md` | 回滚时恢复直接 UDP socket + `quinn::Endpoint::new(...)` 路径，但不得引入独立 punch socket、raw UDP tunnel 或改变 NAT punch/heartbeat 语义。 |
 | tunnel_network_listen_callback | P-TUNNEL-NETWORK-CALLBACK-1 | `TunnelNetwork::listen(...)` 由返回 `TunnelListenerRef` 改为接收 `IncomingTunnelCallback` 并返回 `P2pResult<()>`；TCP/QUIC/PN network 保存内部 listener 并在 accept 到新 tunnel 后调用回调；`NetManager` 注册回调并复用原有 dispatch/validator/publish 逻辑；公共 trait 删除 `listeners()`。 | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/stack.rs`、相关 tests | 回滚时恢复 `listen(...) -> P2pResult<TunnelListenerRef>` 和 `listeners()`，但必须同步回滚 NetManager/stack 调用点；不得改变 tunnel publish 或线协议语义。 |
+| tunnel_stream_datagram_listen_callback | P-TUNNEL-CHANNEL-CALLBACK-1 | `Tunnel` trait 删除 `accept_stream()` / `accept_datagram()`；新增或调整 `IncomingStreamCallback`、`IncomingDatagramCallback` 等等价回调类型；`listen_stream(...)` / `listen_datagram(...)` 保存 listen 规则和回调；TCP/QUIC/PN tunnel 入站 stream/datagram dispatch 按状态、listen 规则和 bounded capacity 触发回调；TTP、stream manager、datagram manager 和 PN server/client 迁移到回调消费模型。 | `p2p-frame/src/networks/tunnel.rs`、`p2p-frame/src/networks/tcp/tunnel.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/ttp/runtime.rs`、`p2p-frame/src/stream/stream_manager.rs`、`p2p-frame/src/datagram/datagram_manager.rs`、`p2p-frame/src/pn/service/pn_server.rs`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-channel-listen-callback.md`、相关 tests | 回滚时恢复公共 `accept_*` 和旧 accept loops，并同步回滚 TTP/manager 调用点；不得留下既有回调又有公共 accept 的双入口状态。 |
 | bounded_channel_capacity_config | P-BOUNDED-CHANNELS-1 | 在 `P2pConfig` / `P2pStackConfig` 顶层提供分位置 channel 容量配置，每项默认 `1024`，用户默认无需设置，并通过 `P2pEnv` 和各构造函数把对应位置容量传入底层；所有生产路径 `mpsc::unbounded_channel`、`UnboundedSender`、`UnboundedReceiver` 替换为 bounded `mpsc::channel`、`Sender`、`Receiver`；同步分发路径使用 `try_send` 并将满载转成错误、关闭或订阅清理，异步可背压路径使用 `send(...).await`。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/**`、`p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/ttp/**`、`p2p-frame/src/pn/**` 中现有 unbounded mpsc 使用点和对应测试替身 | 回滚时恢复 unbounded mpsc 类型和构造传参，但不得留下半迁移容量 API；若保留顶层配置，应退回 proposal/design 明确兼容目标。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。
 - 面向运行时或密码学的回归需要比孤立工具改动更强的回滚姿态。
+- `Tunnel` stream/datagram 回调化影响公共 API 和所有 tunnel 消费者；回滚必须成组恢复 trait 签名、TCP/QUIC/PN tunnel 实现、TTP/stream/datagram/PN 调用点和测试替身，避免出现回调与公共 accept 双入口并存。
 - bounded channel 会把历史积压转为背压或满载错误；回滚必须成组恢复 sender/receiver 类型、构造传参和满载错误映射，避免出现 sender bounded、receiver unbounded 或容量配置无法生效的半迁移状态。
 - 回滚应优先撤销具体实现改动，同时保留已批准的 proposal/design/testing 证据，为下一次尝试复用。

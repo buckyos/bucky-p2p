@@ -1,19 +1,24 @@
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
+use crate::executor::Executor;
 use crate::networks::{ListenVPorts, ListenVPortsRef, TunnelPurpose};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
+
+type TtpQueueCallback<T> =
+    Arc<dyn Fn(P2pResult<T>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 
 pub(crate) struct TtpQueueRegistry<T> {
-    listeners: RwLock<HashMap<TunnelPurpose, Arc<mpsc::Sender<P2pResult<T>>>>>,
-    channel_capacity: usize,
+    listeners: RwLock<HashMap<TunnelPurpose, TtpQueueCallback<T>>>,
+    _marker: std::marker::PhantomData<fn(T)>,
 }
 
 impl<T> TtpQueueRegistry<T> {
-    pub(crate) fn new(channel_capacity: usize) -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             listeners: RwLock::new(HashMap::new()),
-            channel_capacity,
+            _marker: std::marker::PhantomData,
         })
     }
 
@@ -27,8 +32,8 @@ impl<T> TtpQueueRegistry<T> {
     pub(crate) fn register(
         &self,
         purpose: TunnelPurpose,
-    ) -> P2pResult<mpsc::Receiver<P2pResult<T>>> {
-        let (tx, rx) = mpsc::channel(self.channel_capacity);
+        callback: TtpQueueCallback<T>,
+    ) -> P2pResult<()> {
         let mut listeners = self.listeners.write().unwrap();
         if listeners.contains_key(&purpose) {
             return Err(p2p_err!(
@@ -37,8 +42,8 @@ impl<T> TtpQueueRegistry<T> {
                 purpose
             ));
         }
-        listeners.insert(purpose, Arc::new(tx));
-        Ok(rx)
+        listeners.insert(purpose, callback);
+        Ok(())
     }
 
     pub(crate) fn remove(&self, purpose: &TunnelPurpose) {
@@ -46,22 +51,15 @@ impl<T> TtpQueueRegistry<T> {
     }
 
     pub(crate) fn deliver(&self, purpose: &TunnelPurpose, item: P2pResult<T>) -> P2pResult<()> {
-        let Some(sender) = self.listeners.read().unwrap().get(purpose).cloned() else {
+        let Some(callback) = self.listeners.read().unwrap().get(purpose).cloned() else {
             return Err(p2p_err!(
                 P2pErrorCode::NotFound,
                 "ttp purpose {} not listening",
                 purpose
             ));
         };
-        sender.try_send(item).map_err(|err| {
-            self.listeners.write().unwrap().remove(purpose);
-            p2p_err!(
-                P2pErrorCode::OutOfLimit,
-                "ttp purpose {} listener queue full or closed: {}",
-                purpose,
-                err
-            )
-        })
+        Executor::spawn((callback)(item));
+        Ok(())
     }
 }
 

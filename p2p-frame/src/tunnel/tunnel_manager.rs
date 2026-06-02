@@ -1698,6 +1698,7 @@ fn is_tunnel_available(tunnel: &dyn crate::networks::Tunnel) -> bool {
 mod nat_strategy_tests {
     use super::*;
     use crate::endpoint::{EndpointArea, Protocol};
+    use crate::error::P2pError;
     use crate::p2p_identity::{
         EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
         P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pIdentitySignType,
@@ -1873,11 +1874,19 @@ mod nat_strategy_tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
-        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_datagram(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
@@ -1888,26 +1897,10 @@ mod nat_strategy_tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            TunnelStreamRead,
-            TunnelStreamWrite,
-        )> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
-        }
-
         async fn open_datagram(
             &self,
             _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
-        }
-
-        async fn accept_datagram(
-            &self,
-        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "test tunnel"))
         }
     }
@@ -1986,11 +1979,19 @@ mod nat_strategy_tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
-        async fn listen_datagram(&self, _vports: ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_datagram(
+            &self,
+            _vports: ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
@@ -2001,26 +2002,10 @@ mod nat_strategy_tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            TunnelStreamRead,
-            TunnelStreamWrite,
-        )> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
-        }
-
         async fn open_datagram(
             &self,
             _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
-        }
-
-        async fn accept_datagram(
-            &self,
-        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "selection tunnel"))
         }
     }
@@ -2335,6 +2320,7 @@ mod nat_strategy_tests {
 mod tests {
     use super::*;
     use crate::endpoint::{EndpointArea, Protocol};
+    use crate::error::P2pError;
     use crate::executor::Executor;
     use crate::networks::{IncomingTunnelCallback, TunnelListenerInfo, TunnelNetwork};
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
@@ -2420,7 +2406,7 @@ mod tests {
                 DefaultTlsServerCertResolver::new(),
                 TEST_CHANNEL_CAPACITY,
             )
-                .unwrap(),
+            .unwrap(),
             None,
             Arc::new(X509IdentityCertFactory),
             pn_network,
@@ -2732,13 +2718,18 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
         async fn listen_datagram(
             &self,
             _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
         ) -> P2pResult<()> {
             Ok(())
         }
@@ -2750,26 +2741,10 @@ mod tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            TunnelStreamRead,
-            TunnelStreamWrite,
-        )> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
-        }
-
         async fn open_datagram(
             &self,
             _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
-        }
-
-        async fn accept_datagram(
-            &self,
-        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "mock tunnel"))
         }
     }
@@ -2888,13 +2863,18 @@ mod tests {
             Ok(())
         }
 
-        async fn listen_stream(&self, _vports: crate::networks::ListenVPortsRef) -> P2pResult<()> {
+        async fn listen_stream(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
             Ok(())
         }
 
         async fn listen_datagram(
             &self,
             _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
         ) -> P2pResult<()> {
             Ok(())
         }
@@ -2906,26 +2886,10 @@ mod tests {
             Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
         }
 
-        async fn accept_stream(
-            &self,
-        ) -> P2pResult<(
-            crate::networks::TunnelPurpose,
-            TunnelStreamRead,
-            TunnelStreamWrite,
-        )> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
-        }
-
         async fn open_datagram(
             &self,
             _purpose: crate::networks::TunnelPurpose,
         ) -> P2pResult<TunnelDatagramWrite> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
-        }
-
-        async fn accept_datagram(
-            &self,
-        ) -> P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)> {
             Err(p2p_err!(P2pErrorCode::NotSupport, "trackable tunnel"))
         }
     }
@@ -2996,6 +2960,13 @@ mod tests {
             .add_server_identity(callee_identity.clone())
             .await
             .unwrap();
+        let (server_incoming_tx, mut server_incoming_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let server_incoming: IncomingTunnelCallback = Arc::new(move |result| {
+            let server_incoming_tx = server_incoming_tx.clone();
+            Box::pin(async move {
+                let _ = server_incoming_tx.send(result).await;
+            })
+        });
         let server_listener = TcpTunnelListener::new(
             server_resolver,
             Arc::new(X509IdentityCertFactory),
@@ -3004,6 +2975,9 @@ mod tests {
             Duration::from_millis(200),
             Duration::from_secs(5),
             ServerRuntime::start(ServerRuntimeConfig::default()).unwrap(),
+            TEST_CHANNEL_CAPACITY,
+            server_incoming,
+            TEST_CHANNEL_CAPACITY,
         );
         server_listener
             .start(loopback_tcp_ep(), None, None, false)
@@ -3020,7 +2994,7 @@ mod tests {
             .await
             .unwrap();
 
-        let accepted = server_listener.accept_tunnel().await.unwrap();
+        let accepted = server_incoming_rx.recv().await.unwrap().unwrap();
         let accepted = callee_manager.register_tunnel(accepted).await.unwrap();
         callee_manager.publish_registered_tunnel(&accepted).unwrap();
 
