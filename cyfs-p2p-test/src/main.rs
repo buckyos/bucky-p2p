@@ -333,7 +333,7 @@ async fn server_instance(data_folder: &Path) {
         .unwrap();
     stack.wait_online(None).await.unwrap();
 
-    let listener = stack
+    let mut listener = stack
         .stream_manager()
         .listen(tunnel_purpose(80))
         .await
@@ -554,7 +554,7 @@ fn print_case_stats(round: u64, stats: &HashMap<&'static str, CaseMetric>) {
 }
 
 async fn start_stream_listener(stack: P2pStackRef, port: u16, label: &'static str) {
-    let listener = stack
+    let mut listener = stack
         .stream_manager()
         .listen(tunnel_purpose(port))
         .await
@@ -586,7 +586,7 @@ async fn start_stream_listener(stack: P2pStackRef, port: u16, label: &'static st
 }
 
 async fn start_datagram_listener(stack: P2pStackRef, port: u16, label: &'static str) {
-    let listener = stack
+    let mut listener = stack
         .datagram_manager()
         .listen(tunnel_purpose(port))
         .await

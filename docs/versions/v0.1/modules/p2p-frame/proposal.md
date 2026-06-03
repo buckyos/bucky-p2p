@@ -22,6 +22,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 本轮新增需求是调整 `TunnelNetwork` 的入站 tunnel 暴露模型：`TunnelNetwork` 不再向外导出 `TunnelListener` 对象，不再提供 `listeners()` 查询方法；`listen(...)` 必须由调用方传入接收新 `Tunnel` 的异步回调函数，返回值改为 `P2pResult<()>`，新进入的 tunnel 通过该回调通知外部。
 - 本轮新增需求是调整通用 `Tunnel` 的 stream/datagram 入站 channel 暴露模型：`Tunnel` trait 不再提供 `accept_stream()` 与 `accept_datagram()` 轮询式接口；`listen_stream(...)` 与 `listen_datagram(...)` 必须由调用方传入接收新 stream/datagram channel 的异步回调函数，Tunnel 内部在对应 listener 或 `sfo-reuseport` worker runtime 的入站处理路径中监听新 channel 并触发回调。
 - 本轮新增需求是清理 `p2p-frame` 内部所有 `tokio::sync::mpsc::unbounded_channel` 使用点，改为容量受限的 bounded channel；容量必须由外部配置向下传入，最上层配置提供按队列用途或位置拆分的容量配置，每个配置项默认值为 `1024`，调用方默认不需要显式设置；底层组件只接收对应位置已解析后的容量而不自行定义或兜底默认值。
+- 本轮后续清理需求是删除 `p2p-frame/src/stack.rs` 中公开的 `ChannelCapacityConfig` 以及 `P2pConfig` / `P2pStackConfig` / `P2pEnv` 上围绕该结构的容量覆盖、继承和访问逻辑；现有 bounded channel 仍保留容量上限，内部默认统一使用 `DEFAULT_CHANNEL_CAPACITY == 1024`，调用方不再通过 stack 顶层配置覆盖队列容量。
 
 ## 范围
 ### 范围内
@@ -73,6 +74,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 不同位置的 channel 容量不得强制共用同一个配置值；至少应能区分 TTP listener registry、TunnelManager subscription、NetManager incoming subscriber、PN 内部队列和 QUIC listener connect/punch 相关内部队列等仍存在 bounded queue 的类别；TCP/QUIC tunnel stream/datagram 入站回调路径不再保留旧 accept queue 容量参数
 - 底层 network、tunnel、PN、TTP 等组件不得定义自己的 channel 容量默认值；缺少容量时必须由构造路径上传入，而不是在底层 silently fallback
 - 当 bounded channel 满载时，设计阶段必须为各路径明确背压、拒绝、关闭或错误传播语义，且不得通过重新引入 unbounded buffer 绕开容量限制
+- 删除 stack 层容量配置 API 后，仍存在的 bounded channel 必须继续使用容量上限，不得退回 unbounded channel；默认容量保持 `1024`，但不再要求调用方可按队列位置覆盖容量
 
 ### 范围外
 - 重写当前协议实现
@@ -106,6 +108,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 因引入 `sfo-reuseport` 而移除现有 QUIC NAT punch 的 `ServerReflexive` 准入条件、50ms cadence、active/reverse 起发时机或 1 秒默认截止
 - 在底层组件中散落硬编码 channel 容量默认值，或保留 `unbounded_channel` 作为容量限制的旁路
 - 借本轮 bounded channel 改造改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式
+- 删除 `ChannelCapacityConfig` 时改变 bounded channel sender/receiver 类型、满载错误语义、TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式
 
 ### 与相邻模块的边界
 - `cyfs-p2p` 可以适配 `p2p-frame`，但不拥有 `p2p-frame` 的协议语义。
@@ -123,6 +126,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 外部设置 `ServerRuntime` 是 `p2p-frame` 的配置责任边界；`cyfs-p2p` 可透传或组合该配置，但不得在适配层另行定义 listener 分发策略。
 - `Tunnel` stream/datagram 回调模型属于 `p2p-frame` 的公共 tunnel API 责任边界；`cyfs-p2p` 可以适配该 API，但不得在适配层保留另一套基于公共 `accept_*` 的 tunnel channel 暴露语义。
 - bounded channel 容量属于 `p2p-frame` 顶层运行时配置责任边界；`cyfs-p2p` 可以透传或组合该配置，但不得在适配层为 `p2p-frame` 底层队列另行定义一套默认值。顶层配置必须提供完整默认配置，因此普通调用方不需要为了启用 bounded channel 而显式填写任一容量项。
+- `ChannelCapacityConfig` 清理后，容量不再是 `p2p-frame` 对相邻模块暴露的配置责任；相邻模块不得依赖 stack 顶层容量覆盖 API。
 
 ## 约束
 - 允许使用的库/组件：
@@ -150,6 +154,7 @@ approved_at: 2026-06-02T11:14:58+08:00
   - bounded channel 各位置默认容量只能出现在顶层配置定义中，默认值均为 `1024`；底层构造函数、listener、tunnel、registry 和测试替身必须接收对应位置的显式容量或配置快照，不得自行选择默认值
   - 顶层配置必须能在用户不传任何 channel 容量参数时构造完整默认配置；显式配置时，调用方可以只覆盖某一类队列容量，不应被迫同时覆盖所有队列容量
   - channel 容量配置必须覆盖所有由当前 unbounded channel 承载且仍保留为 queue 的内部队列；设计阶段若某个路径已改为直接回调交付，不得继续保留旧 queue 容量参数，仍需明确关闭、拒绝或错误语义
+  - 后续 `stack_channel_capacity_config_removal` 清理获批后，以上顶层分位置容量覆盖要求不再作为公开配置义务；保留的 bounded queue 使用固定默认容量 `1024`，并继续禁止生产路径 `unbounded_channel`
   - 流量统计口径必须与 relay 实际成功转发的字节数一致；仅进入用户态缓冲但未成功写出的字节不得提前计入
   - source 与 target 两个统计视图都必须以各自“成功写到对端”的字节为准；不得把同一批字节重复累计到同一用户视图，也不得因为双边都可见而丢失任何一侧的记账
   - 限速应作用于 relay 成功握手后的桥接数据路径，不改变握手前 `ProxyOpenReq`/`ProxyOpenResp` 的控制流时序
@@ -212,6 +217,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 通用 `TunnelNetwork` 调用方通过 `listen(local, out, mapping_port, on_incoming_tunnel)` 注册入站回调并接收 `P2pResult<TunnelRef>`；`NetManager` 负责把该回调接到原有 incoming validator、订阅发布和 reject close 路径，保持外部 tunnel publish 语义不变。
 - 通用 `Tunnel` 调用方通过 `listen_stream(vports, on_incoming_stream)` 与 `listen_datagram(vports, on_incoming_datagram)` 注册入站 channel 回调；stream/datagram、TTP 和 PN server/client 侧不再启动公共 `accept_*` 循环，入站 channel 由 tunnel 内部接收后直接投递到对应回调。
 - 所有原 `unbounded_channel` 队列均具备容量上限，默认从顶层配置取得对应位置的 `1024`；外部调用方可以按队列类别或位置独立覆盖容量，不需要为未覆盖位置重复填写默认值；底层组件只消费对应位置已解析容量，并在队列满载时按设计定义的背压、拒绝、关闭或错误路径收敛。
+- `ChannelCapacityConfig` 后续清理完成后，stack 顶层不再暴露容量结构、getter 或 setter；默认调用方仍无需设置容量即可启动，保留队列继续以 `1024` 为固定容量上限收敛满载路径。
 
 ## 风险
 - 旧设计说明与未来实现之间的协议漂移
@@ -296,6 +302,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 | P-TUNNEL-NETWORK-CALLBACK-1 | tunnel_network_listen_callback | `TunnelNetwork::listen(...)` 改为由调用方传入入站 tunnel 回调并返回 `P2pResult<()>`；`TunnelNetwork` 不再导出 `TunnelListener` 或提供 `listeners()`，新 tunnel 通过回调通知外部。 | 不改变 `TunnelListener` 内部实现类型可被 TCP/QUIC/PN listener 复用；不改变 tunnel publish、incoming validator、TLS 身份校验、TCP/QUIC/PN 线协议、QUIC NAT punch 策略或 `listener_infos()` 语义；不要求调用方轮询 listener。 | unit 能覆盖 `NetManager::listen(...)` 注册回调后仍走 incoming validator、订阅发布和 reject close 路径；unit 或编译覆盖 TCP/QUIC/PN `listen(...)` 返回 `P2pResult<()>` 且不再暴露 `listeners()`；integration 能覆盖 workspace 调用方迁移后仍可建立入站 tunnel。 |
 | P-TUNNEL-CHANNEL-CALLBACK-1 | tunnel_stream_datagram_listen_callback | `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`，`listen_stream(...)` / `listen_datagram(...)` 改为接收可克隆、线程安全的异步回调；Tunnel 内部在入站 stream/datagram channel 到达时按 vport/purpose listen 规则触发回调。 | 不改变 TCP/QUIC/PN/TTP 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码、tunnel publish 规则或 `TunnelNetwork` listener 回调语义；不保留公共 `accept_*` 兼容旁路；不要求调用方同时注册回调又轮询队列。 | schema/admission 能以 `tunnel_stream_datagram_listen_callback` 建立后续准入；unit 或编译覆盖公共 `Tunnel` trait 不再包含 `accept_*`，TCP/QUIC/PN tunnel 以及 TTP/stream/datagram manager 调用点均迁移到 listen 回调；unit 覆盖关闭后不再调用回调、未 listen 的 purpose 仍拒绝或报错、回调满载/背压/错误路径按 design 收敛；integration 覆盖 workspace 调用方迁移后 stream/datagram 仍可建立并传输。 |
 | P-BOUNDED-CHANNELS-1 | bounded_channel_capacity_config | `p2p-frame` 内部所有 `unbounded_channel` 队列改为 bounded channel；容量由顶层配置按队列类别或位置独立向下传递，每个容量项默认值为 `1024`，用户默认不需要设置，外部可只覆盖某一位置容量，底层组件不定义默认值。 | 不改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不在底层散落硬编码默认容量；不强制所有队列共用一个容量配置；不通过额外 unbounded buffer 绕开容量限制。 | schema/admission 能以 `bounded_channel_capacity_config` 建立后续准入；unit 或编译覆盖默认用户不设置时各容量默认 `1024`、单个位置自定义容量只影响对应底层构造路径；代码搜索确认生产路径不再存在 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；满载路径具备按设计定义的错误、关闭或背压覆盖。 |
+| P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | stack_channel_capacity_config_removal | 删除 `ChannelCapacityConfig`、`P2pConfig` / `P2pStackConfig` 的 channel capacity getter/setter、`P2pEnv` 的容量快照和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime` 不再接收无效 channel capacity 参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel，内部使用固定 `DEFAULT_CHANNEL_CAPACITY == 1024`。 | 不改变已有 bounded channel 类型、满载错误语义、TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不新增替代公开容量配置 API；不把容量清理扩展为移除所有底层显式构造参数。 | schema/admission 能以 `stack_channel_capacity_config_removal` 建立后续准入；编译或 unit 覆盖 `stack.rs` 不再导出 `ChannelCapacityConfig` 或 stack 层容量 getter/setter，`NetManager::new(...)` / `new_with_incoming_tunnel_validator(...)`、`TtpRuntime::new()` 和 `PnClient::new*` 不再要求容量参数；代码搜索确认生产路径仍无 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；unit 或 compile 覆盖默认 stack 构造继续使用固定容量启动相关 bounded queue。 |
 
 ## Downstream Follow-up
 - 本次 proposal 新增 `tunnel_stream_datagram_listen_callback`，并已完成 proposal 审批、design/testing 同步和 implementation admission。
@@ -308,3 +315,4 @@ approved_at: 2026-06-02T11:14:58+08:00
 - Testing 已补齐默认用户不配置、单项覆盖不影响其他位置、底层不保留默认值、满载错误传播和无 unbounded mpsc 的验证映射。
 - Implementation 必须在 proposal/design/testing 均 approved 且 admission 通过后，把当前统一 `channel_capacity` 改为分位置配置下发。
 - Acceptance 必须重新审计新的独立容量配置是否覆盖所有原 unbounded channel 使用点，且没有通过单一全局容量或底层默认值绕过本 proposal。
+- 本次后续清理已按用户确认新增 `stack_channel_capacity_config_removal`，允许删除 `ChannelCapacityConfig` 及 stack 层容量覆盖逻辑；Design/Testing/Implementation/Acceptance 必须同步改为以固定默认容量和无 unbounded channel 作为证据重点。

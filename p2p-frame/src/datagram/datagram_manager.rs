@@ -1,5 +1,5 @@
 use crate::endpoint::Endpoint;
-use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
     ListenPurposeRegistry, Tunnel, TunnelDatagramRead, TunnelDatagramWrite, TunnelManagerRef,
@@ -7,11 +7,13 @@ use crate::networks::{
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
 use crate::types::{SessionId, SessionIdGenerator};
-use callback_result::SingleCallbackWaiter;
-use futures::future::{AbortHandle, abortable};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::{Notify, mpsc};
 
 fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
     matches!(err.code(), P2pErrorCode::PortNotListen)
@@ -131,15 +133,39 @@ impl Drop for DatagramWrite {
     }
 }
 
-struct DatagramListenerState {
-    abort_handle: Option<AbortHandle>,
-    is_stop: bool,
+struct DatagramListenerShared {
+    is_stop: AtomicBool,
+    notify_stop: Notify,
+}
+
+impl DatagramListenerShared {
+    fn new() -> Self {
+        Self {
+            is_stop: AtomicBool::new(false),
+            notify_stop: Notify::new(),
+        }
+    }
+
+    fn is_stop(&self) -> bool {
+        self.is_stop.load(Ordering::SeqCst)
+    }
+
+    fn stop(&self) {
+        if !self.is_stop.swap(true, Ordering::SeqCst) {
+            self.notify_stop.notify_waiters();
+        }
+    }
 }
 
 pub struct DatagramListener {
     listener_purpose: TunnelPurpose,
-    waiter: SingleCallbackWaiter<DatagramRead>,
-    state: Mutex<DatagramListenerState>,
+    accepted_rx: mpsc::Receiver<DatagramRead>,
+    shared: Arc<DatagramListenerShared>,
+}
+
+pub struct DatagramListenerSender {
+    accepted_tx: mpsc::Sender<DatagramRead>,
+    shared: Arc<DatagramListenerShared>,
 }
 
 impl Drop for DatagramListener {
@@ -149,55 +175,78 @@ impl Drop for DatagramListener {
 }
 
 impl DatagramListener {
-    pub fn new(listener_purpose: TunnelPurpose) -> Self {
-        Self {
-            listener_purpose,
-            waiter: SingleCallbackWaiter::new(),
-            state: Mutex::new(DatagramListenerState {
-                abort_handle: None,
-                is_stop: false,
+    pub fn channel(listener_purpose: TunnelPurpose) -> (Self, Arc<DatagramListenerSender>) {
+        let (accepted_tx, accepted_rx) = mpsc::channel(1);
+        let shared = Arc::new(DatagramListenerShared::new());
+        (
+            Self {
+                listener_purpose,
+                accepted_rx,
+                shared: shared.clone(),
+            },
+            Arc::new(DatagramListenerSender {
+                accepted_tx,
+                shared,
             }),
-        }
+        )
     }
 
-    pub async fn accept(&self) -> P2pResult<DatagramRead> {
-        let future = self
-            .waiter
-            .create_result_future()
-            .map_err(into_p2p_err!(P2pErrorCode::Failed))?;
-        let (abort_future, handle) = abortable(async move { future.await });
-        {
-            let mut state = self.state.lock().unwrap();
-            if !state.is_stop {
-                state.abort_handle = Some(handle);
+    pub async fn accept(&mut self) -> P2pResult<DatagramRead> {
+        if self.shared.is_stop() {
+            return Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"));
+        }
+        tokio::select! {
+            _ = self.shared.notify_stop.notified() => {
+                Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"))
+            }
+            datagram = self.accepted_rx.recv() => {
+                if self.shared.is_stop() {
+                    return Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"));
+                }
+                datagram.ok_or_else(|| {
+                    p2p_err!(
+                        P2pErrorCode::Interrupted,
+                        "datagram listener channel closed"
+                    )
+                })
             }
         }
-        let ret = abort_future.await;
-        {
-            let mut state = self.state.lock().unwrap();
-            state.abort_handle = None;
-        }
-        if ret.is_err() {
-            Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"))
-        } else {
-            Ok(ret.unwrap().unwrap())
-        }
     }
 
-    pub fn stop(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.is_stop = true;
-        if let Some(handle) = state.abort_handle.take() {
-            handle.abort();
-        }
+    pub fn stop(&mut self) {
+        self.shared.stop();
+        self.accepted_rx.close();
     }
 }
 
-pub type DatagramListenerRef = Arc<DatagramListener>;
+impl DatagramListenerSender {
+    fn push_accepted(&self, datagram: DatagramRead) -> P2pResult<()> {
+        if self.shared.is_stop() {
+            return Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"));
+        }
+        match self.accepted_tx.try_send(datagram) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "datagram listener channel is full"
+            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "datagram listener channel closed"
+            )),
+        }
+    }
+
+    fn stop(&self) {
+        self.shared.stop();
+    }
+}
+
+pub type DatagramListenerSenderRef = Arc<DatagramListenerSender>;
 
 pub struct DatagramListenerGuard {
     datagram_manager: DatagramManagerRef,
-    listener: DatagramListenerRef,
+    listener: DatagramListener,
 }
 
 impl Drop for DatagramListenerGuard {
@@ -209,7 +258,7 @@ impl Drop for DatagramListenerGuard {
 }
 
 impl Deref for DatagramListenerGuard {
-    type Target = DatagramListenerRef;
+    type Target = DatagramListener;
 
     fn deref(&self) -> &Self::Target {
         &self.listener
@@ -226,7 +275,7 @@ pub struct DatagramManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: SessionIdGenerator,
-    listeners: Arc<ListenPurposeRegistry<DatagramListener>>,
+    listeners: Arc<ListenPurposeRegistry<DatagramListenerSender>>,
 }
 
 pub type DatagramManagerRef = Arc<DatagramManager>;
@@ -321,8 +370,8 @@ impl DatagramManager {
             self.local_identity.get_id(),
             purpose
         );
-        let listener = Arc::new(DatagramListener::new(purpose.clone()));
-        self.listeners.insert(purpose, listener.clone());
+        let (listener, sender) = DatagramListener::channel(purpose.clone());
+        self.listeners.insert(purpose, sender);
         Ok(DatagramListenerGuard {
             datagram_manager: self.clone(),
             listener,
@@ -330,23 +379,25 @@ impl DatagramManager {
     }
 
     fn remove_listener(&self, purpose: &TunnelPurpose) {
-        self.listeners.remove(purpose);
+        if let Some(sender) = self.listeners.remove(purpose) {
+            sender.stop();
+        }
     }
 
     fn start_subscription_loop(self: &Arc<Self>) {
-        let mut subscription = self.tunnel_manager.subscribe();
         let weak = Arc::downgrade(self);
-        Executor::spawn_ok(async move {
-            loop {
-                let tunnel = match subscription.accept_tunnel().await {
+        let callback: crate::networks::IncomingTunnelCallback = Arc::new(move |result| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let tunnel = match result {
                     Ok(tunnel) => tunnel,
                     Err(err) => {
-                        log::warn!("datagram tunnel subscription stopped: {:?}", err);
-                        break;
+                        log::warn!("datagram tunnel subscription failed: {:?}", err);
+                        return;
                     }
                 };
                 let Some(datagram) = weak.upgrade() else {
-                    break;
+                    return;
                 };
                 log::debug!(
                     "datagram inject listen vports local_id={} remote_id={} form={:?} protocol={:?}",
@@ -367,14 +418,21 @@ impl DatagramManager {
                             };
                             match accepted {
                                 Ok((purpose, read)) => {
-                                    let listener = datagram.listeners.get(&purpose);
-                                    if let Some(listener) = listener {
-                                        listener.waiter.set_result_with_cache(DatagramRead::new(
+                                    let sender = datagram.listeners.get(&purpose);
+                                    if let Some(sender) = sender {
+                                        let datagram_read = DatagramRead::new(
                                             read,
                                             Arc::downgrade(&tunnel),
                                             datagram.session_gen.generate(),
                                             purpose,
-                                        ));
+                                        );
+                                        if let Err(err) = sender.push_accepted(datagram_read) {
+                                            log::warn!(
+                                                "datagram listener deliver failed remote {} err {:?}",
+                                                tunnel.remote_id(),
+                                                err
+                                            );
+                                        }
                                     }
                                 }
                                 Err(err) => {
@@ -405,7 +463,7 @@ impl DatagramManager {
                         tunnel.remote_id(),
                         err
                     );
-                    continue;
+                    return;
                 }
                 log::debug!(
                     "datagram inject listen vports done local_id={} remote_id={} form={:?} protocol={:?}",
@@ -414,8 +472,9 @@ impl DatagramManager {
                     tunnel.form(),
                     tunnel.protocol()
                 );
-            }
+            })
         });
+        self.tunnel_manager.subscribe(callback);
     }
 }
 

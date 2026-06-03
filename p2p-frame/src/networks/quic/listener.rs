@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::runtime::Handle as TokioRuntimeHandle;
+use tokio::sync::Notify;
 
 const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
 const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
@@ -271,59 +272,24 @@ async fn wait_quic_endpoint_ready(listener: &QuicTunnelListener) -> P2pResult<()
     }
 }
 
-struct QuicConnectRequest {
-    local_identity_ref: P2pIdentityRef,
-    cert_factory: P2pIdentityCertFactoryRef,
-    remote_identity_id: P2pId,
-    remote_name: Option<String>,
-    remote: Endpoint,
-    congestion_algorithm: QuicCongestionAlgorithm,
-    timeout: Duration,
-    idle_timeout: Duration,
-    response: oneshot::Sender<P2pResult<quinn::Connection>>,
-}
-
 #[derive(Clone)]
 struct WorkerQuicEndpoint {
     endpoint: quinn::Endpoint,
-    connect_tx: mpsc::Sender<QuicConnectRequest>,
+    worker_index: usize,
+    runtime: TokioRuntimeHandle,
 }
 
 async fn wait_quic_endpoint_loop(
     listener: Arc<QuicTunnelListener>,
     endpoint: quinn::Endpoint,
-    mut connect_rx: mpsc::Receiver<QuicConnectRequest>,
 ) {
     loop {
-        tokio::select! {
-            conn = endpoint.accept() => match conn {
-                Some(conn) => {
+        match endpoint.accept().await {
+            Some(conn) => {
                 let result = listener.accept_connection(conn).await;
                 (listener.on_incoming_tunnel)(result).await;
             }
-                None => break,
-            },
-            request = connect_rx.recv() => {
-                let Some(request) = request else {
-                    break;
-                };
-                let endpoint = endpoint.clone();
-                tokio::spawn(async move {
-                    let result = connect_with_ep(
-                        endpoint,
-                        request.local_identity_ref,
-                        request.cert_factory,
-                        request.remote_identity_id,
-                        request.remote_name,
-                        request.remote,
-                        request.congestion_algorithm,
-                        request.timeout,
-                        request.idle_timeout,
-                    )
-                    .await;
-                    let _ = request.response.send(result);
-                });
-            }
+            None => break,
         }
     }
 }
@@ -350,7 +316,6 @@ pub(crate) struct QuicTunnelListener {
     closed: AtomicBool,
     worker_count: Arc<AtomicUsize>,
     server_runtime: ServerRuntime,
-    listener_connect_capacity: usize,
 }
 
 impl QuicTunnelListener {
@@ -361,7 +326,6 @@ impl QuicTunnelListener {
         congestion_algorithm: QuicCongestionAlgorithm,
         server_runtime: ServerRuntime,
         on_incoming_tunnel: IncomingTunnelCallback,
-        listener_connect_capacity: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             cert_cache,
@@ -383,7 +347,6 @@ impl QuicTunnelListener {
             closed: AtomicBool::new(false),
             worker_count: Arc::new(AtomicUsize::new(0)),
             server_runtime,
-            listener_connect_capacity,
         })
     }
 
@@ -427,24 +390,36 @@ impl QuicTunnelListener {
             state.endpoints[index].clone()
         };
 
-        let (response, rx) = oneshot::channel();
+        let worker_index = endpoint.worker_index;
+        log::trace!(
+            "quic connect scheduled on listener worker {} remote={}",
+            worker_index,
+            remote
+        );
         endpoint
-            .connect_tx
-            .send(QuicConnectRequest {
-                local_identity_ref,
-                cert_factory,
-                remote_identity_id,
-                remote_name,
-                remote,
-                congestion_algorithm,
-                timeout,
-                idle_timeout,
-                response,
+            .runtime
+            .spawn(async move {
+                connect_with_ep(
+                    endpoint.endpoint,
+                    local_identity_ref,
+                    cert_factory,
+                    remote_identity_id,
+                    remote_name,
+                    remote,
+                    congestion_algorithm,
+                    timeout,
+                    idle_timeout,
+                )
+                .await
             })
             .await
-            .map_err(|_| p2p_err!(P2pErrorCode::ErrorState, "quic endpoint worker closed"))?;
-        rx.await
-            .map_err(|_| p2p_err!(P2pErrorCode::ErrorState, "quic endpoint worker closed"))?
+            .map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::ErrorState,
+                    "quic endpoint worker connect task failed: {}",
+                    err
+                )
+            })?
     }
 
     pub(crate) fn start_udp_punch_burst(
@@ -667,19 +642,20 @@ impl QuicTunnelListener {
         )
         .map_err(|err| SfoReuseportError::Runtime(err.to_string()))?;
 
-        let (connect_tx, connect_rx) = mpsc::channel(self.listener_connect_capacity);
-        if !self.register_worker_endpoint(endpoint.clone(), connect_tx, socket) {
+        let runtime = TokioRuntimeHandle::current();
+        if !self.register_worker_endpoint(endpoint.clone(), worker_id, runtime, socket) {
             endpoint.close(0_u32.into(), b"close listener");
             return Ok(());
         }
-        wait_quic_endpoint_loop(self, endpoint, connect_rx).await;
+        wait_quic_endpoint_loop(self, endpoint).await;
         Ok(())
     }
 
     fn register_worker_endpoint(
         &self,
         endpoint: quinn::Endpoint,
-        connect_tx: mpsc::Sender<QuicConnectRequest>,
+        worker_index: usize,
+        runtime: TokioRuntimeHandle,
         socket: SfoUdpSocket,
     ) -> bool {
         if self.closed.load(Ordering::SeqCst) {
@@ -691,7 +667,8 @@ impl QuicTunnelListener {
         }
         state.endpoints.push(WorkerQuicEndpoint {
             endpoint,
-            connect_tx,
+            worker_index,
+            runtime,
         });
         drop(state);
         self.endpoint_ready.notify_waiters();

@@ -9,7 +9,6 @@ mod validator;
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 pub use crate::tunnel::{
     DefaultDeviceFinder, DeviceFinder, DeviceFinderRef, TunnelManager, TunnelManagerRef,
-    TunnelSubscription,
 };
 pub use command::*;
 use futures::FutureExt;

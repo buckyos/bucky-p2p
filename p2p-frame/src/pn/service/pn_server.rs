@@ -1926,7 +1926,6 @@ mod tests {
         let net_manager = NetManager::new(
             vec![fake_network.clone() as TunnelNetworkRef],
             DefaultTlsServerCertResolver::new(),
-            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
         net_manager.listen(&[local_ep], None).await.unwrap();

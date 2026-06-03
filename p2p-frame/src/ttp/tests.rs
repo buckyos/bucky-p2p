@@ -414,12 +414,7 @@ fn make_identity(id: u8, name: &str, endpoint: Endpoint) -> P2pIdentityRef {
 }
 
 fn make_manager(network: TunnelNetworkRef) -> NetManagerRef {
-    NetManager::new(
-        vec![network],
-        DefaultTlsServerCertResolver::new(),
-        TEST_CHANNEL_CAPACITY,
-    )
-    .unwrap()
+    NetManager::new(vec![network], DefaultTlsServerCertResolver::new()).unwrap()
 }
 
 fn init_executor() {

@@ -30,7 +30,6 @@ pub struct QuicTunnelNetwork {
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
     server_runtime: ServerRuntime,
-    listener_connect_capacity: usize,
 }
 
 fn connect_timeout_for_intent(base_timeout: Duration, intent: TunnelConnectIntent) -> Duration {
@@ -65,7 +64,6 @@ impl QuicTunnelNetwork {
         timeout: Duration,
         idle_timeout: Duration,
         server_runtime: ServerRuntime,
-        listener_connect_capacity: usize,
     ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
@@ -78,7 +76,6 @@ impl QuicTunnelNetwork {
             tunnel_id_gen: Mutex::new(TunnelIdGenerator::new()),
             reuse_address: AtomicBool::new(false),
             server_runtime,
-            listener_connect_capacity,
         }
     }
 
@@ -260,7 +257,6 @@ impl TunnelNetwork for QuicTunnelNetwork {
             self.congestion_algorithm,
             self.server_runtime.clone(),
             on_incoming_tunnel,
-            self.listener_connect_capacity,
         );
         listener
             .bind(
@@ -643,9 +639,6 @@ mod tests {
                 Duration::from_secs(10),
                 ServerRuntime::start(sfo_reuseport::ServerRuntimeConfig::default())
                     .expect("sfo reuseport server runtime should start"),
-                TEST_CHANNEL_CAPACITY,
-                TEST_CHANNEL_CAPACITY,
-                TEST_CHANNEL_CAPACITY,
             ),
             resolver,
         )

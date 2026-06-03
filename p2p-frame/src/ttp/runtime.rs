@@ -13,7 +13,7 @@ pub(crate) struct TtpRuntime {
 }
 
 impl TtpRuntime {
-    pub(crate) fn new(_channel_capacity: usize) -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             stream_registry: TtpQueueRegistry::new(),
             datagram_registry: TtpQueueRegistry::new(),

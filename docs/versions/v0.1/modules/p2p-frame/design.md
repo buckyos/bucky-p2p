@@ -29,6 +29,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 为本轮 `TunnelNetwork` listener 暴露模型变更建立可执行设计边界：`listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`，不再返回 `TunnelListenerRef`，公共 trait 移除 `listeners()`，`NetManager` 负责在回调中执行原有 incoming validator、订阅发布和 reject close 逻辑。
 - 为本轮 `Tunnel` stream/datagram 入站 channel 暴露模型变更建立可执行设计边界：`listen_stream(...)` / `listen_datagram(...)` 接收入站 channel 回调，公共 trait 移除 `accept_stream()` / `accept_datagram()`，TCP/QUIC/PN tunnel 内部在入站处理路径中按 listen 规则触发回调，TTP、stream manager、datagram manager 和 PN server/client 不再通过公共 accept loop 消费 channel。
 - 为本轮 bounded channel 容量配置化需求建立可执行设计边界：`P2pConfig` / `P2pStackConfig` 作为顶层配置入口提供按位置拆分的容量配置，各项默认 `1024`，调用方默认无需设置；`NetManager`、`TunnelManager`、TTP registry、QUIC listener connect queue 和 PN 相关内部队列只接收对应位置已解析容量，不在底层定义默认值；TCP/QUIC tunnel 的入站 stream/datagram 已改为回调交付，不再保留旧 accept queue 容量参数；所有生产路径 `tokio::sync::mpsc::unbounded_channel` 均替换为 bounded channel，并明确满载时的背压、错误或关闭语义。
+- 为本轮后续 stack/NetManager/TTP/PN 容量配置清理建立可执行设计边界：删除 `ChannelCapacityConfig`、`P2pEnv` 容量快照、`P2pConfig` / `P2pStackConfig` 的容量 getter/setter 和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime::new()` 不再接收无效容量参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel 与 `DEFAULT_CHANNEL_CAPACITY == 1024`，由默认构造路径内部使用固定容量。
 
 ### 非目标
 - 对 `p2p-frame/docs/` 下已存在的每个协议细节做完整重写
@@ -41,6 +42,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - 因 `Tunnel` stream/datagram 回调化而改变 TCP/QUIC/PN/TTP 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码或 tunnel publish 规则
 - 为 bounded channel 引入独立配置模块、全局静态默认值或底层局部默认值
 - 通过额外 unbounded buffer、后台无限 Vec 队列或隐藏转发任务绕开 bounded channel 容量限制
+- 为 `ChannelCapacityConfig` 删除引入新的公开容量配置结构、环境变量、feature flag 或运行时覆盖 API
 
 ## 总体方案
 - 将 `p2p-frame` 视为 Tier 0 核心模块。
@@ -60,7 +62,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 | `finder` | support | 设备与 outer device 查询缓存 | endpoints、设备元数据 | 发现辅助能力 | `stack` | no |
 | `identity_tls` | support | P2P 身份、TLS、X509 和密码学辅助逻辑 | keys、certs、握手元数据 | 已认证连接 | `tls`、`x509`、`p2p_identity` | no |
 | `stack_runtime` | assembly | 高层 stack 编排和运行时抽象 | 所有下层 | 端到端 P2P 栈 | 几乎全部子模块 | no |
-| `channel_capacity_config` | shared runtime config | bounded channel 分位置容量配置、顶层默认值和构造路径传递 | `P2pConfig` / `P2pStackConfig` | 按用途拆分的已解析 `usize` 容量 | `stack_runtime`、`networks`、`tunnel`、`ttp`、`pn` | no |
+| `channel_capacity_config` | shared runtime config | bounded channel 固定默认容量和构造路径传递；后续清理删除公开分位置容量配置结构 | `DEFAULT_CHANNEL_CAPACITY` | 固定 `1024` 容量 | `stack_runtime`、`networks`、`tunnel`、`ttp`、`pn` | no |
 
 ## 实现顺序
 | 阶段 | 目标 | 前置条件 | 输出 | 依赖 | 可并行 |
@@ -133,6 +135,7 @@ approved_at: 2026-06-02T11:14:58+08:00
 - TTP runtime attach tunnel 时不再 spawn `accept_stream()` / `accept_datagram()` loop，而是注册 stream/datagram 回调；回调中按 registry 查找 listener 并转交给 TTP listener bounded 队列。stream manager、datagram manager 和 PN server/client 同样改为注册回调并在回调中执行原有 listener lookup、统计或 bridge 分发逻辑。
 - `P2pConfig` 必须新增顶层 `ChannelCapacityConfig` 或等价配置快照，按队列用途至少区分 QUIC listener connect、TTP listener registry、TunnelManager subscription、NetManager incoming subscriber 和 PN 内部队列；每项默认值为 `1024`，调用方默认不需要设置，并可只覆盖单个位置。`create_p2p_env(...)` 必须把对应容量传入仍存在 bounded queue 的底层组件。
 - `P2pEnv` 必须保存已解析的分位置 channel 容量配置，作为 stack 层继续传递的唯一来源；`P2pStackConfig` 必须从 `P2pEnv` 继承该配置快照，并在创建默认 `PnClient`、`SNClientService`、`TunnelManager` 及其他 stack 组装路径时传入对应位置容量。底层构造函数只接收 `usize` 容量或显式配置快照，不得在构造函数内部使用 `unwrap_or(1024)`、`const DEFAULT_*` 或其他默认兜底。
+- 后续 `stack_channel_capacity_config_removal` 清理阶段必须删除上一轮公开 `ChannelCapacityConfig` 结构以及 `P2pEnv` / `P2pConfig` / `P2pStackConfig` 的容量访问、覆盖和继承逻辑；`NetManager::new(...)` / `new_with_incoming_tunnel_validator(...)` 不再接收容量参数，`NetManager` 不再保存 `channel_capacity` 字段或提供 `channel_capacity()`；`TtpRuntime::new()` 必须改为无参数，`TtpClient::new(...)` / `TtpServer::new(...)` 不再读取 `NetManager::channel_capacity()` 来创建 TTP runtime；`PnClient::new_with_channel_capacity(...)` 和 `PnClient::new_with_tls_material_and_channel_capacity(...)` 必须删除，默认 PN client 构造内部使用固定容量。该清理不得改变底层 bounded sender/receiver 类型，也不得新增替代公开容量配置 API。
 - TCP 与 QUIC tunnel 的 inbound stream/datagram 不再通过旧 accepted queue 暴露给调用方；实现不得保留旧 `channel_capacity` 构造参数或为该路径新增隐藏 queue 来模拟旧轮询入口。远端或控制循环投递 inbound channel 时，必须按 listen 回调、关闭状态和协议拒绝路径收敛。
 - `TunnelManager` 的 subscription receiver、`NetManager` incoming subscriber、TTP listener registry、QUIC listener connect request queue 和 PN service/test 内部 accept queue 必须分别使用顶层配置中对应位置的容量。对不允许阻塞的同步分发路径使用 `try_send` 并把满载转化为错误、关闭或移除订阅；对天然异步且调用方可等待的路径可以使用 `send(...).await`，但不得持有会造成死锁的 mutex guard 跨 await。
 - `TtpRegistry::register(...)` 必须接收 capacity 参数或在 `TtpClient` / listener 构造时绑定容量；同一 purpose 重复注册语义保持不变。满载时，新的 stream/datagram 投递必须返回错误给 tunnel/ttp 分发路径，而不是丢弃成功状态。
@@ -226,10 +229,12 @@ p2p-frame/src
 | tunnel_network_listen_callback | P-TUNNEL-NETWORK-CALLBACK-1 | `TunnelNetwork::listen(...)` 由返回 `TunnelListenerRef` 改为接收 `IncomingTunnelCallback` 并返回 `P2pResult<()>`；TCP/QUIC/PN network 保存内部 listener 并在 accept 到新 tunnel 后调用回调；`NetManager` 注册回调并复用原有 dispatch/validator/publish 逻辑；公共 trait 删除 `listeners()`。 | `p2p-frame/src/networks/network.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/stack.rs`、相关 tests | 回滚时恢复 `listen(...) -> P2pResult<TunnelListenerRef>` 和 `listeners()`，但必须同步回滚 NetManager/stack 调用点；不得改变 tunnel publish 或线协议语义。 |
 | tunnel_stream_datagram_listen_callback | P-TUNNEL-CHANNEL-CALLBACK-1 | `Tunnel` trait 删除 `accept_stream()` / `accept_datagram()`；新增或调整 `IncomingStreamCallback`、`IncomingDatagramCallback` 等等价回调类型；`listen_stream(...)` / `listen_datagram(...)` 保存 listen 规则和回调；TCP/QUIC/PN tunnel 入站 stream/datagram dispatch 按状态、listen 规则和 bounded capacity 触发回调；TTP、stream manager、datagram manager 和 PN server/client 迁移到回调消费模型。 | `p2p-frame/src/networks/tunnel.rs`、`p2p-frame/src/networks/tcp/tunnel.rs`、`p2p-frame/src/networks/quic/tunnel.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/ttp/runtime.rs`、`p2p-frame/src/stream/stream_manager.rs`、`p2p-frame/src/datagram/datagram_manager.rs`、`p2p-frame/src/pn/service/pn_server.rs`、`docs/versions/v0.1/modules/p2p-frame/design/tunnel-channel-listen-callback.md`、相关 tests | 回滚时恢复公共 `accept_*` 和旧 accept loops，并同步回滚 TTP/manager 调用点；不得留下既有回调又有公共 accept 的双入口状态。 |
 | bounded_channel_capacity_config | P-BOUNDED-CHANNELS-1 | 在 `P2pConfig` / `P2pStackConfig` 顶层提供分位置 channel 容量配置，每项默认 `1024`，用户默认无需设置，并通过 `P2pEnv` 和各构造函数把对应位置容量传入底层；所有生产路径 `mpsc::unbounded_channel`、`UnboundedSender`、`UnboundedReceiver` 替换为 bounded `mpsc::channel`、`Sender`、`Receiver`；同步分发路径使用 `try_send` 并将满载转成错误、关闭或订阅清理，异步可背压路径使用 `send(...).await`。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/**`、`p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/ttp/**`、`p2p-frame/src/pn/**` 中现有 unbounded mpsc 使用点和对应测试替身 | 回滚时恢复 unbounded mpsc 类型和构造传参，但不得留下半迁移容量 API；若保留顶层配置，应退回 proposal/design 明确兼容目标。 |
+| stack_channel_capacity_config_removal | P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | 删除 `ChannelCapacityConfig` 结构和 stack 层容量 getter/setter；`P2pEnv` 不再保存容量快照，`P2pStackConfig` 不再从 env 继承或覆盖容量；`NetManager` 不再保存或暴露容量；`QuicTunnelNetwork::new(...)` 不接收容量参数；`TtpRuntime::new()` 改为无参数，`TtpClient` / `TtpServer` 不再为 TTP runtime 读取 `NetManager` 容量；`PnClient` 删除显式容量构造入口，stack 默认 proxy client 不再传入容量。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/ttp/runtime.rs`、`p2p-frame/src/ttp/client.rs`、`p2p-frame/src/ttp/server.rs`、`p2p-frame/src/pn/client/pn_client.rs`，以及仅当编译需要时调整直接依赖被删除容量 API 的调用点 | 回滚时恢复 `ChannelCapacityConfig`、env/config 字段、setter/getter、`NetManager` 容量字段/构造参数、`QuicTunnelNetwork::new(..., capacity)`、`TtpRuntime::new(capacity)` 和 PN 显式容量构造入口；不得借回滚恢复 unbounded channel 或改变底层队列满载语义。 |
 
 ## 风险与回滚
 - 协议或传输改动可能破坏所有下游 crate。
 - 面向运行时或密码学的回归需要比孤立工具改动更强的回滚姿态。
 - `Tunnel` stream/datagram 回调化影响公共 API 和所有 tunnel 消费者；回滚必须成组恢复 trait 签名、TCP/QUIC/PN tunnel 实现、TTP/stream/datagram/PN 调用点和测试替身，避免出现回调与公共 accept 双入口并存。
 - bounded channel 会把历史积压转为背压或满载错误；回滚必须成组恢复 sender/receiver 类型、构造传参和满载错误映射，避免出现 sender bounded、receiver unbounded 或容量配置无法生效的半迁移状态。
+- `ChannelCapacityConfig` 删除是公开 stack 配置 API 清理；若下游仍依赖该 API，应退回 proposal/design 明确兼容窗口，而不是在实现中保留半公开容量结构。
 - 回滚应优先撤销具体实现改动，同时保留已批准的 proposal/design/testing 证据，为下一次尝试复用。

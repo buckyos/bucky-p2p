@@ -1,5 +1,5 @@
 use crate::endpoint::Endpoint;
-use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
     ListenPurposeRegistry, Tunnel, TunnelManagerRef, TunnelPurpose, TunnelRef, TunnelStreamRead,
@@ -8,12 +8,13 @@ use crate::networks::{
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef, P2pIdentityRef};
 use crate::types::SessionId;
 use crate::types::SessionIdGenerator;
-use callback_result::SingleCallbackWaiter;
-use futures::TryFutureExt;
-use futures::future::{AbortHandle, abortable};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::{Notify, mpsc};
 
 fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
     matches!(err.code(), P2pErrorCode::PortNotListen)
@@ -189,71 +190,120 @@ impl Drop for StreamWrite {
     }
 }
 
-struct StreamListenerState {
-    abort_handle: Option<AbortHandle>,
-    is_stop: bool,
+type AcceptedStream = (StreamRead, StreamWrite);
+
+struct StreamListenerShared {
+    is_stop: AtomicBool,
+    notify_stop: Notify,
+}
+
+impl StreamListenerShared {
+    fn new() -> Self {
+        Self {
+            is_stop: AtomicBool::new(false),
+            notify_stop: Notify::new(),
+        }
+    }
+
+    fn is_stop(&self) -> bool {
+        self.is_stop.load(Ordering::SeqCst)
+    }
+
+    fn stop(&self) {
+        if !self.is_stop.swap(true, Ordering::SeqCst) {
+            self.notify_stop.notify_waiters();
+        }
+    }
 }
 
 pub struct StreamListener {
     listener_purpose: TunnelPurpose,
-    waiter: SingleCallbackWaiter<(StreamRead, StreamWrite)>,
-    state: Mutex<StreamListenerState>,
+    accepted_rx: mpsc::Receiver<AcceptedStream>,
+    shared: Arc<StreamListenerShared>,
+}
+
+pub struct StreamListenerSender {
+    accepted_tx: mpsc::Sender<AcceptedStream>,
+    shared: Arc<StreamListenerShared>,
 }
 
 impl StreamListener {
-    fn new(listener_purpose: TunnelPurpose) -> Self {
-        Self {
-            listener_purpose,
-            waiter: SingleCallbackWaiter::new(),
-            state: Mutex::new(StreamListenerState {
-                abort_handle: None,
-                is_stop: false,
+    fn channel(listener_purpose: TunnelPurpose) -> (Self, Arc<StreamListenerSender>) {
+        let (accepted_tx, accepted_rx) = mpsc::channel(1);
+        let shared = Arc::new(StreamListenerShared::new());
+        (
+            Self {
+                listener_purpose,
+                accepted_rx,
+                shared: shared.clone(),
+            },
+            Arc::new(StreamListenerSender {
+                accepted_tx,
+                shared,
             }),
-        }
+        )
     }
 
-    pub async fn accept(&self) -> P2pResult<(StreamRead, StreamWrite)> {
-        let future = self
-            .waiter
-            .create_result_future()
-            .map_err(into_p2p_err!(P2pErrorCode::Failed))?;
-        let (abort_future, handle) = abortable(async move { future.await });
-        {
-            let mut state = self.state.lock().unwrap();
-            if !state.is_stop {
-                state.abort_handle = Some(handle);
+    pub async fn accept(&mut self) -> P2pResult<AcceptedStream> {
+        if self.shared.is_stop() {
+            return Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"));
+        }
+        tokio::select! {
+            _ = self.shared.notify_stop.notified() => {
+                Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"))
+            }
+            stream = self.accepted_rx.recv() => {
+                if self.shared.is_stop() {
+                    return Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"));
+                }
+                stream.ok_or_else(|| {
+                    p2p_err!(
+                        P2pErrorCode::Interrupted,
+                        "stream listener channel closed"
+                    )
+                })
             }
         }
-        let ret = abort_future.await;
-        {
-            let mut state = self.state.lock().unwrap();
-            state.abort_handle = None;
-        }
-        if ret.is_err() {
-            Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"))
-        } else {
-            Ok(ret.unwrap().unwrap())
-        }
     }
 
-    pub fn stop(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.is_stop = true;
-        if let Some(handle) = state.abort_handle.take() {
-            handle.abort();
-        }
+    pub fn stop(&mut self) {
+        self.shared.stop();
+        self.accepted_rx.close();
     }
 }
 
-pub type StreamListenerRef = Arc<StreamListener>;
+impl StreamListenerSender {
+    fn push_accepted(&self, stream: AcceptedStream) -> P2pResult<()> {
+        if self.shared.is_stop() {
+            return Err(p2p_err!(P2pErrorCode::UserCanceled, "user canceled"));
+        }
+        match self.accepted_tx.try_send(stream) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "stream listener channel is full"
+            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "stream listener channel closed"
+            )),
+        }
+    }
+
+    fn stop(&self) {
+        self.shared.stop();
+    }
+}
+
+pub type StreamListenerSenderRef = Arc<StreamListenerSender>;
 
 pub struct StreamListenerGuard {
     stream_manager: StreamManagerRef,
-    listener: StreamListenerRef,
+    listener: StreamListener,
 }
 
 impl StreamListenerGuard {
-    fn new(listener: StreamListenerRef, stream_manager: StreamManagerRef) -> Self {
+    fn new(listener: StreamListener, stream_manager: StreamManagerRef) -> Self {
         Self {
             stream_manager,
             listener,
@@ -273,7 +323,13 @@ impl Deref for StreamListenerGuard {
     type Target = StreamListener;
 
     fn deref(&self) -> &Self::Target {
-        self.listener.as_ref()
+        &self.listener
+    }
+}
+
+impl DerefMut for StreamListenerGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.listener
     }
 }
 
@@ -281,7 +337,7 @@ pub struct StreamManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: SessionIdGenerator,
-    listeners: Arc<ListenPurposeRegistry<StreamListener>>,
+    listeners: Arc<ListenPurposeRegistry<StreamListenerSender>>,
 }
 
 pub type StreamManagerRef = Arc<StreamManager>;
@@ -360,29 +416,31 @@ impl StreamManager {
             self.local_identity.get_id(),
             purpose
         );
-        let listener = Arc::new(StreamListener::new(purpose.clone()));
-        self.listeners.insert(purpose, listener.clone());
+        let (listener, sender) = StreamListener::channel(purpose.clone());
+        self.listeners.insert(purpose, sender);
         Ok(StreamListenerGuard::new(listener, self.clone()))
     }
 
     fn remove_listener(&self, purpose: &TunnelPurpose) {
-        self.listeners.remove(purpose);
+        if let Some(sender) = self.listeners.remove(purpose) {
+            sender.stop();
+        }
     }
 
     fn start_subscription_loop(self: &Arc<Self>) {
-        let mut subscription = self.tunnel_manager.subscribe();
         let weak = Arc::downgrade(self);
-        Executor::spawn_ok(async move {
-            loop {
-                let tunnel = match subscription.accept_tunnel().await {
+        let callback: crate::networks::IncomingTunnelCallback = Arc::new(move |result| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let tunnel = match result {
                     Ok(tunnel) => tunnel,
                     Err(err) => {
-                        log::warn!("stream tunnel subscription stopped: {:?}", err);
-                        break;
+                        log::warn!("stream tunnel subscription failed: {:?}", err);
+                        return;
                     }
                 };
                 let Some(stream) = weak.upgrade() else {
-                    break;
+                    return;
                 };
                 log::debug!(
                     "stream inject listen vports local_id={} remote_id={} form={:?} protocol={:?}",
@@ -402,15 +460,21 @@ impl StreamManager {
                         };
                         match accepted {
                             Ok((purpose, read, write)) => {
-                                let listener = stream.listeners.get(&purpose);
-                                if let Some(listener) = listener {
+                                let sender = stream.listeners.get(&purpose);
+                                if let Some(sender) = sender {
                                     let session_id = stream.session_gen.generate();
                                     let (stream_read, stream_write) = stream.wrap_opened_stream(
                                         &tunnel, read, write, session_id, purpose,
                                     );
-                                    listener
-                                        .waiter
-                                        .set_result_with_cache((stream_read, stream_write));
+                                    if let Err(err) =
+                                        sender.push_accepted((stream_read, stream_write))
+                                    {
+                                        log::warn!(
+                                            "stream listener deliver failed remote {} err {:?}",
+                                            tunnel.remote_id(),
+                                            err
+                                        );
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -440,7 +504,7 @@ impl StreamManager {
                         tunnel.remote_id(),
                         err
                     );
-                    continue;
+                    return;
                 }
                 log::debug!(
                     "stream inject listen vports done local_id={} remote_id={} form={:?} protocol={:?}",
@@ -449,8 +513,9 @@ impl StreamManager {
                     tunnel.form(),
                     tunnel.protocol()
                 );
-            }
+            })
         });
+        self.tunnel_manager.subscribe(callback);
     }
 
     fn wrap_opened_stream(

@@ -17,15 +17,14 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify as AsyncNotify;
-use tokio::sync::mpsc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
 use super::{ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionInfoCacheRef};
 use crate::networks::{
-    ListenVPortsRef, NetManagerRef, TunnelCommandResult, TunnelConnectIntent, TunnelDatagramRead,
-    TunnelDatagramWrite, TunnelForm, TunnelListenerInfo, TunnelNetworkRef, TunnelRef, TunnelState,
-    TunnelStreamRead, TunnelStreamWrite,
+    IncomingTunnelCallback, ListenVPortsRef, NetManagerRef, TunnelCommandResult,
+    TunnelConnectIntent, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelListenerInfo,
+    TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
 };
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
@@ -75,22 +74,6 @@ where
                     Err(_) => (Err(err), true),
                 }
             }
-        }
-    }
-}
-
-pub struct TunnelSubscription {
-    rx: mpsc::Receiver<P2pResult<TunnelRef>>,
-}
-
-impl TunnelSubscription {
-    pub async fn accept_tunnel(&mut self) -> P2pResult<TunnelRef> {
-        match self.rx.recv().await {
-            Some(result) => result,
-            None => Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "tunnel subscription closed"
-            )),
         }
     }
 }
@@ -222,8 +205,7 @@ pub struct TunnelManager {
     proxy_upgrade_initial_interval: Duration,
     tunnels: RwLock<HashMap<P2pId, TunnelEntries>>,
     state: Mutex<ManagerState>,
-    subscriptions: Mutex<Vec<mpsc::Sender<P2pResult<TunnelRef>>>>,
-    channel_capacity: usize,
+    subscriptions: Mutex<Vec<IncomingTunnelCallback>>,
     cleanup_task: SpawnHandle<()>,
     proxy_upgrade_notify: Arc<AsyncNotify>,
     proxy_upgrade_task: SpawnHandle<()>,
@@ -244,7 +226,6 @@ impl TunnelManager {
         conn_timeout: Duration,
         idle_timeout: Duration,
         proxy_upgrade_initial_interval: Duration,
-        channel_capacity: usize,
     ) -> P2pResult<TunnelManagerRef> {
         let sn_service_for_listener = sn_service.clone();
         let proxy_upgrade_notify = Arc::new(AsyncNotify::new());
@@ -267,7 +248,6 @@ impl TunnelManager {
                 proxy_upgrade_states: HashMap::new(),
             }),
             subscriptions: Mutex::new(Vec::new()),
-            channel_capacity,
             cleanup_task: Executor::spawn_with_handle({
                 let weak = weak.clone();
                 async move {
@@ -353,10 +333,8 @@ impl TunnelManager {
         Ok(manager)
     }
 
-    pub fn subscribe(&self) -> TunnelSubscription {
-        let (tx, rx) = mpsc::channel(self.channel_capacity);
-        self.subscriptions.lock().unwrap().push(tx);
-        TunnelSubscription { rx }
+    pub fn subscribe(&self, callback: IncomingTunnelCallback) {
+        self.subscriptions.lock().unwrap().push(callback);
     }
 
     pub fn get_tunnel(&self, remote_id: &P2pId) -> Option<TunnelRef> {
@@ -1607,23 +1585,12 @@ impl TunnelManager {
             tunnel.form(),
             tunnel.protocol()
         );
-        let mut subscriptions = self.subscriptions.lock().unwrap();
-        let mut first_error = None;
-        subscriptions.retain(|tx| match tx.try_send(Ok(tunnel.clone())) {
-            Ok(()) => true,
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(p2p_err!(
-                        P2pErrorCode::OutOfLimit,
-                        "publish tunnel subscriber queue failed: {}",
-                        err
-                    ));
-                }
-                false
-            }
-        });
-        if let Some(err) = first_error {
-            return Err(err);
+        let subscriptions = self.subscriptions.lock().unwrap().clone();
+        for callback in subscriptions {
+            let tunnel = tunnel.clone();
+            Executor::spawn_ok(async move {
+                callback(Ok(tunnel)).await;
+            });
         }
         Ok(())
     }
@@ -1705,6 +1672,9 @@ mod nat_strategy_tests {
         P2pSignature,
     };
     use std::sync::atomic::AtomicUsize;
+    use tokio::sync::mpsc;
+
+    const TEST_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 8;
 
     struct SelectionTunnel {
         form: TunnelForm,
@@ -1913,7 +1883,6 @@ mod nat_strategy_tests {
             crate::networks::NetManager::new(
                 Vec::new(),
                 crate::tls::DefaultTlsServerCertResolver::new(),
-                crate::stack::DEFAULT_CHANNEL_CAPACITY,
             )
             .unwrap(),
             None,
@@ -1924,9 +1893,29 @@ mod nat_strategy_tests {
             Duration::from_millis(200),
             Duration::from_secs(30),
             PROXY_UPGRADE_INITIAL_INTERVAL,
-            crate::stack::DEFAULT_CHANNEL_CAPACITY,
         )
         .unwrap()
+    }
+
+    fn subscribe_tunnels(manager: &TunnelManagerRef) -> mpsc::Receiver<P2pResult<TunnelRef>> {
+        let (tx, rx) = mpsc::channel(TEST_SUBSCRIPTION_CHANNEL_CAPACITY);
+        manager.subscribe(Arc::new(move |result| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(result).await;
+            })
+        }));
+        rx
+    }
+
+    async fn recv_tunnel(rx: &mut mpsc::Receiver<P2pResult<TunnelRef>>) -> P2pResult<TunnelRef> {
+        match rx.recv().await {
+            Some(result) => result,
+            None => Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "tunnel subscription closed"
+            )),
+        }
     }
 
     #[async_trait::async_trait]
@@ -2150,7 +2139,7 @@ mod nat_strategy_tests {
         let local = TestIdentity::new(1, "local-no-reverse-waiter");
         let remote = TestIdentity::new(2, "remote-no-reverse-waiter");
         let manager = test_manager(local.clone());
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let tunnel_id = TunnelId::from(51);
         let (notify, _waiter) = Notify::new();
         let registration =
@@ -2169,7 +2158,7 @@ mod nat_strategy_tests {
         assert_eq!(late.close_count(), 1);
         assert!(manager.get_tunnel(&remote.get_id()).is_none());
         assert!(
-            runtime::timeout(Duration::from_millis(50), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(50), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -2180,7 +2169,7 @@ mod nat_strategy_tests {
         let local = TestIdentity::new(3, "local-no-waiter-reverse");
         let remote = TestIdentity::new(4, "remote-no-waiter-reverse");
         let manager = test_manager(local.clone());
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let fresh_tunnel_id = TunnelId::from(53);
 
         let fresh = ClosableReverseTunnel::new(
@@ -2196,7 +2185,7 @@ mod nat_strategy_tests {
         assert_eq!(fresh.close_count(), 1);
         assert!(manager.get_tunnel(&remote.get_id()).is_none());
         assert!(
-            runtime::timeout(Duration::from_millis(50), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(50), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -2207,7 +2196,7 @@ mod nat_strategy_tests {
         let local = TestIdentity::new(5, "local-publish-unregistered");
         let remote = TestIdentity::new(6, "remote-publish-unregistered");
         let manager = test_manager(local.clone());
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let tunnel = ClosableReverseTunnel::new_with_form(
             TunnelId::from(55),
             TunnelCandidateId::from(5501),
@@ -2222,7 +2211,7 @@ mod nat_strategy_tests {
 
         assert!(manager.get_tunnel(&remote.get_id()).is_none());
         assert!(
-            runtime::timeout(Duration::from_millis(50), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(50), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -2332,10 +2321,32 @@ mod tests {
     use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
     use std::sync::Once;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
 
     static TLS_INIT: Once = Once::new();
     static TEST_TUNNEL_ID_SEQ: AtomicUsize = AtomicUsize::new(1);
     const TEST_CHANNEL_CAPACITY: usize = 8;
+
+    fn subscribe_tunnels(manager: &TunnelManagerRef) -> mpsc::Receiver<P2pResult<TunnelRef>> {
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        manager.subscribe(Arc::new(move |result| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(result).await;
+            })
+        }));
+        rx
+    }
+
+    async fn recv_tunnel(rx: &mut mpsc::Receiver<P2pResult<TunnelRef>>) -> P2pResult<TunnelRef> {
+        match rx.recv().await {
+            Some(result) => result,
+            None => Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "tunnel subscription closed"
+            )),
+        }
+    }
 
     struct StaticDeviceFinder {
         devices: HashMap<P2pId, P2pIdentityCertRef>,
@@ -2401,12 +2412,8 @@ mod tests {
         TunnelManager::new(
             local_identity,
             Some(Arc::new(StaticDeviceFinder { devices })),
-            crate::networks::NetManager::new(
-                networks,
-                DefaultTlsServerCertResolver::new(),
-                TEST_CHANNEL_CAPACITY,
-            )
-            .unwrap(),
+            crate::networks::NetManager::new(networks, DefaultTlsServerCertResolver::new())
+                .unwrap(),
             None,
             Arc::new(X509IdentityCertFactory),
             pn_network,
@@ -2415,7 +2422,6 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(30),
             PROXY_UPGRADE_INITIAL_INTERVAL,
-            TEST_CHANNEL_CAPACITY,
         )
         .unwrap()
     }
@@ -2912,7 +2918,6 @@ mod tests {
                 ServerRuntime::start(ServerRuntimeConfig::default()).unwrap(),
             ))],
             DefaultTlsServerCertResolver::new(),
-            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
 
@@ -2930,10 +2935,9 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(30),
             PROXY_UPGRADE_INITIAL_INTERVAL,
-            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
-        let mut callee_sub = callee_manager.subscribe();
+        let mut callee_sub = subscribe_tunnels(&callee_manager);
 
         let caller_resolver = DefaultTlsServerCertResolver::new();
         caller_resolver
@@ -2996,7 +3000,7 @@ mod tests {
         let accepted = callee_manager.register_tunnel(accepted).await.unwrap();
         callee_manager.publish_registered_tunnel(&accepted).unwrap();
 
-        let subscribed = callee_sub.accept_tunnel().await.unwrap();
+        let subscribed = recv_tunnel(&mut callee_sub).await.unwrap();
         assert_eq!(subscribed.remote_id(), caller_identity.get_id());
         assert!(
             callee_manager
@@ -3014,7 +3018,7 @@ mod tests {
         let local_identity = new_identity("local-reverse");
         let remote_identity = new_identity("remote-reverse");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let tunnel_id = TunnelId::from(42);
         let tunnel: TunnelRef = Arc::new(MockTunnel {
             tunnel_id,
@@ -3045,7 +3049,7 @@ mod tests {
                 .contains_key(&remote_identity.get_id())
         );
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -3111,7 +3115,7 @@ mod tests {
         let local_identity = new_identity("local-late-reverse-close");
         let remote_identity = new_identity("remote-late-reverse-close");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let tunnel_id = TunnelId::from(45);
         let (notify, _waiter) = Notify::new();
         let registration = ReverseWaitRegistration::register(
@@ -3148,7 +3152,7 @@ mod tests {
                 .contains_key(&remote_identity.get_id())
         );
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -3161,7 +3165,7 @@ mod tests {
         let local_identity = new_identity("local-no-waiter-reverse-new-id");
         let remote_identity = new_identity("remote-no-waiter-reverse-new-id");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let fresh_tunnel_id = TunnelId::from(47);
 
         let fresh_reverse = TrackableTunnel::new_with_ids(
@@ -3180,7 +3184,7 @@ mod tests {
         assert_eq!(fresh_reverse.close_count(), 1);
         assert!(manager.get_tunnel(&remote_identity.get_id()).is_none());
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -3282,7 +3286,7 @@ mod tests {
         let local_identity = new_identity("local-publish-all");
         let remote_identity = new_identity("remote-publish-all");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let logical_tunnel_id = TunnelId::from(601);
 
         let first = TrackableTunnel::new_with_ids(
@@ -3313,8 +3317,8 @@ mod tests {
             .await
             .unwrap();
 
-        let first_published = sub.accept_tunnel().await.unwrap();
-        let second_published = sub.accept_tunnel().await.unwrap();
+        let first_published = recv_tunnel(&mut sub).await.unwrap();
+        let second_published = recv_tunnel(&mut sub).await.unwrap();
         assert_eq!(first_published.tunnel_id(), logical_tunnel_id);
         assert_eq!(second_published.tunnel_id(), logical_tunnel_id);
         assert_ne!(
@@ -3339,7 +3343,7 @@ mod tests {
         let local_identity = new_identity("local-publish-reverse-without-waiter");
         let remote_identity = new_identity("remote-publish-reverse-without-waiter");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let logical_tunnel_id = TunnelId::from(651);
         let reverse = TrackableTunnel::new_with_ids(
             logical_tunnel_id,
@@ -3356,7 +3360,7 @@ mod tests {
             .register_tunnel_and_publish(reverse_ref.clone())
             .await
             .unwrap();
-        let published = sub.accept_tunnel().await.unwrap();
+        let published = recv_tunnel(&mut sub).await.unwrap();
 
         assert!(Arc::ptr_eq(&returned, &reverse_ref));
         assert!(Arc::ptr_eq(&published, &reverse_ref));
@@ -3369,7 +3373,7 @@ mod tests {
         let local_identity = new_identity("local-reverse-after-waiter");
         let remote_identity = new_identity("remote-reverse-after-waiter");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let logical_tunnel_id = TunnelId::from(701);
 
         let first = TrackableTunnel::new_with_ids(
@@ -3402,7 +3406,7 @@ mod tests {
         let first_ref: TunnelRef = first.clone();
         assert!(Arc::ptr_eq(&notified, &first_ref));
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -3411,7 +3415,7 @@ mod tests {
         assert_eq!(first.close_count(), 0);
         assert_eq!(second.close_count(), 1);
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -3433,7 +3437,7 @@ mod tests {
         let local_identity = new_identity("local-reverse-waiter-publish");
         let remote_identity = new_identity("remote-reverse-waiter-publish");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let logical_tunnel_id = TunnelId::from(711);
         let reverse = TrackableTunnel::new_with_ids(
             logical_tunnel_id,
@@ -3456,7 +3460,7 @@ mod tests {
         let notified = manager.register_tunnel(notified).await.unwrap();
         manager.publish_registered_tunnel(&notified).unwrap();
 
-        let published = sub.accept_tunnel().await.unwrap();
+        let published = recv_tunnel(&mut sub).await.unwrap();
         let reverse_ref: TunnelRef = reverse.clone();
         assert!(Arc::ptr_eq(&published, &reverse_ref));
     }
@@ -3660,7 +3664,7 @@ mod tests {
         let local_identity = new_identity("local-register-proxy");
         let remote_identity = new_identity("remote-register-proxy");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let proxy = TrackableTunnel::new(
             TunnelForm::Proxy,
             local_identity.get_id(),
@@ -3673,7 +3677,7 @@ mod tests {
             .register_tunnel_and_publish(proxy_ref)
             .await
             .unwrap();
-        let published = sub.accept_tunnel().await.unwrap();
+        let published = recv_tunnel(&mut sub).await.unwrap();
 
         assert_eq!(returned.form(), TunnelForm::Proxy);
         assert_eq!(published.remote_id(), remote_identity.get_id());
@@ -3697,7 +3701,7 @@ mod tests {
         let local_identity = new_identity("local-publish-idempotent");
         let remote_identity = new_identity("remote-publish-idempotent");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let tunnel = TrackableTunnel::new(
             TunnelForm::Active,
             local_identity.get_id(),
@@ -3710,10 +3714,10 @@ mod tests {
         manager.publish_registered_tunnel(&tunnel_ref).unwrap();
         manager.publish_registered_tunnel(&tunnel_ref).unwrap();
 
-        let published = sub.accept_tunnel().await.unwrap();
+        let published = recv_tunnel(&mut sub).await.unwrap();
         assert!(Arc::ptr_eq(&published, &tunnel_ref));
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -3726,7 +3730,7 @@ mod tests {
         let local_identity = new_identity("local-duplicate-published");
         let remote_identity = new_identity("remote-duplicate-published");
         let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
-        let mut sub = manager.subscribe();
+        let mut sub = subscribe_tunnels(&manager);
         let tunnel_id = TunnelId::from(901);
         let candidate_id = TunnelCandidateId::from(1);
         let first = TrackableTunnel::new_with_ids(
@@ -3752,7 +3756,7 @@ mod tests {
             .register_tunnel_and_publish(first.clone())
             .await
             .unwrap();
-        let first_published = sub.accept_tunnel().await.unwrap();
+        let first_published = recv_tunnel(&mut sub).await.unwrap();
         let first_ref: TunnelRef = first.clone();
         assert!(Arc::ptr_eq(&first_published, &first_ref));
 
@@ -3766,7 +3770,7 @@ mod tests {
         assert_eq!(first.close_count(), 0);
         assert_eq!(replacement.close_count(), 1);
         assert!(
-            runtime::timeout(Duration::from_millis(100), sub.accept_tunnel())
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -4449,12 +4453,7 @@ mod tests {
             Some(Arc::new(StaticDeviceFinder {
                 devices: HashMap::new(),
             })),
-            crate::networks::NetManager::new(
-                vec![],
-                DefaultTlsServerCertResolver::new(),
-                TEST_CHANNEL_CAPACITY,
-            )
-            .unwrap(),
+            crate::networks::NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
             None,
             Arc::new(X509IdentityCertFactory),
             None,
@@ -4463,7 +4462,6 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(30),
             configured_interval,
-            TEST_CHANNEL_CAPACITY,
         )
         .unwrap();
         let proxy = TrackableTunnel::new(

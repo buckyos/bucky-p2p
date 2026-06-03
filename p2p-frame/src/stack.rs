@@ -27,51 +27,6 @@ use std::time::Duration;
 
 pub use crate::networks::{DeviceFinder, DeviceFinderRef};
 
-pub const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChannelCapacityConfig {
-    pub net_manager_incoming: usize,
-    pub tunnel_manager_subscription: usize,
-    pub quic_listener_connect: usize,
-    pub ttp_listener: usize,
-    pub pn_internal: usize,
-}
-
-impl Default for ChannelCapacityConfig {
-    fn default() -> Self {
-        Self {
-            net_manager_incoming: DEFAULT_CHANNEL_CAPACITY,
-            tunnel_manager_subscription: DEFAULT_CHANNEL_CAPACITY,
-            quic_listener_connect: DEFAULT_CHANNEL_CAPACITY,
-            ttp_listener: DEFAULT_CHANNEL_CAPACITY,
-            pn_internal: DEFAULT_CHANNEL_CAPACITY,
-        }
-    }
-}
-
-impl ChannelCapacityConfig {
-    fn normalize(mut self) -> Self {
-        self.net_manager_incoming = self.net_manager_incoming.max(1);
-        self.tunnel_manager_subscription = self.tunnel_manager_subscription.max(1);
-        self.quic_listener_connect = self.quic_listener_connect.max(1);
-        self.ttp_listener = self.ttp_listener.max(1);
-        self.pn_internal = self.pn_internal.max(1);
-        self
-    }
-
-    pub fn with_all(capacity: usize) -> Self {
-        let capacity = capacity.max(1);
-        Self {
-            net_manager_incoming: capacity,
-            tunnel_manager_subscription: capacity,
-            quic_listener_connect: capacity,
-            ttp_listener: capacity,
-            pn_internal: capacity,
-        }
-    }
-}
-
 pub struct P2pEnv {
     net_manager: NetManagerRef,
     identity_factory: P2pIdentityFactoryRef,
@@ -81,7 +36,6 @@ pub struct P2pEnv {
     connection_info_cache: P2pConnectionInfoCacheRef,
     endpoints: Vec<Endpoint>,
     port_mapping: Option<Vec<(Endpoint, u16)>>,
-    channel_capacities: ChannelCapacityConfig,
 }
 
 impl P2pEnv {
@@ -94,7 +48,6 @@ impl P2pEnv {
         connection_info_cache: P2pConnectionInfoCacheRef,
         endpoints: Vec<Endpoint>,
         port_mapping: Option<Vec<(Endpoint, u16)>>,
-        channel_capacities: ChannelCapacityConfig,
     ) -> P2pEnvRef {
         Arc::new(P2pEnv {
             net_manager,
@@ -105,7 +58,6 @@ impl P2pEnv {
             connection_info_cache,
             endpoints,
             port_mapping,
-            channel_capacities: channel_capacities.normalize(),
         })
     }
 
@@ -119,14 +71,6 @@ impl P2pEnv {
 
     pub fn net_manager(&self) -> &NetManagerRef {
         &self.net_manager
-    }
-
-    pub fn channel_capacity(&self) -> usize {
-        self.channel_capacities.ttp_listener
-    }
-
-    pub fn channel_capacities(&self) -> &ChannelCapacityConfig {
-        &self.channel_capacities
     }
 }
 pub type P2pEnvRef = Arc<P2pEnv>;
@@ -148,7 +92,6 @@ pub struct P2pConfig {
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
     server_runtime: Option<ServerRuntime>,
-    channel_capacities: ChannelCapacityConfig,
 }
 
 impl P2pConfig {
@@ -180,7 +123,6 @@ impl P2pConfig {
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
             server_runtime: None,
-            channel_capacities: ChannelCapacityConfig::default(),
         }
     }
 
@@ -339,29 +281,6 @@ impl P2pConfig {
         self.server_runtime = Some(server_runtime);
         self
     }
-
-    pub fn channel_capacity(&self) -> usize {
-        self.channel_capacities.ttp_listener
-    }
-
-    pub fn channel_capacities(&self) -> &ChannelCapacityConfig {
-        &self.channel_capacities
-    }
-
-    pub fn set_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities = ChannelCapacityConfig::with_all(channel_capacity);
-        self
-    }
-
-    pub fn set_channel_capacities(mut self, channel_capacities: ChannelCapacityConfig) -> Self {
-        self.channel_capacities = channel_capacities.normalize();
-        self
-    }
-
-    pub fn set_ttp_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities.ttp_listener = channel_capacity.max(1);
-        self
-    }
 }
 
 pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
@@ -381,7 +300,6 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
             ),
         )?,
     };
-    let channel_capacities = config.channel_capacities().clone();
     let tcp_network = Arc::new(TcpTunnelNetwork::new(
         tsl_server_cert_resolver.clone(),
         cert_factory.clone(),
@@ -399,7 +317,6 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         config.quic_connect_timeout,
         config.quic_idle_time,
         server_runtime,
-        channel_capacities.quic_listener_connect,
     ));
     TunnelNetwork::set_reuse_address(quic_network.as_ref(), config.reuse_address());
     tunnel_networks.extend(vec![
@@ -410,7 +327,6 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         tunnel_networks,
         tsl_server_cert_resolver.clone(),
         config.incoming_tunnel_validator().clone(),
-        channel_capacities.ttp_listener,
     )?;
     Ok(P2pEnv::new(
         net_manager,
@@ -421,7 +337,6 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         config.connection_info_cache.clone(),
         config.endpoints().to_vec(),
         config.port_mapping().clone(),
-        channel_capacities,
     ))
 }
 
@@ -532,12 +447,10 @@ pub struct P2pStackConfig {
     proxy_stream_encrypted: bool,
     proxy_client: Option<TunnelNetworkRef>,
     local_ip_provider: Option<SnLocalIpProviderRef>,
-    channel_capacities: ChannelCapacityConfig,
 }
 
 impl P2pStackConfig {
     pub fn new(env: P2pEnvRef, local_identity: P2pIdentityRef) -> Self {
-        let channel_capacities = env.channel_capacities().clone();
         Self {
             env,
             local_identity,
@@ -554,7 +467,6 @@ impl P2pStackConfig {
             proxy_stream_encrypted: false,
             proxy_client: None,
             local_ip_provider: None,
-            channel_capacities,
         }
     }
 
@@ -684,34 +596,6 @@ impl P2pStackConfig {
         self.sn_query_interval = sn_query_interval;
         self
     }
-
-    pub fn channel_capacity(&self) -> usize {
-        self.channel_capacities.ttp_listener
-    }
-
-    pub fn channel_capacities(&self) -> &ChannelCapacityConfig {
-        &self.channel_capacities
-    }
-
-    pub fn set_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities = ChannelCapacityConfig::with_all(channel_capacity);
-        self
-    }
-
-    pub fn set_channel_capacities(mut self, channel_capacities: ChannelCapacityConfig) -> Self {
-        self.channel_capacities = channel_capacities.normalize();
-        self
-    }
-
-    pub fn set_tunnel_manager_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities.tunnel_manager_subscription = channel_capacity.max(1);
-        self
-    }
-
-    pub fn set_pn_channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.channel_capacities.pn_internal = channel_capacity.max(1);
-        self
-    }
 }
 
 fn proxy_stream_security_mode(proxy_stream_encrypted: bool) -> PnProxyStreamSecurityMode {
@@ -727,18 +611,12 @@ fn create_default_proxy_client(
     local_identity: P2pIdentityRef,
     cert_factory: P2pIdentityCertFactoryRef,
     proxy_stream_encrypted: bool,
-    pn_channel_capacity: usize,
 ) -> Arc<PnClient> {
     let stream_security_mode = proxy_stream_security_mode(proxy_stream_encrypted);
     let client = if proxy_stream_encrypted {
-        PnClient::new_with_tls_material_and_channel_capacity(
-            ttp_client,
-            local_identity,
-            cert_factory,
-            pn_channel_capacity,
-        )
+        PnClient::new_with_tls_material(ttp_client, local_identity, cert_factory)
     } else {
-        PnClient::new_with_channel_capacity(ttp_client, pn_channel_capacity)
+        PnClient::new(ttp_client)
     };
     client.set_stream_security_mode(stream_security_mode);
     client
@@ -768,7 +646,6 @@ fn build_proxy_client(
         config.local_identity().clone(),
         cert_factory,
         config.proxy_stream_encrypted(),
-        config.channel_capacities().pn_internal,
     );
     Ok(Some(proxy_client))
 }
@@ -789,7 +666,6 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     let sn_tunnel_count = config.sn_tunnel_count();
     let sn_query_interval = config.sn_query_interval();
     let support_proxy = config.support_proxy();
-    let channel_capacities = config.channel_capacities().clone();
 
     let sn_service = if let Some(local_ip_provider) = config.local_ip_provider.clone() {
         SNClientService::new_with_local_ip_provider(
@@ -873,7 +749,6 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         conn_timeout,
         idle_timeout,
         proxy_upgrade_initial_interval,
-        channel_capacities.tunnel_manager_subscription,
     )?;
     let _ = sn_service.start().await;
     let stream_manager = StreamManager::new(local_identity.clone(), tunnel_manager.clone());
@@ -1020,20 +895,10 @@ mod tests {
     async fn create_default_proxy_client_enables_tls_for_proxy_streams() {
         let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(7));
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(TestIdentityCertFactory);
-        let net_manager = NetManager::new(
-            vec![],
-            DefaultTlsServerCertResolver::new(),
-            DEFAULT_CHANNEL_CAPACITY,
-        )
-        .unwrap();
+        let net_manager = NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
-        let pn_client = create_default_proxy_client(
-            ttp_client,
-            local_identity.clone(),
-            cert_factory,
-            true,
-            DEFAULT_CHANNEL_CAPACITY,
-        );
+        let pn_client =
+            create_default_proxy_client(ttp_client, local_identity.clone(), cert_factory, true);
 
         assert_eq!(
             pn_client.stream_security_mode(),
@@ -1051,12 +916,7 @@ mod tests {
         let identity_factory = Arc::new(TestIdentityFactory);
         let cert_factory = Arc::new(TestIdentityCertFactory);
         let env = P2pEnv::new(
-            NetManager::new(
-                vec![],
-                DefaultTlsServerCertResolver::new(),
-                DEFAULT_CHANNEL_CAPACITY,
-            )
-            .unwrap(),
+            NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
             identity_factory,
             cert_factory,
             Arc::new(DeviceCache::new(
@@ -1070,7 +930,6 @@ mod tests {
             DefaultP2pConnectionInfoCache::new(),
             vec![],
             None,
-            ChannelCapacityConfig::default(),
         );
         let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(9));
 
@@ -1079,81 +938,11 @@ mod tests {
     }
 
     #[test]
-    fn p2p_config_channel_capacity_defaults_and_can_be_overridden() {
-        let identity_factory = Arc::new(TestIdentityFactory);
-        let cert_factory = Arc::new(TestIdentityCertFactory);
-        let config = P2pConfig::new(identity_factory, cert_factory, vec![]);
-
-        assert_eq!(config.channel_capacity(), DEFAULT_CHANNEL_CAPACITY);
-        assert_eq!(config.set_channel_capacity(17).channel_capacity(), 17);
-    }
-
-    #[test]
-    fn p2p_config_channel_capacities_default_and_single_override() {
-        let identity_factory = Arc::new(TestIdentityFactory);
-        let cert_factory = Arc::new(TestIdentityCertFactory);
-        let config = P2pConfig::new(identity_factory, cert_factory, vec![]);
-
-        assert_eq!(
-            *config.channel_capacities(),
-            ChannelCapacityConfig::default()
-        );
-
-        let config = config.set_ttp_channel_capacity(17);
-        assert_eq!(config.channel_capacities().ttp_listener, 17);
-        assert_eq!(
-            config.channel_capacities().quic_listener_connect,
-            DEFAULT_CHANNEL_CAPACITY
-        );
-    }
-
-    #[test]
-    fn stack_config_inherits_env_channel_capacity_and_can_override() {
-        let identity_factory = Arc::new(TestIdentityFactory);
-        let cert_factory = Arc::new(TestIdentityCertFactory);
-        let env = P2pEnv::new(
-            NetManager::new(vec![], DefaultTlsServerCertResolver::new(), 19).unwrap(),
-            identity_factory,
-            cert_factory,
-            Arc::new(DeviceCache::new(
-                &DeviceCacheConfig {
-                    expire: Duration::from_secs(60),
-                    capacity: 8,
-                },
-                None,
-            )),
-            DefaultTlsServerCertResolver::new(),
-            DefaultP2pConnectionInfoCache::new(),
-            vec![],
-            None,
-            {
-                let mut capacities = ChannelCapacityConfig::default();
-                capacities.ttp_listener = 19;
-                capacities.tunnel_manager_subscription = 31;
-                capacities
-            },
-        );
-        let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(11));
-
-        let config = P2pStackConfig::new(env, local_identity);
-        assert_eq!(config.channel_capacity(), 19);
-        assert_eq!(config.channel_capacities().tunnel_manager_subscription, 31);
-        let config = config.set_tunnel_manager_channel_capacity(23);
-        assert_eq!(config.channel_capacities().tunnel_manager_subscription, 23);
-        assert_eq!(config.channel_capacities().ttp_listener, 19);
-    }
-
-    #[test]
     fn stack_config_sets_proxy_upgrade_initial_interval() {
         let identity_factory = Arc::new(TestIdentityFactory);
         let cert_factory = Arc::new(TestIdentityCertFactory);
         let env = P2pEnv::new(
-            NetManager::new(
-                vec![],
-                DefaultTlsServerCertResolver::new(),
-                DEFAULT_CHANNEL_CAPACITY,
-            )
-            .unwrap(),
+            NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap(),
             identity_factory,
             cert_factory,
             Arc::new(DeviceCache::new(
@@ -1167,7 +956,6 @@ mod tests {
             DefaultP2pConnectionInfoCache::new(),
             vec![],
             None,
-            ChannelCapacityConfig::default(),
         );
         let local_identity: P2pIdentityRef = Arc::new(TestIdentity::new(10));
         let interval = Duration::from_secs(19);
