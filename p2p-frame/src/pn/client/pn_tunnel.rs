@@ -963,6 +963,16 @@ impl PnTunnel {
     }
 
     async fn finish_close(&self, reason: PnTunnelCloseReason) {
+        self.finish_close_local();
+        self.close_control_channel(reason).await;
+
+        let mut state = self.lifecycle.lock().unwrap();
+        if state.status == PnTunnelLifecycleStatus::Closing {
+            state.status = PnTunnelLifecycleStatus::Closed;
+        }
+    }
+
+    fn finish_close_local(&self) {
         if let Some(shared) = self.shared() {
             shared.unregister_tunnel(
                 &PnShared::tunnel_key(self.remote_id.clone(), self.tunnel_id),
@@ -972,8 +982,6 @@ impl PnTunnel {
 
         self.stream_vports_notify.notify_waiters();
         self.datagram_vports_notify.notify_waiters();
-
-        self.close_control_channel(reason).await;
 
         let mut state = self.lifecycle.lock().unwrap();
         if state.status == PnTunnelLifecycleStatus::Closing {
@@ -1387,8 +1395,20 @@ impl Tunnel for PnTunnel {
         self.closed.load(Ordering::SeqCst)
     }
 
-    async fn close(&self) -> P2pResult<()> {
-        self.close_with_reason(PnTunnelCloseReason::Manual).await
+    fn close(&self) -> P2pResult<()> {
+        let should_finish = {
+            let mut state = self.lifecycle.lock().unwrap();
+            self.close_lifecycle_locked(&mut state, PnTunnelCloseReason::Manual)
+        };
+        if should_finish {
+            self.finish_close_local();
+            if let Some(this) = self.self_weak.upgrade() {
+                runtime::task::spawn(async move {
+                    this.close_control_channel(PnTunnelCloseReason::Manual).await;
+                });
+            }
+        }
+        Ok(())
     }
 
     async fn listen_stream(
@@ -2236,7 +2256,7 @@ mod tests {
 
         shared.register_tunnel(key.clone(), &old);
         shared.register_tunnel(key.clone(), &replacement);
-        old.close().await.unwrap();
+        old.close().unwrap();
 
         let registered = shared.get_tunnel(&key).unwrap();
         assert!(Arc::ptr_eq(&registered, &replacement));
@@ -2255,7 +2275,7 @@ mod tests {
             PnShared::new_local(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
-        tunnel.close().await.unwrap();
+        tunnel.close().unwrap();
 
         let request = ProxyOpenReq {
             tunnel_id: TunnelId::from(47),
@@ -2317,7 +2337,7 @@ mod tests {
         tunnel.mark_control_ready();
 
         let pending = tunnel.begin_pending_channel().unwrap();
-        tunnel.close().await.unwrap();
+        tunnel.close().unwrap();
 
         let err = pending.into_active(&tunnel).err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
@@ -2358,7 +2378,7 @@ mod tests {
         );
         attach_control_pair(&local, &remote).await;
 
-        remote.close().await.unwrap();
+        remote.close().unwrap();
         timeout(std::time::Duration::from_secs(1), async {
             while !local.is_closed() {
                 tokio::task::yield_now().await;
@@ -2547,7 +2567,7 @@ mod tests {
             .set_control_channel(Box::pin(local_read), Box::pin(local_write))
             .await;
 
-        local.close().await.unwrap();
+        local.close().unwrap();
         let close = read_pn_command::<_, PnControlClose>(&mut remote_read)
             .await
             .unwrap();
@@ -2579,7 +2599,7 @@ mod tests {
         );
         attach_control_pair(&local, &remote).await;
 
-        remote.close().await.unwrap();
+        remote.close().unwrap();
         timeout(std::time::Duration::from_secs(1), async {
             while shared.get_tunnel(&key).is_some() {
                 tokio::task::yield_now().await;
@@ -2611,7 +2631,7 @@ mod tests {
         );
         attach_control_pair(&local, &remote).await;
 
-        remote.close().await.unwrap();
+        remote.close().unwrap();
         timeout(std::time::Duration::from_secs(1), async {
             while !local.is_closed() {
                 tokio::task::yield_now().await;
@@ -2620,7 +2640,7 @@ mod tests {
         .await
         .unwrap();
         trigger_idle_timeout(&local).await;
-        local.close().await.unwrap();
+        local.close().unwrap();
         assert!(local.is_closed());
         assert_eq!(lifecycle_counts(&local), (0, 0, 0));
     }
@@ -2643,7 +2663,7 @@ mod tests {
         let second = tunnel.begin_pending_channel().unwrap();
         assert_eq!(lifecycle_counts(&tunnel), (0, 2, 0));
 
-        tunnel.close().await.unwrap();
+        tunnel.close().unwrap();
         let err = first.into_active(&tunnel).err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
         assert_eq!(lifecycle_counts(&tunnel), (0, 1, 0));

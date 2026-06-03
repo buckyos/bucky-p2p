@@ -552,7 +552,7 @@ impl TunnelManager {
                     remote_id,
                     tunnel_id
                 );
-                tunnel.close().await?;
+                tunnel.close()?;
                 return Ok(());
             };
             log::debug!(
@@ -1377,7 +1377,7 @@ impl TunnelManager {
                 tunnel.candidate_id(),
                 tunnel.form()
             );
-            if let Err(err) = proxy.close().await {
+            if let Err(err) = proxy.close() {
                 log::warn!(
                     "close proxy tunnel after upgrade failed remote={} tunnel_id={:?} candidate_id={:?} code={:?} msg={}",
                     remote_id,
@@ -1532,7 +1532,7 @@ impl TunnelManager {
                 same_arc
             );
             if !same_arc {
-                let _ = tunnel.close().await;
+                let _ = tunnel.close();
             }
             return Err(p2p_err!(
                 P2pErrorCode::AlreadyExists,
@@ -1666,7 +1666,7 @@ impl TunnelManager {
             self.track_proxy_upgrade_if_missing(&remote_id);
         }
         for tunnel in removed {
-            let _ = tunnel.close().await;
+            let _ = tunnel.close();
         }
     }
 }
@@ -1685,7 +1685,7 @@ impl Drop for TunnelManager {
         self.cleanup_task.abort();
         self.proxy_upgrade_task.abort();
         for tunnel in tunnels {
-            let _ = Executor::block_on(tunnel.close());
+            let _ = tunnel.close();
         }
     }
 }
@@ -1868,7 +1868,7 @@ mod nat_strategy_tests {
             self.state() == TunnelState::Closed
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             self.close_count.fetch_add(1, Ordering::SeqCst);
             *self.state.lock().unwrap() = TunnelState::Closed;
             Ok(())
@@ -1975,7 +1975,7 @@ mod nat_strategy_tests {
             false
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             Ok(())
         }
 
@@ -2714,7 +2714,7 @@ mod tests {
             self.state == TunnelState::Closed
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             Ok(())
         }
 
@@ -2857,7 +2857,7 @@ mod tests {
             self.state() == TunnelState::Closed
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             self.close_count.fetch_add(1, Ordering::SeqCst);
             *self.state.lock().unwrap() = TunnelState::Closed;
             Ok(())
@@ -2909,8 +2909,7 @@ mod tests {
                 Duration::from_secs(3),
                 Duration::from_millis(200),
                 Duration::from_secs(5),
-                TEST_CHANNEL_CAPACITY,
-                TEST_CHANNEL_CAPACITY,
+                ServerRuntime::start(ServerRuntimeConfig::default()).unwrap(),
             ))],
             DefaultTlsServerCertResolver::new(),
             TEST_CHANNEL_CAPACITY,
@@ -2947,8 +2946,7 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_millis(200),
             Duration::from_secs(5),
-            TEST_CHANNEL_CAPACITY,
-            TEST_CHANNEL_CAPACITY,
+            ServerRuntime::start(ServerRuntimeConfig::default()).unwrap(),
         ));
         caller_network
             .listen(&loopback_tcp_ep(), None, None, ignore_incoming())

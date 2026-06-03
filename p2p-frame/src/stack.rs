@@ -365,7 +365,6 @@ impl P2pConfig {
 }
 
 pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
-    Executor::init_new_multi_thread(None);
     let identity_factory = config.identity_factory();
     let cert_factory = config.cert_factory();
     init_tls(config.identity_factory().clone());
@@ -383,7 +382,7 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
         )?,
     };
     let channel_capacities = config.channel_capacities().clone();
-    let tcp_network = Arc::new(TcpTunnelNetwork::new_with_server_runtime(
+    let tcp_network = Arc::new(TcpTunnelNetwork::new(
         tsl_server_cert_resolver.clone(),
         cert_factory.clone(),
         config.tcp_connect_timout,
@@ -502,11 +501,10 @@ impl P2pStack {
 impl Drop for P2pStack {
     fn drop(&mut self) {
         log::info!("P2pStack drop.device = {}", self.local_identity.get_id());
-        Executor::block_on(
-            self.net_manager
-                .remove_listen_device(&self.local_identity.get_name()),
-        );
-        Executor::block_on(self.sn_service.stop());
+        let _ = self
+            .net_manager
+            .remove_listen_device(&self.local_identity.get_name());
+        self.sn_service.stop();
     }
 }
 

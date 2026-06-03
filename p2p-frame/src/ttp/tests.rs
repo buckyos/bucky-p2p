@@ -233,7 +233,7 @@ impl Tunnel for FakeTunnel {
         false
     }
 
-    async fn close(&self) -> P2pResult<()> {
+    fn close(&self) -> P2pResult<()> {
         Ok(())
     }
 

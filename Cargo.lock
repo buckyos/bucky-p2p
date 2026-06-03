@@ -3429,9 +3429,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-reuseport"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80fe25bb4c0a8b744d6273be985321c43d61741675b2aa05e4a7788c3197a259"
+checksum = "90ff5e034bd3585131f398d3049e30ac969bcb7bc4fd81e5d03b5ed4aeaac77d"
 dependencies = [
  "atomic-waker",
  "getrandom 0.3.4",

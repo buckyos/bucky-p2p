@@ -290,7 +290,7 @@ impl TcpTunnelListener {
     async fn deliver_incoming(&self, result: P2pResult<TunnelRef>) {
         if self.closed.load(Ordering::SeqCst) {
             if let Ok(tunnel) = result {
-                let _ = tunnel.close().await;
+                let _ = tunnel.close();
             }
             return;
         }

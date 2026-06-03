@@ -46,7 +46,7 @@ impl PnListener {
                         .send_control_open_response(TunnelCommandResult::Success)
                         .await
                     {
-                        let _ = tunnel.close().await;
+                        let _ = tunnel.close();
                         return Err(err);
                     }
                     return Ok(Some(tunnel));

@@ -666,9 +666,9 @@ impl TcpTunnel {
         }
     }
 
-    async fn close_impl(&self, phase: LocalTunnelPhase, reason: P2pErrorCode) -> P2pResult<()> {
+    fn close_local(&self, phase: LocalTunnelPhase, reason: P2pErrorCode) -> bool {
         if self.closed.swap(true, Ordering::SeqCst) {
-            return Ok(());
+            return false;
         }
         *self.stream_callback.write().unwrap() = None;
         *self.datagram_callback.write().unwrap() = None;
@@ -720,7 +720,13 @@ impl TcpTunnel {
                 entry.drop_stream();
             }
         }
+        true
+    }
 
+    async fn close_impl(&self, phase: LocalTunnelPhase, reason: P2pErrorCode) -> P2pResult<()> {
+        if !self.close_local(phase, reason) {
+            return Ok(());
+        }
         let mut write = self.control_write.lock().await;
         let _ = runtime::AsyncWriteExt::shutdown(&mut *write).await;
         Ok(())
@@ -2831,9 +2837,9 @@ impl Tunnel for TcpTunnel {
         self.closed.load(Ordering::SeqCst)
     }
 
-    async fn close(&self) -> P2pResult<()> {
-        self.close_impl(LocalTunnelPhase::Closed, P2pErrorCode::Interrupted)
-            .await
+    fn close(&self) -> P2pResult<()> {
+        self.close_local(LocalTunnelPhase::Closed, P2pErrorCode::Interrupted);
+        Ok(())
     }
 
     async fn listen_stream(

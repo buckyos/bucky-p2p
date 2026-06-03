@@ -461,7 +461,7 @@ impl PnClient {
         {
             Ok(control) => control,
             Err(err) => {
-                let _ = tunnel.close().await;
+                let _ = tunnel.close();
                 return Err(err);
             }
         };
@@ -469,7 +469,7 @@ impl PnClient {
             PnShared::tunnel_key(remote_id.clone(), tunnel_id),
             &tunnel,
         ) {
-            let _ = tunnel.close().await;
+            let _ = tunnel.close();
             return Err(err);
         }
         tunnel
@@ -645,7 +645,7 @@ impl TunnelNetwork for PnClient {
         {
             Ok(control) => control,
             Err(err) => {
-                let _ = tunnel.close().await;
+                let _ = tunnel.close();
                 return Err(err);
             }
         };
@@ -653,7 +653,7 @@ impl TunnelNetwork for PnClient {
             PnShared::tunnel_key(remote_id.clone(), tunnel_id),
             &tunnel,
         ) {
-            let _ = tunnel.close().await;
+            let _ = tunnel.close();
             return Err(err);
         }
         tunnel
@@ -836,7 +836,7 @@ mod tests {
             false
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             Ok(())
         }
 

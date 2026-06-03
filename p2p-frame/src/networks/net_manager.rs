@@ -180,8 +180,8 @@ impl NetManager {
         self.cert_resolver.add_server_identity(device).await
     }
 
-    pub async fn remove_listen_device(&self, device_id: &str) -> P2pResult<()> {
-        self.cert_resolver.remove_server_identity(device_id).await
+    pub fn remove_listen_device(&self, device_id: &str) -> P2pResult<()> {
+        self.cert_resolver.remove_server_identity(device_id)
     }
 
     pub async fn get_listen_device(&self, device_id: &str) -> Option<P2pIdentityRef> {
@@ -321,7 +321,7 @@ impl NetManager {
     }
 
     async fn close_tunnel(&self, tunnel: super::TunnelRef) {
-        if let Err(err) = tunnel.close().await {
+        if let Err(err) = tunnel.close() {
             log::warn!(
                 "close rejected tunnel failed local={} remote={} protocol={:?} code={:?} msg={}",
                 tunnel.local_id(),
@@ -465,7 +465,7 @@ mod tests {
             self.close_count() > 0
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             self.close_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

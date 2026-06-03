@@ -745,8 +745,8 @@ mod tests {
         assert_eq!(accepted.local_id(), server_identity.get_id());
         assert_eq!(accepted.remote_id(), client_identity.get_id());
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -801,10 +801,10 @@ mod tests {
         assert_eq!(opened_b.remote_id(), server_identity_b.get_id());
         assert_eq!(accepted_b.local_id(), server_identity_b.get_id());
 
-        opened_a.close().await.unwrap();
-        accepted_a.close().await.unwrap();
-        opened_b.close().await.unwrap();
-        accepted_b.close().await.unwrap();
+        opened_a.close().unwrap();
+        accepted_a.close().unwrap();
+        opened_b.close().unwrap();
+        accepted_b.close().unwrap();
     }
 
     #[tokio::test]
@@ -845,8 +845,8 @@ mod tests {
         read.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"pong");
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -874,8 +874,8 @@ mod tests {
             assert_eq!(received, payload);
         }
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -900,8 +900,8 @@ mod tests {
         peer_read.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello");
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -916,8 +916,8 @@ mod tests {
         .await;
         assert!(result.is_err());
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -937,7 +937,7 @@ mod tests {
         assert!(opened.is_closed());
         assert_eq!(opened.state(), crate::networks::TunnelState::Closed);
 
-        accepted.close().await.unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -952,8 +952,8 @@ mod tests {
         .await;
         assert!(result.is_err());
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -973,7 +973,7 @@ mod tests {
         assert!(opened.is_closed());
         assert_eq!(opened.state(), crate::networks::TunnelState::Closed);
 
-        accepted.close().await.unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -987,8 +987,8 @@ mod tests {
         let err = opened.open_stream(purpose_of(6553)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -1002,8 +1002,8 @@ mod tests {
         let err = opened.open_datagram(purpose_of(6554)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -1014,8 +1014,8 @@ mod tests {
         let err = recv_stream(&*accepted).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -1026,8 +1026,8 @@ mod tests {
         let err = recv_datagram(&*accepted).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::Interrupted);
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -1063,10 +1063,10 @@ mod tests {
         assert_ne!(Arc::as_ptr(&first_opened), Arc::as_ptr(&second_opened));
         assert_ne!(Arc::as_ptr(&first_accepted), Arc::as_ptr(&second_accepted));
 
-        first_opened.close().await.unwrap();
-        second_opened.close().await.unwrap();
-        first_accepted.close().await.unwrap();
-        second_accepted.close().await.unwrap();
+        first_opened.close().unwrap();
+        second_opened.close().unwrap();
+        first_accepted.close().unwrap();
+        second_accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -1089,7 +1089,7 @@ mod tests {
         pair.client_network.close_all_listener().await.unwrap();
         assert!(pair.client_network.listener_infos().is_empty());
 
-        accepted.close().await.unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -1184,7 +1184,7 @@ mod tests {
         assert_eq!(opened.remote_id(), server_identity.get_id());
         assert_eq!(accepted.local_id(), server_identity.get_id());
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 }

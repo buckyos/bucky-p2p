@@ -1,41 +1,43 @@
-use crate::error::P2pResult;
-use once_cell::sync::OnceCell;
+use crate::error::{P2pErrorCode, P2pResult};
 use std::future::Future;
+use std::marker::PhantomData;
+use std::sync::Mutex;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::task::JoinHandle;
 
 pub struct Executor;
-pub type SpawnHandle<Output> = JoinHandle<Output>;
-static EXECUTOR: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+
+pub struct SpawnHandle<Output> {
+    task: Mutex<Option<JoinHandle<Output>>>,
+    _output: PhantomData<Output>,
+}
+
+impl<Output> SpawnHandle<Output> {
+    pub fn abort(&self) {
+        if let Some(task) = self.task.lock().unwrap().take() {
+            task.abort();
+        }
+    }
+}
 
 impl Executor {
-    pub fn init_new_multi_thread(pool_size: Option<usize>) {
-        EXECUTOR.get_or_init(|| {
-            let mut builder = tokio::runtime::Builder::new_multi_thread();
-            if let Some(size) = pool_size {
-                builder.worker_threads(size);
-            }
-            builder.enable_all().build().unwrap()
-        });
-    }
-
-    pub fn init() {
-        EXECUTOR.get_or_init(|| tokio::runtime::Runtime::new().unwrap());
-    }
-
-    pub fn spawn_with_handle<Fut>(future: Fut) -> P2pResult<JoinHandle<Fut::Output>>
+    pub fn spawn_with_handle<Fut>(future: Fut) -> P2pResult<SpawnHandle<Fut::Output>>
     where
         Fut: Future + Send + 'static,
-        Fut::Output: Send,
+        Fut::Output: Send + 'static,
     {
-        Ok(EXECUTOR.get().unwrap().spawn(future))
+        let task = tokio::spawn(future);
+        Ok(SpawnHandle {
+            task: Mutex::new(Some(task)),
+            _output: PhantomData,
+        })
     }
 
     pub fn spawn<Fut>(future: Fut) -> P2pResult<()>
     where
         Fut: Future<Output = ()> + Send + 'static,
     {
-        EXECUTOR.get().unwrap().spawn(future);
+        tokio::spawn(future);
         Ok(())
     }
 
@@ -43,24 +45,6 @@ impl Executor {
     where
         Fut: Future<Output = ()> + Send + 'static,
     {
-        EXECUTOR.get().unwrap().spawn(future);
-    }
-    pub fn block_on<F>(f: F) -> F::Output
-    where
-        F: Future + Send,
-        F::Output: Send,
-    {
-        match Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(|| EXECUTOR.get().unwrap().block_on(f))
-            }
-            Ok(_) => std::thread::scope(|scope| {
-                scope
-                    .spawn(|| EXECUTOR.get().unwrap().block_on(f))
-                    .join()
-                    .unwrap()
-            }),
-            Err(_) => EXECUTOR.get().unwrap().block_on(f),
-        }
+        tokio::spawn(future);
     }
 }

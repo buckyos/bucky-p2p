@@ -578,8 +578,8 @@ impl SnServer {
         contract: Box<dyn SnServiceContractServer + Send + Sync>,
         congestion_algorithm: QuicCongestionAlgorithm,
         reuse_address: bool,
+        server_runtime: ServerRuntime,
     ) -> SnServerRef {
-        Executor::init_new_multi_thread(None);
         init_tls(identity_factory);
 
         let device_cache = Arc::new(DeviceCache::new(
@@ -599,6 +599,7 @@ impl SnServer {
             Duration::from_secs(30),
             Duration::from_secs(5),
             Duration::from_secs(15),
+            server_runtime.clone(),
         ));
         TunnelNetwork::set_reuse_address(tcp_network.as_ref(), reuse_address);
         let quic_network = Arc::new(QuicTunnelNetwork::new(
@@ -608,8 +609,7 @@ impl SnServer {
             congestion_algorithm,
             Duration::from_secs(30),
             Duration::from_secs(30),
-            ServerRuntime::start(ServerRuntimeConfig::default())
-                .expect("sfo reuseport server runtime should start"),
+            server_runtime,
             DEFAULT_CHANNEL_CAPACITY,
         ));
         TunnelNetwork::set_reuse_address(quic_network.as_ref(), reuse_address);
@@ -790,6 +790,7 @@ pub struct SnServiceConfig {
     contract: Box<dyn SnServiceContractServer + Send + Sync>,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
+    server_runtime: Option<ServerRuntime>,
 }
 
 impl SnServiceConfig {
@@ -805,6 +806,7 @@ impl SnServiceConfig {
             contract: Box::new(DefaultSnServiceContractServer::new()),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
+            server_runtime: None,
         }
     }
 
@@ -828,9 +830,17 @@ impl SnServiceConfig {
         self.reuse_address = reuse_address;
         self
     }
+
+    pub fn set_server_runtime(mut self, server_runtime: ServerRuntime) -> Self {
+        self.server_runtime = Some(server_runtime);
+        self
+    }
 }
 
 pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
+    let server_runtime = config
+        .server_runtime
+        .unwrap_or_else(|| ServerRuntime::start(ServerRuntimeConfig::default()).unwrap());
     let service = SnServer::new(
         config.local_identity,
         config.identity_factory,
@@ -838,6 +848,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
         config.contract,
         config.quic_congestion_algorithm,
         config.reuse_address,
+        server_runtime,
     )
     .await;
     service
@@ -1001,7 +1012,7 @@ mod tests {
             false
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             Ok(())
         }
 

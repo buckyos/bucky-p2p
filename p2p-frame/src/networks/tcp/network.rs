@@ -14,7 +14,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
 use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelCandidateId, TunnelIdGenerator};
-use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
+use sfo_reuseport::ServerRuntime;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -48,25 +48,6 @@ impl TcpTunnelNetwork {
     }
 
     pub fn new(
-        cert_resolver: ServerCertResolverRef,
-        cert_factory: P2pIdentityCertFactoryRef,
-        timeout: Duration,
-        heartbeat_interval: Duration,
-        heartbeat_timeout: Duration,
-    ) -> Self {
-        let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default())
-            .expect("sfo reuseport server runtime should start");
-        Self::new_with_server_runtime(
-            cert_resolver,
-            cert_factory,
-            timeout,
-            heartbeat_interval,
-            heartbeat_timeout,
-            server_runtime,
-        )
-    }
-
-    pub fn new_with_server_runtime(
         cert_resolver: ServerCertResolverRef,
         cert_factory: P2pIdentityCertFactoryRef,
         timeout: Duration,
@@ -346,7 +327,7 @@ mod construction_tests {
 
     fn network() -> TcpTunnelNetwork {
         EXECUTOR_INIT.call_once(crate::executor::Executor::init);
-        TcpTunnelNetwork::new_with_server_runtime(
+        TcpTunnelNetwork::new(
             DefaultTlsServerCertResolver::new(),
             Arc::new(TestCertFactory),
             Duration::from_secs(1),
@@ -545,7 +526,7 @@ mod tests {
         let resolver = DefaultTlsServerCertResolver::new();
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(X509IdentityCertFactory);
         (
-            TcpTunnelNetwork::new_with_server_runtime(
+            TcpTunnelNetwork::new(
                 resolver.clone(),
                 cert_factory,
                 Duration::from_secs(3),
@@ -553,8 +534,6 @@ mod tests {
                 Duration::from_secs(30),
                 ServerRuntime::start(ServerRuntimeConfig::default())
                     .expect("sfo reuseport server runtime should start"),
-                TEST_CHANNEL_CAPACITY,
-                TEST_CHANNEL_CAPACITY,
             ),
             resolver,
         )
@@ -656,8 +635,8 @@ mod tests {
         peer_read.read_to_end(&mut passive_tail).await.unwrap();
         assert!(passive_tail.is_empty());
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -699,8 +678,8 @@ mod tests {
         second_read.read_to_end(&mut second_received).await.unwrap();
         assert_eq!(second_received, b"second");
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -725,8 +704,8 @@ mod tests {
         peer_read.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello");
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -740,8 +719,8 @@ mod tests {
         let err = opened.open_stream(purpose_of(3303)).await.err().unwrap();
         assert_eq!(err.code(), P2pErrorCode::PortNotListen);
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]
@@ -756,8 +735,8 @@ mod tests {
         .await;
         assert!(result.is_err());
 
-        opened.close().await.unwrap();
-        accepted.close().await.unwrap();
+        opened.close().unwrap();
+        accepted.close().unwrap();
     }
 
     #[tokio::test]

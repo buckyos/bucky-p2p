@@ -12,8 +12,10 @@ use std::sync::{Arc, Mutex};
 #[async_trait::async_trait]
 pub trait TlsServerCertResolver: ResolvesServerCert + Send + Sync + 'static {
     async fn add_server_identity(&self, id: Arc<dyn P2pIdentity>) -> P2pResult<()>;
-    async fn remove_server_identity(&self, device_id: &str) -> P2pResult<()>;
     async fn get_server_identity(&self, device_id: &str) -> Option<Arc<dyn P2pIdentity>>;
+    fn remove_server_identity(&self, _device_id: &str) -> P2pResult<()> {
+        Ok(())
+    }
     fn get_resolves_server_cert(self: Arc<Self>) -> Arc<dyn ResolvesServerCert>;
 }
 
@@ -53,7 +55,7 @@ impl TlsServerCertResolver for DefaultTlsServerCertResolver {
         Ok(())
     }
 
-    async fn remove_server_identity(&self, device_id: &str) -> P2pResult<()> {
+    fn remove_server_identity(&self, device_id: &str) -> P2pResult<()> {
         let mut device_cache = self.device_cache.lock().unwrap();
         if let Some(device) = device_cache.device_cache.remove(device_id) {
             device_cache

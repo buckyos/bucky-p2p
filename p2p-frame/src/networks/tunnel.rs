@@ -269,7 +269,9 @@ pub trait Tunnel: Send + Sync + 'static {
     fn state(&self) -> TunnelState;
     fn is_closed(&self) -> bool;
 
-    async fn close(&self) -> P2pResult<()>;
+    fn close(&self) -> P2pResult<()> {
+        Ok(())
+    }
 
     async fn listen_stream(
         &self,

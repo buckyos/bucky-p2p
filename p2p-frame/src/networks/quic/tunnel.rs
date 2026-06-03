@@ -1137,7 +1137,7 @@ impl Tunnel for QuicTunnel {
         self.closed.load(Ordering::SeqCst) || self.socket.close_reason().is_some()
     }
 
-    async fn close(&self) -> P2pResult<()> {
+    fn close(&self) -> P2pResult<()> {
         self.close_with_error(P2pErrorCode::Interrupted, "tunnel closed".to_owned());
         Ok(())
     }

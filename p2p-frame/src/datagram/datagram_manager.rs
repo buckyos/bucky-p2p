@@ -484,7 +484,7 @@ mod tests {
             self.closed.load(Ordering::SeqCst)
         }
 
-        async fn close(&self) -> P2pResult<()> {
+        fn close(&self) -> P2pResult<()> {
             self.closed.store(true, Ordering::SeqCst);
             Ok(())
         }

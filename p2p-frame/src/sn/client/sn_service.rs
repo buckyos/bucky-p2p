@@ -652,7 +652,7 @@ impl SNClientService {
         Ok(())
     }
 
-    pub async fn stop(&self) {
+    pub fn stop(&self) {
         {
             let mut state = self.state.write().unwrap();
             state.active_sn_list.clear();
@@ -664,7 +664,7 @@ impl SNClientService {
 
     pub async fn reset_sn(self: &Arc<Self>, sn_list: Vec<P2pSn>) {
         self.sn_list.update_sn_list(sn_list);
-        self.stop().await;
+        self.stop();
         self.cmd_client.clear_all_tunnel().await;
         self.start().await;
     }
