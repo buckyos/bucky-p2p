@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-05T17:05:04+08:00
+approved_at: 2026-06-05T18:58:53+08:00
 ---
 
 # p2p-frame 提案
@@ -23,6 +23,7 @@ approved_at: 2026-06-05T17:05:04+08:00
 - 本轮新增需求是调整通用 `Tunnel` 的 stream/datagram 入站 channel 暴露模型：`Tunnel` trait 不再提供 `accept_stream()` 与 `accept_datagram()` 轮询式接口；`listen_stream(...)` 与 `listen_datagram(...)` 必须由调用方传入接收新 stream/datagram channel 的异步回调函数，Tunnel 内部在对应 listener 或 `sfo-reuseport` worker runtime 的入站处理路径中监听新 channel 并触发回调。
 - 本轮新增需求是为通用 `Tunnel` 提供低频外部控制数据通道能力：调用方可通过 `open_control_stream(...)` / `listen_control_stream(...)` 在现有 tunnel 控制命令通道上复用一组内部多路复用的 virtual control stream；具体实现必须作为 `Tunnel` 内部共享模块，不向外暴露 `control_stream` runtime、frame 或子协议类型。现有 TCP/QUIC/PN tunnel 控制命令只新增一个 `Data` 命令承载内部 control stream frame，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 必须断开。
 - 本轮新增需求是将 SN 低频信令通信迁移到 `Tunnel` control stream：SN report、call、called、响应或等价小消息不得为了每次交互都新建普通业务 `open_stream()`；在已有 tunnel 控制通道健康时，应复用 `open_control_stream(...)` / `listen_control_stream(...)` 承载 SN 小数据通信，以减少真实 stream 建立开销并保持 SN 信令属于控制面。
+- 本轮新增清理需求是移除 `SnServiceContractServer` 相关逻辑：当前 `contract.rs`、`service/receipt.rs` 和服务侧 receipt 装配方向尚未作为 SN 主流程的完整计费、评估或准入系统接入，不应继续作为生产路径或公开装配点保留；为避免改变 SN wire 兼容性，`sn/protocol` 中既有 receipt 字段和编解码类型可继续作为协议兼容结构存在。后续如需服务计费或合约评估，必须以新的 proposal 重新定义目标、接口、状态存储、验证与验收边界。
 - 本轮新增需求是清理 `p2p-frame` 内部所有 `tokio::sync::mpsc::unbounded_channel` 使用点，改为容量受限的 bounded channel；容量必须由外部配置向下传入，最上层配置提供按队列用途或位置拆分的容量配置，每个配置项默认值为 `1024`，调用方默认不需要显式设置；底层组件只接收对应位置已解析后的容量而不自行定义或兜底默认值。
 - 本轮后续清理需求是删除 `p2p-frame/src/stack.rs` 中公开的 `ChannelCapacityConfig` 以及 `P2pConfig` / `P2pStackConfig` / `P2pEnv` 上围绕该结构的容量覆盖、继承和访问逻辑；现有 bounded channel 仍保留容量上限，内部默认统一使用 `DEFAULT_CHANNEL_CAPACITY == 1024`，调用方不再通过 stack 顶层配置覆盖队列容量。
 
@@ -77,6 +78,8 @@ approved_at: 2026-06-05T17:05:04+08:00
 - 底层 tunnel 控制通道断开、decode 失败、write 失败、heartbeat timeout、收到 remote close、本地 close 或 tunnel 进入 closing/closed/error 时，所有基于该控制通道派生的 control stream 都必须断开，pending read/write/open 必须返回 EOF 或 `Interrupted` 类错误，后续 `open_control_stream` 必须立即失败。
 - control stream 是低频控制扩展，不得承载普通业务大流量，不得改变现有 `open_stream` / `listen_stream`、`open_datagram` / `listen_datagram` 行为、线协议载荷格式、TLS 身份校验、PN proxy 业务 channel 协议、vport/purpose 编解码或 tunnel publish 规则。
 - SN 低频信令必须作为 control stream 的目标使用场景：SN report/call/called/response 或等价小消息必须走 control stream；不得保留普通业务 stream fallback，控制通道不可用或远端未监听 SN purpose 时当前 SN 命令通道建立或发送应失败。
+- SN server 必须提供连接验证器装配点，用于判断发起 SN 连接、report、call 或等价 SN server 入站请求的客户端是否允许连接；默认实现必须是显式 allow-all，保持未配置部署的兼容行为；验证上下文只允许包含已认证的 `client_id` 和该客户端证书，不暴露 command、tunnel id 或报文载荷派生的 peer 字段。
+- 移除 `SnServiceContractServer` 相关生产逻辑、服务侧公开导出、构造装配、后台任务和仅服务于该方向的存储/统计路径；保留 `sn/protocol` 中既有 receipt wire 字段和编解码类型，SN report/call/called/连接验证器和 control-stream-only 信令不得依赖被移除的 contract/receipt 服务逻辑。
 - `p2p-frame` 内部事件、accept、listener、stream/datagram 和 tunnel 订阅队列必须由 unbounded channel 改为 bounded channel，避免无上限内存增长
 - bounded channel 容量必须从顶层配置入口向下传递；顶层配置必须按不同队列用途或位置提供可独立覆盖的容量项，各项默认值均为 `1024`，调用方不设置时使用默认容量即可启动
 - 不同位置的 channel 容量不得强制共用同一个配置值；至少应能区分 TTP listener registry、TunnelManager subscription、NetManager incoming subscriber、PN 内部队列和 QUIC listener connect/punch 相关内部队列等仍存在 bounded queue 的类别；TCP/QUIC tunnel stream/datagram 入站回调路径不再保留旧 accept queue 容量参数
@@ -99,6 +102,8 @@ approved_at: 2026-06-05T17:05:04+08:00
 - 因 idle timeout 关闭本端 `PnTunnel` 时强制中断已经交给上层并仍在活动的 channel；这些 channel 必须先通过正常生命周期让计数归零，idle 才能触发
 - 引入多 SN fanout、跨 SN 协调或依赖多个 SN 观察结果推断 NAT 类型
 - 重写 SN `ReportSn` / `SnCall` / `SnCalled` 的基础命令协议，或改变 `SnCallResp` 仅表示 SN 受理结果而非最终连通性结果的语义
+- 把 SN server 连接验证器解释为认证协议、计费系统、跨 SN 策略同步、NAT 类型判断或最终连通性判定；本轮只定义 server 侧准入判断装配点和默认 allow-all 行为
+- 将 SN server 连接验证器上下文扩展为请求语义审计接口；上下文不得包含 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段
 - 引入完整 STUN/TURN 协议栈、外部第三方 NAT 探测服务，或把 PN relay 替换为 TURN 等价服务
 - 将 NAT 打洞优化扩展成二层广播域、L2 bridge、虚拟局域网自动发现或跨网段服务发现能力
 - 为本轮同时设计双边 NAT 类型数据库、长期全局路径质量服务或跨进程持久化的连接质量画像
@@ -107,6 +112,8 @@ approved_at: 2026-06-05T17:05:04+08:00
 - 为 `ServerReflexive` tunnel 引入新的上层业务心跳、raw UDP keepalive 协议、额外心跳发送频率或要求远端解析 punch payload
 - 改变 QUIC tunnel 现有心跳发送间隔；本轮只允许调整心跳超时阈值
 - 将 SN 低频信令迁移解释为新增 SN 大流量数据平面、替代普通业务 stream 的通用消息总线，或允许 SN 信令直接依赖 `p2p-frame` 内部 `control_stream` frame/stream id/window 协议
+- 将 `SnServiceContractServer` 清理解释为删除 SN server、SN client、连接验证器、peer manager、SN 观察端点分类、SN control stream 信令、基础 report/call/called 命令语义或 `sn/protocol` receipt wire 兼容结构；本轮只移除未完整接入主流程的服务合约/回执生产路径。
+- 在本轮清理中引入新的计费、配额、合约评估、持久化账本、跨 SN 策略同步或准入策略；这些能力如果未来需要，必须单独 proposal。
 - 改变 direct、proxy、普通 incoming tunnel 的 register/publish 规则；本轮只收窄 reverse incoming 无 waiter 的行为
 - 引入 reverse tunnel 过期表或跨进程状态；本轮只以当前 pending reverse waiter 作为接收入站 reverse 的依据
 - 新增 `NetworkServerRuntime`、socket factory trait 或其他包裹 `sfo-reuseport` 的通用运行时抽象；本轮必须直接使用 `sfo_reuseport::ServerRuntime`、`TcpServer` 和 `QuicServer`
@@ -134,12 +141,14 @@ approved_at: 2026-06-05T17:05:04+08:00
 - proxy tunnel 的 `datagram` 明文兼容语义同样属于 `p2p-frame` 的 PN/tunnel 责任边界；`cyfs-p2p` 不得通过适配层把 `stream` 加密模式扩展成 `datagram` 拒绝或隐式加密语义。
 - NAT 打洞优化属于 `p2p-frame/src/tunnel/**`、`p2p-frame/src/sn/client/**` 和必要的 SN 服务端候选转发边界；`cyfs-p2p` 可以暴露配置或消费行为，但不得在适配层分叉 tunnel 建立策略。
 - SN 服务端在本轮只承担单 SN 的观察端点、上报候选和 call/called 转发职责；它不负责判定最终连通性，也不负责跨多个 SN 汇总 NAT 类型。
+- SN server 连接验证器属于 `p2p-frame/src/sn/service/**` 的 SN server 准入责任边界；`sn-miner-rust` 可以消费默认 allow-all 行为或后续配置能力，但不得在启动二进制中重新定义核心 SN 准入语义。
 - SN 观察地址分类属于 `p2p-frame` 的 SN/tunnel endpoint 语义边界；下游适配层不得把 `ServerReflexive` 与节点自声明 `Wan` 静默合并成同一类地址。
 - `sfo-reuseport` 负责 listener socket 绑定、reuse-port worker 分发、`TcpServer`/`QuicServer` 服务注册、`serve_socket` worker socket 回调、`UdpSocket` Quinn helper 接口和 QUIC worker-shard CID 生成辅助；`p2p-frame` 负责把这些 socket/stream/packet 接入已有 tunnel、TLS、QUIC 和 NAT punch 语义，不得把 `p2p-frame` 的协议语义下沉到 `sfo-reuseport`。
 - 外部设置 `ServerRuntime` 是 `p2p-frame` 的配置责任边界；`cyfs-p2p` 可透传或组合该配置，但不得在适配层另行定义 listener 分发策略。
 - `Tunnel` stream/datagram 回调模型属于 `p2p-frame` 的公共 tunnel API 责任边界；`cyfs-p2p` 可以适配该 API，但不得在适配层保留另一套基于公共 `accept_*` 的 tunnel channel 暴露语义。
 - `Tunnel` control stream API 属于 `p2p-frame` 的公共 tunnel API 责任边界；`cyfs-p2p` 可以调用 `open_control_stream` / `listen_control_stream`，但不得依赖或重新定义 `p2p-frame` 内部 control stream frame、stream id、window 和 buffer 协议。
 - SN control-stream 化属于 `p2p-frame/src/sn/**` 对 `Tunnel` 公共 control stream API 的消费责任边界；`cyfs-p2p`、`sn-miner-rust` 和测试场景可以观察 SN 行为兼容性，但不得在适配层另行实现一套 SN 信令 stream 选择策略。
+- `SnServiceContractServer` 清理属于 `p2p-frame/src/sn/**` 内部 SN 服务实现边界；`sn-miner-rust`、`cyfs-p2p-test` 和 `cyfs-p2p` 只能适配移除后的 SN 服务公开 API，不得在相邻模块重新保留一套旧 contract server 或 receipt 生产路径作为兼容旁路。
 - bounded channel 容量属于 `p2p-frame` 顶层运行时配置责任边界；`cyfs-p2p` 可以透传或组合该配置，但不得在适配层为 `p2p-frame` 底层队列另行定义一套默认值。顶层配置必须提供完整默认配置，因此普通调用方不需要为了启用 bounded channel 而显式填写任一容量项。
 - `ChannelCapacityConfig` 清理后，容量不再是 `p2p-frame` 对相邻模块暴露的配置责任；相邻模块不得依赖 stack 顶层容量覆盖 API。
 
@@ -162,6 +171,7 @@ approved_at: 2026-06-05T17:05:04+08:00
   - 为规避 bounded channel 满载而在任一路径保留或重新引入 `unbounded_channel`
   - 为兼容旧调用方而在公共 `Tunnel` trait 中保留 `accept_stream()` 或 `accept_datagram()`
   - 公开导出内部 `control_stream` runtime/frame 类型，或让外部直接读写现有 tunnel raw 控制通道
+  - 为保留旧服务合约方向而在 SN 主流程中继续构造、启动或导出 `SnServiceContractServer`、服务侧 receipt trait/module 或等价 contract/receipt 装配入口
 - 系统约束：
   - 保持当前以 tokio 为优先的运行时策略
   - 保持混合 edition 的工作区布局
@@ -211,6 +221,7 @@ approved_at: 2026-06-05T17:05:04+08:00
 - `Data` 控制命令 payload 上限固定为 `64 KiB`，该上限必须由发送侧切分和接收侧校验共同保证；任何绕过该上限的 frame 都是协议错误。
 - 控制命令通道生命周期严格支配所有派生 control stream；底层控制通道关闭或错误后，所有 virtual control stream、pending open、pending write 和 listen 交付必须收敛，不得留下仍可读写的半开对象。
 - SN 信令使用 control stream 时必须通过公开 `Tunnel` control stream API 进入，不得跨模块调用内部 `control_stream` runtime 或自定义 raw `Data` payload 子协议；普通业务 `open_stream()` 不应继续作为 SN 小消息的默认发送路径。
+- `SnServiceContractServer` 清理后，SN 服务主流程仍必须保留 report、call、called、peer manager 更新、连接验证器和 control-stream-only 信令的既有职责；任何需要改变这些职责的发现都必须退回 design 或 proposal，而不是在 implementation 中扩大删除范围。
 
 ## 高层结果
 - 未来的 `p2p-frame` 改动必须通过显式模块数据包进入流程。
@@ -276,6 +287,7 @@ approved_at: 2026-06-05T17:05:04+08:00
 - control stream 在现有控制命令通道上承载外部数据，若 frame 切分、写锁占用、buffer/window 或关闭传播设计不当，可能阻塞内部 heartbeat/close/open response，导致 tunnel 生命周期误判或半开 control stream 泄漏。
 - 若 transport 层解析内部 control stream frame，或把 `control_stream` 子协议暴露为公开 API，会导致 TCP/QUIC/PN 的控制面实现耦合到外部调用方，破坏后续演进边界。
 - 若 SN 信令迁移到 control stream 后仍残留普通 stream fallback，可能导致控制面和数据面语义混杂，并重新引入每次小消息建立真实 stream 的开销；若控制通道不可用，应以明确失败暴露，而不是隐式降级。
+- 若 SN server 连接验证器看到的客户端身份或证书不是由已认证连接元数据规范化后的值，可能允许客户端通过报文字段伪造身份绕过准入；验证上下文必须只暴露 `client_id` 与该客户端证书，默认 allow-all 必须是显式实现，避免部署方误以为已经启用限制策略。
 - 移除公共 `accept_*` 会影响所有测试替身和下游 crate；若迁移遗漏，可能形成编译回归或旧语义在某个 manager 中被私有队列重新暴露。
 - unbounded channel 改为 bounded channel 会把原先隐藏的积压转化为背压或错误；如果容量传递遗漏、满载语义不一致，可能导致 accept/open 等待路径卡住、过早关闭或错误传播不清。
 - 若底层组件继续保留局部默认值，实际容量会与顶层配置漂移，造成不同 transport 或测试替身的内存上限不可预测。
@@ -315,6 +327,8 @@ approved_at: 2026-06-05T17:05:04+08:00
 - `Tunnel` control stream 的对外 API 只能是 `open_control_stream` / `listen_control_stream`；代码审查和测试必须确认内部 `control_stream` runtime/frame 类型未公开导出，且 TCP/QUIC/PN 只新增一个控制命令 `Data` 作为承载。
 - control stream 验证必须覆盖 `Data` payload 最大 `64 KiB`、发送侧大 buffer 切分、接收侧超限拒绝，以及底层控制通道断开后所有派生 stream、pending open 和 pending write 失败。
 - SN 低频信令必须可验收为 control-stream-only 消费路径：report/call/called/response 或等价小消息不得调用普通业务 `open_stream()` 建立真实 stream；测试或代码审查必须覆盖 control stream purpose 过滤，以及控制通道不可用或未监听时失败而非 fallback。
+- SN server 连接验证器必须可验收：默认构造路径使用显式 allow-all validator 并保持现有所有客户端可连接行为；自定义 validator 拒绝时，SN server 不得继续处理对应客户端的 report、call 或等价入站请求，且拒绝结果必须在测试中覆盖；validator 上下文必须只包含 `client_id` 与客户端证书，不得包含 command、tunnel id、reported peer、target peer 或其他报文载荷派生字段。
+- `SnServiceContractServer` 清理必须可验收：服务侧生产代码、公共导出和下游启动路径中不得继续引用 `SnServiceContractServer`、`service/receipt.rs`、`client/contract.rs` 或等价 contract/receipt 装配逻辑；`sn/protocol` 中既有 receipt wire 兼容结构可保留；SN 基础 report/call/called、连接验证器和 control-stream-only 信令必须继续编译并通过对应验证，不得通过删除基础 SN 能力来满足清理目标。
 - `p2p-frame` 代码中不得继续存在生产路径 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；对应队列必须使用 bounded channel，并由顶层配置传入容量。
 - 顶层配置未显式设置 channel 容量时，仍存在的每个队列类别或位置的默认值必须为 `1024`；显式设置某一位置容量时，只有对应 network、PN、TTP、manager 等底层队列使用该覆盖值，其他位置继续使用顶层默认值，且底层不得自行覆盖默认值；TCP/QUIC tunnel 不再暴露旧 accept queue 容量项。
 - 验收必须确认用户可以不设置任何 channel 容量并获得完整默认配置，也可以只覆盖单个位置容量而不影响其他位置容量。
@@ -332,6 +346,8 @@ approved_at: 2026-06-05T17:05:04+08:00
 | P-TUNNEL-CHANNEL-CALLBACK-1 | tunnel_stream_datagram_listen_callback | `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`，`listen_stream(...)` / `listen_datagram(...)` 改为接收可克隆、线程安全的异步回调；Tunnel 内部在入站 stream/datagram channel 到达时按 vport/purpose listen 规则触发回调。 | 不改变 TCP/QUIC/PN/TTP 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码、tunnel publish 规则或 `TunnelNetwork` listener 回调语义；不保留公共 `accept_*` 兼容旁路；不要求调用方同时注册回调又轮询队列。 | schema/admission 能以 `tunnel_stream_datagram_listen_callback` 建立后续准入；unit 或编译覆盖公共 `Tunnel` trait 不再包含 `accept_*`，TCP/QUIC/PN tunnel 以及 TTP/stream/datagram manager 调用点均迁移到 listen 回调；unit 覆盖关闭后不再调用回调、未 listen 的 purpose 仍拒绝或报错、回调满载/背压/错误路径按 design 收敛；integration 覆盖 workspace 调用方迁移后 stream/datagram 仍可建立并传输。 |
 | P-TUNNEL-CONTROL-STREAM-API-1 | tunnel_control_stream_api | `Tunnel` trait 新增 `open_control_stream(...)` / `listen_control_stream(...)`，为外部提供低频控制数据通道；内部 `control_stream` 模块通过现有 TCP/QUIC/PN tunnel 控制命令通道上的单一 `Data` 命令多路复用 virtual stream，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 断开。 | 不公开内部 `control_stream` runtime/frame/stream id/window 类型；不让外部直接读写现有 raw 控制通道；不改变现有 stream/datagram 逻辑、业务 payload 格式、TLS 身份校验、PN proxy 业务 channel 协议、vport/purpose 编解码或 tunnel publish 规则；不将该能力扩展为大流量业务数据平面。 | schema/admission 能以 `tunnel_control_stream_api` 建立后续准入；unit 或编译证据确认公共 API 只有 `Tunnel` trait 方法和 callback/stream 类型，内部 control stream 类型未公开导出；TCP/QUIC/PN 只新增 `Data` 控制命令承载内部 frame；测试覆盖 open/listen、purpose 过滤、64KiB 切分/超限拒绝、控制通道断开后所有派生 stream 和 pending open/write 失败。 |
 | P-SN-CONTROL-STREAM-1 | sn_control_stream_signaling | SN report、call、called、response 或等价低频小消息通过 `Tunnel` control stream 交互，不再为每次 SN 信令新建普通业务 `open_stream()`，且不保留普通 stream fallback。 | 不把 control stream 扩展成 SN 大流量数据平面；不公开或依赖内部 `control_stream` frame/stream id/window 协议；不改变 SN 最终连通性语义、单 SN 边界、SN 观察 endpoint 分类或 `SnCallResp` 只表示 SN 受理结果的语义；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时当前 SN 命令通道建立或发送失败，不得 fallback 到普通 stream。 | schema/admission 能以 `sn_control_stream_signaling` 建立后续准入；unit 或编译证据确认 SN 信令路径调用 `open_control_stream` / `listen_control_stream` 而不是 `open_stream` / `listen_stream`；测试覆盖 control stream purpose 过滤、控制通道不可用或未监听时失败，以及 SN report/call/called/response 小消息仍能通过 control stream 完成。 |
+| P-SN-SERVER-CONNECTION-VALIDATOR-1 | sn_server_connection_validator | SN server 增加连接验证器装配点，用于判断客户端是否允许连接或发起 SN server 入站请求；默认构造路径必须安装显式 allow-all validator，保持未配置部署的兼容行为；validator 上下文只包含已认证 `client_id` 与该客户端证书。 | 不改变 SN command 线协议、`SnCallResp` 最终连通性语义、单 SN 边界、endpoint 分类或 control-stream-only 信令选择；不把 validator 扩展为认证协议、计费系统、限速器、NAT 类型推断、请求语义审计器或跨 SN 策略同步；不信任客户端自填报文字段作为准入身份来源；不在 validator 上下文中暴露 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段。 | schema/admission 能以 `sn_server_connection_validator` 建立后续准入；design/testing 需要定义只含 `client_id` 与客户端证书的 validator 上下文、默认 allow-all 构造路径、自定义 reject 行为和错误映射；implementation 必须移除当前 `SnConnectionValidateContext` 中的 command、tunnel id、reported peer 和 target peer 字段；unit 覆盖默认 allow-all 允许连接，自定义 validator 拒绝时 SN server 不继续处理对应 report/call 或等价请求，并覆盖 validator 可读取客户端证书但无法读取报文派生字段。 |
+| P-SN-CONTRACT-CLEANUP-1 | remove_sn_service_contract_server | 移除 `SnServiceContractServer` 相关服务合约/回执生产路径，包括服务侧生产代码、公开导出、构造装配、后台任务、仅服务于该方向的存储/统计路径，以及 `client/contract.rs` / `service/receipt.rs` 等等价模块；保留 `sn/protocol` receipt wire 兼容结构、SN 基础 report/call/called、连接验证器和 control-stream-only 信令。 | 不删除 SN server/client 基础能力、不改变 SN command 线协议、不改变 `SnCallResp` 语义、不改变 peer manager、endpoint 分类、连接验证器或 control stream 信令选择；不引入新的计费、合约评估、配额或持久化账本替代方案；不在相邻模块保留旧 contract server 兼容旁路。 | schema/admission 能以 `remove_sn_service_contract_server` 建立后续准入；design/testing 需要明确删除路径、公开 API 影响、下游启动路径适配和验证命令；implementation 后代码搜索确认服务侧生产代码和公开导出不再引用 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs` 或等价 contract/receipt 装配逻辑，且 SN report/call/called、连接验证器和 control-stream-only 信令对应 unit/compile 验证仍通过。 |
 | P-BOUNDED-CHANNELS-1 | bounded_channel_capacity_config | `p2p-frame` 内部所有 `unbounded_channel` 队列改为 bounded channel；容量由顶层配置按队列类别或位置独立向下传递，每个容量项默认值为 `1024`，用户默认不需要设置，外部可只覆盖某一位置容量，底层组件不定义默认值。 | 不改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不在底层散落硬编码默认容量；不强制所有队列共用一个容量配置；不通过额外 unbounded buffer 绕开容量限制。 | schema/admission 能以 `bounded_channel_capacity_config` 建立后续准入；unit 或编译覆盖默认用户不设置时各容量默认 `1024`、单个位置自定义容量只影响对应底层构造路径；代码搜索确认生产路径不再存在 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；满载路径具备按设计定义的错误、关闭或背压覆盖。 |
 | P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | stack_channel_capacity_config_removal | 删除 `ChannelCapacityConfig`、`P2pConfig` / `P2pStackConfig` 的 channel capacity getter/setter、`P2pEnv` 的容量快照和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime` 不再接收无效 channel capacity 参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel，内部使用固定 `DEFAULT_CHANNEL_CAPACITY == 1024`。 | 不改变已有 bounded channel 类型、满载错误语义、TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不新增替代公开容量配置 API；不把容量清理扩展为移除所有底层显式构造参数。 | schema/admission 能以 `stack_channel_capacity_config_removal` 建立后续准入；编译或 unit 覆盖 `stack.rs` 不再导出 `ChannelCapacityConfig` 或 stack 层容量 getter/setter，`NetManager::new(...)` / `new_with_incoming_tunnel_validator(...)`、`TtpRuntime::new()` 和 `PnClient::new*` 不再要求容量参数；代码搜索确认生产路径仍无 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；unit 或 compile 覆盖默认 stack 构造继续使用固定容量启动相关 bounded queue。 |
 
@@ -349,3 +365,6 @@ approved_at: 2026-06-05T17:05:04+08:00
 - 本次后续清理已按用户确认新增 `stack_channel_capacity_config_removal`，允许删除 `ChannelCapacityConfig` 及 stack 层容量覆盖逻辑；Design/Testing/Implementation/Acceptance 必须同步改为以固定默认容量和无 unbounded channel 作为证据重点。
 - 本次自动流水线已按用户确认新增 `tunnel_control_stream_api`，必须先补齐 Design/Testing，再通过 implementation admission 后实现；该能力的内部 `control_stream` 模块不得公开导出。
 - 本次 proposal 已按用户要求新增并收紧 `sn_control_stream_signaling`：SN 信令必须使用 `Tunnel` control stream，且不保留普通 stream fallback；Design/Testing/Implementation/Acceptance 必须以 control-stream-only 为准。
+- 本次 proposal 已按用户要求收紧 `sn_server_connection_validator`：SN server 连接验证器上下文只允许包含 `client_id` 与客户端证书，默认实现仍为显式 allow-all。Design/Testing/Implementation/Acceptance 必须同步移除 command、tunnel id、reported peer、target peer 和其他报文载荷派生字段的上下文依赖，补齐证书来源、默认构造路径、自定义拒绝行为、错误映射和对应验证证据后，才能进入实现准入。
+- 本次 proposal 已按用户要求新增 `remove_sn_service_contract_server` 并由自动流水线批准；Design 必须补齐 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs`、公开导出、构造装配、下游调用点、协议 receipt wire 兼容结构保留和 SN 基础能力之间的删除边界。
+- Testing 必须补齐代码搜索、编译、SN 基础 report/call/called、连接验证器和 control-stream-only 信令不回归的验证映射；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `remove_sn_service_contract_server` 通过后，才能删除生产代码。

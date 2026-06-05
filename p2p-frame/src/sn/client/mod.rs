@@ -1,4 +1,3 @@
-mod contract;
 // mod cache;
 // pub mod ping;
 // pub mod call;

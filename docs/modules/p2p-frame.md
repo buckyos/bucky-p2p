@@ -9,7 +9,7 @@
 - `src/networks/tcp/**` 负责 TCP listener、TLS accept、control/data connection 分流和 TCP tunnel registry；TCP listener 可基于 `sfo_reuseport::TcpServer` 接收入站 stream，并通过 `TunnelNetwork::listen(...)` 的回调交付新 tunnel，但不得改变 TCP tunnel 线协议、TLS 身份校验或 tunnel publish 语义。
 - 公共 `Tunnel` trait 的 stream/datagram 入站 channel 暴露使用 `listen_stream(...)` / `listen_datagram(...)` 回调模型；调用方不得通过公共 `accept_stream()` / `accept_datagram()` 轮询 channel。TCP、QUIC、PN tunnel 必须在内部入站处理路径中按 listen vport/purpose 规则触发回调，并保持线协议、TLS 身份校验、PN proxy channel 协议和 tunnel publish 语义不变。
 - `src/endpoint.rs` 负责 endpoint area、协议和地址的公开语义及编解码；`ServerReflexive` 表示 SN 观察到但未与节点自上报地址一致的外网地址，文本编码使用 `S`，不得再作为 system default 语义使用。
-- `src/sn/**` 负责 SN 观察 endpoint 的归类：只有 SN 观察地址与节点自上报 endpoint 完全一致时才可标记为 `Wan`，否则必须标记为 `ServerReflexive`。SN report/call/called/response 等低频小消息必须通过公共 `Tunnel` control stream API 承载；控制通道不可用或远端未监听 SN purpose 时当前 SN 命令通道建立或发送失败，不回退普通 stream。
+- `src/sn/**` 负责 SN 观察 endpoint 的归类：只有 SN 观察地址与节点自上报 endpoint 完全一致时才可标记为 `Wan`，否则必须标记为 `ServerReflexive`。SN report/call/called/response 等低频小消息必须通过公共 `Tunnel` control stream API 承载；控制通道不可用或远端未监听 SN purpose 时当前 SN 命令通道建立或发送失败，不回退普通 stream。SN 主流程不保留未完整接入的 service contract/receipt 生产路径；如需计费、合约评估或回执系统，必须另行定义 proposal。
 - `src/pn/client/**` 负责 `PnTunnel` 本地生命周期、proxy channel open/accept、tunnel 级控制通道、对端关闭感知、idle timeout 关闭，以及关闭后同一 logical tunnel 后续 open 触发重新创建的语义。
 - `src/tunnel/**` 负责 tunnel 候选选择、proxy 兜底连通性，以及 proxy 已连通后的 direct/reverse 脱代理升级策略；当同一远端存在多个可用 tunnel candidate 时，默认复用路径应优先选择已发布的非 proxy tunnel，只有没有可用非 proxy candidate 时才复用 proxy。reverse incoming tunnel 必须命中本地同 `(remote_id, tunnel_id)` reverse waiter；无 waiter 时必须关闭且不得发布为可用候选。
 

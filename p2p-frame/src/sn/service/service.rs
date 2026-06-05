@@ -1,11 +1,11 @@
-use super::{call_stub::CallStub, peer_manager::PeerManager, receipt::*};
+use super::{call_stub::CallStub, peer_manager::PeerManager};
 use crate::endpoint::{Endpoint, EndpointArea, Protocol, endpoints_to_string};
-use crate::error::{P2pErrorCode, P2pResult, into_p2p_err};
+use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
     NetManager, NetManagerRef, QuicCongestionAlgorithm, QuicTunnelNetwork, TcpTunnelNetwork,
-    TunnelNetwork, TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite,
+    TunnelNetwork, TunnelNetworkRef, TunnelStreamRead, TunnelStreamWrite, ValidateResult,
 };
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
@@ -42,52 +42,54 @@ pub type SnCmdServiceRef = Arc<SnCmdService>;
 pub type SnServiceRef = Arc<SnService>;
 pub type SnServerRef = Arc<SnServer>;
 
-struct DefaultSnServiceContractServer {}
+#[derive(Clone, Debug)]
+pub struct SnConnectionValidateContext {
+    pub client_id: P2pId,
+    pub client_cert: EncodedP2pIdentityCert,
+}
 
-impl DefaultSnServiceContractServer {
-    fn new() -> DefaultSnServiceContractServer {
-        DefaultSnServiceContractServer {}
+#[async_trait::async_trait]
+pub trait SnConnectionValidator: Send + Sync + 'static {
+    async fn validate(&self, ctx: &SnConnectionValidateContext) -> P2pResult<ValidateResult>;
+}
+
+pub type SnConnectionValidatorRef = Arc<dyn SnConnectionValidator>;
+
+pub struct AllowAllSnConnectionValidator;
+
+#[async_trait::async_trait]
+impl SnConnectionValidator for AllowAllSnConnectionValidator {
+    async fn validate(&self, _ctx: &SnConnectionValidateContext) -> P2pResult<ValidateResult> {
+        Ok(ValidateResult::Accept)
     }
 }
 
-impl SnServiceContractServer for DefaultSnServiceContractServer {
-    fn check_receipt(
-        &self,
-        _client_peer_desc: &EncodedP2pIdentityCert, // 客户端desc
-        _local_receipt: &SnServiceReceipt,          // 本地(服务端)统计的服务清单
-        _client_receipt: &Option<ReceiptWithSignature>, // 客户端提供的服务清单
-        _last_request_time: &ReceiptRequestTime,    // 上次要求服务清单的时间
-    ) -> IsAcceptClient {
-        IsAcceptClient::Accept(false)
-    }
-
-    fn verify_auth(&self, _client_device_id: &P2pId) -> IsAcceptClient {
-        IsAcceptClient::Accept(false)
-    }
+pub fn allow_all_sn_connection_validator() -> SnConnectionValidatorRef {
+    Arc::new(AllowAllSnConnectionValidator)
 }
 
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
-    _contract: Box<dyn SnServiceContractServer + Send + Sync>,
     peer_mgr: PeerManagerRef,
     call_stub: CallStub,
     cert_factory: P2pIdentityCertFactoryRef,
     cmd_server: SnCmdServiceRef,
+    connection_validator: SnConnectionValidatorRef,
     cmd_version: u8,
 }
 
 impl SnService {
     pub fn new(
         cert_factory: P2pIdentityCertFactoryRef,
-        contract: Box<dyn SnServiceContractServer + Send + Sync>,
+        connection_validator: SnConnectionValidatorRef,
     ) -> SnServiceRef {
         let service = Arc::new(SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
-            _contract: contract,
             peer_mgr: PeerManager::new(),
             call_stub: CallStub::new(),
             cert_factory,
             cmd_server: DefaultCmdServerService::new(),
+            connection_validator,
             cmd_version: 0,
         });
         service.register_sn_cmd_handler();
@@ -114,7 +116,8 @@ impl SnService {
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                     service
                         .handle_call(call_req, &local_id, &peer_id, tunnel_id, bucky_time_now())
-                        .await;
+                        .await
+                        .map_err(into_cmd_err!(CmdErrorCode::Failed, "handle sn call failed"))?;
                     Ok(None)
                 }
             },
@@ -155,7 +158,11 @@ impl SnService {
                             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                     service
                         .handle_report_sn(&local_id, &peer_id, tunnel_id, report_sn)
-                        .await;
+                        .await
+                        .map_err(into_cmd_err!(
+                            CmdErrorCode::Failed,
+                            "handle report sn failed"
+                        ))?;
                     Ok(None)
                 }
             },
@@ -182,6 +189,58 @@ impl SnService {
 
     fn peer_manager(&self) -> &PeerManagerRef {
         &self.peer_mgr
+    }
+
+    async fn validate_connection(&self, ctx: SnConnectionValidateContext) -> P2pResult<()> {
+        match self.connection_validator.validate(&ctx).await? {
+            ValidateResult::Accept => Ok(()),
+            ValidateResult::Reject(reason) => Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "sn connection validate failed client={} reason={}",
+                ctx.client_id,
+                reason
+            )),
+        }
+    }
+
+    fn validate_context_from_cert(
+        &self,
+        peer_id: &PeerId,
+        client_cert: EncodedP2pIdentityCert,
+    ) -> P2pResult<SnConnectionValidateContext> {
+        let client_id = P2pId::from(peer_id.as_slice());
+        let parsed_cert = self.cert_factory.create(&client_cert)?;
+        let cert_id = parsed_cert.get_id();
+        if cert_id != client_id {
+            return Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "sn client cert id mismatch client={} cert={}",
+                client_id,
+                cert_id
+            ));
+        }
+        Ok(SnConnectionValidateContext {
+            client_id,
+            client_cert,
+        })
+    }
+
+    fn client_cert_from_request_or_cache(
+        &self,
+        client_id: &P2pId,
+        request_cert: Option<EncodedP2pIdentityCert>,
+    ) -> P2pResult<EncodedP2pIdentityCert> {
+        if let Some(cert) = request_cert {
+            return Ok(cert);
+        }
+        let cached = self.peer_manager().find_peer(client_id).ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "sn client cert missing client={}",
+                client_id
+            )
+        })?;
+        cached.desc.get_encoded_cert()
     }
 
     fn push_unique_endpoint(endpoints: &mut Vec<Endpoint>, endpoint: Endpoint) {
@@ -237,6 +296,12 @@ impl SnService {
         tunnel_id: CmdTunnelId,
         _send_time: Timestamp,
     ) -> P2pResult<()> {
+        let client_id = P2pId::from(peer_id.as_slice());
+        let client_cert =
+            self.client_cert_from_request_or_cache(&client_id, call_req.peer_info.clone())?;
+        self.validate_connection(self.validate_context_from_cert(peer_id, client_cert)?)
+            .await?;
+
         let from_peer_id = &call_req.from_peer_id;
         let log_key = format!(
             "[call {}->{} seq({})]",
@@ -452,6 +517,17 @@ impl SnService {
         tunnel_id: CmdTunnelId,
         report_sn: ReportSn,
     ) -> P2pResult<()> {
+        self.validate_connection(self.validate_context_from_cert(
+            peer_id,
+            report_sn.peer_info.clone().ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::PermissionDenied,
+                    "sn report missing client cert"
+                )
+            })?,
+        )?)
+        .await?;
+
         log::info!(
             "report sn from {}.eps: {:?} map_port: {:?}",
             peer_id.to_base36(),
@@ -574,7 +650,7 @@ impl SnServer {
         local_identity: P2pIdentityRef,
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
-        contract: Box<dyn SnServiceContractServer + Send + Sync>,
+        connection_validator: SnConnectionValidatorRef,
         congestion_algorithm: QuicCongestionAlgorithm,
         reuse_address: bool,
         server_runtime: ServerRuntime,
@@ -618,7 +694,7 @@ impl SnServer {
 
         let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
         let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
-        let service = SnService::new(cert_factory, contract);
+        let service = SnService::new(cert_factory, connection_validator);
 
         Arc::new(Self {
             local_identity,
@@ -799,7 +875,7 @@ pub struct SnServiceConfig {
     local_identity: P2pIdentityRef,
     identity_factory: P2pIdentityFactoryRef,
     cert_factory: P2pIdentityCertFactoryRef,
-    contract: Box<dyn SnServiceContractServer + Send + Sync>,
+    connection_validator: SnConnectionValidatorRef,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
     server_runtime: Option<ServerRuntime>,
@@ -815,18 +891,15 @@ impl SnServiceConfig {
             local_identity,
             identity_factory,
             cert_factory,
-            contract: Box::new(DefaultSnServiceContractServer::new()),
+            connection_validator: allow_all_sn_connection_validator(),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
             server_runtime: None,
         }
     }
 
-    pub fn set_contract(
-        mut self,
-        contract: Box<dyn SnServiceContractServer + Send + Sync>,
-    ) -> Self {
-        self.contract = contract;
+    pub fn set_connection_validator(mut self, validator: SnConnectionValidatorRef) -> Self {
+        self.connection_validator = validator;
         self
     }
 
@@ -857,7 +930,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
         config.local_identity,
         config.identity_factory,
         config.cert_factory,
-        config.contract,
+        config.connection_validator,
         config.quic_congestion_algorithm,
         config.reuse_address,
         server_runtime,
@@ -876,7 +949,8 @@ mod tests {
         TunnelState, TunnelStreamRead, TunnelStreamWrite,
     };
     use crate::p2p_identity::{
-        EncodedP2pIdentity, P2pIdentity, P2pIdentityCertRef, P2pIdentityRef, P2pSignature,
+        EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
+        P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pSn,
     };
     use crate::tls::DefaultTlsServerCertResolver;
     use std::sync::{Arc, Mutex};
@@ -927,6 +1001,92 @@ mod tests {
                 name: self.name.clone(),
                 endpoints: eps,
             })
+        }
+    }
+
+    struct TestIdentityCert {
+        id: P2pId,
+        encoded: EncodedP2pIdentityCert,
+    }
+
+    impl P2pIdentityCert for TestIdentityCert {
+        fn get_id(&self) -> P2pId {
+            self.id.clone()
+        }
+
+        fn get_name(&self) -> String {
+            "test-cert".to_owned()
+        }
+
+        fn sign_type(&self) -> crate::p2p_identity::P2pIdentitySignType {
+            crate::p2p_identity::P2pIdentitySignType::Rsa
+        }
+
+        fn verify(&self, _message: &[u8], _sign: &P2pSignature) -> bool {
+            true
+        }
+
+        fn verify_cert(&self, _name: &str) -> bool {
+            true
+        }
+
+        fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
+            Ok(self.encoded.clone())
+        }
+
+        fn endpoints(&self) -> Vec<Endpoint> {
+            vec![]
+        }
+
+        fn sn_list(&self) -> Vec<P2pSn> {
+            vec![]
+        }
+
+        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityCertRef {
+            Arc::new(Self {
+                id: self.id.clone(),
+                encoded: self.encoded.clone(),
+            })
+        }
+    }
+
+    struct TestIdentityCertFactory;
+
+    impl P2pIdentityCertFactory for TestIdentityCertFactory {
+        fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
+            Ok(Arc::new(TestIdentityCert {
+                id: P2pId::from(cert.clone()),
+                encoded: cert.clone(),
+            }))
+        }
+    }
+
+    struct TestSnConnectionValidator {
+        decision: ValidateResult,
+        last_ctx: Mutex<Option<SnConnectionValidateContext>>,
+    }
+
+    impl TestSnConnectionValidator {
+        fn new(decision: ValidateResult) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                last_ctx: Mutex::new(None),
+            })
+        }
+
+        fn last_ctx(&self) -> Option<SnConnectionValidateContext> {
+            self.last_ctx.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SnConnectionValidator for TestSnConnectionValidator {
+        async fn validate(&self, ctx: &SnConnectionValidateContext) -> P2pResult<ValidateResult> {
+            *self.last_ctx.lock().unwrap() = Some(ctx.clone());
+            match &self.decision {
+                ValidateResult::Accept => Ok(ValidateResult::Accept),
+                ValidateResult::Reject(reason) => Ok(ValidateResult::Reject(reason.clone())),
+            }
         }
     }
 
@@ -1211,6 +1371,26 @@ mod tests {
         ((Box::pin(tunnel_read), Box::pin(tunnel_write)), test_write)
     }
 
+    fn test_sn_service(validator: SnConnectionValidatorRef) -> SnServiceRef {
+        SnService::new(Arc::new(TestIdentityCertFactory), validator)
+    }
+
+    fn test_report(from_peer_id: P2pId, client_cert: EncodedP2pIdentityCert) -> ReportSn {
+        ReportSn {
+            protocol_version: 0,
+            stack_version: 0,
+            seq: 1u32.into(),
+            sn_peer_id: P2pId::from(vec![9u8; 32]),
+            from_peer_id: Some(from_peer_id),
+            peer_info: Some(client_cert),
+            send_time: 0,
+            contract_id: None,
+            receipt: None,
+            map_ports: vec![],
+            local_eps: vec![],
+        }
+    }
+
     #[test]
     fn reverse_endpoint_array_dedup_preserves_first_seen_endpoint() {
         let mut wan_ep = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
@@ -1299,6 +1479,77 @@ mod tests {
         let classified = SnService::classify_observed_endpoint(observed, &[reported]);
 
         assert_eq!(classified.get_area(), EndpointArea::ServerReflexive);
+    }
+
+    #[tokio::test]
+    async fn sn_service_default_validator_allows_report() {
+        let service = test_sn_service(allow_all_sn_connection_validator());
+        let reported_peer = P2pId::from(vec![7u8; 32]);
+        let peer_id = PeerId::from(reported_peer.as_slice());
+        let local_id = P2pId::from(vec![9u8; 32]);
+
+        let result = service
+            .handle_report_sn(
+                &local_id,
+                &peer_id,
+                1u32.into(),
+                test_report(reported_peer.clone(), reported_peer.as_slice().to_vec()),
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sn_service_rejects_report_when_validator_rejects() {
+        let validator =
+            TestSnConnectionValidator::new(ValidateResult::Reject("blocked-by-test".to_owned()));
+        let service = test_sn_service(validator.clone());
+        let reported_peer = P2pId::from(vec![8u8; 32]);
+        let client_peer = P2pId::from(vec![3u8; 32]);
+        let peer_id = PeerId::from(client_peer.as_slice());
+        let local_id = P2pId::from(vec![9u8; 32]);
+
+        let err = service
+            .handle_report_sn(
+                &local_id,
+                &peer_id,
+                2u32.into(),
+                test_report(reported_peer.clone(), client_peer.as_slice().to_vec()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), P2pErrorCode::PermissionDenied);
+        assert!(service.peer_manager().find_peer(&reported_peer).is_none());
+        let ctx = validator.last_ctx().unwrap();
+        assert_eq!(ctx.client_id, client_peer);
+        assert_eq!(ctx.client_cert, client_peer.as_slice().to_vec());
+    }
+
+    #[tokio::test]
+    async fn sn_service_rejects_report_when_client_cert_mismatches_peer_id() {
+        let validator = TestSnConnectionValidator::new(ValidateResult::Accept);
+        let service = test_sn_service(validator.clone());
+        let reported_peer = P2pId::from(vec![8u8; 32]);
+        let client_peer = P2pId::from(vec![3u8; 32]);
+        let mismatched_cert = P2pId::from(vec![4u8; 32]);
+        let peer_id = PeerId::from(client_peer.as_slice());
+        let local_id = P2pId::from(vec![9u8; 32]);
+
+        let err = service
+            .handle_report_sn(
+                &local_id,
+                &peer_id,
+                2u32.into(),
+                test_report(reported_peer.clone(), mismatched_cert.as_slice().to_vec()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), P2pErrorCode::PermissionDenied);
+        assert!(service.peer_manager().find_peer(&reported_peer).is_none());
+        assert!(validator.last_ctx().is_none());
     }
 
     #[tokio::test]

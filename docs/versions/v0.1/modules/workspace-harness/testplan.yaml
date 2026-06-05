@@ -1,0 +1,69 @@
+schema_version: 1
+version: v0.1
+module: workspace-harness
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 工作区治理结构验证
+    test_targets:
+      - harness/rules/**
+      - harness/scripts/**
+      - harness/pipeline-plan.md
+      - harness/workspace-governance.yaml
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - 该入口验证必需治理文件存在，不能证明业务模块准入通过。
+    steps:
+      - id: workspace-harness-structure
+        name: 验证工作区 Harness 结构
+        change_ids: ["workspace_harness_acceptance_review_gate", "workspace_harness_pipeline_plan_current_change"]
+        run: ["python3", "./harness/scripts/verify-workspace-harness.py", "v0.1"]
+
+  dv:
+    mode: enabled
+    summary: 代表模块 schema 验证
+    test_targets:
+      - docs/versions/v0.1/modules/p2p-frame/**
+      - harness/scripts/schema-check.py
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - p2p-frame 是 Tier 0 代表模块，用于验证 schema checker 的主路径。
+    steps:
+      - id: workspace-harness-schema-p2p-frame
+        name: 验证 p2p-frame schema
+        change_ids: ["workspace_harness_direct_admission_gate"]
+        run: ["python3", "./harness/scripts/schema-check.py", "--version", "v0.1", "--module", "p2p-frame"]
+
+  integration:
+    mode: enabled
+    summary: admission checker 通过与失败关闭路径验证
+    test_targets:
+      - harness/scripts/admission-check.py
+      - docs/versions/v0.1/modules/p2p-frame/**
+      - docs/versions/v0.1/modules/cyfs-p2p/**
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - p2p-frame 应在审批和映射齐备后通过。
+        - cyfs-p2p 在 design/testing 未审批时应失败关闭；审批后再重新运行确认通过。
+    steps:
+      - id: workspace-harness-admission-p2p-frame
+        name: 验证 p2p-frame admission
+        change_ids: ["workspace_harness_direct_admission_gate"]
+        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "p2p-frame", "--change-id", "endpoint_area_server_reflexive"]
+      - id: workspace-harness-admission-cyfs-p2p
+        name: 验证 cyfs-p2p admission 失败关闭或审批后通过
+        change_ids: ["workspace_harness_direct_admission_gate"]
+        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "cyfs-p2p", "--change-id", "endpoint_area_server_reflexive"]
