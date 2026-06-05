@@ -417,13 +417,8 @@ fn make_manager(network: TunnelNetworkRef) -> NetManagerRef {
     NetManager::new(vec![network], DefaultTlsServerCertResolver::new()).unwrap()
 }
 
-fn init_executor() {
-    Executor::init_new_multi_thread(None);
-}
-
 #[tokio::test]
 async fn client_open_stream_and_datagram_reuse_same_tunnel() {
-    init_executor();
     let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24001".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24002".parse().unwrap()));
     let local = make_identity(1, "local-client", local_ep);
@@ -457,7 +452,6 @@ async fn client_open_stream_and_datagram_reuse_same_tunnel() {
 
 #[tokio::test]
 async fn server_listeners_receive_incoming_stream_and_datagram() {
-    init_executor();
     let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24101".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24102".parse().unwrap()));
     let local = make_identity(3, "local-server", local_ep);
@@ -518,7 +512,6 @@ async fn server_listeners_receive_incoming_stream_and_datagram() {
 
 #[tokio::test]
 async fn server_open_stream_requires_existing_incoming_tunnel() {
-    init_executor();
     let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24201".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24202".parse().unwrap()));
     let local = make_identity(5, "local-server-open", local_ep);
@@ -544,7 +537,6 @@ async fn server_open_stream_requires_existing_incoming_tunnel() {
 
 #[tokio::test]
 async fn server_open_stream_and_datagram_reuse_existing_incoming_tunnel() {
-    init_executor();
     let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24301".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24302".parse().unwrap()));
     let local = make_identity(7, "local-server-reuse", local_ep);

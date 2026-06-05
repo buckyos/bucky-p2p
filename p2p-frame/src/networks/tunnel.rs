@@ -15,12 +15,20 @@ pub type TunnelDatagramRead = Pin<Box<dyn runtime::AsyncRead + Send + Unpin + 's
 pub type TunnelDatagramWrite = Pin<Box<dyn runtime::AsyncWrite + Send + Unpin + 'static>>;
 pub type IncomingStream = (TunnelPurpose, TunnelStreamRead, TunnelStreamWrite);
 pub type IncomingDatagram = (TunnelPurpose, TunnelDatagramRead);
+pub type IncomingControlStream = (TunnelPurpose, TunnelStreamRead, TunnelStreamWrite);
 pub type IncomingStreamCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub type IncomingDatagramCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub type IncomingControlStreamCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub type IncomingStreamCallback =
     Arc<dyn Fn(P2pResult<IncomingStream>) -> IncomingStreamCallbackFuture + Send + Sync + 'static>;
 pub type IncomingDatagramCallback = Arc<
     dyn Fn(P2pResult<IncomingDatagram>) -> IncomingDatagramCallbackFuture + Send + Sync + 'static,
+>;
+pub type IncomingControlStreamCallback = Arc<
+    dyn Fn(P2pResult<IncomingControlStream>) -> IncomingControlStreamCallbackFuture
+        + Send
+        + Sync
+        + 'static,
 >;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, RawEncode, RawDecode)]
@@ -283,6 +291,16 @@ pub trait Tunnel: Send + Sync + 'static {
         vports: ListenVPortsRef,
         callback: IncomingDatagramCallback,
     ) -> P2pResult<()>;
+    async fn listen_control_stream(
+        &self,
+        _purposes: ListenVPortsRef,
+        _callback: IncomingControlStreamCallback,
+    ) -> P2pResult<()> {
+        Err(P2pError::new(
+            P2pErrorCode::NotSupport,
+            "control stream is not supported".to_owned(),
+        ))
+    }
 
     async fn open_stream(
         &self,
@@ -290,6 +308,15 @@ pub trait Tunnel: Send + Sync + 'static {
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)>;
 
     async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite>;
+    async fn open_control_stream(
+        &self,
+        _purpose: TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        Err(P2pError::new(
+            P2pErrorCode::NotSupport,
+            "control stream is not supported".to_owned(),
+        ))
+    }
 }
 
 pub type TunnelRef = Arc<dyn Tunnel>;

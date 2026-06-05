@@ -357,9 +357,7 @@ mod tests {
     };
     use crate::tls::DefaultTlsServerCertResolver;
     use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
-    use std::sync::{Arc, Once};
-
-    static EXECUTOR_INIT: Once = Once::new();
+    use std::sync::Arc;
 
     struct TestCertFactory;
 
@@ -416,7 +414,6 @@ mod tests {
     }
 
     fn listener() -> Arc<TcpTunnelListener> {
-        EXECUTOR_INIT.call_once(crate::executor::Executor::init);
         let callback: IncomingTunnelCallback = Arc::new(|_| Box::pin(async {}));
         TcpTunnelListener::new(
             DefaultTlsServerCertResolver::new(),
@@ -442,8 +439,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tcp_listener_accepts_only_control_hello_without_data_fields() {
+    #[tokio::test]
+    async fn tcp_listener_accepts_only_control_hello_without_data_fields() {
         let listener = listener();
         let mut hello = control_hello();
         assert_eq!(

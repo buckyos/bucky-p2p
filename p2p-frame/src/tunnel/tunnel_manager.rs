@@ -1876,7 +1876,6 @@ mod nat_strategy_tests {
     }
 
     fn test_manager(local_identity: P2pIdentityRef) -> TunnelManagerRef {
-        Executor::init();
         TunnelManager::new(
             local_identity,
             None,
@@ -2364,7 +2363,6 @@ mod tests {
 
     fn init_tls_once() {
         TLS_INIT.call_once(|| {
-            Executor::init();
             crate::tls::init_tls(Arc::new(X509IdentityFactory));
         });
     }
@@ -2977,9 +2975,7 @@ mod tests {
             Duration::from_millis(200),
             Duration::from_secs(5),
             ServerRuntime::start(ServerRuntimeConfig::default()).unwrap(),
-            TEST_CHANNEL_CAPACITY,
             server_incoming,
-            TEST_CHANNEL_CAPACITY,
         );
         server_listener
             .start(loopback_tcp_ep(), None, None, false)

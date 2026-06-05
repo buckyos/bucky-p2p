@@ -848,7 +848,6 @@ mod tests {
 
     #[tokio::test]
     async fn pn_client_listener_infos_empty_until_listen() {
-        Executor::init();
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(9));
         let net_manager =
             NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();

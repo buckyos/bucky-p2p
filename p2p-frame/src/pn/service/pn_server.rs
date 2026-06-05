@@ -1272,10 +1272,6 @@ mod tests {
         }
     }
 
-    fn init_executor() {
-        Executor::init_new_multi_thread(None);
-    }
-
     #[tokio::test]
     async fn pn_service_uses_injected_target_stream_factory() {
         let source_id = P2pId::from(vec![2u8; 32]);
@@ -1913,8 +1909,6 @@ mod tests {
 
     #[tokio::test]
     async fn pn_server_listens_and_bridges_proxy_stream() {
-        init_executor();
-
         let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23101".parse().unwrap()));
         let source_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23102".parse().unwrap()));
         let target_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23103".parse().unwrap()));

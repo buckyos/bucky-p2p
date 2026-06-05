@@ -1164,10 +1164,6 @@ mod tests {
         ((Box::pin(tunnel_read), Box::pin(tunnel_write)), test_write)
     }
 
-    fn init_executor() {
-        Executor::init_new_multi_thread(None);
-    }
-
     #[test]
     fn reverse_endpoint_array_dedup_preserves_first_seen_endpoint() {
         let mut wan_ep = Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
@@ -1260,7 +1256,6 @@ mod tests {
 
     #[tokio::test]
     async fn sn_server_wraps_sn_cmd_vport_into_cmd_tunnel() {
-        init_executor();
         let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23001".parse().unwrap()));
         let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23002".parse().unwrap()));
         let identity = test_identity(local_ep);

@@ -28,6 +28,7 @@ enum TcpCommandId {
     ClaimConnAck = 8,
     WriteFin = 9,
     ReadDone = 10,
+    Data = 11,
 }
 
 impl TcpCommandId {
@@ -43,6 +44,7 @@ impl TcpCommandId {
             x if x == Self::ClaimConnAck as u8 => Some(Self::ClaimConnAck),
             x if x == Self::WriteFin as u8 => Some(Self::WriteFin),
             x if x == Self::ReadDone as u8 => Some(Self::ReadDone),
+            x if x == Self::Data as u8 => Some(Self::Data),
             _ => None,
         }
     }
@@ -227,6 +229,15 @@ impl TunnelCommandBody for ReadDone {
     const COMMAND_ID: u8 = TcpCommandId::ReadDone as u8;
 }
 
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct TcpControlData {
+    pub payload: Vec<u8>,
+}
+
+impl TunnelCommandBody for TcpControlData {
+    const COMMAND_ID: u8 = TcpCommandId::Data as u8;
+}
+
 #[derive(Clone, Debug)]
 pub enum TcpControlCmd {
     Ping(PingCmd),
@@ -236,6 +247,7 @@ pub enum TcpControlCmd {
     ClaimConnAck(ClaimConnAck),
     WriteFin(WriteFin),
     ReadDone(ReadDone),
+    Data(TcpControlData),
 }
 
 pub trait TcpTunnelWireEncode {
@@ -323,6 +335,7 @@ impl TcpTunnelWireEncode for TcpControlCmd {
             Self::ClaimConnAck(cmd) => encode_tunnel_command_bytes(cmd),
             Self::WriteFin(cmd) => encode_tunnel_command_bytes(cmd),
             Self::ReadDone(cmd) => encode_tunnel_command_bytes(cmd),
+            Self::Data(cmd) => encode_tunnel_command_bytes(cmd),
         }
     }
 }
@@ -370,6 +383,9 @@ impl TcpTunnelWireDecode for TcpControlCmd {
             )),
             TcpCommandId::ReadDone => Ok(Self::ReadDone(
                 decode_tunnel_command_body::<_, ReadDone>(read, header).await?,
+            )),
+            TcpCommandId::Data => Ok(Self::Data(
+                decode_tunnel_command_body::<_, TcpControlData>(read, header).await?,
             )),
         }
     }

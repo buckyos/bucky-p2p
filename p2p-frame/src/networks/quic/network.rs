@@ -3,8 +3,9 @@ use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
-    IncomingDatagram, IncomingStream, IncomingTunnelCallback, QuicCongestionAlgorithm,
-    TunnelConnectIntent, TunnelForm, TunnelListenerInfo, TunnelNetwork, TunnelRef,
+    IncomingControlStream, IncomingDatagram, IncomingStream, IncomingTunnelCallback,
+    QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelListenerInfo, TunnelNetwork,
+    TunnelRef,
 };
 use crate::p2p_identity::{
     P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
@@ -471,9 +472,12 @@ mod tests {
     static TLS_INIT: Once = Once::new();
     type TestStreamRx = mpsc::Receiver<P2pResult<IncomingStream>>;
     type TestDatagramRx = mpsc::Receiver<P2pResult<IncomingDatagram>>;
+    type TestControlStreamRx = mpsc::Receiver<P2pResult<IncomingControlStream>>;
     static TEST_STREAM_RX: LazyLock<StdMutex<HashMap<String, TestStreamRx>>> =
         LazyLock::new(|| StdMutex::new(HashMap::new()));
     static TEST_DATAGRAM_RX: LazyLock<StdMutex<HashMap<String, TestDatagramRx>>> =
+        LazyLock::new(|| StdMutex::new(HashMap::new()));
+    static TEST_CONTROL_STREAM_RX: LazyLock<StdMutex<HashMap<String, TestControlStreamRx>>> =
         LazyLock::new(|| StdMutex::new(HashMap::new()));
     const TEST_CHANNEL_CAPACITY: usize = 8;
 
@@ -520,6 +524,27 @@ mod tests {
         tunnel.listen_datagram(vports, callback).await.unwrap();
     }
 
+    async fn listen_control_stream_collect(
+        tunnel: &dyn Tunnel,
+        vports: crate::networks::ListenVPortsRef,
+    ) {
+        let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let callback: crate::networks::IncomingControlStreamCallback = Arc::new(move |accepted| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(accepted).await;
+            })
+        });
+        TEST_CONTROL_STREAM_RX
+            .lock()
+            .unwrap()
+            .insert(test_tunnel_key(tunnel), rx);
+        tunnel
+            .listen_control_stream(vports, callback)
+            .await
+            .unwrap();
+    }
+
     async fn recv_stream(tunnel: &dyn Tunnel) -> P2pResult<IncomingStream> {
         let key = test_tunnel_key(tunnel);
         let mut rx =
@@ -549,6 +574,28 @@ mod tests {
         accepted
     }
 
+    async fn recv_control_stream(tunnel: &dyn Tunnel) -> P2pResult<IncomingControlStream> {
+        let key = test_tunnel_key(tunnel);
+        let mut rx = TEST_CONTROL_STREAM_RX
+            .lock()
+            .unwrap()
+            .remove(&key)
+            .ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::Interrupted,
+                    "test control stream receiver missing"
+                )
+            })?;
+        let accepted = rx.recv().await.ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::Interrupted,
+                "test control stream receiver closed"
+            )
+        })?;
+        TEST_CONTROL_STREAM_RX.lock().unwrap().insert(key, rx);
+        accepted
+    }
+
     struct TestNetworkPair {
         client_network: QuicTunnelNetwork,
         client_identity: P2pIdentityRef,
@@ -561,7 +608,6 @@ mod tests {
 
     fn init_tls_once() {
         TLS_INIT.call_once(|| {
-            crate::executor::Executor::init();
             crate::tls::init_tls(Arc::new(X509IdentityFactory));
         });
     }
@@ -837,6 +883,38 @@ mod tests {
         let mut reply = Vec::new();
         read.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"pong");
+
+        opened.close().unwrap();
+        accepted.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn quic_tunnel_control_stream_round_trip_ok() {
+        let pair = setup_network_pair().await;
+        let (opened, accepted) = pair.connect().await;
+
+        listen_control_stream_collect(&*accepted, allow_all_listen_vports()).await;
+
+        let (opened_stream, accepted_stream) = tokio::join!(
+            opened.open_control_stream(purpose_of(1050)),
+            recv_control_stream(&*accepted)
+        );
+        let (mut read, mut write) = opened_stream.unwrap();
+        let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
+
+        assert_eq!(purpose, purpose_of(1050));
+
+        write.write_all(b"control-ping").await.unwrap();
+        write.shutdown().await.unwrap();
+        let mut buf = Vec::new();
+        peer_read.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"control-ping");
+
+        peer_write.write_all(b"control-pong").await.unwrap();
+        peer_write.shutdown().await.unwrap();
+        let mut reply = Vec::new();
+        read.read_to_end(&mut reply).await.unwrap();
+        assert_eq!(reply, b"control-pong");
 
         opened.close().unwrap();
         accepted.close().unwrap();

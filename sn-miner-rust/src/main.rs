@@ -28,7 +28,6 @@ const APP_NAME: &str = "sn-miner";
 async fn main() {
     sfo_log::Logger::new("sn-miner").start().unwrap();
 
-    Executor::init_new_multi_thread(None);
     let default_desc_path = std::env::current_dir().unwrap().join("sn");
     let matches = clap::App::new(APP_NAME)
         .arg(

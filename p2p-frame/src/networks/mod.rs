@@ -1,4 +1,5 @@
 mod command;
+pub(crate) mod control_stream;
 mod net_manager;
 mod network;
 mod quic;

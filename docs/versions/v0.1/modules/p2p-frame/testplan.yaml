@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、基于 `sfo-reuseport` 的 TCP/QUIC listener runtime 注入和 socket 适配编译边界、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、bounded channel 顶层分位置容量默认值/单项覆盖、后续 stack 容量配置 API 删除和源码 unbounded mpsc 清理、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、基于 `sfo-reuseport` 的 TCP/QUIC listener runtime 注入和 socket 适配编译边界、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、bounded channel 顶层分位置容量默认值/单项覆盖、后续 stack 容量配置 API 删除和源码 unbounded mpsc 清理、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -31,6 +31,7 @@ levels:
         - `networks/tcp/listener.rs`、`networks/quic/listener.rs`、`networks/tcp/network.rs`、`networks/quic/network.rs` 与 `stack.rs` 必须通过 unit 编译覆盖 `sfo_reuseport::TcpServer` / `QuicServer::serve_socket(...)` listener 接入、外部 `ServerRuntime` 注入、默认 runtime 创建、per-worker Quinn endpoint、worker CID generator 和 QUIC `AsyncUdpSocket` 适配边界。
         - `networks/network.rs`、`networks/net_manager.rs`、`networks/tcp/network.rs`、`networks/quic/network.rs`、`pn/client/pn_client.rs` 与 `stack.rs` 必须通过 unit 编译或行为测试覆盖 `TunnelNetwork::listen(...)` 接收入站 tunnel 回调、返回 `P2pResult<()>`、公共 trait 移除 `listeners()`、`NetManager` 通过回调执行 validator/发布/reject close，以及 PN proxy listener 幂等 listen 不依赖 listener 对象查询。
         - `networks/tunnel.rs`、`networks/tcp/tunnel.rs`、`networks/quic/tunnel.rs`、`pn/client/pn_tunnel.rs`、`stream/stream_manager.rs`、`datagram/datagram_manager.rs` 和 `ttp/runtime.rs` 必须通过 unit 编译或行为测试覆盖公共 `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`，`listen_stream(...)` / `listen_datagram(...)` 注册回调后由 tunnel 内部 dispatch loop 交付入口 stream/datagram，关闭后不继续交付成功 channel，且 PN `PortNotListen` 错误可通过 callback 返回并继续监听。
+        - `networks/tunnel.rs`、`networks/control_stream.rs`、`networks/tcp/tunnel.rs`、`networks/quic/tunnel.rs` 和 `pn/client/pn_tunnel.rs` 必须通过 unit 编译或行为测试覆盖 `Tunnel::open_control_stream(...)` / `listen_control_stream(...)`，确认内部 runtime/frame 类型未公开导出，TCP/QUIC/PN 只通过单一 `Data` 控制命令承载内部 frame，覆盖 purpose 过滤、重复 listen 替换、64KiB 发送切分、接收超限拒绝，底层控制通道断开后所有派生 stream、pending open 和 pending write 失败，以及 TCP/QUIC/PN tunnel 建立后的 control stream 双向收发。
         - `stack.rs` 的 unit 测试必须覆盖 `P2pConfig` 默认用户不设置时仍存在的各队列位置 channel 容量均为 `1024`、单项容量可显式覆盖且不影响其他位置，覆盖 `P2pStackConfig` 从 `P2pEnv` 继承分位置容量且可显式覆盖；源码搜索必须确认 `p2p-frame/src` 内不再存在 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`，并确认 TCP/QUIC tunnel 不再保留旧 accept queue 容量参数。
         - 后续 `stack_channel_capacity_config_removal` 清理必须覆盖 `stack.rs` 不再导出 `ChannelCapacityConfig`，`P2pConfig` / `P2pStackConfig` / `P2pEnv` 不再提供 stack 层容量 getter/setter 或容量快照继承，`NetManager` 不再保存或暴露 channel capacity，`QuicTunnelNetwork::new(...)` 和 `TtpRuntime::new()` 不再接收容量参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 读取 `NetManager` 容量，`PnClient` 不再提供显式 channel capacity 构造入口。
         - `sn/client/sn_service.rs` 与 `sn/service/service.rs` 的 unit 测试必须覆盖 `SnCall` 携带本次建链的 `reverse_endpoint_array`，SN called 保留调用方候选并扩展单 SN 观察候选，且不引入多 SN fanout。
@@ -44,18 +45,18 @@ levels:
     steps:
       - id: p2p-frame-unit
         name: 运行 p2p-frame unit 测试集
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api"]
         run: ["cargo", "test", "-p", "p2p-frame"]
 
   dv:
     mode: disabled
     summary: p2p-frame 当前不定义自动 DV 入口；`cyfs-p2p-test all-in-one` 不得作为本模块或其他模块的 DV 证据。
-    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback"]
+    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api"]
     reason: 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口；运行时兼容性由 unit 和 integration 承担，新增 DV 必须另行 proposal/design/testing。
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证，确认 `ServerReflexive` endpoint area 语义、单 SN NAT 打洞优化和默认关闭、仅 SN 存在时对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch、QUIC heartbeat timeout 调整、基于 `sfo-reuseport` 的 TCP listener 与 QUIC per-worker endpoint runtime 注入和 socket 适配、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、bounded channel 顶层分位置容量配置及后续 stack 容量配置 API 删除、incoming reverse 无 waiter close、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
+    summary: 工作区级兼容性与下游使用方验证，确认 `ServerReflexive` endpoint area 语义、单 SN NAT 打洞优化和默认关闭、仅 SN 存在时对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch、QUIC heartbeat timeout 调整、基于 `sfo-reuseport` 的 TCP listener 与 QUIC per-worker endpoint runtime 注入和 socket 适配、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、bounded channel 顶层分位置容量配置及后续 stack 容量配置 API 删除、incoming reverse 无 waiter close、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test
@@ -79,8 +80,9 @@ levels:
         - bounded channel 容量配置不得要求下游直接构造底层 network/tunnel 队列默认值；默认用户无需设置容量，下游可继续通过 `P2pConfig` / `P2pStackConfig` 或显式构造参数传递仍存在队列的对应位置容量；TCP/QUIC tunnel 不再暴露旧 accept queue 容量参数。
         - `stack_channel_capacity_config_removal` 清理后，下游不得继续依赖 `ChannelCapacityConfig` 或 stack 层容量 getter/setter；默认构造路径必须继续可用。
         - `Tunnel` 入站 stream/datagram 回调化不得改变 TCP/QUIC/PN 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码或 tunnel publish 规则；下游不得继续依赖公共 `accept_stream()` / `accept_datagram()` trait 方法。
+        - `Tunnel` control stream API 不得要求下游依赖内部 `control_stream` runtime/frame；下游只能通过 `open_control_stream(...)` / `listen_control_stream(...)` 使用该能力，现有 stream/datagram、TLS 身份校验、PN proxy 业务 channel 和 tunnel publish 行为不得回归。
     steps:
       - id: p2p-frame-integration
         name: 运行工作区测试套件
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api"]
         run: ["cargo", "test", "--workspace"]

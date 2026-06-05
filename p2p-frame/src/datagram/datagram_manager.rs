@@ -19,6 +19,8 @@ fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
     matches!(err.code(), P2pErrorCode::PortNotListen)
 }
 
+const LISTENER_CHANNEL_CAPACITY: usize = 1024;
+
 pub struct DatagramRead {
     read: TunnelDatagramRead,
     tunnel: Weak<dyn Tunnel>,
@@ -176,7 +178,7 @@ impl Drop for DatagramListener {
 
 impl DatagramListener {
     pub fn channel(listener_purpose: TunnelPurpose) -> (Self, Arc<DatagramListenerSender>) {
-        let (accepted_tx, accepted_rx) = mpsc::channel(1);
+        let (accepted_tx, accepted_rx) = mpsc::channel(LISTENER_CHANNEL_CAPACITY);
         let shared = Arc::new(DatagramListenerShared::new());
         (
             Self {
@@ -408,8 +410,8 @@ impl DatagramManager {
                 );
                 let callback_tunnel = tunnel.clone();
                 let callback_weak = weak.clone();
-                let callback: crate::networks::IncomingDatagramCallback =
-                    Arc::new(move |accepted| {
+                let callback: crate::networks::IncomingDatagramCallback = Arc::new(
+                    move |accepted| {
                         let tunnel = callback_tunnel.clone();
                         let weak = callback_weak.clone();
                         Box::pin(async move {
@@ -453,7 +455,8 @@ impl DatagramManager {
                             }
                         })
                             as crate::networks::IncomingDatagramCallbackFuture
-                    });
+                    },
+                );
                 if let Err(err) = tunnel
                     .listen_datagram(datagram.listeners.as_listen_vports_ref(), callback)
                     .await
@@ -582,9 +585,8 @@ mod tests {
         (Box::pin(read), Box::pin(write))
     }
 
-    #[test]
-    fn datagram_wrappers_report_tunnel_closed_state() {
-        Executor::init();
+    #[tokio::test]
+    async fn datagram_wrappers_report_tunnel_closed_state() {
         let tunnel = Arc::new(TestTunnel {
             closed: AtomicBool::new(false),
         });

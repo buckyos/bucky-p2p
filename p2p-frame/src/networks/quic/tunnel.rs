@@ -1,11 +1,15 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
+use crate::networks::control_stream::{
+    ControlDataSender, ControlDataSenderFuture, ControlStreamRuntime,
+};
 use crate::networks::{
-    IncomingDatagramCallback, IncomingStreamCallback, ListenVPortsRef, Tunnel, TunnelCommand,
-    TunnelCommandBody, TunnelCommandResult, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm,
-    TunnelPurpose, TunnelState, TunnelStreamRead, TunnelStreamWrite, read_tunnel_command_body,
-    read_tunnel_command_header, write_tunnel_command,
+    IncomingControlStreamCallback, IncomingDatagramCallback, IncomingStreamCallback,
+    ListenVPortsRef, Tunnel, TunnelCommand, TunnelCommandBody, TunnelCommandResult,
+    TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelPurpose, TunnelState,
+    TunnelStreamRead, TunnelStreamWrite, read_tunnel_command_body, read_tunnel_command_header,
+    write_tunnel_command,
 };
 use crate::p2p_identity::P2pId;
 use crate::runtime;
@@ -20,6 +24,20 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 const COMMAND_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const COMMAND_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct QuicControlDataSender {
+    command_write: Arc<AsyncMutex<quinn::SendStream>>,
+}
+
+impl ControlDataSender for QuicControlDataSender {
+    fn send(&self, payload: Vec<u8>) -> ControlDataSenderFuture {
+        let command_write = self.command_write.clone();
+        Box::pin(async move {
+            let mut write = command_write.lock().await;
+            QuicTunnel::write_command(&mut *write, TunnelControlData { payload }).await
+        })
+    }
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, RawEncode, RawDecode)]
@@ -48,6 +66,7 @@ enum QuicTunnelCommandId {
     Pong = 4,
     OpenChannelReq = 5,
     OpenChannelResp = 6,
+    Data = 7,
 }
 
 impl QuicTunnelCommandId {
@@ -59,6 +78,7 @@ impl QuicTunnelCommandId {
             x if x == Self::Pong as u8 => Some(Self::Pong),
             x if x == Self::OpenChannelReq as u8 => Some(Self::OpenChannelReq),
             x if x == Self::OpenChannelResp as u8 => Some(Self::OpenChannelResp),
+            x if x == Self::Data as u8 => Some(Self::Data),
             _ => None,
         }
     }
@@ -126,6 +146,15 @@ impl TunnelCommandBody for TunnelOpenChannelResp {
     const COMMAND_ID: u8 = QuicTunnelCommandId::OpenChannelResp as u8;
 }
 
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+struct TunnelControlData {
+    payload: Vec<u8>,
+}
+
+impl TunnelCommandBody for TunnelControlData {
+    const COMMAND_ID: u8 = QuicTunnelCommandId::Data as u8;
+}
+
 struct QuicTunnelState {
     last_cmd_recv_at: Instant,
     last_pong_at: Instant,
@@ -142,7 +171,7 @@ pub(crate) struct QuicTunnel {
     remote_id: P2pId,
     local_ep: Endpoint,
     remote_ep: Endpoint,
-    command_write: AsyncMutex<quinn::SendStream>,
+    command_write: Arc<AsyncMutex<quinn::SendStream>>,
     state: Mutex<QuicTunnelState>,
     self_weak: Weak<QuicTunnel>,
     closed: AtomicBool,
@@ -155,6 +184,7 @@ pub(crate) struct QuicTunnel {
     datagram_vports: RwLock<Option<ListenVPortsRef>>,
     stream_callback: RwLock<Option<IncomingStreamCallback>>,
     datagram_callback: RwLock<Option<IncomingDatagramCallback>>,
+    control_streams: ControlStreamRuntime,
 }
 
 impl QuicTunnel {
@@ -312,6 +342,13 @@ impl QuicTunnel {
         command_read: quinn::RecvStream,
         command_write: quinn::SendStream,
     ) -> Arc<Self> {
+        let command_write = Arc::new(AsyncMutex::new(command_write));
+        let control_streams = ControlStreamRuntime::new(
+            matches!(form, TunnelForm::Active | TunnelForm::Proxy),
+            Arc::new(QuicControlDataSender {
+                command_write: command_write.clone(),
+            }),
+        );
         let tunnel = Arc::new_cyclic(|weak| Self {
             socket,
             tunnel_id,
@@ -322,7 +359,7 @@ impl QuicTunnel {
             remote_id,
             local_ep,
             remote_ep,
-            command_write: AsyncMutex::new(command_write),
+            command_write,
             state: Mutex::new(QuicTunnelState {
                 last_cmd_recv_at: Instant::now(),
                 last_pong_at: Instant::now(),
@@ -339,6 +376,7 @@ impl QuicTunnel {
             datagram_vports: RwLock::new(None),
             stream_callback: RwLock::new(None),
             datagram_callback: RwLock::new(None),
+            control_streams,
         });
         Self::start_loops(tunnel.clone(), command_read);
         tunnel
@@ -422,6 +460,8 @@ impl QuicTunnel {
         }
         *self.stream_callback.write().unwrap() = None;
         *self.datagram_callback.write().unwrap() = None;
+        self.control_streams
+            .close_all(P2pError::new(code, message.clone()));
         log::warn!(
             "quic tunnel closing {} code={:?} message={}",
             self.log_ctx(),
@@ -665,6 +705,24 @@ impl QuicTunnel {
                             resp.request_id,
                             resp.result
                         );
+                    }
+                }
+                QuicTunnelCommandId::Data => {
+                    let data = match read_tunnel_command_body::<_, TunnelControlData>(
+                        &mut command_read,
+                        header,
+                    )
+                    .await
+                    {
+                        Ok(command) => command.body,
+                        Err(err) => {
+                            self.handle_decode_error("quic decode control data failed", err);
+                            break;
+                        }
+                    };
+                    if let Err(err) = self.control_streams.on_data(data.payload).await {
+                        self.handle_decode_error("quic handle control data failed", err);
+                        break;
                     }
                 }
             }
@@ -1172,6 +1230,17 @@ impl Tunnel for QuicTunnel {
         Ok(())
     }
 
+    async fn listen_control_stream(
+        &self,
+        purposes: ListenVPortsRef,
+        callback: IncomingControlStreamCallback,
+    ) -> P2pResult<()> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed"));
+        }
+        self.control_streams.listen(purposes, callback).await
+    }
+
     async fn open_stream(
         &self,
         purpose: TunnelPurpose,
@@ -1341,5 +1410,15 @@ impl Tunnel for QuicTunnel {
         );
         self.wait_open_channel(request_id, rx).await?;
         Ok(Box::pin(send))
+    }
+
+    async fn open_control_stream(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed"));
+        }
+        self.control_streams.open(purpose).await
     }
 }

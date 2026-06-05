@@ -20,6 +20,8 @@ fn should_continue_accept_loop(err: &crate::error::P2pError) -> bool {
     matches!(err.code(), P2pErrorCode::PortNotListen)
 }
 
+const LISTENER_CHANNEL_CAPACITY: usize = 1024;
+
 pub struct StreamRead {
     read: TunnelStreamRead,
     tunnel: Weak<dyn Tunnel>,
@@ -229,7 +231,7 @@ pub struct StreamListenerSender {
 
 impl StreamListener {
     fn channel(listener_purpose: TunnelPurpose) -> (Self, Arc<StreamListenerSender>) {
-        let (accepted_tx, accepted_rx) = mpsc::channel(1);
+        let (accepted_tx, accepted_rx) = mpsc::channel(LISTENER_CHANNEL_CAPACITY);
         let shared = Arc::new(StreamListenerShared::new());
         (
             Self {
@@ -333,11 +335,48 @@ impl DerefMut for StreamListenerGuard {
     }
 }
 
+pub struct ControlStreamListenerGuard {
+    stream_manager: StreamManagerRef,
+    listener: StreamListener,
+}
+
+impl ControlStreamListenerGuard {
+    fn new(listener: StreamListener, stream_manager: StreamManagerRef) -> Self {
+        Self {
+            stream_manager,
+            listener,
+        }
+    }
+}
+
+impl Drop for ControlStreamListenerGuard {
+    fn drop(&mut self) {
+        self.listener.stop();
+        self.stream_manager
+            .remove_control_listener(&self.listener.listener_purpose);
+    }
+}
+
+impl Deref for ControlStreamListenerGuard {
+    type Target = StreamListener;
+
+    fn deref(&self) -> &Self::Target {
+        &self.listener
+    }
+}
+
+impl DerefMut for ControlStreamListenerGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.listener
+    }
+}
+
 pub struct StreamManager {
     local_identity: P2pIdentityRef,
     tunnel_manager: TunnelManagerRef,
     session_gen: SessionIdGenerator,
     listeners: Arc<ListenPurposeRegistry<StreamListenerSender>>,
+    control_listeners: Arc<ListenPurposeRegistry<StreamListenerSender>>,
 }
 
 pub type StreamManagerRef = Arc<StreamManager>;
@@ -358,6 +397,7 @@ impl StreamManager {
             tunnel_manager,
             session_gen: SessionIdGenerator::new(),
             listeners: ListenPurposeRegistry::new(),
+            control_listeners: ListenPurposeRegistry::new(),
         });
         stream.start_subscription_loop();
         stream
@@ -400,6 +440,43 @@ impl StreamManager {
         Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
     }
 
+    pub async fn connect_control_stream(
+        &self,
+        remote: &P2pIdentityCertRef,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(StreamRead, StreamWrite)> {
+        let tunnel = self.tunnel_manager.open_tunnel(remote).await?;
+        let session_id = self.session_gen.generate();
+        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
+        Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
+    }
+
+    pub async fn connect_control_stream_from_id(
+        &self,
+        remote_id: &P2pId,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(StreamRead, StreamWrite)> {
+        let tunnel = self.tunnel_manager.open_tunnel_from_id(remote_id).await?;
+        let session_id = self.session_gen.generate();
+        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
+        Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
+    }
+
+    pub async fn connect_control_stream_direct(
+        &self,
+        remote_eps: Vec<Endpoint>,
+        purpose: TunnelPurpose,
+        remote_id: &P2pId,
+    ) -> P2pResult<(StreamRead, StreamWrite)> {
+        let tunnel = self
+            .tunnel_manager
+            .open_direct_tunnel(remote_eps, remote_id)
+            .await?;
+        let session_id = self.session_gen.generate();
+        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
+        Ok(self.wrap_opened_stream(&tunnel, read, write, session_id, purpose))
+    }
+
     pub async fn listen(
         self: &StreamManagerRef,
         purpose: TunnelPurpose,
@@ -421,8 +498,35 @@ impl StreamManager {
         Ok(StreamListenerGuard::new(listener, self.clone()))
     }
 
+    pub async fn listen_control_stream(
+        self: &StreamManagerRef,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<ControlStreamListenerGuard> {
+        if self.control_listeners.contains(&purpose) {
+            return Err(p2p_err!(
+                P2pErrorCode::StreamPortAlreadyListen,
+                "control stream purpose {} already listen",
+                purpose
+            ));
+        }
+        log::debug!(
+            "control stream listen register local_id={} purpose={}",
+            self.local_identity.get_id(),
+            purpose
+        );
+        let (listener, sender) = StreamListener::channel(purpose.clone());
+        self.control_listeners.insert(purpose, sender);
+        Ok(ControlStreamListenerGuard::new(listener, self.clone()))
+    }
+
     fn remove_listener(&self, purpose: &TunnelPurpose) {
         if let Some(sender) = self.listeners.remove(purpose) {
+            sender.stop();
+        }
+    }
+
+    fn remove_control_listener(&self, purpose: &TunnelPurpose) {
+        if let Some(sender) = self.control_listeners.remove(purpose) {
             sender.stop();
         }
     }
@@ -501,6 +605,70 @@ impl StreamManager {
                 {
                     log::warn!(
                         "stream inject listen vports failed remote {} err {:?}",
+                        tunnel.remote_id(),
+                        err
+                    );
+                    return;
+                }
+                let callback_tunnel = tunnel.clone();
+                let callback_weak = weak.clone();
+                let callback: crate::networks::IncomingControlStreamCallback = Arc::new(
+                    move |accepted| {
+                        let tunnel = callback_tunnel.clone();
+                        let weak = callback_weak.clone();
+                        Box::pin(async move {
+                            let Some(stream) = weak.upgrade() else {
+                                return;
+                            };
+                            match accepted {
+                                Ok((purpose, read, write)) => {
+                                    let sender = stream.control_listeners.get(&purpose);
+                                    if let Some(sender) = sender {
+                                        let session_id = stream.session_gen.generate();
+                                        let (stream_read, stream_write) = stream
+                                            .wrap_opened_stream(
+                                                &tunnel, read, write, session_id, purpose,
+                                            );
+                                        if let Err(err) =
+                                            sender.push_accepted((stream_read, stream_write))
+                                        {
+                                            log::warn!(
+                                                "control stream listener deliver failed remote {} err {:?}",
+                                                tunnel.remote_id(),
+                                                err
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    if should_continue_accept_loop(&err) {
+                                        log::debug!(
+                                            "control stream callback continue remote {} err {:?}",
+                                            tunnel.remote_id(),
+                                            err
+                                        );
+                                    } else {
+                                        log::debug!(
+                                            "control stream callback ended remote {} err {:?}",
+                                            tunnel.remote_id(),
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+                        })
+                            as crate::networks::IncomingControlStreamCallbackFuture
+                    },
+                );
+                if let Err(err) = tunnel
+                    .listen_control_stream(
+                        stream.control_listeners.as_listen_vports_ref(),
+                        callback,
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "control stream inject listen purposes failed remote {} err {:?}",
                         tunnel.remote_id(),
                         err
                     );
@@ -650,9 +818,8 @@ mod tests {
         (Box::pin(read), Box::pin(write))
     }
 
-    #[test]
-    fn stream_wrappers_report_tunnel_closed_state() {
-        Executor::init();
+    #[tokio::test]
+    async fn stream_wrappers_report_tunnel_closed_state() {
         let tunnel = Arc::new(TestTunnel {
             closed: AtomicBool::new(false),
         });

@@ -2,16 +2,19 @@ use super::connection::{TcpTlsConnection, connect_with_optional_local};
 use super::protocol::{
     ClaimConnAck, ClaimConnAckResult, ClaimConnReq, ControlConnReady, ControlConnReadyResult,
     DataConnReady, DataConnReadyResult, OpenDataConnReq, PingCmd, PongCmd, ReadDone, TcpChannelId,
-    TcpChannelKind, TcpConnId, TcpConnectionHello, TcpConnectionRole, TcpControlCmd, TcpLeaseSeq,
-    TcpRequestId, WriteFin, read_raw_frame, write_raw_frame,
+    TcpChannelKind, TcpConnId, TcpConnectionHello, TcpConnectionRole, TcpControlCmd,
+    TcpControlData, TcpLeaseSeq, TcpRequestId, WriteFin, read_raw_frame, write_raw_frame,
 };
 use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::Executor;
+use crate::networks::control_stream::{
+    ControlDataSender, ControlDataSenderFuture, ControlStreamRuntime,
+};
 use crate::networks::{
-    IncomingDatagramCallback, IncomingStreamCallback, ListenVPortsRef, Tunnel, TunnelDatagramRead,
-    TunnelDatagramWrite, TunnelForm, TunnelPurpose, TunnelState, TunnelStreamRead,
-    TunnelStreamWrite,
+    IncomingControlStreamCallback, IncomingDatagramCallback, IncomingStreamCallback,
+    ListenVPortsRef, Tunnel, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelPurpose,
+    TunnelState, TunnelStreamRead, TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
@@ -30,6 +33,24 @@ const FIRST_LISTEN_WAIT_NOT_STARTED: u8 = 0;
 const FIRST_LISTEN_WAIT_IN_PROGRESS: u8 = 1;
 const FIRST_LISTEN_WAIT_DONE: u8 = 2;
 const TCP_LOCAL_ID_HIGH_BIT: u32 = 1u32 << 31;
+
+struct TcpControlDataSender {
+    control_write: Arc<AsyncMutex<runtime::WriteHalf<runtime::TlsStream<runtime::TcpStream>>>>,
+}
+
+impl ControlDataSender for TcpControlDataSender {
+    fn send(&self, payload: Vec<u8>) -> ControlDataSenderFuture {
+        let control_write = self.control_write.clone();
+        Box::pin(async move {
+            let mut write = control_write.lock().await;
+            write_raw_frame(
+                &mut *write,
+                &TcpControlCmd::Data(TcpControlData { payload }),
+            )
+            .await
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TcpIncomingControlDecision {
@@ -208,6 +229,7 @@ pub(crate) struct TcpTunnel {
     datagram_callback: std::sync::RwLock<Option<IncomingDatagramCallback>>,
     datagram_first_listen_wait_state: AtomicU8,
     datagram_vports_notify: Notify,
+    control_streams: ControlStreamRuntime,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
     unclaimed_data_conn_budget: AtomicU64,
@@ -526,6 +548,13 @@ impl TcpTunnel {
         initial_phase: LocalTunnelPhase,
     ) -> Arc<Self> {
         let (control_read, control_write) = runtime::split(control.stream);
+        let control_write = Arc::new(AsyncMutex::new(control_write));
+        let control_streams = ControlStreamRuntime::new(
+            matches!(form, TunnelForm::Active | TunnelForm::Proxy),
+            Arc::new(TcpControlDataSender {
+                control_write: control_write.clone(),
+            }),
+        );
         let tunnel = Arc::new(Self {
             tunnel_id,
             candidate_id,
@@ -535,7 +564,7 @@ impl TcpTunnel {
             remote_id: control.remote_id,
             local_ep: control.local_ep,
             remote_ep: control.remote_ep,
-            control_write: Arc::new(AsyncMutex::new(control_write)),
+            control_write,
             connector,
             self_weak: Mutex::new(Weak::new()),
             state: Mutex::new(TcpTunnelState {
@@ -564,6 +593,7 @@ impl TcpTunnel {
             datagram_callback: std::sync::RwLock::new(None),
             datagram_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
             datagram_vports_notify: Notify::new(),
+            control_streams,
             heartbeat_interval,
             heartbeat_timeout,
             unclaimed_data_conn_budget: AtomicU64::new(8),
@@ -672,6 +702,8 @@ impl TcpTunnel {
         }
         *self.stream_callback.write().unwrap() = None;
         *self.datagram_callback.write().unwrap() = None;
+        self.control_streams
+            .close_all(p2p_err!(reason, "tunnel closed"));
 
         let (pending_open_requests, pending_claims, data_conns) = {
             let mut state = self.state.lock().unwrap();
@@ -797,6 +829,9 @@ impl TcpTunnel {
             }
             TcpControlCmd::ReadDone(done) => {
                 self.handle_read_done(done)?;
+            }
+            TcpControlCmd::Data(data) => {
+                self.control_streams.on_data(data.payload).await?;
             }
         }
         Ok(())
@@ -2870,6 +2905,17 @@ impl Tunnel for TcpTunnel {
         Ok(())
     }
 
+    async fn listen_control_stream(
+        &self,
+        purposes: ListenVPortsRef,
+        callback: IncomingControlStreamCallback,
+    ) -> P2pResult<()> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
+        }
+        self.control_streams.listen(purposes, callback).await
+    }
+
     async fn open_stream(
         &self,
         purpose: TunnelPurpose,
@@ -2899,6 +2945,16 @@ impl Tunnel for TcpTunnel {
             .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "tunnel dropped"))?;
         let lease = this.open_channel(TcpChannelKind::Datagram, purpose).await?;
         Ok(self.make_datagram_write(lease))
+    }
+
+    async fn open_control_stream(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
+        }
+        self.control_streams.open(purpose).await
     }
 }
 

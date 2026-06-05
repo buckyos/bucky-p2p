@@ -279,10 +279,7 @@ struct WorkerQuicEndpoint {
     runtime: TokioRuntimeHandle,
 }
 
-async fn wait_quic_endpoint_loop(
-    listener: Arc<QuicTunnelListener>,
-    endpoint: quinn::Endpoint,
-) {
+async fn wait_quic_endpoint_loop(listener: Arc<QuicTunnelListener>, endpoint: quinn::Endpoint) {
     loop {
         match endpoint.accept().await {
             Some(conn) => {

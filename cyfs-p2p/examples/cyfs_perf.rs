@@ -446,7 +446,7 @@ async fn generate_runtime_identity(eps: Vec<CyfsEndpoint>) -> AppResult<(Device,
 
 async fn run_server(opts: ServerOpts) -> AppResult<()> {
     let stack = create_stack(opts.bind, opts.protocol).await?;
-    let listener = stack
+    let mut listener = stack
         .stream_manager()
         .listen(tunnel_purpose(PERF_VPORT))
         .await

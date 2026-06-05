@@ -14,6 +14,7 @@ pub const PN_COMMAND_PROXY_CONTROL_OPEN_RESP: u8 = 4;
 pub const PN_COMMAND_CONTROL_PING: u8 = 5;
 pub const PN_COMMAND_CONTROL_PONG: u8 = 6;
 pub const PN_COMMAND_CONTROL_CLOSE: u8 = 7;
+pub const PN_COMMAND_CONTROL_DATA: u8 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, RawDecode, RawEncode)]
 pub enum PnChannelKind {
@@ -92,4 +93,13 @@ pub struct PnControlClose {
 
 impl TunnelCommandBody for PnControlClose {
     const COMMAND_ID: u8 = PN_COMMAND_CONTROL_CLOSE;
+}
+
+#[derive(Clone, Debug, RawDecode, RawEncode)]
+pub struct PnControlData {
+    pub payload: Vec<u8>,
+}
+
+impl TunnelCommandBody for PnControlData {
+    const COMMAND_ID: u8 = PN_COMMAND_CONTROL_DATA;
 }
