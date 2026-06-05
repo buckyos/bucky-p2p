@@ -9,13 +9,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::listener::{TtpIncomingDatagramCallback, TtpIncomingStreamCallback, TtpPortListener};
+use super::listener::{
+    TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStreamCallback,
+    TtpPortListener,
+};
 use super::runtime::TtpRuntime;
 use super::{TtpDatagramMeta, TtpStreamMeta, TtpTarget};
 
 #[async_trait::async_trait]
 pub trait TtpConnector: Send + Sync + 'static {
     async fn open_stream(
+        &self,
+        target: &TtpTarget,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)>;
+    async fn open_control_stream(
         &self,
         target: &TtpTarget,
         purpose: TunnelPurpose,
@@ -86,6 +94,28 @@ impl TtpClient {
             .latest_available_tunnel()
             .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no cached ttp tunnel available"))?;
         let (read, write) = tunnel.open_stream(purpose.clone()).await?;
+        Ok((
+            TtpStreamMeta {
+                local_ep: tunnel.local_ep(),
+                remote_ep: tunnel.remote_ep(),
+                local_id: tunnel.local_id(),
+                remote_id: tunnel.remote_id(),
+                remote_name: None,
+                purpose,
+            },
+            read,
+            write,
+        ))
+    }
+
+    pub async fn open_control_stream_on_latest_tunnel(
+        &self,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
+        let tunnel = self
+            .latest_available_tunnel()
+            .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no cached ttp tunnel available"))?;
+        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep(),
@@ -188,6 +218,19 @@ impl TtpPortListener for TtpClient {
         Ok(())
     }
 
+    async fn listen_control_stream(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingControlStreamCallback,
+    ) -> P2pResult<()> {
+        self.runtime.listen_control_stream(purpose, callback)
+    }
+
+    async fn unlisten_control_stream(&self, purpose: &TunnelPurpose) -> P2pResult<()> {
+        self.runtime.unlisten_control_stream(purpose);
+        Ok(())
+    }
+
     async fn listen_datagram(
         &self,
         purpose: TunnelPurpose,
@@ -211,6 +254,27 @@ impl TtpConnector for TtpClient {
     ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
         let tunnel = self.get_or_create_tunnel(target).await?;
         let (read, write) = tunnel.open_stream(purpose.clone()).await?;
+        Ok((
+            TtpStreamMeta {
+                local_ep: tunnel.local_ep().or(target.local_ep),
+                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                local_id: tunnel.local_id(),
+                remote_id: tunnel.remote_id(),
+                remote_name: target.remote_name.clone(),
+                purpose,
+            },
+            read,
+            write,
+        ))
+    }
+
+    async fn open_control_stream(
+        &self,
+        target: &TtpTarget,
+        purpose: TunnelPurpose,
+    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
+        let tunnel = self.get_or_create_tunnel(target).await?;
+        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep().or(target.local_ep),

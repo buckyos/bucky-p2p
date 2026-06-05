@@ -96,9 +96,27 @@ struct FakeTunnel {
         AsyncMutex<mpsc::Receiver<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>>,
     incoming_datagram_tx:
         mpsc::Sender<P2pResult<(crate::networks::TunnelPurpose, TunnelDatagramRead)>>,
+    incoming_control_stream_rx: AsyncMutex<
+        mpsc::Receiver<
+            P2pResult<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
+        >,
+    >,
+    incoming_control_stream_tx: mpsc::Sender<
+        P2pResult<(
+            crate::networks::TunnelPurpose,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )>,
+    >,
     stream_callback: Mutex<Option<crate::networks::IncomingStreamCallback>>,
     datagram_callback: Mutex<Option<crate::networks::IncomingDatagramCallback>>,
+    control_stream_callback: Mutex<Option<crate::networks::IncomingControlStreamCallback>>,
     opened_stream_vports: Mutex<Vec<u16>>,
+    opened_control_stream_vports: Mutex<Vec<u16>>,
     opened_datagram_vports: Mutex<Vec<u16>>,
 }
 
@@ -111,6 +129,7 @@ impl FakeTunnel {
     ) -> Arc<Self> {
         let (stream_tx, stream_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         let (datagram_tx, datagram_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let (control_stream_tx, control_stream_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
         Arc::new(Self {
             tunnel_id: crate::types::TunnelId::from(1),
             candidate_id: crate::types::TunnelCandidateId::from(1),
@@ -122,9 +141,13 @@ impl FakeTunnel {
             incoming_stream_tx: stream_tx,
             incoming_datagram_rx: AsyncMutex::new(datagram_rx),
             incoming_datagram_tx: datagram_tx,
+            incoming_control_stream_rx: AsyncMutex::new(control_stream_rx),
+            incoming_control_stream_tx: control_stream_tx,
             stream_callback: Mutex::new(None),
             datagram_callback: Mutex::new(None),
+            control_stream_callback: Mutex::new(None),
             opened_stream_vports: Mutex::new(Vec::new()),
+            opened_control_stream_vports: Mutex::new(Vec::new()),
             opened_datagram_vports: Mutex::new(Vec::new()),
         })
     }
@@ -151,6 +174,32 @@ impl FakeTunnel {
                 err
             )
         })
+    }
+
+    fn push_control_stream(&self, vport: u16) -> P2pResult<()> {
+        let (peer_end, tunnel_end) = tokio::io::duplex(64);
+        let (tunnel_read, tunnel_write) = split(tunnel_end);
+        drop(peer_end);
+        let accepted = Ok((
+            purpose_of(vport),
+            Box::pin(tunnel_read) as TunnelStreamRead,
+            Box::pin(tunnel_write) as TunnelStreamWrite,
+        ));
+        if let Some(callback) = self.control_stream_callback.lock().unwrap().clone() {
+            tokio::spawn(async move {
+                callback(accepted).await;
+            });
+            return Ok(());
+        }
+        self.incoming_control_stream_tx
+            .try_send(accepted)
+            .map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "test control stream queue failed: {}",
+                    err
+                )
+            })
     }
 
     fn push_datagram(&self, vport: u16, payload: &'static [u8]) -> P2pResult<()> {
@@ -180,6 +229,10 @@ impl FakeTunnel {
 
     fn opened_stream_vports(&self) -> Vec<u16> {
         self.opened_stream_vports.lock().unwrap().clone()
+    }
+
+    fn opened_control_stream_vports(&self) -> Vec<u16> {
+        self.opened_control_stream_vports.lock().unwrap().clone()
     }
 
     fn opened_datagram_vports(&self) -> Vec<u16> {
@@ -263,12 +316,40 @@ impl Tunnel for FakeTunnel {
         Ok(())
     }
 
+    async fn listen_control_stream(
+        &self,
+        _vports: crate::networks::ListenVPortsRef,
+        callback: crate::networks::IncomingControlStreamCallback,
+    ) -> P2pResult<()> {
+        *self.control_stream_callback.lock().unwrap() = Some(callback.clone());
+        let mut rx = self.incoming_control_stream_rx.lock().await;
+        while let Ok(accepted) = rx.try_recv() {
+            callback(accepted).await;
+        }
+        Ok(())
+    }
+
     async fn open_stream(
         &self,
         purpose: crate::networks::TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let vport = purpose.decode_as::<u16>().unwrap();
         self.opened_stream_vports.lock().unwrap().push(vport);
+        let (peer_end, tunnel_end) = tokio::io::duplex(64);
+        let (tunnel_read, tunnel_write) = split(tunnel_end);
+        drop(peer_end);
+        Ok((Box::pin(tunnel_read), Box::pin(tunnel_write)))
+    }
+
+    async fn open_control_stream(
+        &self,
+        purpose: crate::networks::TunnelPurpose,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let vport = purpose.decode_as::<u16>().unwrap();
+        self.opened_control_stream_vports
+            .lock()
+            .unwrap()
+            .push(vport);
         let (peer_end, tunnel_end) = tokio::io::duplex(64);
         let (tunnel_read, tunnel_write) = split(tunnel_end);
         drop(peer_end);
@@ -451,6 +532,42 @@ async fn client_open_stream_and_datagram_reuse_same_tunnel() {
 }
 
 #[tokio::test]
+async fn client_open_control_stream_reuses_ttp_tunnel() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24011".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24012".parse().unwrap()));
+    let local = make_identity(21, "local-control-client", local_ep);
+    let remote = make_identity(22, "remote-control-server", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let client = TtpClient::new(local, manager);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    let (meta, _read, _write) = client
+        .open_control_stream(&target, purpose_of(1011))
+        .await
+        .unwrap();
+    let (latest_meta, _latest_read, _latest_write) = client
+        .open_control_stream_on_latest_tunnel(purpose_of(1012))
+        .await
+        .unwrap();
+
+    assert_eq!(meta.remote_id, target.remote_id);
+    assert_eq!(meta.purpose, purpose_of(1011));
+    assert_eq!(latest_meta.purpose, purpose_of(1012));
+    assert_eq!(network.create_count(), 1);
+    assert_eq!(tunnel.opened_control_stream_vports(), vec![1011, 1012]);
+    assert!(tunnel.opened_stream_vports().is_empty());
+    assert!(tunnel.opened_datagram_vports().is_empty());
+}
+
+#[tokio::test]
 async fn server_listeners_receive_incoming_stream_and_datagram() {
     let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24101".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24102".parse().unwrap()));
@@ -508,6 +625,42 @@ async fn server_listeners_receive_incoming_stream_and_datagram() {
     assert_eq!(datagram.meta.remote_id, remote.get_id());
     assert_eq!(datagram.meta.purpose, purpose_of(2002));
     assert_eq!(&buf, b"abc");
+}
+
+#[tokio::test]
+async fn server_listener_receives_incoming_control_stream() {
+    let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24111".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24112".parse().unwrap()));
+    let local = make_identity(23, "local-control-server", local_ep);
+    let remote = make_identity(24, "remote-control-client", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Quic);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let server = TtpServer::new(local.clone(), manager).unwrap();
+    let (control_tx, mut control_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+    let control_callback: TtpIncomingControlStreamCallback = Arc::new(move |accepted| {
+        let control_tx = control_tx.clone();
+        Box::pin(async move {
+            let _ = control_tx.send(accepted).await;
+        }) as TtpIncomingControlStreamCallbackFuture
+    });
+    server
+        .listen_control_stream(purpose_of(2011), control_callback)
+        .await
+        .unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+
+    network.push_tunnel(tunnel.clone()).unwrap();
+    tunnel.push_control_stream(2011).unwrap();
+
+    let (meta, _read, _write) = timeout(Duration::from_secs(1), control_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(meta.remote_id, remote.get_id());
+    assert_eq!(meta.purpose, purpose_of(2011));
 }
 
 #[tokio::test]
@@ -583,4 +736,57 @@ async fn server_open_stream_and_datagram_reuse_existing_incoming_tunnel() {
     assert_eq!(datagram_meta.purpose, purpose_of(4003));
     assert_eq!(tunnel.opened_stream_vports(), vec![4002]);
     assert_eq!(tunnel.opened_datagram_vports(), vec![4003]);
+}
+
+#[tokio::test]
+async fn server_open_control_stream_reuses_existing_incoming_tunnel() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24311".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24312".parse().unwrap()));
+    let local = make_identity(25, "local-server-control-reuse", local_ep);
+    let remote = make_identity(26, "remote-client-control-reuse", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let server = TtpServer::new(local.clone(), manager).unwrap();
+    let (control_tx, mut control_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+    let control_callback: TtpIncomingControlStreamCallback = Arc::new(move |accepted| {
+        let control_tx = control_tx.clone();
+        Box::pin(async move {
+            let _ = control_tx.send(accepted).await;
+        }) as TtpIncomingControlStreamCallbackFuture
+    });
+    server
+        .listen_control_stream(purpose_of(4011), control_callback)
+        .await
+        .unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+
+    network.push_tunnel(tunnel.clone()).unwrap();
+    tunnel.push_control_stream(4011).unwrap();
+    let _ = timeout(Duration::from_secs(1), control_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+    let (meta, _read, _write) = server
+        .open_control_stream(&target, purpose_of(4012))
+        .await
+        .unwrap();
+    let (by_id_meta, _by_id_read, _by_id_write) = server
+        .open_control_stream_by_id(&remote.get_id(), Some(remote.get_name()), purpose_of(4013))
+        .await
+        .unwrap();
+
+    assert_eq!(meta.purpose, purpose_of(4012));
+    assert_eq!(by_id_meta.purpose, purpose_of(4013));
+    assert_eq!(tunnel.opened_control_stream_vports(), vec![4012, 4013]);
+    assert!(tunnel.opened_stream_vports().is_empty());
+    assert!(tunnel.opened_datagram_vports().is_empty());
 }

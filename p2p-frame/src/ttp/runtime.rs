@@ -2,12 +2,16 @@ use crate::error::{P2pErrorCode, P2pResult};
 use crate::networks::{Tunnel, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite};
 use std::sync::{Arc, Mutex, Weak};
 
-use super::listener::{TtpIncomingDatagramCallback, TtpIncomingStream, TtpIncomingStreamCallback};
+use super::listener::{
+    TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStream,
+    TtpIncomingStreamCallback,
+};
 use super::registry::TtpQueueRegistry;
 use super::{TtpDatagram, TtpDatagramMeta, TtpStreamMeta};
 
 pub(crate) struct TtpRuntime {
     stream_registry: Arc<TtpQueueRegistry<TtpIncomingStream>>,
+    control_stream_registry: Arc<TtpQueueRegistry<TtpIncomingStream>>,
     datagram_registry: Arc<TtpQueueRegistry<TtpDatagram>>,
     attached_tunnels: Mutex<Vec<Weak<dyn Tunnel>>>,
 }
@@ -16,6 +20,7 @@ impl TtpRuntime {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             stream_registry: TtpQueueRegistry::new(),
+            control_stream_registry: TtpQueueRegistry::new(),
             datagram_registry: TtpQueueRegistry::new(),
             attached_tunnels: Mutex::new(Vec::new()),
         })
@@ -33,6 +38,20 @@ impl TtpRuntime {
     pub(crate) fn unlisten_stream(&self, purpose: &TunnelPurpose) {
         log::debug!("ttp unlisten stream purpose={}", purpose);
         self.stream_registry.remove(purpose);
+    }
+
+    pub(crate) fn listen_control_stream(
+        &self,
+        purpose: TunnelPurpose,
+        callback: TtpIncomingControlStreamCallback,
+    ) -> P2pResult<()> {
+        log::debug!("ttp listen control stream register purpose={}", purpose);
+        self.control_stream_registry.register(purpose, callback)
+    }
+
+    pub(crate) fn unlisten_control_stream(&self, purpose: &TunnelPurpose) {
+        log::debug!("ttp unlisten control stream purpose={}", purpose);
+        self.control_stream_registry.remove(purpose);
     }
 
     pub(crate) fn listen_datagram(
@@ -124,6 +143,78 @@ impl TtpRuntime {
             Err(err) if err.code() == P2pErrorCode::NotSupport => {
                 log::debug!(
                     "ttp attach tunnel listen_stream not supported local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
+            }
+            Err(err) => return Err(err),
+        }
+
+        let control_stream_tunnel = tunnel.clone();
+        let control_stream_weak = Arc::downgrade(self);
+        let control_stream_callback: crate::networks::IncomingControlStreamCallback =
+            Arc::new(move |accepted| {
+                let tunnel = control_stream_tunnel.clone();
+                let weak = control_stream_weak.clone();
+                Box::pin(async move {
+                    match accepted {
+                        Ok((purpose, read, write)) => {
+                            let Some(runtime) = weak.upgrade() else {
+                                return;
+                            };
+                            if let Err(err) = runtime.control_stream_registry.deliver(
+                                &purpose,
+                                Ok((
+                                    TtpStreamMeta {
+                                        local_ep: tunnel.local_ep(),
+                                        remote_ep: tunnel.remote_ep(),
+                                        local_id: tunnel.local_id(),
+                                        remote_id: tunnel.remote_id(),
+                                        remote_name: None,
+                                        purpose: purpose.clone(),
+                                    },
+                                    read,
+                                    write,
+                                )),
+                            ) {
+                                log::warn!(
+                                    "ttp control stream deliver failed purpose={}: {:?}",
+                                    purpose,
+                                    err
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            if err.code() != P2pErrorCode::NotSupport {
+                                log::debug!("ttp control stream callback finished: {:?}", err);
+                            }
+                        }
+                    }
+                }) as crate::networks::IncomingControlStreamCallbackFuture
+            });
+        match tunnel
+            .listen_control_stream(
+                self.control_stream_registry.as_listen_vports_ref(),
+                control_stream_callback,
+            )
+            .await
+        {
+            Ok(()) => {
+                log::debug!(
+                    "ttp attach tunnel listen_control_stream ready local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
+                    tunnel.local_id(),
+                    tunnel.remote_id(),
+                    tunnel.protocol(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id()
+                );
+            }
+            Err(err) if err.code() == P2pErrorCode::NotSupport => {
+                log::debug!(
+                    "ttp attach tunnel listen_control_stream not supported local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
                     tunnel.local_id(),
                     tunnel.remote_id(),
                     tunnel.protocol(),
