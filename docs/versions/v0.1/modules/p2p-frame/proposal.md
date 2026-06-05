@@ -3,7 +3,7 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-04T16:26:18+08:00
+approved_at: 2026-06-05T17:05:04+08:00
 ---
 
 # p2p-frame 提案
@@ -22,6 +22,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - 本轮新增需求是调整 `TunnelNetwork` 的入站 tunnel 暴露模型：`TunnelNetwork` 不再向外导出 `TunnelListener` 对象，不再提供 `listeners()` 查询方法；`listen(...)` 必须由调用方传入接收新 `Tunnel` 的异步回调函数，返回值改为 `P2pResult<()>`，新进入的 tunnel 通过该回调通知外部。
 - 本轮新增需求是调整通用 `Tunnel` 的 stream/datagram 入站 channel 暴露模型：`Tunnel` trait 不再提供 `accept_stream()` 与 `accept_datagram()` 轮询式接口；`listen_stream(...)` 与 `listen_datagram(...)` 必须由调用方传入接收新 stream/datagram channel 的异步回调函数，Tunnel 内部在对应 listener 或 `sfo-reuseport` worker runtime 的入站处理路径中监听新 channel 并触发回调。
 - 本轮新增需求是为通用 `Tunnel` 提供低频外部控制数据通道能力：调用方可通过 `open_control_stream(...)` / `listen_control_stream(...)` 在现有 tunnel 控制命令通道上复用一组内部多路复用的 virtual control stream；具体实现必须作为 `Tunnel` 内部共享模块，不向外暴露 `control_stream` runtime、frame 或子协议类型。现有 TCP/QUIC/PN tunnel 控制命令只新增一个 `Data` 命令承载内部 control stream frame，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 必须断开。
+- 本轮新增需求是将 SN 低频信令通信迁移到 `Tunnel` control stream：SN report、call、called、响应或等价小消息不得为了每次交互都新建普通业务 `open_stream()`；在已有 tunnel 控制通道健康时，应复用 `open_control_stream(...)` / `listen_control_stream(...)` 承载 SN 小数据通信，以减少真实 stream 建立开销并保持 SN 信令属于控制面。
 - 本轮新增需求是清理 `p2p-frame` 内部所有 `tokio::sync::mpsc::unbounded_channel` 使用点，改为容量受限的 bounded channel；容量必须由外部配置向下传入，最上层配置提供按队列用途或位置拆分的容量配置，每个配置项默认值为 `1024`，调用方默认不需要显式设置；底层组件只接收对应位置已解析后的容量而不自行定义或兜底默认值。
 - 本轮后续清理需求是删除 `p2p-frame/src/stack.rs` 中公开的 `ChannelCapacityConfig` 以及 `P2pConfig` / `P2pStackConfig` / `P2pEnv` 上围绕该结构的容量覆盖、继承和访问逻辑；现有 bounded channel 仍保留容量上限，内部默认统一使用 `DEFAULT_CHANNEL_CAPACITY == 1024`，调用方不再通过 stack 顶层配置覆盖队列容量。
 
@@ -75,6 +76,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - 单个控制命令 `Data` 的 payload 上限必须是 `64 KiB`；调用方写入更大 buffer 时由内部 control stream 模块切分，接收侧遇到超过上限的 `Data` 必须按协议错误关闭相关 tunnel 或至少关闭所有派生 control stream，不得继续解析。
 - 底层 tunnel 控制通道断开、decode 失败、write 失败、heartbeat timeout、收到 remote close、本地 close 或 tunnel 进入 closing/closed/error 时，所有基于该控制通道派生的 control stream 都必须断开，pending read/write/open 必须返回 EOF 或 `Interrupted` 类错误，后续 `open_control_stream` 必须立即失败。
 - control stream 是低频控制扩展，不得承载普通业务大流量，不得改变现有 `open_stream` / `listen_stream`、`open_datagram` / `listen_datagram` 行为、线协议载荷格式、TLS 身份校验、PN proxy 业务 channel 协议、vport/purpose 编解码或 tunnel publish 规则。
+- SN 低频信令必须作为 control stream 的目标使用场景：SN report/call/called/response 或等价小消息必须走 control stream；不得保留普通业务 stream fallback，控制通道不可用或远端未监听 SN purpose 时当前 SN 命令通道建立或发送应失败。
 - `p2p-frame` 内部事件、accept、listener、stream/datagram 和 tunnel 订阅队列必须由 unbounded channel 改为 bounded channel，避免无上限内存增长
 - bounded channel 容量必须从顶层配置入口向下传递；顶层配置必须按不同队列用途或位置提供可独立覆盖的容量项，各项默认值均为 `1024`，调用方不设置时使用默认容量即可启动
 - 不同位置的 channel 容量不得强制共用同一个配置值；至少应能区分 TTP listener registry、TunnelManager subscription、NetManager incoming subscriber、PN 内部队列和 QUIC listener connect/punch 相关内部队列等仍存在 bounded queue 的类别；TCP/QUIC tunnel stream/datagram 入站回调路径不再保留旧 accept queue 容量参数
@@ -104,6 +106,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - 对非 `ServerReflexive` endpoint 发起 UDP punch，包括仅因地址是非 LAN IPv4 就发起 punch
 - 为 `ServerReflexive` tunnel 引入新的上层业务心跳、raw UDP keepalive 协议、额外心跳发送频率或要求远端解析 punch payload
 - 改变 QUIC tunnel 现有心跳发送间隔；本轮只允许调整心跳超时阈值
+- 将 SN 低频信令迁移解释为新增 SN 大流量数据平面、替代普通业务 stream 的通用消息总线，或允许 SN 信令直接依赖 `p2p-frame` 内部 `control_stream` frame/stream id/window 协议
 - 改变 direct、proxy、普通 incoming tunnel 的 register/publish 规则；本轮只收窄 reverse incoming 无 waiter 的行为
 - 引入 reverse tunnel 过期表或跨进程状态；本轮只以当前 pending reverse waiter 作为接收入站 reverse 的依据
 - 新增 `NetworkServerRuntime`、socket factory trait 或其他包裹 `sfo-reuseport` 的通用运行时抽象；本轮必须直接使用 `sfo_reuseport::ServerRuntime`、`TcpServer` 和 `QuicServer`
@@ -136,6 +139,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - 外部设置 `ServerRuntime` 是 `p2p-frame` 的配置责任边界；`cyfs-p2p` 可透传或组合该配置，但不得在适配层另行定义 listener 分发策略。
 - `Tunnel` stream/datagram 回调模型属于 `p2p-frame` 的公共 tunnel API 责任边界；`cyfs-p2p` 可以适配该 API，但不得在适配层保留另一套基于公共 `accept_*` 的 tunnel channel 暴露语义。
 - `Tunnel` control stream API 属于 `p2p-frame` 的公共 tunnel API 责任边界；`cyfs-p2p` 可以调用 `open_control_stream` / `listen_control_stream`，但不得依赖或重新定义 `p2p-frame` 内部 control stream frame、stream id、window 和 buffer 协议。
+- SN control-stream 化属于 `p2p-frame/src/sn/**` 对 `Tunnel` 公共 control stream API 的消费责任边界；`cyfs-p2p`、`sn-miner-rust` 和测试场景可以观察 SN 行为兼容性，但不得在适配层另行实现一套 SN 信令 stream 选择策略。
 - bounded channel 容量属于 `p2p-frame` 顶层运行时配置责任边界；`cyfs-p2p` 可以透传或组合该配置，但不得在适配层为 `p2p-frame` 底层队列另行定义一套默认值。顶层配置必须提供完整默认配置，因此普通调用方不需要为了启用 bounded channel 而显式填写任一容量项。
 - `ChannelCapacityConfig` 清理后，容量不再是 `p2p-frame` 对相邻模块暴露的配置责任；相邻模块不得依赖 stack 顶层容量覆盖 API。
 
@@ -206,6 +210,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - `Tunnel` control stream 必须作为 tunnel 内部共享实现模块复用在 TCP/QUIC/PN 上；该模块只通过 transport 注入的 `send Data payload` 适配器与现有控制命令通道交互，transport 侧不得解析内部 control stream 子协议。
 - `Data` 控制命令 payload 上限固定为 `64 KiB`，该上限必须由发送侧切分和接收侧校验共同保证；任何绕过该上限的 frame 都是协议错误。
 - 控制命令通道生命周期严格支配所有派生 control stream；底层控制通道关闭或错误后，所有 virtual control stream、pending open、pending write 和 listen 交付必须收敛，不得留下仍可读写的半开对象。
+- SN 信令使用 control stream 时必须通过公开 `Tunnel` control stream API 进入，不得跨模块调用内部 `control_stream` runtime 或自定义 raw `Data` payload 子协议；普通业务 `open_stream()` 不应继续作为 SN 小消息的默认发送路径。
 
 ## 高层结果
 - 未来的 `p2p-frame` 改动必须通过显式模块数据包进入流程。
@@ -233,6 +238,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - 通用 `Tunnel` 调用方通过 `listen_stream(vports, on_incoming_stream)` 与 `listen_datagram(vports, on_incoming_datagram)` 注册入站 channel 回调；stream/datagram、TTP 和 PN server/client 侧不再启动公共 `accept_*` 循环，入站 channel 由 tunnel 内部接收后直接投递到对应回调。
 - 通用 `Tunnel` 调用方能通过 `open_control_stream(purpose)` / `listen_control_stream(purposes, on_incoming_control_stream)` 获得低频控制数据通道；该能力通过现有 tunnel 控制命令通道上的单一 `Data` 命令承载内部多路复用 frame，但 `control_stream` runtime 和 frame 类型不成为公开 API。
 - 当底层控制通道仍健康时，control stream 的 open、listen、read、write、fin/reset 和 purpose 过滤能独立于现有 stream/datagram 数据平面工作；当底层控制通道断开或 tunnel close 时，所有派生 control stream 立即失败或 EOF。
+- SN report/call/called/response 或等价低频小消息通过 control stream 交互，不再为每次 SN 信令建立新的普通业务 stream；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时不得 fallback 到普通 stream，而应按现有 SN 失败路径移除当前 SN 连接或返回错误。
 - 所有原 `unbounded_channel` 队列均具备容量上限，默认从顶层配置取得对应位置的 `1024`；外部调用方可以按队列类别或位置独立覆盖容量，不需要为未覆盖位置重复填写默认值；底层组件只消费对应位置已解析容量，并在队列满载时按设计定义的背压、拒绝、关闭或错误路径收敛。
 - `ChannelCapacityConfig` 后续清理完成后，stack 顶层不再暴露容量结构、getter 或 setter；默认调用方仍无需设置容量即可启动，保留队列继续以 `1024` 为固定容量上限收敛满载路径。
 
@@ -269,6 +275,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - `Tunnel` stream/datagram 回调化会改变上层消费时序；若回调执行位置、背压、重复注册或 close 并发没有设计清楚，可能导致入站 channel 丢失、控制循环被回调阻塞、关闭后仍交付 channel，或 TTP/stream/datagram manager 的 listener 生命周期泄漏。
 - control stream 在现有控制命令通道上承载外部数据，若 frame 切分、写锁占用、buffer/window 或关闭传播设计不当，可能阻塞内部 heartbeat/close/open response，导致 tunnel 生命周期误判或半开 control stream 泄漏。
 - 若 transport 层解析内部 control stream frame，或把 `control_stream` 子协议暴露为公开 API，会导致 TCP/QUIC/PN 的控制面实现耦合到外部调用方，破坏后续演进边界。
+- 若 SN 信令迁移到 control stream 后仍残留普通 stream fallback，可能导致控制面和数据面语义混杂，并重新引入每次小消息建立真实 stream 的开销；若控制通道不可用，应以明确失败暴露，而不是隐式降级。
 - 移除公共 `accept_*` 会影响所有测试替身和下游 crate；若迁移遗漏，可能形成编译回归或旧语义在某个 manager 中被私有队列重新暴露。
 - unbounded channel 改为 bounded channel 会把原先隐藏的积压转化为背压或错误；如果容量传递遗漏、满载语义不一致，可能导致 accept/open 等待路径卡住、过早关闭或错误传播不清。
 - 若底层组件继续保留局部默认值，实际容量会与顶层配置漂移，造成不同 transport 或测试替身的内存上限不可预测。
@@ -307,6 +314,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 - TTP、stream manager、datagram manager 和 PN server/client 调用点必须迁移到回调模型；acceptance 必须确认没有公共 `accept_*` 轮询循环残留。
 - `Tunnel` control stream 的对外 API 只能是 `open_control_stream` / `listen_control_stream`；代码审查和测试必须确认内部 `control_stream` runtime/frame 类型未公开导出，且 TCP/QUIC/PN 只新增一个控制命令 `Data` 作为承载。
 - control stream 验证必须覆盖 `Data` payload 最大 `64 KiB`、发送侧大 buffer 切分、接收侧超限拒绝，以及底层控制通道断开后所有派生 stream、pending open 和 pending write 失败。
+- SN 低频信令必须可验收为 control-stream-only 消费路径：report/call/called/response 或等价小消息不得调用普通业务 `open_stream()` 建立真实 stream；测试或代码审查必须覆盖 control stream purpose 过滤，以及控制通道不可用或未监听时失败而非 fallback。
 - `p2p-frame` 代码中不得继续存在生产路径 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；对应队列必须使用 bounded channel，并由顶层配置传入容量。
 - 顶层配置未显式设置 channel 容量时，仍存在的每个队列类别或位置的默认值必须为 `1024`；显式设置某一位置容量时，只有对应 network、PN、TTP、manager 等底层队列使用该覆盖值，其他位置继续使用顶层默认值，且底层不得自行覆盖默认值；TCP/QUIC tunnel 不再暴露旧 accept queue 容量项。
 - 验收必须确认用户可以不设置任何 channel 容量并获得完整默认配置，也可以只覆盖单个位置容量而不影响其他位置容量。
@@ -323,6 +331,7 @@ approved_at: 2026-06-04T16:26:18+08:00
 | P-TUNNEL-NETWORK-CALLBACK-1 | tunnel_network_listen_callback | `TunnelNetwork::listen(...)` 改为由调用方传入入站 tunnel 回调并返回 `P2pResult<()>`；`TunnelNetwork` 不再导出 `TunnelListener` 或提供 `listeners()`，新 tunnel 通过回调通知外部。 | 不改变 `TunnelListener` 内部实现类型可被 TCP/QUIC/PN listener 复用；不改变 tunnel publish、incoming validator、TLS 身份校验、TCP/QUIC/PN 线协议、QUIC NAT punch 策略或 `listener_infos()` 语义；不要求调用方轮询 listener。 | unit 能覆盖 `NetManager::listen(...)` 注册回调后仍走 incoming validator、订阅发布和 reject close 路径；unit 或编译覆盖 TCP/QUIC/PN `listen(...)` 返回 `P2pResult<()>` 且不再暴露 `listeners()`；integration 能覆盖 workspace 调用方迁移后仍可建立入站 tunnel。 |
 | P-TUNNEL-CHANNEL-CALLBACK-1 | tunnel_stream_datagram_listen_callback | `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`，`listen_stream(...)` / `listen_datagram(...)` 改为接收可克隆、线程安全的异步回调；Tunnel 内部在入站 stream/datagram channel 到达时按 vport/purpose listen 规则触发回调。 | 不改变 TCP/QUIC/PN/TTP 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码、tunnel publish 规则或 `TunnelNetwork` listener 回调语义；不保留公共 `accept_*` 兼容旁路；不要求调用方同时注册回调又轮询队列。 | schema/admission 能以 `tunnel_stream_datagram_listen_callback` 建立后续准入；unit 或编译覆盖公共 `Tunnel` trait 不再包含 `accept_*`，TCP/QUIC/PN tunnel 以及 TTP/stream/datagram manager 调用点均迁移到 listen 回调；unit 覆盖关闭后不再调用回调、未 listen 的 purpose 仍拒绝或报错、回调满载/背压/错误路径按 design 收敛；integration 覆盖 workspace 调用方迁移后 stream/datagram 仍可建立并传输。 |
 | P-TUNNEL-CONTROL-STREAM-API-1 | tunnel_control_stream_api | `Tunnel` trait 新增 `open_control_stream(...)` / `listen_control_stream(...)`，为外部提供低频控制数据通道；内部 `control_stream` 模块通过现有 TCP/QUIC/PN tunnel 控制命令通道上的单一 `Data` 命令多路复用 virtual stream，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 断开。 | 不公开内部 `control_stream` runtime/frame/stream id/window 类型；不让外部直接读写现有 raw 控制通道；不改变现有 stream/datagram 逻辑、业务 payload 格式、TLS 身份校验、PN proxy 业务 channel 协议、vport/purpose 编解码或 tunnel publish 规则；不将该能力扩展为大流量业务数据平面。 | schema/admission 能以 `tunnel_control_stream_api` 建立后续准入；unit 或编译证据确认公共 API 只有 `Tunnel` trait 方法和 callback/stream 类型，内部 control stream 类型未公开导出；TCP/QUIC/PN 只新增 `Data` 控制命令承载内部 frame；测试覆盖 open/listen、purpose 过滤、64KiB 切分/超限拒绝、控制通道断开后所有派生 stream 和 pending open/write 失败。 |
+| P-SN-CONTROL-STREAM-1 | sn_control_stream_signaling | SN report、call、called、response 或等价低频小消息通过 `Tunnel` control stream 交互，不再为每次 SN 信令新建普通业务 `open_stream()`，且不保留普通 stream fallback。 | 不把 control stream 扩展成 SN 大流量数据平面；不公开或依赖内部 `control_stream` frame/stream id/window 协议；不改变 SN 最终连通性语义、单 SN 边界、SN 观察 endpoint 分类或 `SnCallResp` 只表示 SN 受理结果的语义；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时当前 SN 命令通道建立或发送失败，不得 fallback 到普通 stream。 | schema/admission 能以 `sn_control_stream_signaling` 建立后续准入；unit 或编译证据确认 SN 信令路径调用 `open_control_stream` / `listen_control_stream` 而不是 `open_stream` / `listen_stream`；测试覆盖 control stream purpose 过滤、控制通道不可用或未监听时失败，以及 SN report/call/called/response 小消息仍能通过 control stream 完成。 |
 | P-BOUNDED-CHANNELS-1 | bounded_channel_capacity_config | `p2p-frame` 内部所有 `unbounded_channel` 队列改为 bounded channel；容量由顶层配置按队列类别或位置独立向下传递，每个容量项默认值为 `1024`，用户默认不需要设置，外部可只覆盖某一位置容量，底层组件不定义默认值。 | 不改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不在底层散落硬编码默认容量；不强制所有队列共用一个容量配置；不通过额外 unbounded buffer 绕开容量限制。 | schema/admission 能以 `bounded_channel_capacity_config` 建立后续准入；unit 或编译覆盖默认用户不设置时各容量默认 `1024`、单个位置自定义容量只影响对应底层构造路径；代码搜索确认生产路径不再存在 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；满载路径具备按设计定义的错误、关闭或背压覆盖。 |
 | P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | stack_channel_capacity_config_removal | 删除 `ChannelCapacityConfig`、`P2pConfig` / `P2pStackConfig` 的 channel capacity getter/setter、`P2pEnv` 的容量快照和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime` 不再接收无效 channel capacity 参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel，内部使用固定 `DEFAULT_CHANNEL_CAPACITY == 1024`。 | 不改变已有 bounded channel 类型、满载错误语义、TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不新增替代公开容量配置 API；不把容量清理扩展为移除所有底层显式构造参数。 | schema/admission 能以 `stack_channel_capacity_config_removal` 建立后续准入；编译或 unit 覆盖 `stack.rs` 不再导出 `ChannelCapacityConfig` 或 stack 层容量 getter/setter，`NetManager::new(...)` / `new_with_incoming_tunnel_validator(...)`、`TtpRuntime::new()` 和 `PnClient::new*` 不再要求容量参数；代码搜索确认生产路径仍无 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；unit 或 compile 覆盖默认 stack 构造继续使用固定容量启动相关 bounded queue。 |
 
@@ -339,3 +348,4 @@ approved_at: 2026-06-04T16:26:18+08:00
 - Acceptance 必须重新审计新的独立容量配置是否覆盖所有原 unbounded channel 使用点，且没有通过单一全局容量或底层默认值绕过本 proposal。
 - 本次后续清理已按用户确认新增 `stack_channel_capacity_config_removal`，允许删除 `ChannelCapacityConfig` 及 stack 层容量覆盖逻辑；Design/Testing/Implementation/Acceptance 必须同步改为以固定默认容量和无 unbounded channel 作为证据重点。
 - 本次自动流水线已按用户确认新增 `tunnel_control_stream_api`，必须先补齐 Design/Testing，再通过 implementation admission 后实现；该能力的内部 `control_stream` 模块不得公开导出。
+- 本次 proposal 已按用户要求新增并收紧 `sn_control_stream_signaling`：SN 信令必须使用 `Tunnel` control stream，且不保留普通 stream fallback；Design/Testing/Implementation/Acceptance 必须以 control-stream-only 为准。

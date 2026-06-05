@@ -12,7 +12,7 @@ use crate::p2p_identity::{
 };
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sn::types::{CmdTunnelId, SN_CMD_SERVICE, SnCmdHeader, SnTunnelRead, SnTunnelWrite};
+use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
 use crate::ttp::{TtpPortListener, TtpServer, TtpServerRef};
 use crate::types::{SequenceGenerator, Timestamp, TunnelId};
@@ -699,38 +699,53 @@ impl SnServer {
     }
 
     async fn start_cmd_accept_loop(self: &Arc<Self>) -> P2pResult<()> {
-        let purpose =
-            crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap();
+        let purpose = sn_cmd_purpose()?;
         log::debug!(
             "sn server start cmd accept loop local_id={} purpose={}",
             self.local_identity.get_id(),
             purpose
         );
-        let service = self.service.clone();
-        let callback = Arc::new(move |accepted| {
-            let service = service.clone();
-            Box::pin(async move {
-                let accepted = match accepted {
-                    Ok(accepted) => accepted,
-                    Err(err) => {
-                        warn!("sn server cmd accept stopped: {:?}", err);
-                        return;
-                    }
-                };
-                let tunnel = Self::into_cmd_tunnel(accepted);
-                Executor::spawn(async move {
-                    if let Err(err) = service.handle_tunnel(tunnel).await {
-                        error!("sn server handle cmd tunnel failed: {:?}", err);
-                    }
-                });
-            }) as crate::ttp::TtpIncomingStreamCallbackFuture
-        });
-        self.ttp_server.listen_stream(purpose, callback).await?;
+        self.ttp_server
+            .listen_control_stream(purpose, self.make_cmd_control_stream_callback())
+            .await?;
         log::debug!(
             "sn server cmd accept loop started local_id={}",
             self.local_identity.get_id()
         );
         Ok(())
+    }
+
+    fn make_cmd_control_stream_callback(&self) -> crate::ttp::TtpIncomingControlStreamCallback {
+        let service = self.service.clone();
+        Arc::new(move |accepted| {
+            let service = service.clone();
+            Box::pin(async move {
+                SnServer::handle_accepted_cmd_stream(service, accepted).await;
+            }) as crate::ttp::TtpIncomingControlStreamCallbackFuture
+        })
+    }
+
+    async fn handle_accepted_cmd_stream(
+        service: SnServiceRef,
+        accepted: P2pResult<(
+            crate::ttp::TtpStreamMeta,
+            TunnelStreamRead,
+            TunnelStreamWrite,
+        )>,
+    ) {
+        let accepted = match accepted {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                warn!("sn server cmd accept stopped: {:?}", err);
+                return;
+            }
+        };
+        let tunnel = Self::into_cmd_tunnel(accepted);
+        Executor::spawn(async move {
+            if let Err(err) = service.handle_tunnel(tunnel).await {
+                error!("sn server handle cmd tunnel failed: {:?}", err);
+            }
+        });
     }
 
     fn into_cmd_tunnel(
@@ -931,6 +946,15 @@ mod tests {
                 )>,
             >,
         >,
+        incoming_control_rx: Arc<
+            AsyncMutex<
+                mpsc::UnboundedReceiver<(
+                    crate::networks::TunnelPurpose,
+                    TunnelStreamRead,
+                    TunnelStreamWrite,
+                )>,
+            >,
+        >,
     }
 
     impl FakeTunnel {
@@ -946,8 +970,14 @@ mod tests {
                 TunnelStreamRead,
                 TunnelStreamWrite,
             )>,
+            mpsc::UnboundedSender<(
+                crate::networks::TunnelPurpose,
+                TunnelStreamRead,
+                TunnelStreamWrite,
+            )>,
         ) {
             let (tx, rx) = mpsc::unbounded_channel();
+            let (control_tx, control_rx) = mpsc::unbounded_channel();
             (
                 Arc::new(Self {
                     tunnel_id: crate::types::TunnelId::from(1),
@@ -957,8 +987,10 @@ mod tests {
                     local_ep,
                     remote_ep,
                     incoming_rx: Arc::new(AsyncMutex::new(rx)),
+                    incoming_control_rx: Arc::new(AsyncMutex::new(control_rx)),
                 }),
                 tx,
+                control_tx,
             )
         }
     }
@@ -1033,6 +1065,21 @@ mod tests {
             _vports: crate::networks::ListenVPortsRef,
             _callback: crate::networks::IncomingDatagramCallback,
         ) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_control_stream(
+            &self,
+            _purposes: crate::networks::ListenVPortsRef,
+            callback: crate::networks::IncomingControlStreamCallback,
+        ) -> P2pResult<()> {
+            let incoming_control_rx = self.incoming_control_rx.clone();
+            tokio::spawn(async move {
+                let mut incoming_control_rx = incoming_control_rx.lock().await;
+                while let Some((purpose, read, write)) = incoming_control_rx.recv().await {
+                    callback(Ok((purpose, read, write))).await;
+                }
+            });
             Ok(())
         }
 
@@ -1255,9 +1302,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sn_server_wraps_sn_cmd_vport_into_cmd_tunnel() {
-        let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23001".parse().unwrap()));
-        let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23002".parse().unwrap()));
+    async fn sn_server_wraps_sn_control_stream_into_cmd_tunnel() {
+        let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23101".parse().unwrap()));
+        let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:23102".parse().unwrap()));
         let identity = test_identity(local_ep);
         let fake_network = FakeTunnelNetwork::new(Protocol::Quic);
         let net_manager = NetManager::new(
@@ -1268,29 +1315,22 @@ mod tests {
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager.clone()).unwrap();
         let (accepted_tx, mut accepted_rx) = mpsc::channel(1);
-        let callback: crate::ttp::TtpIncomingStreamCallback = Arc::new(move |accepted| {
+        let callback: crate::ttp::TtpIncomingControlStreamCallback = Arc::new(move |accepted| {
             let accepted_tx = accepted_tx.clone();
             Box::pin(async move {
                 let _ = accepted_tx.send(accepted).await;
-            }) as crate::ttp::TtpIncomingStreamCallbackFuture
+            }) as crate::ttp::TtpIncomingControlStreamCallbackFuture
         });
         ttp_server
-            .listen_stream(
-                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
-                callback,
-            )
+            .listen_control_stream(sn_cmd_purpose().unwrap(), callback)
             .await
             .unwrap();
 
-        let (tunnel, stream_tx) =
+        let (tunnel, _stream_tx, control_tx) =
             FakeTunnel::new(identity.get_id(), remote_id(), local_ep, remote_ep);
         let ((read, write), mut remote_write) = make_stream_pair();
-        stream_tx
-            .send((
-                crate::networks::TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).unwrap(),
-                read,
-                write,
-            ))
+        control_tx
+            .send((sn_cmd_purpose().unwrap(), read, write))
             .unwrap();
         fake_network.push_tunnel(tunnel);
 
@@ -1302,9 +1342,9 @@ mod tests {
         let cmd_tunnel = SnServer::into_cmd_tunnel(accepted);
         let (mut cmd_read, _cmd_write) = cmd_tunnel.split();
 
-        remote_write.write_all(b"ping").await.unwrap();
+        remote_write.write_all(b"ctrl").await.unwrap();
         let mut buf = [0u8; 4];
         cmd_read.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"ping");
+        assert_eq!(&buf, b"ctrl");
     }
 }

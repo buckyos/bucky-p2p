@@ -1,7 +1,7 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::networks::{NetManagerRef, TunnelPurpose};
+use crate::networks::NetManagerRef;
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef,
     P2pSn,
@@ -12,7 +12,7 @@ use crate::sn::protocol::{
     Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp,
 };
 use crate::sn::types::{
-    CmdTunnelId, SN_CMD_SERVICE, SnCmdHeader, SnTunnelClassification, SnTunnelRead, SnTunnelWrite,
+    CmdTunnelId, SnCmdHeader, SnTunnelClassification, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose,
 };
 use crate::ttp::{TtpClient, TtpClientRef, TtpConnector, TtpTarget};
 use crate::types::{Sequence, SequenceGenerator, TunnelId, TunnelIdGenerator};
@@ -105,24 +105,22 @@ impl SnClientTunnelFactory {
         remote_id: &P2pId,
         remote_name: String,
     ) -> CmdResult<ClassifiedCmdTunnel<SnTunnelRead, SnTunnelWrite>> {
-        let (meta, read, write) =
-            self.ttp_client
-                .open_stream(
-                    &TtpTarget {
-                        local_ep: local_ep.copied(),
-                        remote_ep: *remote_ep,
-                        remote_id: remote_id.clone(),
-                        remote_name: Some(remote_name.clone()),
-                    },
-                    TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string()).map_err(
-                        into_cmd_err!(CmdErrorCode::Failed, "encode sn cmd purpose failed"),
-                    )?,
-                )
-                .await
-                .map_err(into_cmd_err!(
-                    CmdErrorCode::Failed,
-                    "open sn cmd stream failed"
-                ))?;
+        let purpose = sn_cmd_purpose()
+            .map_err(into_cmd_err!(CmdErrorCode::Failed, "encode sn cmd purpose failed"))?;
+        let target = TtpTarget {
+            local_ep: local_ep.copied(),
+            remote_ep: *remote_ep,
+            remote_id: remote_id.clone(),
+            remote_name: Some(remote_name.clone()),
+        };
+        let (meta, read, write) = self
+            .ttp_client
+            .open_control_stream(&target, purpose)
+            .await
+            .map_err(into_cmd_err!(
+                CmdErrorCode::Failed,
+                "open sn cmd control stream failed"
+            ))?;
         let local = meta
             .local_ep
             .unwrap_or(local_ep.copied().unwrap_or_default());

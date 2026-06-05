@@ -1,6 +1,6 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pErrorCode;
-use crate::networks::{TunnelStreamRead, TunnelStreamWrite};
+use crate::networks::{TunnelPurpose, TunnelStreamRead, TunnelStreamWrite};
 use crate::p2p_identity::P2pId;
 use sfo_cmd_server::client::{
     ClassifiedCmdTunnel, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite,
@@ -18,6 +18,10 @@ pub struct PingSessionResp {
 }
 
 pub const SN_CMD_SERVICE: &str = "sn_service";
+
+pub fn sn_cmd_purpose() -> crate::error::P2pResult<TunnelPurpose> {
+    TunnelPurpose::from_value(&SN_CMD_SERVICE.to_string())
+}
 
 #[derive(Clone, Debug, Hash, Eq)]
 pub struct SnTunnelClassification {

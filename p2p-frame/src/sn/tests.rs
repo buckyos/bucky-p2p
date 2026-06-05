@@ -422,3 +422,109 @@ async fn sn_call_unknown_peer_returns_not_found() {
     assert_eq!(call_resp.result, P2pErrorCode::NotFound.as_u8());
     assert!(call_resp.to_peer_info.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sn_client_server_connection_covers_report_query_call_and_called_response() {
+    let (_sn_service, caller_stack, caller_id, callee_stack, callee_id, sn_id, cert_factory) =
+        setup_sn_and_two_clients().await;
+
+    let caller_active = caller_stack.sn_client().get_active_sn_list();
+    assert_eq!(caller_active.len(), 1);
+    assert_eq!(caller_active[0].sn_peer_id, sn_id);
+
+    let callee_active = callee_stack.sn_client().get_active_sn_list();
+    assert_eq!(callee_active.len(), 1);
+    assert_eq!(callee_active[0].sn_peer_id, sn_id);
+
+    let caller_query = caller_stack.sn_client().query(&caller_id).await.unwrap();
+    assert!(caller_query.peer_info.is_some());
+    let caller_cert = cert_factory
+        .create(caller_query.peer_info.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(caller_cert.get_id(), caller_id);
+
+    let callee_query = caller_stack.sn_client().query(&callee_id).await.unwrap();
+    assert!(callee_query.peer_info.is_some());
+    let callee_cert = cert_factory
+        .create(callee_query.peer_info.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(callee_cert.get_id(), callee_id);
+    assert!(
+        callee_query
+            .end_point_array
+            .iter()
+            .any(|ep| ep.protocol() == Protocol::Quic && ep.addr().port() > 0)
+    );
+
+    let missing_peer = P2pId::from(vec![0x44; 32]);
+    let missing_query = caller_stack.sn_client().query(&missing_peer).await.unwrap();
+    assert!(missing_query.peer_info.is_none());
+    assert!(missing_query.end_point_array.is_empty());
+
+    let (called_tx, mut called_rx) = mpsc::channel::<SnCalled>(1);
+    callee_stack
+        .sn_client()
+        .set_listener(move |called: SnCalled| {
+            let called_tx = called_tx.clone();
+            async move {
+                let _ = called_tx.send(called).await;
+                Ok(())
+            }
+        });
+
+    let reverse_eps = vec![
+        localhost_quic_endpoint(next_port()),
+        localhost_quic_endpoint(next_port()),
+    ];
+    let tunnel_id: TunnelId = 0x2001u32.into();
+    let payload = b"sn-client-server-control-stream-e2e".to_vec();
+
+    let call_resp = caller_stack
+        .sn_client()
+        .call(
+            tunnel_id,
+            Some(reverse_eps.as_slice()),
+            &callee_id,
+            TunnelType::Stream,
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(call_resp.result, P2pErrorCode::Ok.as_u8());
+    assert!(call_resp.to_peer_info.is_some());
+    let to_peer_cert = cert_factory
+        .create(call_resp.to_peer_info.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(to_peer_cert.get_id(), callee_id);
+
+    let called = tokio::time::timeout(CALL_TIMEOUT, called_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(called.sn_peer_id, sn_id);
+    assert_eq!(called.to_peer_id, callee_id);
+    assert_eq!(called.tunnel_id, tunnel_id);
+    assert_eq!(called.call_type, TunnelType::Stream);
+    assert_eq!(called.payload, payload);
+    assert_eq!(
+        &called.reverse_endpoint_array[..reverse_eps.len()],
+        reverse_eps.as_slice()
+    );
+    let from_peer_cert = cert_factory.create(&called.peer_info).unwrap();
+    assert_eq!(from_peer_cert.get_id(), caller_id);
+
+    let unknown_call_resp = caller_stack
+        .sn_client()
+        .call(
+            0x2002u32.into(),
+            None,
+            &missing_peer,
+            TunnelType::Datagram,
+            b"missing-peer".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_call_resp.result, P2pErrorCode::NotFound.as_u8());
+    assert!(unknown_call_resp.to_peer_info.is_none());
+}
