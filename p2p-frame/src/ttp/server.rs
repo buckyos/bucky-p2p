@@ -4,6 +4,7 @@ use crate::networks::{
     TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::client::{TtpConnector, is_tunnel_available, match_target};
@@ -18,7 +19,7 @@ pub struct TtpServer {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
-    tunnels: Mutex<Vec<TunnelRef>>,
+    tunnels: Mutex<HashMap<P2pId, TunnelRef>>,
 }
 
 pub type TtpServerRef = Arc<TtpServer>;
@@ -32,7 +33,7 @@ impl TtpServer {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
-            tunnels: Mutex::new(Vec::new()),
+            tunnels: Mutex::new(HashMap::new()),
         });
         server.register_accept_callback()?;
         Ok(server)
@@ -92,19 +93,16 @@ impl TtpServer {
 
     fn remember_tunnel(&self, tunnel: TunnelRef) {
         let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|existing| {
-            is_tunnel_available(existing.as_ref()) && !Arc::ptr_eq(existing, &tunnel)
-        });
-        tunnels.push(tunnel);
+        tunnels.retain(|_, existing| is_tunnel_available(existing.as_ref()));
+        tunnels.insert(tunnel.remote_id(), tunnel);
     }
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {
         let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|tunnel| is_tunnel_available(tunnel.as_ref()));
+        tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
         tunnels
-            .iter()
-            .rev()
-            .find(|tunnel| match_target(tunnel.as_ref(), target))
+            .get(&target.remote_id)
+            .filter(|tunnel| match_target(tunnel.as_ref(), target))
             .cloned()
     }
 
@@ -121,19 +119,14 @@ impl TtpServer {
 
     fn get_existing_tunnel_by_id(&self, remote_id: &P2pId) -> P2pResult<TunnelRef> {
         let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|tunnel| is_tunnel_available(tunnel.as_ref()));
-        tunnels
-            .iter()
-            .rev()
-            .find(|tunnel| tunnel.remote_id() == *remote_id)
-            .cloned()
-            .ok_or_else(|| {
-                p2p_err!(
-                    P2pErrorCode::NotFound,
-                    "ttp server has no incoming tunnel for {}",
-                    remote_id
-                )
-            })
+        tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
+        tunnels.get(remote_id).cloned().ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::NotFound,
+                "ttp server has no incoming tunnel for {}",
+                remote_id
+            )
+        })
     }
 
     pub async fn open_stream_by_id(
