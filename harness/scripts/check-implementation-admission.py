@@ -12,12 +12,14 @@ def main() -> int:
     if len(sys.argv) < 4:
         print(
             "usage: python3 ./harness/scripts/check-implementation-admission.py "
-            "<version> <module> [--submodule <submodule>] <change_id> [<change_id>...]",
+            "<version> <module> [--submodule <submodule>] "
+            "--evidence-file <path> <change_id> [<change_id>...]",
             file=sys.stderr,
         )
         print(
-            "implementation admission now requires explicit change_id coverage; "
-            "use schema-check.py and admission-check.py directly for new tasks.",
+            "implementation admission requires explicit change_id coverage and "
+            "task admission evidence; use schema-check.py and admission-check.py "
+            "directly for new tasks.",
             file=sys.stderr,
         )
         return 2
@@ -30,6 +32,16 @@ def main() -> int:
             return 2
         submodule = rest[1]
         rest = rest[2:]
+    evidence_file = None
+    if rest[:1] == ["--evidence-file"]:
+        if len(rest) < 3:
+            print("--evidence-file requires a path and at least one change_id", file=sys.stderr)
+            return 2
+        evidence_file = rest[1]
+        rest = rest[2:]
+    if evidence_file is None:
+        print("--evidence-file is required by the current admission gate", file=sys.stderr)
+        return 2
     change_ids = rest
     root = Path(__file__).resolve().parents[2]
 
@@ -59,6 +71,7 @@ def main() -> int:
         admission_cmd.extend(["--submodule", submodule])
     for change_id in change_ids:
         admission_cmd.extend(["--change-id", change_id])
+    admission_cmd.extend(["--evidence-file", evidence_file])
 
     schema_result = subprocess.run(schema_cmd, check=False)
     if schema_result.returncode != 0:

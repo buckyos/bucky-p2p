@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: user
 approved_at: 2026-05-13
+approved_content_sha256: 8ffb1aa37f5a066e3e5ae0f7a8aebbec441af887ccf651a87d7a9144e0be8b0b
 ---
 
 # workspace-harness 测试
@@ -36,3 +37,8 @@ approved_at: 2026-05-13
 - [ ] schema checker 对代表模块通过。
 - [ ] admission checker 对已审批路径通过，对未审批路径失败关闭。
 - [ ] pipeline plan 与当前 change_id 和审批状态一致。
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-11
+- user_statement: 将已有文档都迁移到新的要求吧

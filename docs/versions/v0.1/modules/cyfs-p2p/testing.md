@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: user
 approved_at: 2026-05-13
+approved_content_sha256: b73345610e60796cc9e823b809da872d816fba9fb6628eea743ce05a8e02b715
 ---
 
 # cyfs-p2p 测试
@@ -57,3 +58,8 @@ approved_at: 2026-05-13
 - [ ] `testplan.yaml` 与声明的命令一致
 - [ ] 影响运行时的适配层改动具备下游证据
 - [ ] 已检查跨模块兼容性
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-11
+- user_statement: 将已有文档都迁移到新的要求吧

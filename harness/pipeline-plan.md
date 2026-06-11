@@ -5,6 +5,7 @@
 ### 触发条件
 - 已批准的 proposal：`docs/versions/v0.1/modules/p2p-frame/proposal.md`
 - 用户启动确认：已于 `2026-06-05T18:58:53+08:00` 确认并要求自动处理后续步骤。
+- User launch confirmed: 2026-06-05T18:58:53+08:00 确认并要求自动处理后续步骤。
 - 当前 `change_id`：
   - `remove_sn_service_contract_server`
 

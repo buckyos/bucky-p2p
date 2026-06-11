@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: user
 approved_at: 2026-05-13
+approved_content_sha256: a56c434ef7d630f8893ded967ce3fe1fe5a207640edcbd63d173bc85c8e9192e
 ---
 
 # workspace-harness 设计
@@ -51,3 +52,8 @@ approved_at: 2026-05-13
 - 治理规则与脚本不一致会造成准入结果不可预测。
 - 新增规则路径如果未纳入 workspace verifier，可能在验收中被遗漏。
 - 回滚治理变更时必须同时回滚规则、脚本和 pipeline plan 中的对应假设。
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-11
+- user_statement: 将已有文档都迁移到新的要求吧

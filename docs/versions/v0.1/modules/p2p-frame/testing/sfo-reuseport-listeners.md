@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: auto-pipeline
 approved_at: 2026-05-29
+approved_content_sha256: d72044c6100e3e20b0af8db88cdd89649fbc43e2c998c2df897a5b3c0a666376
 ---
 
 # sfo-reuseport Listener 验证补充

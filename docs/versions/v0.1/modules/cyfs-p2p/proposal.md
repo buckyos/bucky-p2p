@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: user
 approved_at: 2026-05-13
+approved_content_sha256: 711fe011d2d04db4bdef306d5ba1669beb6773764734830d6d09ea3bbe8591be
 ---
 
 # cyfs-p2p 提案
@@ -51,3 +52,8 @@ approved_at: 2026-05-13
 - 与 `p2p-frame` 的语义静默漂移
 - 身份/签名适配回归
 - 下游二进制中的运行时启动回归
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-11
+- user_statement: 将已有文档都迁移到新的要求吧

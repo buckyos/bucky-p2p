@@ -29,6 +29,10 @@
 - 建链采用一次握手：成功即得到可用通道，失败则直接返回错误
 - `datagram` 语义也直接跑在底层 `stream` 通道上
 - relay 只负责转发建链请求、回传结果、桥接两端 channel stream
+- PN 横向扩展不由库内负责用户分配或目录查询；上层负责把用户分配到某个 PN，并在连接前把目标用户当前所属 PN 告诉库
+- 库内只负责按上层指定的 PN 建立或复用 relay tunnel，并在该 PN 上执行现有 `ProxyOpenReq` / `ProxyOpenResp` 建链
+- `PnServer` 必须基于现有 relay 准入校验限制可通过本 server 新建 `PnTunnel` 的 target 用户；只有被分配到本 `PnServer` 的用户才能作为新建 tunnel 的 `ProxyOpenReq.to` 被打开
+- 若两个节点已经建立了同一逻辑 `PnTunnel`，双方都可以继续使用该 tunnel 打开 stream/datagram channel 发送数据；assigned target 规则只约束新建 tunnel，不应把既有 tunnel 上的反向 channel 当作新的 target 归属错误拒绝
 
 ## 对外接口
 
@@ -64,6 +68,18 @@
 - `B` 维持到 `S` 的 tunnel
 
 因此建立 `A -> B` 的 `PnTunnel` 时，不需要额外通知 B 再反向补一条独立 data connection。
+
+在多 PN 部署下，`S` 不是全局唯一 PN，而是上层为目标用户查询或选择出的目标 PN：
+
+- 每个用户通常长期连接到一个 assigned PN。
+- 用户到 PN 的分配、迁移、查询和全局负载均衡属于库外职责。
+- `p2p-frame` 不维护 `peer_id -> PN` 的全局目录，也不在 `PnServer` 之间转发查询。
+- 当 `A` 要连接 `B` 时，上层先查询到 `B` 当前 assigned PN，例如 `PN-B`，再要求库通过 `PN-B` 建立 proxy tunnel。
+- 若 `A` 当前还没有到 `PN-B` 的 relay tunnel，库可以按上层提供的 PN 目标信息主动连接并缓存该 tunnel。
+- `PN-B` 只负责为被分配到自己的 target 用户新建逻辑 `PnTunnel`；如果新建 tunnel 的 `ProxyOpenReq.to` 不是本 PN 负责的用户，`PN-B` 应在打开目标流前拒绝。
+- 已建立的逻辑 `PnTunnel` 是双向可用的：任一端都可以在该 tunnel 上继续打开数据 channel，后续 channel 不重新按“新建 tunnel target 归属”解释。
+
+该模型保持业务数据仍是单 relay bridge：`A -> PN-B -> B`。第一版 PN 扩展不引入 `A -> PN-A -> PN-B -> B` 的跨 PN 业务级桥接。
 
 正确模型是：
 
@@ -180,6 +196,36 @@ pub struct ProxyOpenReq {
 - `PnServer::new_with_connection_validator(...)` 允许部署方注入自定义准入策略
 - validator 看到的是 relay 用已认证远端身份重写过 `from` 之后的请求上下文，而不是源端原始报文
 - validator 返回 `Reject`，或校验过程产生 `PermissionDenied` 时，对外握手结果统一映射为 `InvalidParam`
+
+多 PN 扩展应在现有 validator 基础上增加 assigned target 校验，而不是新增一条绕过 `PnConnectionValidator` 的准入路径：
+
+- `PnServer` 消费一份本地 assigned target 策略，用于判断某个 `peer_id` 是否被分配到本 PN，并据此约束新建逻辑 `PnTunnel` 的 target。
+- 只有 assigned target 才能作为新建逻辑 `PnTunnel` 的 `ProxyOpenReq.to` 被本 `PnServer` 打开。
+- 对已经建立的同一逻辑 `PnTunnel`，后续 stream/datagram channel 可以由任一端发起；这类 channel 只需要证明属于该既有 tunnel，不重新触发新建 tunnel 的 assigned target 判定。
+- 非 assigned 用户仍可连接本 `PnServer` 作为 source，并通过本 `PnServer` 连接已分配到本 server 的 target 用户。
+- `PnConnectionValidateContext.to` 是新建 tunnel assigned target 校验的依据；`from` 仍必须先用已认证连接身份规范化。
+- 新建 tunnel 的 assigned target 校验应发生在 `open_target_stream(to)` 之前；target 是否当前在线仍由后续目标流打开结果体现。
+- 若新建 tunnel 的 `to` 不属于本 PN，validator 应返回 `Reject` 或等价 `PermissionDenied`，对外不暴露全局分配细节。
+- 若 `to` 属于本 PN 但当前不在线，`open_target_stream(to)` 返回 `NotFound`、`Interrupted` 或等价不可达错误。
+
+推荐把 assigned target 作为 validator 组合层：
+
+```rust
+pub trait PnAssignedTargetPolicy: Send + Sync + 'static {
+    async fn is_assigned_target(&self, peer: &P2pId) -> P2pResult<bool>;
+}
+
+pub struct AssignedTargetPnConnectionValidator {
+    assignment: PnAssignedTargetPolicyRef,
+    inner: PnConnectionValidatorRef,
+}
+```
+
+组合 validator 的顺序是：
+
+1. 对新建逻辑 `PnTunnel`，检查 `ctx.to` 是否属于本 PN 的 assigned target。
+2. 如果不属于，返回 `ValidateResult::Reject`。
+3. 如果属于，再调用现有 `inner.validate(ctx)`，保留部署方已有 source、purpose、黑白名单或配额准入逻辑。
 
 ### 响应
 
@@ -301,8 +347,25 @@ relay 不负责：
 - 判断目标侧业务 listener 是否接受该 `purpose`
 - 决定最终是 `stream` 还是 `datagram`
 - 解析后续业务 payload
+- 给用户分配 PN
+- 查询某个用户当前属于哪个 PN
+- 在多个 PN server 之间转发业务 bridge
 
 这些都交给目标端 `B` 自己处理。
+
+在多 PN 部署下，`PnServer` 还必须区分三类用户状态：
+
+- assigned users：被库外分配到本 PN 的用户集合，允许作为新建逻辑 `PnTunnel` 的 target 被连接。
+- online assigned users：assigned 且当前已经与本 PN 建立可打开目标流的用户。
+- source users：连接到本 PN 并发起 proxy open 的认证用户，不要求属于 assigned users。
+
+因此，`PnServer` 的目标侧准入顺序应是：
+
+1. 用认证连接身份规范化 source，即覆盖 `req.from`。
+2. 如果这是新建逻辑 `PnTunnel`，通过 assigned target validator 检查 `req.to` 是否归本 PN 服务。
+3. 运行部署方原有 `PnConnectionValidator`。
+4. 通过 `open_target_stream(req.to)` 检查 target 是否在线并打开目标流。
+5. 转发 `ProxyOpenReq` 并执行原有响应校验与 bridge。
 
 ## 建链流程
 
@@ -323,6 +386,15 @@ relay 不负责：
 11. `A` 收到成功响应后，代理通道建立完成
 
 这个流程里，建链成功本身就意味着通道已可用，不再存在后续独立的 channel-open 阶段。
+
+在多 PN 部署中，流程开始前多一个库外步骤：
+
+1. 上层查询或计算 `B` 当前所属 PN，例如 `PN-B`。
+2. 上层把 `PN-B` 作为 relay target 传给 PN 连接逻辑。
+3. 如果 `A` 还没有连接 `PN-B`，库先建立或复用到 `PN-B` 的 relay tunnel。
+4. 后续仍使用上述单 relay 建链流程，由 `PN-B` 直接打开到 `B` 的目标流。
+
+库内不根据 `B` 自行查询目录，也不在 `PN-B` 拒绝后自动猜测其他 PN。是否重新查询、切换 PN 或重试其他 PN，由上层目录和策略决定。
 
 ### 流程二：B 接收入站 PN tunnel
 
@@ -408,6 +480,8 @@ relay 侧在打开目标流之前还会执行新增的前置校验：
 - 将 `{ from, to, tunnel_id, kind, purpose }` 传给 `PnConnectionValidator`
 - 默认构造器保持 allow-all，只有显式注入 validator 时才改变准入策略
 - `Reject` / `PermissionDenied` 对外统一表现为 `InvalidParam`
+- 在多 PN 部署下，`PnConnectionValidator` 应组合 assigned target 策略，保证本 PN 只为 `to` 属于本 PN 的请求新建逻辑 `PnTunnel`
+- assigned target 拒绝是新建 tunnel 的 relay 前置准入失败，不应继续调用 `open_target_stream(to)`
 
 目标侧 `B` 在返回 `ProxyOpenResp` 前需要完成：
 
@@ -517,6 +591,24 @@ PN 还没有独立的 relay 发现与维护机制，仍依赖共享 `TtpClient` 
 
 `PnTunnel` 实例代表一个逻辑 PN tunnel。若该实例由 `PnListener.accept_tunnel()` 返回，触发它创建的第一条 `ProxyOpenReq` 会作为待消费 channel 进入该 tunnel 的队列；若本端已经通过 `PnClient.create_tunnel()` 拥有同一 `(remote_id, tunnel_id)` 的 active tunnel，后续相同 `(from, tunnel_id)` 的 `ProxyOpenReq` 应直接投递到该 active tunnel。无论 active 还是 passive，入站 channel 都由 `accept_stream()` / `accept_datagram()` 逐条消费。
 
+### 5. 多 PN 分配与查询不在库内
+
+PN 扩展只要求库支持“按上层指定 PN 建立 proxy tunnel”。以下能力不属于 `p2p-frame` 的 PN 模块职责：
+
+- 用户分配到哪个 PN
+- `peer_id -> PN` 目录查询
+- 用户迁移、重平衡或多副本在线策略
+- PN server 之间的目录同步
+- 跨 PN 的业务级二跳 bridge
+
+库内应提供或保留的能力是：
+
+- 用户长期连接自己的 assigned PN。
+- 发起方按上层传入的 PN 目标连接该 PN。
+- `PnServer` 基于 assigned target validator 限制可作为新建逻辑 `PnTunnel` target 被打开的用户。
+- 已建立的逻辑 `PnTunnel` 允许双方继续打开数据 channel。
+- 旧的单 PN 部署在不提供 assigned target 策略时仍可通过 allow-all validator 保持兼容。
+
 ## 历史方案说明
 
 以下设计已不再作为当前方案的一部分：
@@ -541,3 +633,5 @@ PN 还没有独立的 relay 发现与维护机制，仍依赖共享 `TtpClient` 
 - `datagram` 语义也统一承载在 stream 上
 - relay 只负责转发建链请求、转发结果、桥接字节流
 - 运行时仍依赖 SN 作为 relay 发现来源
+- 多 PN 扩展的分配和查询在库外完成；库内只按上层指定 PN 连接
+- `PnServer` 基于现有 `PnConnectionValidator` 组合 assigned target 策略，确保本 PN 只为分配到自己的 target 用户新建逻辑 `PnTunnel`，同时不破坏既有 `PnTunnel` 的双向数据 channel 语义

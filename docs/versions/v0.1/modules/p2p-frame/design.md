@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: auto-pipeline
 approved_at: 2026-06-05T18:58:53+08:00
+approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486d1468983c
 ---
 
 # p2p-frame 设计

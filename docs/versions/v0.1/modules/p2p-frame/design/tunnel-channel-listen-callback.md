@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: auto-pipeline
 approved_at: 2026-06-02T11:14:58+08:00
+approved_content_sha256: cec874fda59f2180eb0bbc3684e180e934a6050219495e5c7d93ad1d4abcd65b
 ---
 
 # Tunnel stream/datagram listen 回调设计

@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: auto-pipeline
 approved_at: 2026-05-29
+approved_content_sha256: b67dbdf8e9320518ecba6a656ad437e2df44fe6dca7ef317aa81ed665f659fac
 ---
 
 # sfo-reuseport listener 重构设计

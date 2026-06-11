@@ -1,71 +1,85 @@
-# 流水线子模块任务
+# Pipeline Submodule Task
 
-## 任务标识
-- 任务 ID：
-- 阶段：
-- 职责：
-- Version：
-- 模块：
-- 子模块：
-- change_id：
-- 父任务：
-- 依赖项：
-- 负责人：
+## Task Identity
+- Task ID:
+- Stage:
+- Responsibility:
+- Version:
+- Module:
+- Submodule:
+- change_id:
+- Parent Task:
+- Depends On:
+- Owner:
 
-## 目标
-- 仅为一个直接子模块完成指定阶段。
+## Goal
+- Complete the named stage for this direct submodule only.
 
-## 范围边界
-- 范围内：
-- 范围外：
-- 由其他地方处理的共享主题：
+## Scope Boundary
+- In scope:
+- Out of scope:
+- Shared topics handled elsewhere:
 
-## 输入
-- Proposal 摘录：
-- Design 参考：
-- Testing 参考：
-- 上游输出：
-- 当前子模块映射到的 proposal 条目：
-- 当前子模块映射到的 design 条目：
-- 当前子模块映射到的 testing 条目：
+## Inputs
+- Proposal excerpts:
+- Design references:
+- Testing references or generated test evidence:
+- Upstream outputs:
 
-## 准入检查
-- [ ] 必需的上游制品存在
-- [ ] 必需的上游批准存在
-- [ ] 范围保持在该直接子模块内
-- [ ] 范围保持在命名阶段内，除非用户已显式要求跨阶段同步
-- [ ] 若为 implementation：该子模块的 proposal、design 输入均已批准
-- [ ] 若为 implementation：active `version`、`module`、子模块与 `change_id` 已明确
-- [ ] 若为 implementation：module packet 的 `schema-check.py` 已通过
-- [ ] 若为 implementation：每个已准入 `change_id` 的 `admission-check.py` 已通过
-- [ ] 若为 implementation：当前子模块改动已能映射到直接的 proposal/design 条目
+## Admission Checks
+- [ ] Required upstream artifacts exist
+- [ ] Required upstream approvals exist
+- [ ] If per-stage user confirmation is skipped, the pipeline plan records explicit user auto-pipeline authorization
+- [ ] The pipeline plan task status was updated to `confirmed` or `complete` before dependent tasks continue
+- [ ] If this task produces a stage document and auto-confirmation is enabled, the document front matter was updated to `status: approved`, `approved_by: auto-pipeline`, `approved_at`, and `approved_content_sha256`
+- [ ] Scope stays inside this direct submodule
+- [ ] Scope stays inside the named stage unless the user explicitly requested cross-stage synchronization
+- [ ] For single-stage tasks, `stage-scope-check.py --stage <stage>` passed for the current diff (implementation runs add `--change-id <change_id>` per admitted id so the diff is bound to the design Scope Paths)
+- [ ] For implementation: proposal and design inputs for this submodule are approved
+- [ ] For implementation: active `version`, `module`, submodule, and `change_id` are explicit
+- [ ] For implementation: `schema-check.py --submodule <submodule>` passed for the submodule packet
+- [ ] For implementation: `harness/evidence/admission/<task-id>.md` contains required admission evidence
+- [ ] For implementation: `admission-check.py --submodule <submodule> --evidence-file harness/evidence/admission/<task-id>.md` passed for every admitted `change_id`
+- [ ] For implementation: the approved submodule doc inspection and coverage judgment are recorded in the admission evidence file
 
-## 必需输出
-- 输出文件：
-- 证据：
-- 若为 implementation：验证是否执行，以及依据是什么
+## Implementation Admission Evidence
+| evidence_item | source | status | notes |
+|---------------|--------|--------|-------|
+| proposal_read | `<submodule>/proposal.md` section/table | pass/fail | cite admitted `change_id` and relevant proposal coverage |
+| design_read | `<submodule>/design.md` section/table | pass/fail | cite admitted `change_id` and relevant design coverage |
+| change_scope_matches_request | user request + proposal/design mapping | pass/fail | explain why the admitted scope covers this submodule task |
+| active_module_resolved | submodule packet path | pass/fail | version/module/submodule |
+| no_chat_only_evidence | versioned docs and inspected code | pass/fail | confirm no oral/chat-only requirement is used as admission evidence |
 
-## 允许的改动
-- 可以修改：
-- 不可修改：
+## Required Outputs
+- Output file(s):
+- Evidence:
 
-阶段任务默认值：
-- Proposal 可以修改：仅 `proposal.md`
-- Design 可以修改：仅 `design.md`、`design/` 和必需的长期边界同步
-- Testing 可以修改：测试代码、测试夹具、测试入口，以及可选的 `testing.md`、`testing/` 和 `testplan.yaml`
-- Implementation 可以修改：仅生产代码和必需的非测试运行时/构建资源
-- Acceptance 可以修改：仅评审报告
-- 跨阶段编辑必须由用户显式命名额外阶段，或显式要求跨阶段同步
+## Allowed Changes
+- Can modify:
+- Must not modify:
 
-## 完成条件
-- [ ] 子模块输出完整
-- [ ] 未修改范围外文件
-- [ ] 已存在交接给下游依赖任务的数据
+Stage-task defaults:
+- Proposal can modify: `<submodule>/proposal.md` only
+- Design can modify: `<submodule>/design.md` and required long-lived boundary sync only
+- Implementation can modify: production code, required non-test runtime/build resources, and task admission evidence under `harness/evidence/admission/` only
+- Testing can modify: test code, test fixtures, test runners, unified test entrypoint wiring, and optional `<submodule>/testing.md` / `<submodule>/testplan.yaml` only
+- Acceptance can modify: review reports and generated acceptance rules/expected-result evidence only
+- Cross-stage edits require explicit user instruction naming the extra stage(s) or asking for cross-stage synchronization
 
-## 失败处理
-- 如果问题属于共享问题或上游问题，应退回而不是在该子模块任务内直接解决。
-- 记录：
-  - 问题 ID
-  - 退回阶段
-  - 退回目标任务
-  - 期望的上游修复
+## Done Condition
+- [ ] Submodule output is complete
+- [ ] For testing: submodule tests are reachable through `harness/scripts/test-run.py <module>/<submodule> all` or the repository's documented submodule equivalent
+- [ ] For acceptance: submodule test design adequacy was reviewed, including relevant normal, boundary, negative, error, compatibility, lifecycle, and cross-module cases
+- [ ] For acceptance: incomplete, ambiguous, unreasonable, stale, or non-runnable submodule test coverage was routed back to testing
+- [ ] No out-of-scope files were changed
+- [ ] Stage scope check passed when applicable
+- [ ] Handover data for the next dependent task exists
+
+## Failure Handling
+- If the issue is shared or upstream, return it instead of solving it inside this submodule task.
+- Record:
+  - issue id
+  - return stage
+  - return target task
+  - expected upstream fix

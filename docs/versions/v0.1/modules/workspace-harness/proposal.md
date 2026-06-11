@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: user
 approved_at: 2026-05-13
+approved_content_sha256: 48357c3fa2cee60e1f698f376a9d669d21372216569a1c1ea8a98963a65a737f
 ---
 
 # workspace-harness 提案
@@ -53,3 +54,8 @@ approved_at: 2026-05-13
 - 治理规则过窄会阻塞已有合法豁免或 legacy 数据包。
 - 脚本与规则 prose 不一致会导致人工评审和机器检查结果分叉。
 - 将治理变更与业务实现混在同一 acceptance 中，会使责任阶段不清晰。
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-11
+- user_statement: 将已有文档都迁移到新的要求吧

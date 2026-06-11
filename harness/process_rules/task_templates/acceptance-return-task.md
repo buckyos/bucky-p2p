@@ -1,28 +1,32 @@
-# 验收退回任务
+# Acceptance Return Task
 
-## 任务标识
-- 任务 ID：
-- 由哪份验收报告触发：
-- 退回阶段：
-- 退回阶段职责：
-- 退回目标任务：
-- 负责人：
+## Task Identity
+- Task ID:
+- Triggered By Acceptance Report:
+- Return Stage:
+- Return Stage Responsibility:
+- Return Target Task:
+- Owner:
 
-## 退回原因
-- 阻塞问题 ID：
-- 验收失败原因：
-- 为什么该阶段负责修复：
+## Reason For Return
+- Blocking issue id:
+- Why acceptance failed:
+- Why this stage owns the fix:
+- If returning to testing, list the missing or unreasonable case types: normal / boundary / negative / error / compatibility / lifecycle / cross-module
 
-## 必需修复输出
-- 输出 1：
-- 输出 2：
+## Required Fix Output
+- Output 1:
+- Output 2:
+- For testing returns: supplemented test design, test implementation, metadata if used, and unified-entrypoint runnable evidence
 
-## 需要重新附带的证据
-- 更新后的文档或代码：
-- 更新后的测试或结果：
-- 重新运行验收时的说明：
+## Evidence To Re-Attach
+- Updated docs or code:
+- Updated tests or results:
+- Iteration count for this issue:
+- Notes for re-running acceptance:
 
-## 完成条件
-- [ ] 在该阶段边界内解决了验收阻塞问题
-- [ ] 已为下一次验收附上所需证据
-- [ ] 没有把无关阶段的工作打包进这次退回任务
+## Done Condition
+- [ ] The acceptance-blocking issue is addressed inside this stage boundary
+- [ ] Evidence is attached for the next acceptance run
+- [ ] No unrelated stage work was bundled into this return task
+- [ ] If this issue has already survived more than 5 unsuccessful iterations, stop and report it to the user instead of opening another return task

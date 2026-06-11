@@ -31,22 +31,32 @@
 - Acceptance MUST write a standalone review report instead of editing implementation or stage docs.
 - Acceptance MUST NOT directly edit `proposal.md`, `design.md`, `design/`, `testing.md`, `testing/`, `testplan.yaml`, code, or test code unless the user explicitly requested a separate cross-stage update task.
 - Acceptance MUST identify the owning stage for each blocking mismatch.
-- Acceptance SHOULD verify that the reviewed change maps back to direct proposal and design items, not only to module-overview or baseline text.
+- Acceptance MUST verify that the reviewed change maps back to direct proposal and design items, not only to module-overview or baseline text.
 - Acceptance MUST verify that reviewed implementation changes map to stable `change_id` values across proposal and design, and that testing implementation covers those `change_id` values or records an explicit gap.
 - Acceptance MUST verify every module needed as evidence for accepted behavior has approved, directly mapped proposal/design coverage and post-implementation testing evidence.
 - Acceptance MUST verify every direct submodule packet needed as evidence for accepted behavior has approved, directly mapped proposal/design coverage and post-implementation testing evidence.
-- Acceptance MUST verify that automated test evidence is reachable through the unified test entrypoint, normally `harness/scripts/test-run.py`, and that whole-project tests can be invoked through `test-run.py all all`.
+- Acceptance MUST verify completed testing work includes `testplan.yaml`, unless a repo-local versioned exception records the reason, owner, risk, and acceptance impact.
+- Acceptance MUST verify that post-implementation test design is reasonable for proposal/design/code behavior and covers normal, boundary, negative, error, compatibility, lifecycle, and cross-module cases where applicable.
+- Acceptance MUST verify that test design and test implementation coverage map to reviewed `change_id` values, or that explicit gaps are recorded with a reason.
+- Acceptance MUST verify that automated test evidence is reachable through the unified test entrypoint `harness/scripts/test-run.py`, and that whole-project tests can be invoked through `test-run.py all all`.
+- Acceptance MUST cite machine-written run artifacts as execution evidence: `harness/evidence/test-runs/*.json` for test runs and `harness/evidence/quality-runs/*.json` for quality gates; claimed runs without an artifact are missing evidence.
+- Acceptance MUST run `uv run --active python ./harness/scripts/quality-check.py` and treat failing or unrun configured quality gates as blocking; see `harness/rules/quality-gate-rules.md`.
+- Acceptance MUST verify red-green regression evidence for reviewed bugfix work: a regression test bound to the bugfix `change_id` with a failing pre-fix run artifact or a recorded concrete infeasibility reason.
+- Acceptance MUST verify the implementation diff was bound to the admitted design Scope Paths via `stage-scope-check.py --stage implementation --change-id ...`.
 - Acceptance MUST treat missing or ambiguous active module / `change_id` evidence as a blocking admission failure.
 - Acceptance MUST treat missing or ambiguous active submodule evidence as a blocking admission failure when the change belongs to a direct submodule packet.
 - Acceptance MUST NOT mark the work as passed when required evidence is missing.
 - Acceptance MUST NOT mark the work as passed only because tests passed.
 - Acceptance MUST generate or finalize acceptance rules and expected results from `proposal.md`, `design.md`, implementation, and testing implementation before judging pass/fail.
+- Acceptance MUST run `uv run --active python ./harness/scripts/acceptance-report-check.py <report>` before marking the report complete.
+- An `accepted` conclusion is invalid when `acceptance-report-check.py` fails.
 
 ## Failure Handling
 - proposal mismatch: return to proposal
 - proposal-to-design mismatch: return to design unless the proposal itself is ambiguous or contradictory
 - design-to-code mismatch: return to implementation/code
-- missing or invalid test implementation: return to testing
+- missing, invalid, incomplete, ambiguous, stale, or unreasonable test design / test implementation coverage: return to testing
+- test evidence not reachable through the unified test entrypoint: return to testing
 - document-to-code mismatch: return to implementation/code
 - implementation defect: return to implementation
 - logic or consistency finding: return to the owning stage named by the finding

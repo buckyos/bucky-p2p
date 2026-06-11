@@ -4,6 +4,7 @@ version: v0.1
 status: approved
 approved_by: user
 approved_at: 2026-05-13
+approved_content_sha256: 431693858f5eded83905aa464fc6b206b55044e7a379c8c8662f50e2f48e1af2
 ---
 
 # cyfs-p2p 设计
@@ -80,3 +81,8 @@ cyfs-p2p/src
 ## 风险与回滚
 - 回滚应当在撤销具体适配层改动的同时，保留已批准的数据包文档
 - 身份/证书回归可能需要与运行时使用方协同验证
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-11
+- user_statement: 将已有文档都迁移到新的要求吧

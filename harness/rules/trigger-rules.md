@@ -21,6 +21,9 @@ These rules apply to proposal, design, testing, implementation, and acceptance t
 - If it is unclear whether a trigger applies, treat it as triggered until the owning document stage records a concrete reason why it does not apply.
 - A trigger may be marked not applicable only with evidence from versioned docs or inspected code, not from chat-only assumptions.
 - Triggered checks may be deferred only when generated test evidence, and optional testing metadata when present, records the reason, owner, risk, and acceptance impact.
+- `doc-structure-check.py` MUST validate proposal/design trigger matrices and fail when any trigger category is missing, `applies` is not `yes` or `no`, evidence is missing, or a triggered category lacks required checks.
+- `testing-coverage-check.py` MUST validate that implemented `change_id` values have test coverage or explicit gap/manual/disabled reasons for the required trigger-driven checks.
+- `acceptance-report-check.py` MUST fail accepted reports when required triggered checks are missing, failing, or deferred without recorded owner, risk, and acceptance impact.
 
 ## Trigger Types
 
@@ -61,7 +64,7 @@ These rules apply to proposal, design, testing, implementation, and acceptance t
 - Reviewer focus: broken empty/error/loading states, data mismatch, inaccessible controls, layout overlap, and workflow regressions.
 
 ### Test Harness, Admission, or Process Rule Changes
-- Trigger when a change affects `harness/rules/`, `harness/process_rules/`, `harness/scripts/`, module templates, `AGENTS.md`, `testplan.yaml` schema, CI entrypoints, or acceptance report formats.
+- Trigger when a change affects `harness/rules/`, `harness/custom-rules/`, `harness/process_rules/`, `harness/scripts/`, module templates, `AGENTS.md`, `testplan.yaml` schema, CI entrypoints, or acceptance report formats.
 - Required coverage: design MUST state the process behavior being changed; post-implementation testing MUST include at least one generated-scaffold or checker validation path.
 - Additional checks: run the affected checker or document why it cannot run, inspect generated path references, verify that new rules fail closed, and verify `harness/scripts/test-run.py all all` can still invoke all registered tests.
 - Reviewer focus: contradictions between templates and rules, missing generated files, bypassable wording, and checks that pass without validating the intended condition.
@@ -88,30 +91,7 @@ Every proposal/design/testing/acceptance artifact that handles a triggered chang
 
 Rules:
 - `Applies?` may be `no` only when `Evidence` explains why the trigger does not apply.
+- `Evidence` MUST name concrete files, sections, or inspected code paths, not generic statements; "not applicable to this module" without a reason is placeholder evidence and fails `doc-structure-check.py`.
+- Acceptance audits trigger evidence authenticity for the reviewed change: rows whose evidence does not exist, does not support the recorded decision, or repeats identical wording across unrelated categories are findings against the owning document stage.
 - `Deferred Checks and Reason` must include owner, reason, and acceptance impact.
 - Acceptance MUST NOT pass if a required triggered check is missing and no approved deferral exists.
-
-## P2P Workspace Trigger Overlays
-
-These overlays preserve repository-specific high-risk surfaces in addition to the generic trigger categories above.
-
-### P2P Contract or Protocol Paths
-- Trigger when files under `p2p-frame/src/networks/**`, `p2p-frame/src/tunnel/**`, `p2p-frame/src/ttp/**`, `p2p-frame/src/sn/**`, or `p2p-frame/src/pn/**` change.
-- Trigger when `p2p-frame/docs/*design*.md`, `*protocol*.md`, or `*test_cases*.md` change.
-- Additional checks: unit, DV, integration, and updated design/testing evidence review unless a generated post-implementation testing artifact records a manual or disabled reason.
-- Reviewer focus: wire compatibility, state migration, downstream adapter assumptions, and cross-module admission coverage.
-
-### Descriptor or Key Material Paths
-- Trigger when `desc-tool/**` changes descriptor generation, key handling, or generated desc/sec/device artifact semantics.
-- Additional checks: unit and operator-facing DV unless explicitly deferred in generated testing evidence.
-- Reviewer focus: file compatibility, signature correctness, and accidental data destruction.
-
-### Runtime Scenario Paths
-- Trigger when `cyfs-p2p-test/**`, `sn-miner-rust/**`, runtime feature flags, startup behavior, or configuration defaults change.
-- Additional checks: DV and integration unless generated testing evidence records a manual or disabled reason.
-- Reviewer focus: startup behavior, scenario assumptions, configuration prerequisites, and artifact prerequisites.
-
-### Security-Sensitive P2P Paths
-- Trigger when `p2p-frame/src/tls/**`, `p2p-frame/src/x509*`, `p2p-frame/src/p2p_identity.rs`, or security-sensitive `desc-tool` code changes.
-- Additional checks: unit, targeted design review, and explicit acceptance discussion of the security-sensitive surface.
-- Reviewer focus: handshake correctness, certificate validation, feature-gated behavior, and unsafe defaults.
