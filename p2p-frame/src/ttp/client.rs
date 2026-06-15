@@ -1,3 +1,4 @@
+use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
     NetManagerRef, TunnelDatagramWrite, TunnelPurpose, TunnelRef, TunnelState, TunnelStreamRead,
@@ -5,6 +6,7 @@ use crate::networks::{
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use crate::runtime;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,7 +41,7 @@ pub struct TtpClient {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
-    tunnels: Mutex<Vec<TunnelRef>>,
+    tunnels: Mutex<HashMap<P2pId, TunnelRef>>,
     maintained_targets: Mutex<Vec<TtpTarget>>,
     maintain_started: AtomicBool,
 }
@@ -52,7 +54,7 @@ impl TtpClient {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
-            tunnels: Mutex::new(Vec::new()),
+            tunnels: Mutex::new(HashMap::new()),
             maintained_targets: Mutex::new(Vec::new()),
             maintain_started: AtomicBool::new(false),
         })
@@ -60,74 +62,43 @@ impl TtpClient {
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {
         let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|tunnel| is_tunnel_available(tunnel.as_ref()));
+        tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
         tunnels
-            .iter()
-            .rev()
-            .find(|tunnel| match_target(tunnel.as_ref(), target))
+            .get(&target.remote_id)
+            .filter(|tunnel| match_target(tunnel.as_ref(), target))
             .cloned()
     }
 
     pub(crate) fn remember_tunnel(&self, tunnel: TunnelRef) {
         let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|existing| {
-            is_tunnel_available(existing.as_ref()) && !Arc::ptr_eq(existing, &tunnel)
-        });
-        tunnels.push(tunnel);
-    }
-
-    fn latest_available_tunnel(&self) -> Option<TunnelRef> {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|tunnel| is_tunnel_available(tunnel.as_ref()));
-        tunnels.last().cloned()
+        tunnels.retain(|_, existing| is_tunnel_available(existing.as_ref()));
+        tunnels.insert(tunnel.remote_id(), tunnel);
     }
 
     pub fn local_id(&self) -> P2pId {
         self.local_identity.get_id()
     }
 
-    pub async fn open_stream_on_latest_tunnel(
-        &self,
-        purpose: TunnelPurpose,
-    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
-        let tunnel = self
-            .latest_available_tunnel()
-            .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no cached ttp tunnel available"))?;
-        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
-        Ok((
-            TtpStreamMeta {
-                local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep(),
-                local_id: tunnel.local_id(),
-                remote_id: tunnel.remote_id(),
-                remote_name: None,
-                purpose,
-            },
-            read,
-            write,
-        ))
+    pub(crate) fn configured_server_id(&self) -> P2pResult<Option<P2pId>> {
+        let targets = self.maintained_targets.lock().unwrap();
+        let Some(first) = targets.first() else {
+            return Ok(None);
+        };
+        if targets
+            .iter()
+            .any(|target| target.remote_id != first.remote_id)
+        {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "multiple ttp server targets configured"
+            ));
+        }
+        Ok(Some(first.remote_id.clone()))
     }
 
-    pub async fn open_control_stream_on_latest_tunnel(
-        &self,
-        purpose: TunnelPurpose,
-    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
-        let tunnel = self
-            .latest_available_tunnel()
-            .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no cached ttp tunnel available"))?;
-        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
-        Ok((
-            TtpStreamMeta {
-                local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep(),
-                local_id: tunnel.local_id(),
-                remote_id: tunnel.remote_id(),
-                remote_name: None,
-                purpose,
-            },
-            read,
-            write,
-        ))
+    #[cfg(test)]
+    pub(crate) fn remember_server_target_for_test(&self, target: TtpTarget) {
+        self.maintained_targets.lock().unwrap().push(target);
     }
 
     pub async fn connect_server(self: &TtpClientRef, target: TtpTarget) -> P2pResult<()> {
@@ -325,8 +296,9 @@ pub(crate) fn match_target(tunnel: &dyn crate::networks::Tunnel, target: &TtpTar
         }
     }
 
-    tunnel
-        .remote_ep()
-        .map(|ep| ep == target.remote_ep)
-        .unwrap_or(true)
+    target.remote_ep == Endpoint::default()
+        || tunnel
+            .remote_ep()
+            .map(|ep| ep == target.remote_ep)
+            .unwrap_or(true)
 }

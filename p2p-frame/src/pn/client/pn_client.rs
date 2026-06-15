@@ -17,7 +17,7 @@ use crate::pn::{
     ProxyOpenResp,
 };
 use crate::runtime;
-use crate::ttp::{TtpClientRef, TtpPortListener};
+use crate::ttp::{TtpClientRef, TtpConnector, TtpPortListener, TtpTarget};
 use crate::types::{TunnelId, TunnelIdGenerator};
 
 use super::pn_listener::PnListener;
@@ -33,8 +33,16 @@ pub(super) struct PnShared {
     tls_context: Option<PnTlsContext>,
     stream_security_mode: AtomicU8,
     tunnel_idle_timeout: Mutex<Option<Duration>>,
+    proxy_route_resolver: Option<PnProxyRouteResolverRef>,
     tunnels: Mutex<HashMap<PnTunnelKey, Weak<PnTunnel>>>,
 }
+
+#[async_trait::async_trait]
+pub trait PnProxyRouteResolver: Send + Sync + 'static {
+    async fn resolve_pn_server(&self, target: &P2pId) -> P2pResult<P2pId>;
+}
+
+pub type PnProxyRouteResolverRef = Arc<dyn PnProxyRouteResolver>;
 
 impl PnShared {
     pub(super) fn local_id(&self) -> P2pId {
@@ -60,6 +68,18 @@ impl PnShared {
 
     pub(super) fn set_tunnel_idle_timeout(&self, timeout: Option<Duration>) {
         *self.tunnel_idle_timeout.lock().unwrap() = timeout;
+    }
+
+    async fn resolve_pn_server(&self, target: &P2pId) -> P2pResult<P2pId> {
+        if let Some(resolver) = self.proxy_route_resolver.as_ref() {
+            return resolver.resolve_pn_server(target).await;
+        }
+        self.ttp_client.configured_server_id()?.ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "proxy pn route resolver and current pn server address not configured"
+            )
+        })
     }
 
     pub(super) fn tunnel_key(remote_id: P2pId, tunnel_id: TunnelId) -> PnTunnelKey {
@@ -166,6 +186,7 @@ impl PnShared {
     pub(super) fn register_passive_control_tunnel(
         self: &Arc<Self>,
         req: ProxyControlOpenReq,
+        relay_id: P2pId,
     ) -> P2pResult<Arc<PnTunnel>> {
         let key = PnShared::tunnel_key(req.from.clone(), req.tunnel_id);
         let mut tunnels = self.tunnels.lock().unwrap();
@@ -184,6 +205,7 @@ impl PnShared {
             self.local_id(),
             req,
             Some(self.clone()),
+            Some(relay_id),
             self.tls_context(),
             self.stream_security_mode(),
         );
@@ -203,6 +225,7 @@ impl PnShared {
             tls_context: None,
             stream_security_mode: AtomicU8::new(PnProxyStreamSecurityMode::Disabled.to_atomic()),
             tunnel_idle_timeout: Mutex::new(Some(super::pn_tunnel::DEFAULT_PN_TUNNEL_IDLE_TIMEOUT)),
+            proxy_route_resolver: None,
             tunnels: Mutex::new(HashMap::new()),
         })
     }
@@ -210,6 +233,7 @@ impl PnShared {
     pub(super) async fn open_channel(
         &self,
         tunnel_id: crate::types::TunnelId,
+        relay_id: P2pId,
         remote_id: P2pId,
         kind: PnChannelKind,
         purpose: TunnelPurpose,
@@ -230,7 +254,7 @@ impl PnShared {
             kind,
             purpose
         );
-        let (mut read, mut write) = self.create_data_connection().await?;
+        let (mut read, mut write) = self.create_data_connection(&relay_id).await?;
         write_pn_command(&mut write, req).await?;
 
         let resp = match runtime::timeout(
@@ -285,6 +309,7 @@ impl PnShared {
     pub(super) async fn open_control_channel(
         &self,
         tunnel_id: crate::types::TunnelId,
+        relay_id: P2pId,
         remote_id: P2pId,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let req = ProxyControlOpenReq {
@@ -298,7 +323,7 @@ impl PnShared {
             req.from,
             req.to
         );
-        let (mut read, mut write) = self.create_data_connection().await?;
+        let (mut read, mut write) = self.create_data_connection(&relay_id).await?;
         write_pn_command(&mut write, req).await?;
 
         let resp = match runtime::timeout(
@@ -340,10 +365,22 @@ impl PnShared {
         Ok((read, write))
     }
 
-    async fn create_data_connection(&self) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+    async fn create_data_connection(
+        &self,
+        relay_id: &P2pId,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let target = TtpTarget {
+            local_ep: None,
+            remote_ep: Endpoint::default(),
+            remote_id: relay_id.clone(),
+            remote_name: None,
+        };
         let (_meta, read, write) = self
             .ttp_client
-            .open_stream_on_latest_tunnel(TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?)
+            .open_stream(
+                &target,
+                TunnelPurpose::from_value(&PROXY_SERVICE.to_string())?,
+            )
             .await?;
         Ok((read, write))
     }
@@ -361,13 +398,17 @@ pub struct PnClient {
 }
 
 impl PnClient {
-    pub fn new(ttp_client: TtpClientRef) -> Arc<Self> {
-        Self::new_with_tls_context(ttp_client, None)
+    pub fn new(
+        ttp_client: TtpClientRef,
+        proxy_route_resolver: Option<PnProxyRouteResolverRef>,
+    ) -> Arc<Self> {
+        Self::new_with_tls_context(ttp_client, None, proxy_route_resolver)
     }
 
     fn new_with_tls_context(
         ttp_client: TtpClientRef,
         tls_context: Option<PnTlsContext>,
+        proxy_route_resolver: Option<PnProxyRouteResolverRef>,
     ) -> Arc<Self> {
         Arc::new(Self {
             shared: Arc::new(PnShared {
@@ -380,6 +421,7 @@ impl PnClient {
                 tunnel_idle_timeout: Mutex::new(Some(
                     super::pn_tunnel::DEFAULT_PN_TUNNEL_IDLE_TIMEOUT,
                 )),
+                proxy_route_resolver,
                 tunnels: Mutex::new(HashMap::new()),
             }),
             listener: Mutex::new(None),
@@ -391,6 +433,7 @@ impl PnClient {
         ttp_client: TtpClientRef,
         local_identity: P2pIdentityRef,
         cert_factory: P2pIdentityCertFactoryRef,
+        proxy_route_resolver: Option<PnProxyRouteResolverRef>,
     ) -> Arc<Self> {
         Self::new_with_tls_context(
             ttp_client,
@@ -398,15 +441,28 @@ impl PnClient {
                 local_identity,
                 cert_factory,
             }),
+            proxy_route_resolver,
         )
     }
 
-    pub async fn create_tunnel_with_options(
+    async fn create_tunnel_with_options(
         &self,
         _local_identity: &P2pIdentityRef,
         _remote: &Endpoint,
         remote_id: &P2pId,
         _remote_name: Option<String>,
+        intent: crate::networks::TunnelConnectIntent,
+        options: PnTunnelOptions,
+    ) -> P2pResult<Arc<PnTunnel>> {
+        let relay_id = self.shared.resolve_pn_server(remote_id).await?;
+        self.create_tunnel_via_relay_with_options(remote_id, &relay_id, intent, options)
+            .await
+    }
+
+    async fn create_tunnel_via_relay_with_options(
+        &self,
+        remote_id: &P2pId,
+        relay_id: &P2pId,
         intent: crate::networks::TunnelConnectIntent,
         options: PnTunnelOptions,
     ) -> P2pResult<Arc<PnTunnel>> {
@@ -420,17 +476,18 @@ impl PnClient {
         } else {
             intent.candidate_id
         };
-        let tunnel = PnTunnel::new_active(
+        let tunnel = PnTunnel::new_active_with_relay(
             tunnel_id,
             candidate_id,
             self.shared.local_id(),
             remote_id.clone(),
+            relay_id.clone(),
             self.shared.clone(),
             options.stream_security_mode,
         );
         let (control_read, control_write) = match self
             .shared
-            .open_control_channel(tunnel_id, remote_id.clone())
+            .open_control_channel(tunnel_id, relay_id.clone(), remote_id.clone())
             .await
         {
             Ok(control) => control,
@@ -513,7 +570,7 @@ impl TunnelNetwork for PnClient {
             let listener = callback_listener.clone();
             let on_incoming_tunnel = callback_on_incoming.clone();
             Box::pin(async move {
-                let (_meta, read, write) = match accepted {
+                let (meta, read, write) = match accepted {
                     Ok(accepted) => accepted,
                     Err(err) => {
                         if !matches!(
@@ -525,7 +582,7 @@ impl TunnelNetwork for PnClient {
                         return;
                     }
                 };
-                match listener.handle_stream(read, write).await {
+                match listener.handle_stream(meta.remote_id, read, write).await {
                     Ok(Some(tunnel)) => (on_incoming_tunnel)(Ok(tunnel)).await,
                     Ok(None) => {}
                     Err(err) => {
@@ -588,52 +645,24 @@ impl TunnelNetwork for PnClient {
 
     async fn create_tunnel_with_intent(
         &self,
-        _local_identity: &P2pIdentityRef,
-        _remote: &Endpoint,
+        local_identity: &P2pIdentityRef,
+        remote: &Endpoint,
         remote_id: &P2pId,
-        _remote_name: Option<String>,
+        remote_name: Option<String>,
         intent: crate::networks::TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
-        let tunnel_id = if intent.tunnel_id == crate::types::TunnelId::default() {
-            self.shared.gen_id.generate()
-        } else {
-            intent.tunnel_id
-        };
-        let candidate_id = if intent.candidate_id == crate::types::TunnelCandidateId::default() {
-            crate::types::TunnelCandidateId::from(tunnel_id.value())
-        } else {
-            intent.candidate_id
-        };
-        let tunnel = PnTunnel::new_active(
-            tunnel_id,
-            candidate_id,
-            self.shared.local_id(),
-            remote_id.clone(),
-            self.shared.clone(),
-            self.shared.stream_security_mode(),
-        );
-        let (control_read, control_write) = match self
-            .shared
-            .open_control_channel(tunnel_id, remote_id.clone())
-            .await
-        {
-            Ok(control) => control,
-            Err(err) => {
-                let _ = tunnel.close();
-                return Err(err);
-            }
-        };
-        if let Err(err) = self.shared.register_control_tunnel_if_absent(
-            PnShared::tunnel_key(remote_id.clone(), tunnel_id),
-            &tunnel,
-        ) {
-            let _ = tunnel.close();
-            return Err(err);
-        }
-        tunnel
-            .set_control_channel(control_read, control_write)
-            .await;
-        let tunnel: TunnelRef = tunnel;
+        let tunnel = self
+            .create_tunnel_with_options(
+                local_identity,
+                remote,
+                remote_id,
+                remote_name,
+                intent,
+                PnTunnelOptions {
+                    stream_security_mode: self.shared.stream_security_mode(),
+                },
+            )
+            .await?;
         Ok(tunnel)
     }
 
@@ -681,7 +710,7 @@ mod tests {
     use super::*;
     use crate::networks::{
         ListenVPortsRef, NetManager, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm,
-        TunnelState,
+        TunnelNetwork, TunnelState,
     };
     use crate::p2p_identity::{EncodedP2pIdentity, P2pIdentity, P2pIdentityCertRef, P2pSignature};
     use crate::types::TunnelCandidateId;
@@ -735,6 +764,17 @@ mod tests {
 
         fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityRef {
             Arc::new(self.clone())
+        }
+    }
+
+    struct StaticPnRouteResolver {
+        relay_id: P2pId,
+    }
+
+    #[async_trait::async_trait]
+    impl PnProxyRouteResolver for StaticPnRouteResolver {
+        async fn resolve_pn_server(&self, _target: &P2pId) -> P2pResult<P2pId> {
+            Ok(self.relay_id.clone())
         }
     }
 
@@ -852,7 +892,7 @@ mod tests {
         let net_manager =
             NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity, net_manager);
-        let client = PnClient::new(ttp_client);
+        let client = PnClient::new(ttp_client, None);
 
         assert!(client.listener_infos().is_empty());
 
@@ -875,13 +915,19 @@ mod tests {
     async fn pn_tunnel_create_waits_for_control_ready() {
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(1));
         let remote_id = P2pId::from(vec![2; 32]);
+        let relay_id = P2pId::from(vec![12; 32]);
         let net_manager =
             NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
         let (cached, mut relay_read, mut relay_write) =
-            FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
+            FakeCachedTunnel::new(local_identity.get_id(), relay_id.clone());
         ttp_client.remember_tunnel(cached);
-        let client = PnClient::new(ttp_client);
+        let client = PnClient::new(
+            ttp_client,
+            Some(Arc::new(StaticPnRouteResolver {
+                relay_id: relay_id.clone(),
+            })),
+        );
 
         let create_task = tokio::spawn({
             let client = client.clone();
@@ -937,16 +983,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pn_tunnel_control_ready_failure_fails_create() {
-        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(3));
-        let remote_id = P2pId::from(vec![4; 32]);
+    async fn pn_tunnel_create_uses_configured_server_when_resolver_missing() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(5));
+        let remote_id = P2pId::from(vec![6; 32]);
+        let relay_id = P2pId::from(vec![16; 32]);
         let net_manager =
             NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
         let (cached, mut relay_read, mut relay_write) =
-            FakeCachedTunnel::new(local_identity.get_id(), remote_id.clone());
+            FakeCachedTunnel::new(local_identity.get_id(), relay_id.clone());
         ttp_client.remember_tunnel(cached);
-        let client = PnClient::new(ttp_client);
+        ttp_client.remember_server_target_for_test(crate::ttp::TtpTarget {
+            local_ep: None,
+            remote_ep: Endpoint::default(),
+            remote_id: relay_id.clone(),
+            remote_name: None,
+        });
+        let client = PnClient::new(ttp_client, None);
+
+        let create_task = tokio::spawn({
+            let client = client.clone();
+            let local_identity = local_identity.clone();
+            let remote_id = remote_id.clone();
+            async move {
+                client
+                    .create_tunnel_with_intent(
+                        &local_identity,
+                        &pn_virtual_endpoint(),
+                        &remote_id,
+                        None,
+                        crate::networks::TunnelConnectIntent::default(),
+                    )
+                    .await
+            }
+        });
+
+        let req = read_pn_command::<_, ProxyControlOpenReq>(&mut relay_read)
+            .await
+            .unwrap();
+        assert_eq!(req.to, remote_id);
+        write_pn_command(
+            &mut relay_write,
+            ProxyControlOpenResp {
+                tunnel_id: req.tunnel_id,
+                result: TunnelCommandResult::Success as u8,
+            },
+        )
+        .await
+        .unwrap();
+
+        let tunnel = timeout(Duration::from_secs(1), create_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(tunnel.tunnel_id(), req.tunnel_id);
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_create_fails_when_resolver_and_server_missing() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(7));
+        let remote_id = P2pId::from(vec![8; 32]);
+        let net_manager =
+            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
+        let client = PnClient::new(ttp_client, None);
+
+        let err = client
+            .create_tunnel_with_intent(
+                &local_identity,
+                &pn_virtual_endpoint(),
+                &remote_id,
+                None,
+                crate::networks::TunnelConnectIntent::default(),
+            )
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(err.code(), P2pErrorCode::InvalidParam);
+    }
+
+    #[tokio::test]
+    async fn pn_tunnel_control_ready_failure_fails_create() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(3));
+        let remote_id = P2pId::from(vec![4; 32]);
+        let relay_id = P2pId::from(vec![14; 32]);
+        let net_manager =
+            NetManager::new(vec![], crate::tls::DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
+        let (cached, mut relay_read, mut relay_write) =
+            FakeCachedTunnel::new(local_identity.get_id(), relay_id.clone());
+        ttp_client.remember_tunnel(cached);
+        let client = PnClient::new(
+            ttp_client,
+            Some(Arc::new(StaticPnRouteResolver {
+                relay_id: relay_id.clone(),
+            })),
+        );
 
         let create_task = tokio::spawn({
             let client = client.clone();
@@ -994,6 +1128,10 @@ mod tests {
     }
 }
 
-pub fn pn_virtual_endpoint() -> Endpoint {
-    Endpoint::from((Protocol::Ext(1), "0.0.0.0:0".parse().unwrap()))
+#[cfg(test)]
+fn pn_virtual_endpoint() -> Endpoint {
+    Endpoint::from((
+        crate::endpoint::Protocol::Ext(1),
+        "0.0.0.0:0".parse().unwrap(),
+    ))
 }

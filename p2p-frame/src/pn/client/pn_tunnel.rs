@@ -335,8 +335,14 @@ impl tokio::io::AsyncWrite for LeaseWrite {
 }
 
 enum PnTunnelRole {
-    Active { network: Arc<PnShared> },
-    Passive { network: Option<Arc<PnShared>> },
+    Active {
+        network: Arc<PnShared>,
+        relay_id: P2pId,
+    },
+    Passive {
+        network: Option<Arc<PnShared>>,
+        relay_id: Option<P2pId>,
+    },
 }
 
 pub struct PnTunnel {
@@ -378,11 +384,12 @@ impl PnTunnel {
         )
     }
 
-    pub(super) fn new_active(
+    pub(super) fn new_active_with_relay(
         tunnel_id: TunnelId,
         candidate_id: TunnelCandidateId,
         local_id: P2pId,
         remote_id: P2pId,
+        relay_id: P2pId,
         network: Arc<PnShared>,
         stream_security_mode: PnProxyStreamSecurityMode,
     ) -> Arc<Self> {
@@ -398,7 +405,7 @@ impl PnTunnel {
             remote_id,
             tls_context,
             stream_security_mode,
-            role: PnTunnelRole::Active { network },
+            role: PnTunnelRole::Active { network, relay_id },
             stream_vports: RwLock::new(None),
             stream_callback: RwLock::new(None),
             stream_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
@@ -424,12 +431,33 @@ impl PnTunnel {
         tunnel
     }
 
-    pub(super) fn new_passive(
+    #[cfg(test)]
+    pub(super) fn new_active(
+        tunnel_id: TunnelId,
+        candidate_id: TunnelCandidateId,
+        local_id: P2pId,
+        remote_id: P2pId,
+        network: Arc<PnShared>,
+        stream_security_mode: PnProxyStreamSecurityMode,
+    ) -> Arc<Self> {
+        Self::new_active_with_relay(
+            tunnel_id,
+            candidate_id,
+            local_id,
+            remote_id.clone(),
+            remote_id,
+            network,
+            stream_security_mode,
+        )
+    }
+
+    pub(super) fn new_passive_with_relay(
         local_id: P2pId,
         request: ProxyOpenReq,
         read: TunnelStreamRead,
         write: TunnelStreamWrite,
         network: Option<Arc<PnShared>>,
+        relay_id: Option<P2pId>,
         tls_context: Option<PnTlsContext>,
         stream_security_mode: PnProxyStreamSecurityMode,
     ) -> Arc<Self> {
@@ -450,7 +478,7 @@ impl PnTunnel {
             remote_id,
             tls_context,
             stream_security_mode,
-            role: PnTunnelRole::Passive { network },
+            role: PnTunnelRole::Passive { network, relay_id },
             stream_vports: RwLock::new(None),
             stream_callback: RwLock::new(None),
             stream_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
@@ -485,10 +513,33 @@ impl PnTunnel {
         tunnel
     }
 
+    #[cfg(test)]
+    pub(super) fn new_passive(
+        local_id: P2pId,
+        request: ProxyOpenReq,
+        read: TunnelStreamRead,
+        write: TunnelStreamWrite,
+        network: Option<Arc<PnShared>>,
+        tls_context: Option<PnTlsContext>,
+        stream_security_mode: PnProxyStreamSecurityMode,
+    ) -> Arc<Self> {
+        Self::new_passive_with_relay(
+            local_id,
+            request,
+            read,
+            write,
+            network,
+            None,
+            tls_context,
+            stream_security_mode,
+        )
+    }
+
     pub(super) fn new_passive_control(
         local_id: P2pId,
         request: ProxyControlOpenReq,
         network: Option<Arc<PnShared>>,
+        relay_id: Option<P2pId>,
         tls_context: Option<PnTlsContext>,
         stream_security_mode: PnProxyStreamSecurityMode,
     ) -> Arc<Self> {
@@ -506,7 +557,7 @@ impl PnTunnel {
             remote_id: request.from.clone(),
             tls_context,
             stream_security_mode,
-            role: PnTunnelRole::Passive { network },
+            role: PnTunnelRole::Passive { network, relay_id },
             stream_vports: RwLock::new(None),
             stream_callback: RwLock::new(None),
             stream_first_listen_wait_state: AtomicU8::new(FIRST_LISTEN_WAIT_NOT_STARTED),
@@ -556,7 +607,7 @@ impl PnTunnel {
 
     fn shared(&self) -> Option<Arc<PnShared>> {
         match &self.role {
-            PnTunnelRole::Active { network } => Some(network.clone()),
+            PnTunnelRole::Active { network, .. } => Some(network.clone()),
             PnTunnelRole::Passive {
                 network: Some(network),
                 ..
@@ -1536,13 +1587,14 @@ impl Tunnel for PnTunnel {
         purpose: TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let pending = self.begin_pending_channel()?;
-        let network = match &self.role {
-            PnTunnelRole::Active { network } => network.clone(),
+        let (network, relay_id) = match &self.role {
+            PnTunnelRole::Active { network, relay_id } => (network.clone(), relay_id.clone()),
             PnTunnelRole::Passive {
                 network: Some(network),
+                relay_id: Some(relay_id),
                 ..
-            } => network.clone(),
-            PnTunnelRole::Passive { network: None, .. } => {
+            } => (network.clone(), relay_id.clone()),
+            PnTunnelRole::Passive { .. } => {
                 return Err(p2p_err!(
                     P2pErrorCode::NotSupport,
                     "pn tunnel has no proxy network"
@@ -1553,6 +1605,7 @@ impl Tunnel for PnTunnel {
         let (read, write) = match network
             .open_channel(
                 self.tunnel_id,
+                relay_id,
                 self.remote_id.clone(),
                 PnChannelKind::Stream,
                 purpose,
@@ -1584,13 +1637,14 @@ impl Tunnel for PnTunnel {
 
     async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
         let pending = self.begin_pending_channel()?;
-        let network = match &self.role {
-            PnTunnelRole::Active { network } => network.clone(),
+        let (network, relay_id) = match &self.role {
+            PnTunnelRole::Active { network, relay_id } => (network.clone(), relay_id.clone()),
             PnTunnelRole::Passive {
                 network: Some(network),
+                relay_id: Some(relay_id),
                 ..
-            } => network.clone(),
-            PnTunnelRole::Passive { network: None, .. } => {
+            } => (network.clone(), relay_id.clone()),
+            PnTunnelRole::Passive { .. } => {
                 return Err(p2p_err!(
                     P2pErrorCode::NotSupport,
                     "pn tunnel has no proxy network"
@@ -1600,6 +1654,7 @@ impl Tunnel for PnTunnel {
         let (_read, write) = match network
             .open_channel(
                 self.tunnel_id,
+                relay_id,
                 self.remote_id.clone(),
                 PnChannelKind::Datagram,
                 purpose,
@@ -2868,11 +2923,14 @@ mod tests {
         let tunnel_id = TunnelId::from(50);
         let key = PnShared::tunnel_key(remote_id.clone(), tunnel_id);
         let control = shared
-            .register_passive_control_tunnel(ProxyControlOpenReq {
-                tunnel_id,
-                from: remote_id.clone(),
-                to: local_id.clone(),
-            })
+            .register_passive_control_tunnel(
+                ProxyControlOpenReq {
+                    tunnel_id,
+                    from: remote_id.clone(),
+                    to: local_id.clone(),
+                },
+                test_p2p_id(118),
+            )
             .unwrap();
         assert!(shared.get_tunnel(&key).is_some());
         control.mark_control_ready();
@@ -2928,11 +2986,14 @@ mod tests {
         let tunnel_id = TunnelId::from(52);
         let key = PnShared::tunnel_key(remote_id.clone(), tunnel_id);
         let control = shared
-            .register_passive_control_tunnel(ProxyControlOpenReq {
-                tunnel_id,
-                from: remote_id.clone(),
-                to: local_id.clone(),
-            })
+            .register_passive_control_tunnel(
+                ProxyControlOpenReq {
+                    tunnel_id,
+                    from: remote_id.clone(),
+                    to: local_id.clone(),
+                },
+                test_p2p_id(122),
+            )
             .unwrap();
         assert_eq!(
             lifecycle_status(&control),

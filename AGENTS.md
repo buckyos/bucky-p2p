@@ -93,8 +93,8 @@
 - 兼容准入入口：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <module> --evidence-file harness/evidence/admission/<task-id>.md <change_id>`
 - 阶段范围检查：`python3 ./harness/scripts/stage-scope-check.py --stage <stage> --version v0.1 --module <module>`
 - Harness 自检：`python3 ./harness/scripts/harness-self-check.py`
-- 文档结构检查：`python3 ./harness/scripts/doc-structure-check.py`
-- 测试覆盖检查：`python3 ./harness/scripts/testing-coverage-check.py`
+- 文档结构检查：`python3 ./harness/scripts/doc-structure-check.py --version v0.1 --module <module> --docs <all|mandatory|proposal|design|testing>`
+- 测试覆盖检查：`python3 ./harness/scripts/testing-coverage-check.py --version v0.1 --module <module> [--change-id <id>]`
 - 质量门禁：`python3 ./harness/scripts/quality-check.py`
 - 验收报告检查：`python3 ./harness/scripts/acceptance-report-check.py <report>`
 - 自动流水线计划检查：`python3 ./harness/scripts/pipeline-plan-check.py harness/pipeline-plan.md`
@@ -105,6 +105,7 @@
 ## 治理索引
 - 硬规则：`harness/rules/`
   - 模块级文档豁免：`harness/rules/module-doc-exception-rules.md`
+  - 测试设计深度规则：`harness/rules/test-design-rules.md`
 - 项目自定义规则：`harness/custom-rules/`（用户拥有；harness refresh 不得修改）
 - 阶段执行指南：`harness/process_rules/`
 - 评审清单：`harness/checklists/`

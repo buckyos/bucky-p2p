@@ -10,15 +10,16 @@ use crate::networks::{
     allow_all_incoming_tunnel_validator,
 };
 use crate::p2p_identity::{
-    P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityFactoryRef,
-    P2pIdentityRef, P2pSn,
+    P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef,
+    P2pIdentityFactoryRef, P2pIdentityRef, P2pSn,
 };
-use crate::pn::{PnClient, PnProxyStreamSecurityMode, pn_virtual_endpoint};
+use crate::pn::{PnClient, PnProxyStreamSecurityMode};
 use crate::sn::client::{SNClientService, SNClientServiceRef, SnLocalIpProviderRef};
 use crate::stream::{StreamManager, StreamManagerRef};
 use crate::tls::{
     DefaultTlsServerCertResolver, ServerCertResolverRef, TlsServerCertResolver, init_tls,
 };
+use crate::ttp::{TtpClient, TtpClientRef, TtpTarget};
 use crate::tunnel::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
@@ -26,6 +27,42 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crate::networks::{DeviceFinder, DeviceFinderRef};
+pub use crate::pn::{PnProxyRouteResolver, PnProxyRouteResolverRef};
+
+#[derive(Clone)]
+pub struct P2pPn {
+    id: P2pId,
+    name: String,
+    endpoints: Vec<Endpoint>,
+}
+
+impl P2pPn {
+    pub fn new(id: P2pId, name: String, endpoints: Vec<Endpoint>) -> Self {
+        Self {
+            id,
+            name,
+            endpoints,
+        }
+    }
+
+    pub fn get_id(&self) -> P2pId {
+        self.id.clone()
+    }
+
+    pub fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn endpoints(&self) -> Vec<Endpoint> {
+        self.endpoints.clone()
+    }
+}
+
+#[derive(Clone)]
+pub enum PnServerAddress {
+    Sn,
+    Server(P2pPn),
+}
 
 pub struct P2pEnv {
     net_manager: NetManagerRef,
@@ -446,6 +483,8 @@ pub struct P2pStackConfig {
     support_proxy: bool,
     proxy_stream_encrypted: bool,
     proxy_client: Option<TunnelNetworkRef>,
+    proxy_server: Option<PnServerAddress>,
+    proxy_route_resolver: Option<PnProxyRouteResolverRef>,
     local_ip_provider: Option<SnLocalIpProviderRef>,
 }
 
@@ -466,6 +505,8 @@ impl P2pStackConfig {
             support_proxy: false,
             proxy_stream_encrypted: false,
             proxy_client: None,
+            proxy_server: None,
+            proxy_route_resolver: None,
             local_ip_provider: None,
         }
     }
@@ -588,6 +629,27 @@ impl P2pStackConfig {
         self
     }
 
+    pub fn proxy_server(&self) -> &Option<PnServerAddress> {
+        &self.proxy_server
+    }
+
+    pub fn set_proxy_server(mut self, proxy_server: PnServerAddress) -> Self {
+        self.proxy_server = Some(proxy_server);
+        self
+    }
+
+    pub fn proxy_route_resolver(&self) -> &Option<PnProxyRouteResolverRef> {
+        &self.proxy_route_resolver
+    }
+
+    pub fn set_proxy_route_resolver(
+        mut self,
+        proxy_route_resolver: PnProxyRouteResolverRef,
+    ) -> Self {
+        self.proxy_route_resolver = Some(proxy_route_resolver);
+        self
+    }
+
     pub fn sn_query_interval(&self) -> Duration {
         self.sn_query_interval
     }
@@ -606,23 +668,80 @@ fn proxy_stream_security_mode(proxy_stream_encrypted: bool) -> PnProxyStreamSecu
     }
 }
 
+async fn create_proxy_server_ttp_client(
+    config: &P2pStackConfig,
+    pn_server: &P2pPn,
+) -> P2pResult<TtpClientRef> {
+    let endpoints = pn_server.endpoints();
+    if endpoints.is_empty() {
+        return Err(p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "proxy pn server address has no endpoint"
+        ));
+    }
+    let ttp_client = TtpClient::new(
+        config.local_identity().clone(),
+        config.env.net_manager.clone(),
+    );
+    let mut last_error = None;
+    for endpoint in endpoints {
+        let result = ttp_client
+            .connect_server(TtpTarget {
+                local_ep: None,
+                remote_ep: endpoint,
+                remote_id: pn_server.get_id(),
+                remote_name: Some(pn_server.get_name()),
+            })
+            .await;
+        match result {
+            Ok(()) => return Ok(ttp_client),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "connect proxy pn server failed"
+        )
+    }))
+}
+
+async fn create_default_proxy_client_parts(
+    config: &P2pStackConfig,
+    sn_service: &SNClientServiceRef,
+) -> P2pResult<(TtpClientRef, Option<PnProxyRouteResolverRef>)> {
+    let ttp_client = match config.proxy_server() {
+        Some(PnServerAddress::Sn) | None => sn_service.get_ttp_client(),
+        Some(PnServerAddress::Server(pn_server)) => {
+            create_proxy_server_ttp_client(config, pn_server).await?
+        }
+    };
+    Ok((ttp_client, config.proxy_route_resolver().clone()))
+}
+
 fn create_default_proxy_client(
-    ttp_client: crate::ttp::TtpClientRef,
+    ttp_client: TtpClientRef,
     local_identity: P2pIdentityRef,
     cert_factory: P2pIdentityCertFactoryRef,
     proxy_stream_encrypted: bool,
+    proxy_route_resolver: Option<PnProxyRouteResolverRef>,
 ) -> Arc<PnClient> {
     let stream_security_mode = proxy_stream_security_mode(proxy_stream_encrypted);
     let client = if proxy_stream_encrypted {
-        PnClient::new_with_tls_material(ttp_client, local_identity, cert_factory)
+        PnClient::new_with_tls_material(
+            ttp_client,
+            local_identity,
+            cert_factory,
+            proxy_route_resolver,
+        )
     } else {
-        PnClient::new(ttp_client)
+        PnClient::new(ttp_client, proxy_route_resolver)
     };
     client.set_stream_security_mode(stream_security_mode);
     client
 }
 
-fn build_proxy_client(
+async fn build_proxy_client(
     config: &P2pStackConfig,
     sn_service: &SNClientServiceRef,
     cert_factory: P2pIdentityCertFactoryRef,
@@ -632,6 +751,18 @@ fn build_proxy_client(
     }
 
     if let Some(proxy_client) = config.proxy_client().clone() {
+        if config.proxy_server().is_some() {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "proxy server address requires default pn client construction"
+            ));
+        }
+        if config.proxy_route_resolver().is_some() {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "proxy route resolver requires default pn client construction"
+            ));
+        }
         if config.proxy_stream_encrypted() {
             return Err(p2p_err!(
                 P2pErrorCode::NotSupport,
@@ -641,11 +772,14 @@ fn build_proxy_client(
         return Ok(Some(proxy_client));
     }
 
+    let (ttp_client, proxy_route_resolver) =
+        create_default_proxy_client_parts(config, sn_service).await?;
     let proxy_client: TunnelNetworkRef = create_default_proxy_client(
-        sn_service.get_ttp_client(),
+        ttp_client,
         config.local_identity().clone(),
         cert_factory,
         config.proxy_stream_encrypted(),
+        proxy_route_resolver,
     );
     Ok(Some(proxy_client))
 }
@@ -697,11 +831,10 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
     };
 
     let proxy_client = if support_proxy {
-        build_proxy_client(&config, &sn_service, cert_factory.clone())?
+        build_proxy_client(&config, &sn_service, cert_factory.clone()).await?
     } else {
         None
     };
-
     let device_finder = if device_finder.is_some() {
         device_finder.unwrap()
     } else {
@@ -720,7 +853,7 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
         .await?;
     if let Some(proxy_client) = proxy_client.as_ref() {
         if proxy_client.listener_infos().is_empty() {
-            let proxy_ep = pn_virtual_endpoint();
+            let proxy_ep = Endpoint::default();
             log::debug!(
                 "stack start proxy listener local_id={} protocol={:?} local_ep={}",
                 local_identity.get_id(),
@@ -737,13 +870,16 @@ pub async fn create_p2p_stack(config: P2pStackConfig) -> P2pResult<P2pStackRef> 
                 .await?;
         }
     }
+    let proxy_network: Option<TunnelNetworkRef> = proxy_client
+        .clone()
+        .map(|proxy_client| proxy_client as TunnelNetworkRef);
     let tunnel_manager = NetworkTunnelManager::new(
         local_identity.clone(),
         Some(device_finder.clone()),
         net_manager.clone(),
         Some(sn_service.clone()),
         cert_factory.clone(),
-        proxy_client.clone(),
+        proxy_network,
         config.env.connection_info_cache.clone(),
         Arc::new(TunnelIdGenerator::new()),
         conn_timeout,
@@ -897,8 +1033,13 @@ mod tests {
         let cert_factory: P2pIdentityCertFactoryRef = Arc::new(TestIdentityCertFactory);
         let net_manager = NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap();
         let ttp_client = crate::ttp::TtpClient::new(local_identity.clone(), net_manager);
-        let pn_client =
-            create_default_proxy_client(ttp_client, local_identity.clone(), cert_factory, true);
+        let pn_client = create_default_proxy_client(
+            ttp_client,
+            local_identity.clone(),
+            cert_factory,
+            true,
+            None,
+        );
 
         assert_eq!(
             pn_client.stream_security_mode(),

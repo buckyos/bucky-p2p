@@ -23,6 +23,7 @@
 
 ## Consistency Rule
 - `harness/scripts/test-run.py` is mandatory in generated repositories.
+- What each level (`unit` / `dv` / `integration`) must verify and how deep is defined by `harness/rules/test-design-rules.md`; this rule governs how those tests are invoked.
 - A generated repository MUST include both project-root one-click test shortcuts: `test-run.bat` for Windows and `test-run.sh` for Unix-like systems.
 - The root shortcut MUST check whether `uv` is installed and print an installation hint when it is missing.
 - The root shortcuts MUST create a local `.venv` when it is missing, use `uv` to sync or install dependencies when project metadata exists, activate the project virtual environment, and then invoke `harness/scripts/test-run.py` through `uv run --active python`.
@@ -36,7 +37,7 @@
 
 ## Execution Contract
 - Unknown modules or test levels MUST exit non-zero.
-- Every real run (not `--list` / `--dry-run`) MUST write a machine-readable run artifact to `harness/evidence/test-runs/` recording each executed command, its exit code, duration, and the git state; the artifact is the canonical execution evidence cited by testing and acceptance.
+- Every real run (not `--list` / `--dry-run`) MUST write a machine-readable run artifact to `test-results/test-runs/` recording each executed command, its exit code, duration, and the git state; the artifact is the canonical execution evidence cited by testing and acceptance. `test-results/` is generated output, lives outside `harness/`, and MUST be listed in `.gitignore`.
 - The `all all` command MUST run all registered project tests in deterministic order.
 - `<module> all` MUST run every registered test level for that module.
 - Enabled steps MUST execute in declared order.

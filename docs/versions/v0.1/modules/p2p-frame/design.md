@@ -3,15 +3,15 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-05T18:58:53+08:00
-approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486d1468983c
+approved_at: 2026-06-15T01:22:00+08:00
+approved_content_sha256: 401ab5dde78d79497f958357bdf60f6673caca21b34a07c851a78e346cf4ad22
 ---
 
 # p2p-frame 设计
 
 > 该数据包为治理现有核心库定义设计基线。现有协议说明继续作为参考文档存在，并在此处建立索引。
 
-## 设计范围
+## Design Scope
 ### 目标
 - 让核心库边界足够明确，使未来工作可以按子模块拆分。
 - 复用现有协议说明，而不是重复编写设计内容。
@@ -33,6 +33,7 @@ approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486
 - 为本轮 SN control stream 信令建立可执行设计边界：SN report、call、called、response 或等价低频小消息通过公开 `Tunnel::open_control_stream(...)` / `listen_control_stream(...)` 交互；SN 不调用内部 `control_stream` runtime/frame，不把该路径扩展为大流量数据平面；控制通道不可用、远端未监听 SN purpose 或旧版本不支持时显式失败，不保留普通业务 stream fallback。
 - 为本轮 SN server 连接验证器建立可执行设计边界：`sn/service` 暴露 validator 装配点和显式 allow-all 默认实现，SN server 在处理 report、call 或等价入站请求前用只包含 `client_id` 与 `client_cert` 的连接上下文校验客户端，reject 时短路当前请求而不改变 SN command 线协议或 `SnCallResp` 最终连通性语义。
 - 为本轮 `SnServiceContractServer` 清理建立可执行设计边界：删除未完整接入 SN 主流程的 service contract/receipt 生产路径、公开导出和构造装配；保留 `sn/protocol` 中既有 receipt wire 兼容结构，以及 `sn/service` 的 report/call/called handler、peer manager、连接验证器和 SN control stream 信令，不引入新的计费、合约评估、配额或持久化账本替代方案。
+- 为本轮多 PN server 建链需求建立可执行设计边界：PN client 侧必须由上层显式指定目标用户所在的 relay PN server，并在该 PN 上建立或复用 relay tunnel；PN server 默认 `PnConnectionValidator` / `PnServer::new(...)` 保持显式 allow-all 兼容行为；多 PN assigned target admission 必须通过显式 validator 或 policy 构造路径限制新建逻辑 `PnTunnel` 的 target 归属；旧默认 PN 选择、`latest tunnel` 选择和单 `proxy_client` fallback 不再作为多 PN 新路径兼容目标。
 - 为本轮 bounded channel 容量配置化需求建立可执行设计边界：`P2pConfig` / `P2pStackConfig` 作为顶层配置入口提供按位置拆分的容量配置，各项默认 `1024`，调用方默认无需设置；`NetManager`、`TunnelManager`、TTP registry、QUIC listener connect queue 和 PN 相关内部队列只接收对应位置已解析容量，不在底层定义默认值；TCP/QUIC tunnel 的入站 stream/datagram 已改为回调交付，不再保留旧 accept queue 容量参数；所有生产路径 `tokio::sync::mpsc::unbounded_channel` 均替换为 bounded channel，并明确满载时的背压、错误或关闭语义。
 - 为本轮后续 stack/NetManager/TTP/PN 容量配置清理建立可执行设计边界：删除 `ChannelCapacityConfig`、`P2pEnv` 容量快照、`P2pConfig` / `P2pStackConfig` 的容量 getter/setter 和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime::new()` 不再接收无效容量参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel 与 `DEFAULT_CHANNEL_CAPACITY == 1024`，由默认构造路径内部使用固定容量。
 
@@ -49,32 +50,106 @@ approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486
 - 将 SN control stream 信令解释为新的 SN 大流量数据平面、通用消息总线、跨 SN 协调协议或对内部 `control_stream` frame/window 的公开依赖；改变 `SnCallResp` 只表示 SN 受理结果的语义
 - 将 SN server 连接验证器解释为新的认证协议、计费系统、限速器、NAT 类型推断、跨 SN 策略同步、请求语义审计器或最终连通性判定；validator 不修改 SN command payload、endpoint 分类、单 SN 边界或 control-stream-only 信令选择，不接收 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段
 - 将 `SnServiceContractServer` 清理解释为删除 SN server/client 基础能力、SN command 线协议、`SnCallResp` 受理语义、peer manager、endpoint 分类、连接验证器、SN control stream 信令或 `sn/protocol` receipt wire 兼容结构；本轮不引入新的计费、配额、合约评估、持久化账本或相邻模块兼容旁路。
+- 将多 PN server 支持解释为库内 `peer_id -> PN` 全局目录、自动 PN server 发现/切换、用户迁移、重平衡、多副本在线策略、PN server 之间目录同步或 `A -> PN-A -> PN-B -> B` 跨 PN 二跳业务 bridge；本轮不允许多 PN 新路径依赖默认 allow-all 掩盖错误 PN，但必须保留 `PnServer::new(...)` 默认 allow-all 兼容路径。
 - 为 bounded channel 引入独立配置模块、全局静态默认值或底层局部默认值
 - 通过额外 unbounded buffer、后台无限 Vec 队列或隐藏转发任务绕开 bounded channel 容量限制
 - 为 `ChannelCapacityConfig` 删除引入新的公开容量配置结构、环境变量、feature flag 或运行时覆盖 API
 
-## 总体方案
+## Overall Approach
 - 将 `p2p-frame` 视为 Tier 0 核心模块。
 - 把本文件作为顶层设计索引。
 - 将 `p2p-frame/docs/` 下现有协议说明视为传输、tunnel、PN、SN 和 TTP 行为的从属设计证据。
 - 未来工作按直接子模块拆分，并赋予真实的责任边界与验证边界。
 
-## 模块拆分
-| 子模块 | 类型 | 职责 | 输入 | 输出 | 依赖 | 是否独立文档 |
-|--------|------|------|------|------|------|----------------|
-| `networks` | core transport | TCP/QUIC 监听器、endpoint、validator、QUIC listener 同源 UDP punch burst 和底层网络行为 | sockets、runtime、TLS | 传输事件和 tunnel plumbing | runtime、TLS | no |
-| `tunnel_channel_callback` | public tunnel API | `Tunnel` stream/datagram listen 回调类型、公共 trait 签名、入站 channel 回调交付和关闭/背压语义 | tunnel inbound channel、listen vports、callbacks | stream/datagram callback invocation | `networks`、`ttp`、`pn`、`stream`、`datagram` | no |
-| `tunnel_control_stream` | internal tunnel API | `Tunnel` control stream 公共方法的内部 runtime、多路复用 frame、stream id、buffer/window、64KiB frame 上限和底层控制通道关闭传播 | tunnel control command `Data` payload、listen purposes、callbacks | virtual control stream read/write 和 callback invocation | `networks/tcp`、`networks/quic`、`pn/client` | no |
-| `tunnel` | orchestration | tunnel 生命周期、连接选择、统一 register/publish 生命周期、proxy 回退与后续脱代理升级行为 | 传输事件、身份、发现能力 | active/passive/proxy tunnel 状态 | `networks`、`finder`、`pn`、`sn` | yes |
-| `ttp` | protocol | tunnel 上的命令和流复用协议 | tunnel IO | 带帧的命令/流行为 | `tunnel` | no |
-| `sn` | service | 对端注册、信令和调用转发；已有 tunnel 控制通道健康时使用 `Tunnel` control stream 承载 SN 低频小消息；SN server 侧连接验证器负责基于已认证连接上下文做入站准入；不保留未完整接入主流程的 service contract/receipt 生产路径 | tunnel/ttp/control stream、身份、validator | SN 服务行为与准入结果 | `ttp`、`p2p_identity`、`tunnel_control_stream` | no |
-| `pn` | service | proxy-node 中继行为 | tunnel/ttp | 基于 relay 的连通性 | `tunnel`、`ttp` | yes |
-| `finder` | support | 设备与 outer device 查询缓存 | endpoints、设备元数据 | 发现辅助能力 | `stack` | no |
-| `identity_tls` | support | P2P 身份、TLS、X509 和密码学辅助逻辑 | keys、certs、握手元数据 | 已认证连接 | `tls`、`x509`、`p2p_identity` | no |
-| `stack_runtime` | assembly | 高层 stack 编排和运行时抽象 | 所有下层 | 端到端 P2P 栈 | 几乎全部子模块 | no |
-| `channel_capacity_config` | shared runtime config | bounded channel 固定默认容量和构造路径传递；后续清理删除公开分位置容量配置结构 | `DEFAULT_CHANNEL_CAPACITY` | 固定 `1024` 容量 | `stack_runtime`、`networks`、`tunnel`、`ttp`、`pn` | no |
+## Simplicity Check
+- Smallest sufficient approach: PN 多 server 只增加显式 relay route、显式 assigned target admission 和本 relay 进程内 session registry；不引入库内目录、自动切换或跨 PN 二跳 bridge；`PnServer::new(...)` 默认 allow-all 仅作为未配置部署兼容路径保留，不参与多 PN 错误 PN 兜底。
+- Existing components or patterns reused: 复用现有 `TtpClient` / `TtpServer`、`PROXY_SERVICE`、`ProxyOpenReq` / `ProxyOpenResp`、PN control channel、`TunnelManager` proxy path publish 和 `PnServer` relay bridge。
+- New abstractions introduced: `PnProxyRouteResolver` 或等价 `PnClient` 内部 route 解析配置、`PnAssignedTargetPolicy` / `PnRelayAdmission`、`PnRelaySessionRegistry`。
+- Why each new abstraction is necessary: route 输入消除 latest/default PN 歧义；assigned target policy 是错误 PN 在打开目标流前失败的准入点；session registry 用于区分新建 logical tunnel 与既有 tunnel 后续双向 channel。
 
-## 实现顺序
+## Current Structure
+当前 `p2p-frame` 是一个包含 `networks`、`tunnel`、`ttp`、`sn`、`pn`、`finder`、TLS/X509 和 stack 组装层的核心 crate。PN 现有路径通过 `PnClient` / `PnServer` 在 `PROXY_SERVICE` 上使用 `ProxyOpenReq` / `ProxyOpenResp` 建立 relay bridge；当前实现中存在按 latest tunnel 或单 proxy client 隐式选择 PN 的倾向。`PnServer::new(...)` 的 allow-all 便捷构造符合未配置部署兼容目标，但不能作为多 PN assigned target 准入的替代路径。
+
+## Invariants to Preserve
+- PN `ProxyOpenReq` / `ProxyOpenResp` wire 格式、TLS-over-proxy 边界、source/target 统计口径和 source 单边限速语义不因多 PN server 改动而改变。
+- 错误 PN、缺少 relay route 或显式 assigned target policy 拒绝时必须显式失败，不得隐式查询目录、切换 PN server 或跨 PN 二跳 bridge；未注入策略的 `PnServer::new(...)` 只表达默认 allow-all 兼容行为。
+- 已建立 logical `PnTunnel` 的后续双向 stream/datagram channel 可以复用同一 relay session，不应被误判为新的 target assignment 错误。
+- `p2p-frame` 不拥有用户到 PN server 的目录、迁移、重平衡、断线重连或多副本在线策略。
+
+## Submodules
+| Submodule | Type | Responsibility | Depends On | Exported Interface | Notes |
+|-----------|------|----------------|------------|--------------------|-------|
+| `networks` | technical | TCP/QUIC 监听器、endpoint、validator、QUIC listener 同源 UDP punch burst 和底层网络行为 | `identity_tls`, `tunnel_channel_callback`, `tunnel_control_stream` | tunnel transport implementations | 高风险 trigger surface |
+| `tunnel_channel_callback` | shared | `Tunnel` stream/datagram listen 回调类型、公共 trait 签名、入站 channel 回调交付和关闭/背压语义 | `identity_tls` | `listen_stream`, `listen_datagram` callback contracts | 被 networks、ttp、pn、stream/datagram 消费 |
+| `tunnel_control_stream` | shared | `Tunnel` control stream 公共方法的内部 runtime、多路复用 frame、stream id、buffer/window、64KiB frame 上限和底层控制通道关闭传播 | `identity_tls` | `open_control_stream`, `listen_control_stream` adapters | 被 networks、pn、sn 消费 |
+| `tunnel` | business | tunnel 生命周期、连接选择、统一 register/publish 生命周期、proxy 回退与后续脱代理升级行为 | `networks`, `finder`, `tunnel_channel_callback`, `tunnel_control_stream` | tunnel candidate selection and publish | PN/SN 接入由 stack_runtime 组装，避免设计依赖环 |
+| `ttp` | technical | tunnel 上的命令和流复用协议 | `tunnel_channel_callback`, `tunnel_control_stream` | TTP client/server stream APIs | 具体 tunnel attachment 由 stack/runtime 组装 |
+| `sn` | business | 对端注册、信令和调用转发，SN control stream 信令，连接验证器，移除 contract/receipt 生产路径 | `ttp`, `identity_tls`, `tunnel_control_stream` | SN service/client APIs | 单 SN 边界 |
+| `pn` | business | proxy-node 中继行为、多 PN 显式 relay 选择和 assigned target admission | `tunnel`, `ttp`, `tunnel_channel_callback`, `tunnel_control_stream` | PN client/server APIs | 直接子模块文档保留 |
+| `finder` | technical | 设备与 outer device 查询缓存 | `identity_tls` | finder lookup APIs | 支撑 tunnel |
+| `identity_tls` | technical | P2P 身份、TLS、X509 和密码学辅助逻辑 | not-applicable: identity/tls is a leaf support submodule | identity and TLS helpers | 安全敏感 |
+| `stack_runtime` | assembly | 高层 stack 编排和运行时抽象 | `networks`, `tunnel`, `ttp`, `sn`, `pn`, `finder`, `identity_tls`, `channel_capacity_config` | stack config and assembly APIs | composition root |
+| `channel_capacity_config` | shared | bounded channel 固定默认容量和构造路径传递；后续清理删除公开分位置容量配置结构 | not-applicable: fixed capacity is consumed by callers rather than depending on them | default capacity constant / constructor wiring | 被 stack、networks、tunnel、ttp、pn 消费 |
+
+## Boundary Rationale
+| Boundary | Classification | Why Separate | Shared Logic / Technical Area | Notes |
+|----------|----------------|--------------|-------------------------------|-------|
+| `pn` relay vs `tunnel` orchestration | business | PN 负责指定 relay 上的 proxy 建链和 admission；tunnel 负责候选选择、publish 和复用 | shared control/listen callback APIs | 防止把 PN 目录或二跳 bridge 扩散到 tunnel manager |
+| `PnAssignedTargetPolicy` vs library directory | business | target assignment 来自库使用者，`p2p-frame` 只消费策略结果 | technical injection boundary in `pn/service` | 避免新增库内 `peer_id -> PN` schema |
+| `tunnel_control_stream` | shared | TCP/QUIC/PN 都需要低频 control stream 语义 | shared internal runtime | 不公开 frame/runtime |
+| `identity_tls` | technical | 身份与 TLS 贯穿多 transport 和 PN TLS-over-proxy | technical support | 安全边界单独建模 |
+
+## Boundary Decision Matrix
+| boundary | classification | business_responsibility | shared_logic_or_technical_area | decision |
+|----------|----------------|-------------------------|--------------------------------|----------|
+| PN multi-server route selection | business | 上层指定目标 PN，PN client 只按指定 relay 建链 | route input and existing `TtpConnector` target interface | keep in `pn`/stack boundary; no library-owned directory |
+| PN assigned target admission | business | `PnServer` 判断本 server 可作为 target 的用户 | `PnAssignedTargetPolicy` injected into `pn/service` | split from traffic accounting; required constructor dependency |
+| PN relay session registry | technical | 区分新建 logical tunnel 与既有 tunnel 后续 channel | in-process registry owned by `pn/service` | keep inside `pn/service`; not a cross-PN directory |
+| control stream runtime | shared | 为 tunnel users 提供低频 control stream | private frame/runtime in `networks` | shared by TCP/QUIC/PN, not public |
+| channel capacity | shared | bounded queue capacity stays fixed after cleanup | fixed default and constructor wiring | shared support, no public config after cleanup |
+
+## Dependency Graph
+| Source | Depends On | Reason | Cycle Check |
+|--------|------------|--------|-------------|
+| `networks` | `identity_tls`, `tunnel_channel_callback`, `tunnel_control_stream` | transport handshake and callback/control stream adapters | acyclic |
+| `tunnel` | `networks`, `finder`, `tunnel_channel_callback`, `tunnel_control_stream` | candidate orchestration and publish | acyclic |
+| `ttp` | `tunnel_channel_callback`, `tunnel_control_stream` | framed stream/datagram multiplexing on attached tunnel IO | acyclic |
+| `sn` | `ttp`, `identity_tls`, `tunnel_control_stream` | SN command/control signaling and validation | acyclic |
+| `pn` | `tunnel`, `ttp`, `tunnel_channel_callback`, `tunnel_control_stream` | proxy relay over TTP and tunnel lifecycle | acyclic |
+| `finder` | `identity_tls` | device identity lookup support | acyclic |
+| `stack_runtime` | `networks`, `tunnel`, `ttp`, `sn`, `pn`, `finder`, `identity_tls`, `channel_capacity_config` | assembly root wires submodules together | acyclic |
+| `networks` | `channel_capacity_config` | bounded queue capacity usage | acyclic |
+| `tunnel` | `channel_capacity_config` | subscription queue capacity usage | acyclic |
+| `ttp` | `channel_capacity_config` | registry queue capacity usage | acyclic |
+| `pn` | `channel_capacity_config` | PN internal queue capacity usage | acyclic |
+
+## Key Call Flows
+| Flow | Caller | Callee / Submodule Path | Purpose | Failure Handling | Notes |
+|------|--------|--------------------------|---------|------------------|-------|
+| PN active open with specified relay | `TunnelManager` delegates to configured PN `TunnelNetworkRef` | `pn/client` route resolver -> `ttp/client` -> specified PN `PROXY_SERVICE` | 建立 `A -> PN-B -> B` proxy tunnel | missing route returns config/param error; relay unavailable returns connect/open error; no fallback to latest/default PN | route resolver is owned by the `PnClient` implementation behind the trait object |
+| PN server assigned target admission | remote source peer | `pn/service` admission -> target stream factory | 在打开目标前拒绝错误 PN | non-assigned target returns `InvalidParam`/permission-equivalent result before `open_target_stream` | no library directory lookup |
+| Existing PN session reverse channel | established peer on same tunnel | `pn/service` session registry -> target stream factory | 允许同一 logical tunnel 后续双向 channel | session miss falls back to new-tunnel admission; closed/expired session rejects or reopens through new flow | prevents rejecting legitimate reverse channel |
+| SN control stream signaling | SN client/service | `sn` -> `Tunnel::open_control_stream` | 低频 SN report/call/called/response | control unavailable or purpose not listened returns explicit error; no stream fallback | preserves SN command semantics |
+
+## Large Module Submodule Decision
+| Submodule | Source Proposal | Decision | Design Packet | Reason |
+|-----------|-----------------|----------|---------------|--------|
+| `pn` | P-PN-MULTI-SERVER-ASSIGNED-TARGET-1 / `pn_multi_server_assigned_target` | existing | `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | 多 PN assigned target 属于既有 PN relay/client 责任，不需要新的直接 submodule packet |
+| `sn` | P-SN-CONTRACT-CLEANUP-1 / `remove_sn_service_contract_server` | existing | `design.md` and SN design references | 清理发生在既有 SN service/client 边界内 |
+| `tunnel_control_stream` | P-TUNNEL-CONTROL-STREAM-API-1 / `tunnel_control_stream_api` | existing shared | `docs/versions/v0.1/modules/p2p-frame/design/tunnel-control-stream-api.md` | 已作为共享技术子模块建模 |
+
+## Trigger Matrix
+| trigger_category | applies | evidence | design_coverage | required_checks | deferred_checks_and_reason |
+|------------------|---------|----------|-----------------|-----------------|----------------------------|
+| contract/protocol | yes | PN multi-server constrains `ProxyOpenReq` relay behavior without changing wire; control stream adds private control command data | this file, `design/pn-server.md`, control stream docs | testing must cover correct PN, wrong PN, and no wire format change | owner: testing; risk: protocol regression; acceptance impact: verify no PN wire drift |
+| data/schema | no | user-to-PN assignment remains library-user owned; relay session registry is transient in-process state | Data and State | not-applicable: no persistent repository schema | owner: none; risk: low; acceptance impact: confirm no owned directory schema |
+| security/privacy/permission | yes | assigned target admission rejects non-assigned target before target stream open; SN validator uses normalized identity | `pn-server.md`, SN validator sections | tests must cover rejection before target open and identity normalization | owner: testing; risk: unauthorized relay target; acceptance impact: permission boundaries verified |
+| runtime/integration | yes | PN route selection, server constructor migration, control streams, bounded queues and listener runtime affect integration | Directly Mapped Change Items | integration must cover specified PN success, wrong PN failure, and migrated callers | owner: testing; risk: workspace migration; acceptance impact: stack callers compile and run |
+| build/dependency/config/deployment | yes | `PnServer` default constructor remains allow-all; explicit multi-PN deployments provide assigned target policy; `sfo-io` and `sfo-reuseport` affect build/deployment | Interfaces and Dependencies | compile checks and integration config compatibility required | owner: implementation/testing; risk: caller migration; acceptance impact: no hidden default config |
+| ui/datamodel/workflow | no | crate has no UI and does not define external assignment datamodel | not-applicable | not-applicable: no UI/datamodel owned here | owner: none; risk: low; acceptance impact: none |
+| harness/process | yes | new change id must map to design and admission scope | Directly Mapped Change Items | doc-structure-check and stage-scope-check | owner: design; risk: admission mismatch; acceptance impact: change_id evidence exists |
+
+## Implementation Order
 | 阶段 | 目标 | 前置条件 | 输出 | 依赖 | 可并行 |
 |------|------|----------|------|------|--------|
 | 1 | 确认 proposal 范围和直接子模块 | 已批准 proposal | 稳定的模块拆分 | proposal | no |
@@ -82,7 +157,17 @@ approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486
 | 3 | 在硬性准入检查下实现子模块改动 | 已批准 testing | 代码与测试 | 阶段 1-2 | yes |
 | 4 | 依据 proposal 审计证据链 | implementation 证据已就绪 | acceptance report | 阶段 3 | no |
 
-## 接口与依赖
+## Interfaces and Dependencies
+| Interface | Consumer | Compatibility | Notes |
+|-----------|----------|---------------|-------|
+| `PnProxyRouteResolver` 或等价目标 PN route 输入 | `pn_multi_server_assigned_target`, `PnClient`, stack callers | new | 调用方必须在 `PnClient` 配置目标用户所在 relay PN 解析能力；缺失时失败 |
+| `PnServer::new(ttp_server)` | existing callers, `cyfs-p2p-test`, `sn-miner-rust` | backward-compatible | 默认安装显式 allow-all `PnConnectionValidator`，保持未配置部署可连接 |
+| `PnServer::new_with_connection_validator(...)` / `PnServer::new_with_options(...)` 或等价显式策略构造器 | `pn_multi_server_assigned_target`, deployments requiring assigned target admission | backward-compatible | 多 PN 部署通过显式 validator / policy 注入 assigned target 准入；默认构造不承担错误 PN 拒绝 |
+| `PnAssignedTargetPolicy` / `PnRelayAdmission` | `pn_multi_server_assigned_target`, `pn/service` | new | 判断新建 logical tunnel target 是否属于本 PN |
+| `Tunnel::open_control_stream` / `listen_control_stream` | `tunnel_control_stream_api`, `sn_control_stream_signaling`, `pn/client` | new | control stream public API; internal frame/runtime stays private |
+| `Tunnel::listen_stream` / `listen_datagram` callbacks | `tunnel_stream_datagram_listen_callback`, `ttp`, `pn`, `stream`, `datagram` | migration-required | replaces public `accept_*` polling |
+| `SnServiceConfig::set_connection_validator(...)` 或等价 SN validator 装配 | `sn_server_connection_validator`, `sn/service` | backward-compatible | SN 默认 allow-all remains explicit for SN only |
+
 ### 公共接口摘要
 - `p2p-frame` 暴露核心网络和 tunnel 栈，供 `cyfs-p2p` 与运行时二进制消费。
 - 直接子模块契约必须持续与当前协议说明和公开 crate 导出保持一致。
@@ -92,6 +177,7 @@ approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486
 - SN 信令消费 control stream 时只通过上述公共 `Tunnel` trait 方法进入。SN 子模块定义一个固定的 SN 信令 purpose 或等价 `TunnelPurpose` 常量，并在 tunnel attach 或 SN service 初始化时注册 `listen_control_stream(...)`；发送 report/call/called/response 等小消息时调用 `open_control_stream(...)`。purpose 不匹配、控制通道未 ready、远端未监听或旧版本返回 `PortNotListen` / `ListenerClosed` 时，按 `design/sn-control-stream-signaling.md` 中的失败规则返回错误，不回退到既有普通 stream 信令路径，不改变 SN 命令语义。
 - SN server 连接验证器接口属于 `sn/service`。设计使用一个可克隆、线程安全的 validator 对象或函数，输入为规范化后的客户端上下文，且该上下文只能包含 `client_id` 与 `client_cert`。`client_id` 来自 cmd tunnel 已认证 peer id；`client_cert` 来自当前 SN 请求携带的客户端证书或已缓存的同一客户端证书，且实现必须用 `cert_factory` 解析证书并确认解析出的 id 等于 `client_id` 后才能调用 validator。默认 `SnServer::new(...)` 或等价便捷构造器必须安装 `allow_all_sn_connection_validator()`；需要自定义策略的调用方使用 `SnServiceConfig::set_connection_validator(...)` 或等价显式构造器。
 - `SnServiceContractServer` 清理属于 `sn/service` 和 `sn/client` 中未接入主流程的服务合约路径删除，不新增公开替代接口。实现应删除或停止导出 `client/contract.rs`、`service/receipt.rs`、`SnServiceContractServer` 及仅服务于该方向的后台任务、构造字段和存储/统计连接；`sn/protocol` 中的 `SnServiceReceipt`、`ReceiptWithSignature` 和 report/response receipt 字段保留以维持 wire 兼容。`SnServiceConfig::new(...)`、`create_sn_service(...)`、SN control purpose 注册、validator 装配和 report/call/called handler 保持可用。若下游启动二进制仅通过 `SnServiceConfig` / `create_sn_service` 使用 SN service，则只需随公开 API 删除编译适配；不得在 `cyfs-p2p-test`、`sn-miner-rust` 或 `cyfs-p2p` 中重建 contract server 兼容旁路。
+- 多 PN server 支持属于 PN client 和 stack 组装边界。主动创建 proxy tunnel 时，外部调用方仍只能通过既有 `TunnelNetwork::create_tunnel_with_intent(...)` / `create_tunnel_with_local_ep_and_intent(...)` 建链接口进入 PN network，不得新增或改调 PN 专有建链入口；上层必须为实际的 `PnClient` 配置目标用户所在的 relay PN server id 解析能力。`PnClient` 在该既有接口实现内部解析 relay，并只能通过该指定 relay 打开 `PROXY_SERVICE`，不得使用 `TtpClient` 的 latest tunnel、单例 `proxy_client` 或隐式默认 PN 作为 fallback。`TunnelManager` 字段和构造参数保持 `TunnelNetworkRef` 边界，不持有、不调用 PN route resolver，只把 proxy 建链委托给已配置 PN network 的既有建链接口；`PnClient` 若无法解析目标 PN server，应返回配置/参数错误，不得自行查询目录或尝试其他 PN server。`PnServer::new(ttp_server)` 必须保留显式 allow-all 默认 validator；需要多 PN assigned target admission 的部署必须使用 `new_with_connection_validator(...)`、`new_with_options(...)` 或等价显式策略构造器。
 
 ### 外部依赖
 - async/runtime crates
@@ -104,6 +190,7 @@ approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486
 - 传输和运行时行为必须能够通过日志进行诊断。
 - 影响协议的改动必须在代码改动开始前更新 design/testing 证据。
 - `pn_server` 的统计与限速不得改变现有 `ProxyOpenReq` / `ProxyOpenResp` 握手顺序和结果码映射。
+- 多 PN server 的主动建链必须显式携带目标 relay PN 选择；缺少 relay 选择、relay 不可连接、或指定 relay 的 assigned target admission 拒绝 `req.to` 时，应在打开目标侧 stream 前失败，不能回退到 latest tunnel、默认 `proxy_client`、库内目录查询或跨 PN 二跳 bridge。
 - `pn_server` 的统计主体必须分别锚定到 relay 已认证并规范化后的 source 身份与已打开的 target 身份；限速主体仍只使用 source 侧身份。
 - proxy tunnel 的“是否加密”必须通过 PN 专有显式入口或显式的 client/stack 配置决定；通用 `TunnelNetwork` / `Tunnel` trait 不新增 TLS 参数。未显式配置的 `PnClient` 上，`create_tunnel*` 与 `open_*` 默认保持当前明文兼容语义；若调用方先显式设置 `PnClient::set_stream_security_mode(...)` 或 `P2pStackConfig::set_proxy_stream_encrypted(true)`，则该 `PnClient` 后续通过通用 trait 创建的 proxy tunnel，以及同一 listener 被动接受到的 `PnTunnel`，都会继承当时的 TLS 模式快照。
 - 是否启用 TLS 由 proxy tunnel 两端在 tunnel 外预先约定；PN open 控制流不额外承载 TLS 模式协商。
@@ -169,7 +256,7 @@ approved_content_sha256: 0fc7132b381292f4fe4c4cb493224d1ad0da1715d859c13d16d5486
 - endpoint 评分必须按协议和端点来源记录历史结果；TCP 失败不得降低同一远端 QUIC/UDP 候选的打洞优先级。
 - 本轮保持单 SN 信令模型。SN 服务端只转发单 SN 观察到的公网端点、客户端上报的映射端口和本次 `SnCall` 候选，不承担多 SN 汇总或最终连通性判定。
 
-## 实现布局
+## Implementation Layout
 ```text
 p2p-frame/src
 ├── networks/
@@ -201,7 +288,7 @@ p2p-frame/src
 | `p2p-frame/src/stack.rs` | file | stack 组装与顶层配置 | `P2pConfig` / `P2pStackConfig` 持有 bounded channel 容量默认值和覆盖入口，并向 env、network、manager、PN client 等底层路径传递 |
 | `p2p-frame/docs/*.md` | docs | 协议/设计参考 | 在下方建立索引 |
 
-## 文档索引
+## Document Index
 | 文档 | 主题 | 范围 |
 |------|------|------|
 | `design.md` | 模块概览和任务拆分 | 完整模块 |
@@ -230,6 +317,7 @@ p2p-frame/src
 | relay 侧 `pn_server` 在成功握手后的双向字节桥接路径上增加按用户生效的限速能力 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs`、限速配置/查询接口 | 若实现阶段发现 target 统计可见性会迫使限速扩展成双边模型，应先退回 proposal，而不是静默扩大限速范围。 |
 | `PnTunnel` idle timeout 生命周期关闭 | `PnTunnel` 本地状态机、channel lease 计数、idle sweeper 和关闭后重新创建 | `p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs` | 若实现阶段无法可靠追踪已返回给上层的 channel 生命周期，应先退回 design 重新划分 lease wrapper，而不是只统计 inbound queue。 |
 | `PnTunnel` tunnel 级控制通道与远端关闭感知 | control channel ready gate、控制接收循环、heartbeat、close 命令和统一关闭状态机 | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、必要 `p2p-frame/src/pn/service/pn_server.rs` bridge 路径 | 若实现阶段发现现有 `ProxyOpenReq` 无法无歧义承载 control channel，应扩展 PN protocol 的 control open 命令或 kind，而不是复用业务 stream/datagram kind 造成兼容歧义。 |
+| 多 PN server 显式 relay 选择与 assigned target admission | PN client 侧在既有 `TunnelNetwork::create_tunnel_with_intent(...)` 实现内部通过自身配置的 resolver 按指定 relay PN 打开 proxy tunnel；PN server 默认构造保留 allow-all；显式策略构造用 assigned target admission 限制新建逻辑 tunnel target；relay session registry 允许同一逻辑 tunnel 后续双向 channel | `p2p-frame/src/pn/client/mod.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/service/pn_server.rs`、`p2p-frame/src/ttp/client.rs`、`p2p-frame/src/ttp/server.rs`、`p2p-frame/src/tunnel/tunnel_manager.rs`、必要 `p2p-frame/src/stack.rs` | 若实现阶段需要库内目录、自动 PN 切换、跨 PN 二跳 bridge、让 `TunnelManager` 持有 PN route resolver，或用默认 allow-all 代替显式 assigned target 策略，应退回 proposal/design；若只是 route selector 形态不清，应退回 design。 |
 | 核心库的长期模块边界 | `TunnelManager` 的统一 register/publish 生命周期 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 收敛 publish 逻辑时，优先保持 reverse waiter、候选复用和 proxy 升级语义不变；若实现阶段发现现有测试/运行时依赖旧的分散式时序，则先回滚到文档阶段补充约束。 |
 | reverse incoming 无 waiter 关闭 | `TunnelManager` 的 incoming reverse waiter 判定与 close 分支 | `p2p-frame/src/tunnel/tunnel_manager.rs` | 若实现阶段发现无 waiter reverse 仍可能被合法接收，应退回 design 明确协议来源，而不是继续 publish 未等待的 reverse tunnel。 |
 | 单 SN NAT 打洞优化 | direct/reverse 统一 300ms 竞速、本次反连候选、QUIC listener 同源 UDP punch、proxy 短窗口脱代理、按协议隔离 endpoint 评分 | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/sn/client/sn_service.rs`、必要 `p2p-frame/src/sn/service/service.rs` | 若实现阶段需要多 SN fanout、改变 `SnCallResp` 语义、解析 raw UDP 业务包、改变 `TunnelNetwork` trait 或引入 STUN/TURN，应退回 proposal；若只是候选结构、punch 调度或 socket clone 细节不清，应退回 design。 |
@@ -260,10 +348,36 @@ p2p-frame/src
 | sn_control_stream_signaling | P-SN-CONTROL-STREAM-1 | SN report、call、called、response 或等价低频小消息使用固定 SN control purpose 调用 `Tunnel::open_control_stream(...)` / `listen_control_stream(...)`；不默认建立普通业务 `open_stream()`；bootstrap、控制通道不可用、远端未监听或旧版本不支持时当前 SN 命令通道创建/发送失败，不回退到普通 stream。 | `p2p-frame/src/sn/client/sn_service.rs`、`p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/**`、`p2p-frame/src/networks/tunnel.rs`、`docs/versions/v0.1/modules/p2p-frame/design/sn-control-stream-signaling.md`、相关 tests | 回滚时恢复 SN 默认普通 stream 信令路径并删除 SN control purpose 注册/发送逻辑；不得删除通用 `Tunnel` control stream API，也不得改变 SN 命令、单 SN、endpoint 分类或 `SnCallResp` 语义。 |
 | sn_server_connection_validator | P-SN-SERVER-CONNECTION-VALIDATOR-1 | `sn/service` 提供连接验证器装配点、默认 allow-all helper 和自定义 validator 构造路径；validator 以只含 `client_id` 与 `client_cert` 的规范化客户端上下文作为输入；SN server 在 report、call 或等价入站请求进入 handler 前解析客户端证书并确认其 id 等于 cmd tunnel peer id，随后执行 validator，reject 时短路当前请求。 | `p2p-frame/src/sn/service/service.rs`、必要 `p2p-frame/src/sn/service/**`、相关 tests | 回滚时移除自定义 validator 构造路径并恢复默认无准入短路行为；不得改变 SN command 线协议、`SnCallResp` 语义、endpoint 分类、单 SN 边界或 SN control stream 信令选择；不得把 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段重新加入 validator 上下文。 |
 | remove_sn_service_contract_server | P-SN-CONTRACT-CLEANUP-1 | 删除 `SnServiceContractServer` 相关服务合约/回执生产路径和公开导出；`sn/service` 不再构造或启动 contract server，`sn/client` 不再导出 contract helper；`sn/protocol` receipt wire 兼容结构保留；SN report/call/called、peer manager、连接验证器和 control-stream-only 信令继续按现有设计工作。 | `p2p-frame/src/sn/service/service.rs`、`p2p-frame/src/sn/service/mod.rs`、`p2p-frame/src/sn/service/receipt.rs`、`p2p-frame/src/sn/client/contract.rs`、`p2p-frame/src/sn/client/mod.rs`、必要下游启动调用点和 tests | 回滚时恢复 contract/receipt 文件、公开导出和 service 构造装配；不得借回滚改变 SN command 线协议、`SnCallResp` 语义、validator 上下文、endpoint 分类或 control stream 信令选择。 |
+| pn_multi_server_assigned_target | P-PN-MULTI-SERVER-ASSIGNED-TARGET-1 | PN client active open 必须在既有 `TunnelNetwork::create_tunnel_with_intent(...)` 实现内部使用自身 resolver 得到上层指定的 relay PN server id/route，并通过既有 `TtpConnector::open_stream(...)` target 接口连接该 relay 的 `PROXY_SERVICE`；`TunnelManager` 不持有 PN route resolver，stack 不通过 latest tunnel 隐式选择 PN；`PnServer::new(...)` 默认安装显式 allow-all validator；显式 assigned target validator / policy 路径拒绝非本 PN assigned target 的新建 logical tunnel；成功建立后记录 relay session，后续相同 `(tunnel_id, endpoint pair)` 的双向 channel 可复用该 session 而不重新按 target 分配拒绝。 | `p2p-frame/src/pn/client/mod.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/service/pn_server.rs`、`p2p-frame/src/ttp/client.rs`、`p2p-frame/src/ttp/server.rs`、`p2p-frame/src/tunnel/tunnel_manager.rs`、必要 `p2p-frame/src/stack.rs`、`docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | 回滚时恢复 explicit route / admission 前的 implicit proxy client 选择；不得删除默认 allow-all PN server 构造，也不得让默认 allow-all 掩盖显式策略下的错误 PN 失败。 |
 | bounded_channel_capacity_config | P-BOUNDED-CHANNELS-1 | 在 `P2pConfig` / `P2pStackConfig` 顶层提供分位置 channel 容量配置，每项默认 `1024`，用户默认无需设置，并通过 `P2pEnv` 和各构造函数把对应位置容量传入底层；所有生产路径 `mpsc::unbounded_channel`、`UnboundedSender`、`UnboundedReceiver` 替换为 bounded `mpsc::channel`、`Sender`、`Receiver`；同步分发路径使用 `try_send` 并将满载转成错误、关闭或订阅清理，异步可背压路径使用 `send(...).await`。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/**`、`p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/ttp/**`、`p2p-frame/src/pn/**` 中现有 unbounded mpsc 使用点和对应测试替身 | 回滚时恢复 unbounded mpsc 类型和构造传参，但不得留下半迁移容量 API；若保留顶层配置，应退回 proposal/design 明确兼容目标。 |
 | stack_channel_capacity_config_removal | P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | 删除 `ChannelCapacityConfig` 结构和 stack 层容量 getter/setter；`P2pEnv` 不再保存容量快照，`P2pStackConfig` 不再从 env 继承或覆盖容量；`NetManager` 不再保存或暴露容量；`QuicTunnelNetwork::new(...)` 不接收容量参数；`TtpRuntime::new()` 改为无参数，`TtpClient` / `TtpServer` 不再为 TTP runtime 读取 `NetManager` 容量；`PnClient` 删除显式容量构造入口，stack 默认 proxy client 不再传入容量。 | `p2p-frame/src/stack.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/ttp/runtime.rs`、`p2p-frame/src/ttp/client.rs`、`p2p-frame/src/ttp/server.rs`、`p2p-frame/src/pn/client/pn_client.rs`，以及仅当编译需要时调整直接依赖被删除容量 API 的调用点 | 回滚时恢复 `ChannelCapacityConfig`、env/config 字段、setter/getter、`NetManager` 容量字段/构造参数、`QuicTunnelNetwork::new(..., capacity)`、`TtpRuntime::new(capacity)` 和 PN 显式容量构造入口；不得借回滚恢复 unbounded channel 或改变底层队列满载语义。 |
 
-## 风险与回滚
+## Key Decisions
+| Decision | Chosen | Alternatives Considered | Rejection Reason |
+|----------|--------|-------------------------|------------------|
+| PN relay selection | caller-supplied relay PN route | library-owned peer-to-PN directory or latest tunnel fallback | directory/switching is out of scope; latest fallback hides wrong PN errors |
+| PN target admission | default allow-all plus explicit assigned target policy constructor | making assigned target policy mandatory for every `PnServer` | mandatory policy breaks existing unconfigured deployments; explicit policy still protects multi-PN deployments |
+| Existing PN reverse channel handling | in-process relay session registry | re-run assigned target check on every channel | would reject legitimate reverse channel on established logical tunnel |
+| Multi PN bridge shape | single relay `A -> PN-B -> B` | cross PN `A -> PN-A -> PN-B -> B` bridge | expands protocol/runtime complexity beyond proposal |
+| Control stream implementation | private shared runtime with public `Tunnel` methods only | expose internal frame/runtime | public subprotocol would freeze internals and couple callers |
+
+## Data and State
+| Data or State | Owner Submodule | Access For Others | State Transitions |
+|---------------|-----------------|-------------------|-------------------|
+| PN relay route input | `pn` / stack caller boundary | configured on `PnClient`; no repository-owned peer directory storage | absent -> param/config error; present -> open specified relay; relay unavailable -> open failure |
+| assigned target policy | `pn` | injected into explicit `PnServer` validator / policy path; only admission calls it | default constructor -> allow-all; explicit policy present -> accept/reject per target; policy update semantics owned by caller |
+| relay session registry | `pn` | internal to `pn/service`; no cross-PN access | absent -> new-tunnel admission; registered after success; removed on bridge/control close, timeout or error |
+| tunnel candidate registry | `tunnel` | accessed through `TunnelManager` APIs | pending -> published/rejected/closed; reverse waiter hit delays publish; no waiter closes |
+| control stream runtime state | `tunnel_control_stream` | transport adapters call public/private runtime methods | open/listen -> data/fin/reset -> closed/error on transport close |
+| channel capacity default | `channel_capacity_config` | construction paths consume fixed default | fixed `1024`; no public override after cleanup |
+
+## Testability
+- Isolation seams per submodule: PN server admission can be tested with fake assigned target policy and fake target stream factory; PN client relay route can be tested with fake TTP connector target behavior; relay session registry can be tested without real network.
+- Replaceable external boundaries: `sfo-io` accounting/limiting remains behind PN service adapter; `sfo-reuseport` listener behavior remains behind network listener tests; SN validator uses injected validator.
+- How error/boundary cases will be triggered: wrong PN by policy reject before target open, missing route by `PnClient` configuration/parameter error, existing reverse channel by pre-registered session, no session by registry miss, full queues by small bounded capacity test config where applicable.
+- Untriggerable failure paths and their alternative verification: real multi-server deployment churn and directory migration remain library-user responsibility; verify by absence of repository-owned directory/schema and by explicit route-only APIs.
+
+## Risks and Rollback
 - 协议或传输改动可能破坏所有下游 crate。
 - 面向运行时或密码学的回归需要比孤立工具改动更强的回滚姿态。
 - `Tunnel` stream/datagram 回调化影响公共 API 和所有 tunnel 消费者；回滚必须成组恢复 trait 签名、TCP/QUIC/PN tunnel 实现、TTP/stream/datagram/PN 调用点和测试替身，避免出现回调与公共 accept 双入口并存。
@@ -271,6 +385,12 @@ p2p-frame/src
 - SN control stream 信令依赖通用 `Tunnel` control stream API；回滚 SN 迁移时只恢复 SN 默认普通 stream 信令选择，不应删除通用 control stream API 或改变 TCP/QUIC/PN control stream adapter；本轮实现不得同时保留普通 stream fallback。
 - SN server 连接验证器位于 `sn/service` 入站 handler 前；若 `client_id`、`client_cert` 来源不清、证书解析 id 与 cmd tunnel peer id 一致性不清，或 reject 错误映射不清，应退回 design，而不是在实现中直接信任客户端 payload 字段。回滚必须恢复默认所有客户端可连接行为。
 - `SnServiceContractServer` 清理会删除未完整接入主流程的 service contract/receipt 文件和导出；若下游仍依赖这些公开项，必须退回 proposal/design 明确兼容窗口，而不是在相邻模块重建旁路。回滚必须成组恢复文件、导出和 service 构造装配，但不得改变 SN 基础命令、protocol receipt wire 兼容结构、validator 或 control stream 信令。
+- 多 PN server 支持容易混淆默认 allow-all 兼容路径与显式 assigned target 策略路径；实现必须让旧默认调用点继续可用，同时让多 PN 策略调用点显式拒绝错误 PN。若实现阶段发现某个路径仍必须隐式选择 PN server，应退回 proposal/design 重新定义迁移窗口，而不是保留 latest tunnel fallback。
 - bounded channel 会把历史积压转为背压或满载错误；回滚必须成组恢复 sender/receiver 类型、构造传参和满载错误映射，避免出现 sender bounded、receiver unbounded 或容量配置无法生效的半迁移状态。
 - `ChannelCapacityConfig` 删除是公开 stack 配置 API 清理；若下游仍依赖该 API，应退回 proposal/design 明确兼容窗口，而不是在实现中保留半公开容量结构。
 - 回滚应优先撤销具体实现改动，同时保留已批准的 proposal/design/testing 证据，为下一次尝试复用。
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-14T00:00:00+08:00
+- user_statement: 确认，实现吧，自动处理后续步骤

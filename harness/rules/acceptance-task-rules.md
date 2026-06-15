@@ -39,7 +39,7 @@
 - Acceptance MUST verify that post-implementation test design is reasonable for proposal/design/code behavior and covers normal, boundary, negative, error, compatibility, lifecycle, and cross-module cases where applicable.
 - Acceptance MUST verify that test design and test implementation coverage map to reviewed `change_id` values, or that explicit gaps are recorded with a reason.
 - Acceptance MUST verify that automated test evidence is reachable through the unified test entrypoint `harness/scripts/test-run.py`, and that whole-project tests can be invoked through `test-run.py all all`.
-- Acceptance MUST cite machine-written run artifacts as execution evidence: `harness/evidence/test-runs/*.json` for test runs and `harness/evidence/quality-runs/*.json` for quality gates; claimed runs without an artifact are missing evidence.
+- Acceptance MUST cite machine-written run artifacts as execution evidence: `test-results/test-runs/*.json` for test runs and `test-results/quality-runs/*.json` for quality gates; claimed runs without an artifact are missing evidence.
 - Acceptance MUST run `uv run --active python ./harness/scripts/quality-check.py` and treat failing or unrun configured quality gates as blocking; see `harness/rules/quality-gate-rules.md`.
 - Acceptance MUST verify red-green regression evidence for reviewed bugfix work: a regression test bound to the bugfix `change_id` with a failing pre-fix run artifact or a recorded concrete infeasibility reason.
 - Acceptance MUST verify the implementation diff was bound to the admitted design Scope Paths via `stage-scope-check.py --stage implementation --change-id ...`.

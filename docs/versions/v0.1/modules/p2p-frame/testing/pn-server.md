@@ -6,6 +6,8 @@
 
 - relay 侧 listener 启动与 accept-loop 行为
 - `ProxyOpenReq` 的规范化、校验与转发
+- 默认 `PnConnectionValidator` 显式 allow-all
+- 显式 validator / assigned-target policy 的 wrong-PN 准入控制
 - `ProxyOpenResp` 的转发与 bridge 激活
 - bridge 启动前 relay 失败的结果映射
 - 成功握手后 bridge payload 的 source/target 双边用户流量统计
@@ -26,6 +28,8 @@
 |------|----------|----------|
 | 目标流获取通过注入的 factory 进行委派 | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `pn_service_uses_injected_target_stream_factory` | relay 打开请求的目标，重写 `from`，转发 `ProxyOpenReq`，转发成功响应，并在双向上传输字节 |
 | validator 拒绝会短路目标打开 | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `pn_service_rejects_proxy_open_when_validator_rejects` | validator 能看到规范化上下文，不会打开目标流，源端收到 `InvalidParam` |
+| 默认 PN 连接验证器显式 allow-all | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `default_pn_connection_validator_allows_connections` | `allow_all_pn_connection_validator()` 对规范化 `PnConnectionValidateContext` 返回 `Accept`，未配置部署不会被默认拒绝 |
+| 显式 reject helper 保留拒绝路径 | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `reject_all_pn_connection_validator_rejects_connections` | `reject_all_pn_connection_validator()` 返回 `Reject`，证明 wrong-PN 或 assigned-target 拒绝必须通过显式策略路径启用 |
 | 通过 `PnServer.start()` 完成 listener 注册和端到端 bridge | [p2p-frame/src/pn/service/pn_server.rs](/mnt/f/work/p2p/p2p-frame/src/pn/service/pn_server.rs) 中的 `pn_server_listens_and_bridges_proxy_stream` | relay 在 `PROXY_SERVICE` 上监听，接收来流，转发握手，并桥接 payload |
 | TLS-over-proxy 不要求 relay 理解模式字段 | 待补 `pn_server` TLS 透明桥接测试 | relay 不终止 TLS，也不携带 TLS 模式字段；两端在 open 成功后进入 TLS 时，relay 只继续桥接握手字节和密文 |
 | 成功 bridge 会为 source 与 target 两侧分别记账 | 待补 `pn_server` 双边统计测试 | 只统计成功转发的 payload 字节；控制帧不入账；source 统计主体等于已认证远端 peer id，target 统计主体等于已打开的目标用户 |
@@ -35,8 +39,9 @@
 
 ## Validator 特定预期
 
-- `PnServer::new(...)` 通过使用 allow-all validator 保持向后兼容行为。
+- `PnServer::new(...)` 通过使用 allow-all validator 保持向后兼容行为；这不是 wrong-PN 拒绝证据。
 - 当 relay 准入策略需要检查 `from`、`to`、`tunnel_id`、`kind` 和 `purpose` 时，必须使用 `PnServer::new_with_connection_validator(...)`。
+- 当多 PN 部署需要 assigned target 检查时，必须使用 `PnServer::new_with_assigned_target_policy(...)` 或等价显式 validator 装配。
 - validator 观察到的 `from` 必须是 relay 用已认证连接元数据重写后的值，而不是源端原始报文中的 `from`。
 - 当前预期 validator 侧的 `Reject` 会表现为握手结果 `InvalidParam`，而不是一个独立的线协议权限错误码。
 - source 统计与限速使用的用户键必须与 validator 观察到的规范化 `from` 一致；测试不允许出现 validator 与 source 记账键使用两套身份来源。
@@ -60,6 +65,8 @@
 | 打开目标流超时 | 源端收到 `Timeout`；bridge 不启动 | 尚无专门的 unit 测试覆盖 |
 | 打开目标流返回 `NotFound` 或被中断 | 源端收到映射后的非成功结果；bridge 不启动 | 尚无专门的 unit 测试覆盖 |
 | 自定义 validator 构造路径使用了注入策略 | 注入的 validator 收到规范化上下文并控制准入 | 通过 `PnService` 级 validator 测试部分覆盖；尚无专门的 `PnServer::new_with_connection_validator(...)` 构造测试 |
+| 默认构造误拒绝未配置连接 | `PnServer::new(...)` 使用的默认 validator 为 allow-all | 通过 `default_pn_connection_validator_allows_connections` 的 helper 级测试覆盖；完整 `PnServer::new(...)` 启动兼容由 integration 继承 |
+| wrong-PN 目标未走显式 assigned-target policy | 默认 allow-all 不负责拒绝；显式 validator/policy 才能拒绝未分配目标 | 通过 `reject_all_pn_connection_validator_rejects_connections` 与 `pn_service_rejects_proxy_open_when_validator_rejects` 部分覆盖；仍需继续补专门的 assigned-target policy 构造测试 |
 | relay 会先规范化 `from` 再执行 validator | validator 上下文中的 `from` 等于已认证远端 peer id，而不是报文原值 | 通过 `pn_service_rejects_proxy_open_when_validator_rejects` 部分覆盖 |
 | 目标侧响应中的 `tunnel_id` 不匹配 | relay 将其视为协议失败且不进行 bridge | 尚无专门的 unit 测试覆盖 |
 | 第一条控制帧意外 | relay 丢弃连接且不 panic | 尚无专门的 unit 测试覆盖 |
@@ -76,11 +83,12 @@
 ## DV 与 Integration 继承
 
 - DV 当前 disabled；`pn_server` 不再继承 all-in-one 运行时场景作为自动 DV 证据。
-- Integration 证据仍然是工作区级测试套件。对于 `pn_server`，成功意味着 relay 侧 PN 改动不会破坏 `cyfs-p2p`、`cyfs-p2p-test` 或 `sn-miner-rust` 的兼容性，尤其不能要求现有 `PnServer::new(...)` 调用点立即理解新的 target 统计查询或限速配置细节。
+- Integration 证据仍然是工作区级测试套件。对于 `pn_server`，成功意味着 relay 侧 PN 改动不会破坏 `cyfs-p2p`、`cyfs-p2p-test` 或 `sn-miner-rust` 的兼容性，尤其不能要求现有 `PnServer::new(...)` 调用点立即显式配置 validator、理解 assigned-target policy、target 统计查询或限速配置细节。
 
 ## `pn_server` 的完成定义
 
 - relay 启动、请求规范化、校验、响应转发和成功 bridge 激活都被 unit 测试覆盖。
+- 默认 PN connection validator allow-all 与显式 reject 路径都被 unit 或 targeted unit 测试覆盖。
 - relay 在 bridge 前失败时，对非成功 open 结果的映射已被记录并文档化。
 - relay 在成功 bridge 后的 source/target 双边统计准确性、source 侧限速共享预算和背压退出行为都被 unit 测试覆盖。
 - 模块级 DV disabled 状态与 integration 入口继续与 [testplan.yaml](/mnt/f/work/p2p/docs/versions/v0.1/modules/p2p-frame/testplan.yaml) 保持一致。

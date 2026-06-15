@@ -5,10 +5,11 @@ Adapt this template to the target repository's test commands. The contract is
 stable: all test implementation must be reachable through this entrypoint.
 
 Every real run (not --list / --dry-run) writes a machine-readable run artifact
-to harness/evidence/test-runs/<timestamp>-<module>-<level>.json recording each
-executed command, its exit code, and the git state. Acceptance cites these
-artifacts instead of pasted command output, and acceptance-report-check.py
-re-verifies them, so test evidence cannot be claimed without an actual run.
+to test-results/test-runs/<timestamp>-<module>-<level>.json recording each
+executed command, its exit code, and the git state. test-results/ is generated
+output and must be listed in .gitignore. Acceptance cites these artifacts
+instead of pasted command output, and acceptance-report-check.py re-verifies
+them, so test evidence cannot be claimed without an actual run.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from pathlib import Path
 
 LEVELS = ("unit", "dv", "integration")
 RUN_ARTIFACT_SCHEMA = 1
+EXCLUDED_TESTPLAN_MODULES = {"cyfs-p2p-test"}
 
 # Optional direct registry for repository-local exceptions that do not generate testplan.yaml.
 # Keys are module names. Each level contains a list of command argv lists.
@@ -35,11 +37,6 @@ TEST_COMMANDS: dict[str, dict[str, list[list[str]]]] = {
     },
     "cyfs-p2p": {
         "unit": [["cargo", "test", "-p", "cyfs-p2p"]],
-        "integration": [["cargo", "test", "--workspace"]],
-    },
-    "cyfs-p2p-test": {
-        "unit": [["cargo", "test", "-p", "cyfs-p2p-test"]],
-        "dv": [["cargo", "run", "-p", "cyfs-p2p-test", "--", "--help"]],
         "integration": [["cargo", "test", "--workspace"]],
     },
     "sn-miner": {
@@ -112,6 +109,8 @@ def discover_testplans(root: Path) -> dict[str, Path]:
                 module = line.split(":", 1)[1].strip()
             elif line.startswith("submodule:"):
                 submodule = line.split(":", 1)[1].strip()
+        if module in EXCLUDED_TESTPLAN_MODULES:
+            continue
         if module:
             key = f"{module}/{submodule}" if submodule else module
             plans[key] = path
@@ -164,7 +163,7 @@ def write_run_artifact(
     steps: list[dict[str, object]],
     exit_code: int,
 ) -> None:
-    artifact_dir = root / "harness" / "evidence" / "test-runs"
+    artifact_dir = root / "test-results" / "test-runs"
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

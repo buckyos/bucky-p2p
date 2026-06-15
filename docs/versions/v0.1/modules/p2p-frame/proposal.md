@@ -2,14 +2,14 @@
 module: p2p-frame
 version: v0.1
 status: approved
-approved_by: auto-pipeline
-approved_at: 2026-06-05T18:58:53+08:00
-approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc809f0a6c9b
+approved_by: user
+approved_at: 2026-06-15T01:22:00+08:00
+approved_content_sha256: 9f2cb297c6726493c6927ce98d9c395b3ec4cb8f24c38f237062b393801d6bc1
 ---
 
 # p2p-frame 提案
 
-## 背景与目标
+## Background and Goal
 - `p2p-frame` 是整个工作区的核心传输和 tunnel 库。
 - 这个数据包当前的直接目标，是为未来核心网络栈的改动建立一个严格、可评审的基线，确保协议、传输和运行时改动无法绕过 proposal、design、testing 和 acceptance。
 - 当前待落地的直接需求，是在 relay 侧 `pn/service/pn_server.rs` 增加用户流量统计与限速能力，并让经过 proxy server 的 proxy tunnel 支持由使用者显式控制的可选端到端载荷加密；其中 `stream` 路径可显式启用 TLS-over-proxy，而 `datagram` 路径继续保持明文兼容并忽略该加密模式，要求继续复用 `sfo-io` 中已有的统计/限速实现，同时避免在 `p2p-frame` 内重复实现一套新的字节整形逻辑或把业务明文暴露给 relay。本轮新增澄清是：relay 侧统计不再只提供单边 `from` 视图，而是要求 source 和 target 都能独立查询属于自己的桥接流量统计数据；限速仍只按 source 侧用户生效，不因 target 侧统计可见性而扩展成双边限速。
@@ -25,10 +25,12 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - 本轮新增需求是为通用 `Tunnel` 提供低频外部控制数据通道能力：调用方可通过 `open_control_stream(...)` / `listen_control_stream(...)` 在现有 tunnel 控制命令通道上复用一组内部多路复用的 virtual control stream；具体实现必须作为 `Tunnel` 内部共享模块，不向外暴露 `control_stream` runtime、frame 或子协议类型。现有 TCP/QUIC/PN tunnel 控制命令只新增一个 `Data` 命令承载内部 control stream frame，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 必须断开。
 - 本轮新增需求是将 SN 低频信令通信迁移到 `Tunnel` control stream：SN report、call、called、响应或等价小消息不得为了每次交互都新建普通业务 `open_stream()`；在已有 tunnel 控制通道健康时，应复用 `open_control_stream(...)` / `listen_control_stream(...)` 承载 SN 小数据通信，以减少真实 stream 建立开销并保持 SN 信令属于控制面。
 - 本轮新增清理需求是移除 `SnServiceContractServer` 相关逻辑：当前 `contract.rs`、`service/receipt.rs` 和服务侧 receipt 装配方向尚未作为 SN 主流程的完整计费、评估或准入系统接入，不应继续作为生产路径或公开装配点保留；为避免改变 SN wire 兼容性，`sn/protocol` 中既有 receipt 字段和编解码类型可继续作为协议兼容结构存在。后续如需服务计费或合约评估，必须以新的 proposal 重新定义目标、接口、状态存储、验证与验收边界。
+- 本轮新增需求是支持多 PN server 部署下的 proxy tunnel 建链边界：每个用户保持连接自己的 assigned PN server，断线重连、分配、迁移和目录查询由库使用者负责；`p2p-frame` 只按上层指定的 PN server 建立或复用到该 PN 的 relay tunnel，并允许通过该 PN 与分配在该 PN 上的其他用户建立 `PnTunnel`。对于连接其他 PN server 的路径，库内按普通 tunnel 逻辑处理，不负责该 PN server 的长期保持连接或断线重连。
+- 本轮新增澄清是：`PnServer` 默认 `PnConnectionValidator` 必须是显式 allow-all，以保持未配置部署和现有 `PnServer::new(...)` 调用点的兼容行为；多 PN server 的 assigned target 准入必须通过显式 validator 或 policy 构造路径启用，而不是改变默认 validator 的语义。
 - 本轮新增需求是清理 `p2p-frame` 内部所有 `tokio::sync::mpsc::unbounded_channel` 使用点，改为容量受限的 bounded channel；容量必须由外部配置向下传入，最上层配置提供按队列用途或位置拆分的容量配置，每个配置项默认值为 `1024`，调用方默认不需要显式设置；底层组件只接收对应位置已解析后的容量而不自行定义或兜底默认值。
 - 本轮后续清理需求是删除 `p2p-frame/src/stack.rs` 中公开的 `ChannelCapacityConfig` 以及 `P2pConfig` / `P2pStackConfig` / `P2pEnv` 上围绕该结构的容量覆盖、继承和访问逻辑；现有 bounded channel 仍保留容量上限，内部默认统一使用 `DEFAULT_CHANNEL_CAPACITY == 1024`，调用方不再通过 stack 顶层配置覆盖队列容量。
 
-## 范围
+## Scope
 ### 范围内
 - 核心库的长期模块边界
 - 对 `p2p-frame/docs/` 下现有协议说明建立设计索引
@@ -81,6 +83,12 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - SN 低频信令必须作为 control stream 的目标使用场景：SN report/call/called/response 或等价小消息必须走 control stream；不得保留普通业务 stream fallback，控制通道不可用或远端未监听 SN purpose 时当前 SN 命令通道建立或发送应失败。
 - SN server 必须提供连接验证器装配点，用于判断发起 SN 连接、report、call 或等价 SN server 入站请求的客户端是否允许连接；默认实现必须是显式 allow-all，保持未配置部署的兼容行为；验证上下文只允许包含已认证的 `client_id` 和该客户端证书，不暴露 command、tunnel id 或报文载荷派生的 peer 字段。
 - 移除 `SnServiceContractServer` 相关生产逻辑、服务侧公开导出、构造装配、后台任务和仅服务于该方向的存储/统计路径；保留 `sn/protocol` 中既有 receipt wire 字段和编解码类型，SN report/call/called/连接验证器和 control-stream-only 信令不得依赖被移除的 contract/receipt 服务逻辑。
+- 多 PN server 支持只要求库内按上层指定的 PN server 建立 proxy tunnel；目标用户到 PN server 的分配、目录查询、迁移、重平衡、多副本在线策略、PN server 之间同步、以及每个用户到自身 assigned PN server 的断线重连都属于库使用者职责。
+- `PnServer` 默认构造路径必须安装显式 allow-all `PnConnectionValidator`，保持现有未配置部署可连接；需要多 PN assigned target 约束的部署必须使用显式 validator 或 policy 构造路径限制本 server 可作为新建 `PnTunnel` target 的用户。
+- 在启用 assigned target 策略的多 PN 部署中，被分配到本 `PnServer` 的用户可以作为 `ProxyOpenReq.to` 被打开，未分配到本 server 的 target 必须在打开目标侧 stream 前失败。
+- 如果上层指定了错误的 PN server，库内只返回明确失败，不自动查询目录、不自动猜测其他 PN server、不在多个 PN server 之间转发业务 bridge。
+- 多 PN server 新路径不得依赖默认 allow-all validator 掩盖错误 PN；但旧单 PN / 未配置部署的 `PnServer::new(...)` 默认 allow-all 构造行为必须保留为兼容路径。
+- 第一版多 PN server 支持只允许单 relay bridge：`A -> PN-B -> B`；不引入 `A -> PN-A -> PN-B -> B` 的跨 PN 二跳业务 bridge。
 - `p2p-frame` 内部事件、accept、listener、stream/datagram 和 tunnel 订阅队列必须由 unbounded channel 改为 bounded channel，避免无上限内存增长
 - bounded channel 容量必须从顶层配置入口向下传递；顶层配置必须按不同队列用途或位置提供可独立覆盖的容量项，各项默认值均为 `1024`，调用方不设置时使用默认容量即可启动
 - 不同位置的 channel 容量不得强制共用同一个配置值；至少应能区分 TTP listener registry、TunnelManager subscription、NetManager incoming subscriber、PN 内部队列和 QUIC listener connect/punch 相关内部队列等仍存在 bounded queue 的类别；TCP/QUIC tunnel stream/datagram 入站回调路径不再保留旧 accept queue 容量参数
@@ -115,6 +123,10 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - 将 SN 低频信令迁移解释为新增 SN 大流量数据平面、替代普通业务 stream 的通用消息总线，或允许 SN 信令直接依赖 `p2p-frame` 内部 `control_stream` frame/stream id/window 协议
 - 将 `SnServiceContractServer` 清理解释为删除 SN server、SN client、连接验证器、peer manager、SN 观察端点分类、SN control stream 信令、基础 report/call/called 命令语义或 `sn/protocol` receipt wire 兼容结构；本轮只移除未完整接入主流程的服务合约/回执生产路径。
 - 在本轮清理中引入新的计费、配额、合约评估、持久化账本、跨 SN 策略同步或准入策略；这些能力如果未来需要，必须单独 proposal。
+- 将多 PN server 支持解释为库内自动维护 `peer_id -> PN` 全局目录、自动发现 PN server、自动负载均衡、用户迁移、重平衡、多副本在线策略或 PN server 之间的目录同步。
+- 当上层指定错误 PN server 时，库内不得自动重查目录、自动切换其他 PN server 或尝试跨 PN server 二跳业务 bridge。
+- 将每个用户到自身 assigned PN server 的长期保持连接、断线重连、重注册或分配更新作为 `p2p-frame` 的 PN 模块职责；这些属于库使用者的部署策略。
+- 因多 PN server 支持改变 PN `ProxyOpenReq` / `ProxyOpenResp` 线协议、改变 TLS-over-proxy 语义、改变 source/target 统计与 source 单边限速口径，或把 PN relay 语义迁移到 `cyfs-p2p`。
 - 改变 direct、proxy、普通 incoming tunnel 的 register/publish 规则；本轮只收窄 reverse incoming 无 waiter 的行为
 - 引入 reverse tunnel 过期表或跨进程状态；本轮只以当前 pending reverse waiter 作为接收入站 reverse 的依据
 - 新增 `NetworkServerRuntime`、socket factory trait 或其他包裹 `sfo-reuseport` 的通用运行时抽象；本轮必须直接使用 `sfo_reuseport::ServerRuntime`、`TcpServer` 和 `QuicServer`
@@ -150,10 +162,48 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - `Tunnel` control stream API 属于 `p2p-frame` 的公共 tunnel API 责任边界；`cyfs-p2p` 可以调用 `open_control_stream` / `listen_control_stream`，但不得依赖或重新定义 `p2p-frame` 内部 control stream frame、stream id、window 和 buffer 协议。
 - SN control-stream 化属于 `p2p-frame/src/sn/**` 对 `Tunnel` 公共 control stream API 的消费责任边界；`cyfs-p2p`、`sn-miner-rust` 和测试场景可以观察 SN 行为兼容性，但不得在适配层另行实现一套 SN 信令 stream 选择策略。
 - `SnServiceContractServer` 清理属于 `p2p-frame/src/sn/**` 内部 SN 服务实现边界；`sn-miner-rust`、`cyfs-p2p-test` 和 `cyfs-p2p` 只能适配移除后的 SN 服务公开 API，不得在相邻模块重新保留一套旧 contract server 或 receipt 生产路径作为兼容旁路。
+- 多 PN server 的用户分配、目录查询、迁移、重平衡、多副本在线策略、以及每个用户到自身 assigned PN server 的断线重连属于库使用者职责；`p2p-frame` 只消费上层指定的 PN server 目标并执行 PN relay 建链。
+- `PnServer` assigned target 准入属于 `p2p-frame/src/pn/service/**` 的 relay 责任边界；下游可以提供策略输入，但不得在 `cyfs-p2p` 中重写 PN relay 的 target 归属语义或构造跨 PN server 二跳 bridge。
+- 连接其他 PN server 用于访问其 assigned target 用户时，该连接在 `p2p-frame` 内只作为普通 tunnel/relay tunnel 使用；库内不负责为这些非本用户 assigned PN server 执行长期保活或断线重连策略。
 - bounded channel 容量属于 `p2p-frame` 顶层运行时配置责任边界；`cyfs-p2p` 可以透传或组合该配置，但不得在适配层为 `p2p-frame` 底层队列另行定义一套默认值。顶层配置必须提供完整默认配置，因此普通调用方不需要为了启用 bounded channel 而显式填写任一容量项。
 - `ChannelCapacityConfig` 清理后，容量不再是 `p2p-frame` 对相邻模块暴露的配置责任；相邻模块不得依赖 stack 顶层容量覆盖 API。
 
-## 约束
+## Assumptions and Ambiguities
+- Assumptions:
+  - 多 PN server 需求以 `p2p-frame/docs/pn_design.md` 中的单 relay bridge 模型为参考输入。
+  - 每个用户到自身 assigned PN server 的保持连接、断线重连、分配和目录查询由库使用者负责。
+  - 上层能够在发起 proxy tunnel 前指定目标用户当前应使用的 PN server。
+- Open ambiguities:
+  - relay 如何在实现中区分新建逻辑 `PnTunnel` 与既有 tunnel 后续 channel 不在需求阶段规定，必须由 design 补齐。
+  - assigned target 策略的具体接口形态、错误码映射和状态缓存生命周期由 design 决定。
+- Decision needed before approval:
+  - 用户需审批 `pn_multi_server_assigned_target` 作为新的 proposal item 后，design/testing/implementation 才能继续。
+
+## Requirement Challenge
+| question | evaluation | risk_or_tradeoff | decision |
+|----------|------------|------------------|----------|
+| Is the stated multi PN server requirement reasonable for the user's goal? | 合理；用户明确每个用户只维护自身 assigned PN server，访问其他 PN server 上用户时按 tunnel 逻辑处理，避免把库扩展成全局目录或调度系统。 | 如果不固化边界，后续实现可能误做库内目录、自动切换或跨 PN bridge。 | keep with explicit non-goals |
+| Is there a simpler or safer approach? | 更安全的第一版是只支持上层指定 PN server + assigned target 准入，拒绝错误 PN，不做库内自动发现、重试或迁移。 | 上层必须自行处理目录、迁移和重查；库内不会替用户恢复错误分配。 | chosen approach |
+| Is scope ambiguous? | “新建逻辑 tunnel 与既有 channel 的判定”属于设计细节，需求阶段只要求 assigned target 约束新建 proxy tunnel 且不破坏既有 tunnel 双向 channel。 | 若 design 不补齐，该边界可能导致反向 channel 被错误拒绝。 | proceed with design follow-up |
+| Should `PnConnectionValidator` default to allow-all? | 是；默认 validator 应保持兼容行为，assigned target 是多 PN 部署显式启用的准入策略，不应让未配置部署默认拒绝连接。 | 默认 allow-all 不能作为多 PN 错误 PN 成功的依据；design 必须把默认兼容路径和显式 assigned target 路径分开。 | revise proposal to require default allow-all |
+
+## Large Module Submodule Decision
+| submodule | new_or_existing | responsibility | proposal_packet | reason |
+|-----------|-----------------|----------------|-----------------|--------|
+| pn | existing | PN client/server relay、assigned target 准入和 proxy tunnel 建链边界 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/pn/**` 责任，不需要创建新的直接 submodule packet。 |
+
+## Trigger Matrix
+| trigger_category | applies | evidence | required_checks | deferred_checks_and_reason |
+|------------------|---------|----------|-----------------|----------------------------|
+| contract/protocol | yes | `pn_multi_server_assigned_target` 约束 PN relay 建链、assigned target 准入和错误 PN 行为，但不改变 `ProxyOpenReq` / `ProxyOpenResp` wire。 | design must map PN protocol invariants; testing must cover correct PN success and wrong PN failure. | owner: design/testing; risk: PN wire compatibility; acceptance impact: verify no wire protocol change. |
+| data/schema | no | 需求不新增持久化 schema；用户到 PN 的目录和分配数据属于库使用者。 | not-applicable: no repository-owned schema change in proposal stage. | owner: none; risk: low; acceptance impact: confirm no repository-owned directory schema. |
+| security/privacy/permission | yes | assigned target 准入限制本 `PnServer` 可作为 target 打开的用户，错误 PN 必须失败。 | design must define validator/policy boundary; testing must cover non-assigned target rejection before target open. | owner: design/testing; risk: wrong target authorization; acceptance impact: reject non-assigned target before target open. |
+| runtime/integration | yes | 多 PN server 影响 relay tunnel 建立和 workspace 调用方行为；本变更要求保留 `PnServer::new(...)` 默认 allow-all 兼容路径，同时显式 assigned target 路径仍能拒绝错误 PN。 | integration must cover specified PN flow, wrong PN failure under explicit assigned target policy, and default allow-all compatibility. | owner: testing; risk: workspace migration; acceptance impact: correct PN succeeds, wrong PN fails with policy, and default constructor remains compatible. |
+| build/dependency/config/deployment | yes | 上层指定 PN server 和 assigned target 策略会影响配置/部署边界，但不要求库内目录。 | design must define configuration/interface boundary without adding global directory. | owner: design; risk: accidental global directory/config expansion; acceptance impact: no library-owned PN directory. |
+| ui/datamodel/workflow | no | 该 crate 无 UI，且不定义库外用户分配目录 datamodel。 | not-applicable: no UI/datamodel workflow owned by p2p-frame. | owner: none; risk: low; acceptance impact: no UI/datamodel artifact required. |
+| harness/process | yes | 新增 proposal item `pn_multi_server_assigned_target` 会使下游 design/testing/implementation admission 需要重新映射。 | run doc-structure-check and stage-scope-check for proposal; downstream admission must use new change_id. | owner: downstream stages; risk: admission gap; acceptance impact: design/testing must directly map new change_id. |
+
+## Constraints
 - 允许使用的库/组件：
   - 现有工作区 crate 和当前协议说明
   - 基于 cargo 的验证命令
@@ -167,6 +217,7 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
   - 把是否加密变成隐式默认行为，导致调用方无法明确控制 proxy tunnel 的保密语义
   - 在两端已显式约定启用加密的情况下静默降级到明文 proxy tunnel
   - 通过增加多 SN 依赖来解决本轮单 SN 打洞问题
+  - 通过库内目录、跨 PN server 转发或自动 PN 切换来掩盖上层指定错误 PN server 的问题
   - 将 SN 观察端点或本地映射端口提升为跨 SN NAT 类型推断依据
   - 因 TCP direct 失败而全局惩罚同一远端的 QUIC/UDP 打洞候选
   - 为规避 bounded channel 满载而在任一路径保留或重新引入 `unbounded_channel`
@@ -178,6 +229,7 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
   - 保持混合 edition 的工作区布局
   - 保持当前协议说明中记录的兼容性预期
   - 保持现有 crate 边界，不因为本次需求把 `pn_server` 的 relay 语义迁移到其他 crate
+  - 多 PN server 支持不得扩大为库内全局目录、调度系统或 server 间桥接系统；设计阶段只需定义上层指定 PN server、显式 assigned target 准入、错误 PN 返回失败、默认 allow-all 兼容路径和单 relay bridge 的可执行边界。
   - bounded channel 各位置默认容量只能出现在顶层配置定义中，默认值均为 `1024`；底层构造函数、listener、tunnel、registry 和测试替身必须接收对应位置的显式容量或配置快照，不得自行选择默认值
   - 顶层配置必须能在用户不传任何 channel 容量参数时构造完整默认配置；显式配置时，调用方可以只覆盖某一类队列容量，不应被迫同时覆盖所有队列容量
   - channel 容量配置必须覆盖所有由当前 unbounded channel 承载且仍保留为 queue 的内部队列；设计阶段若某个路径已改为直接回调交付，不得继续保留旧 queue 容量参数，仍需明确关闭、拒绝或错误语义
@@ -224,7 +276,7 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - SN 信令使用 control stream 时必须通过公开 `Tunnel` control stream API 进入，不得跨模块调用内部 `control_stream` runtime 或自定义 raw `Data` payload 子协议；普通业务 `open_stream()` 不应继续作为 SN 小消息的默认发送路径。
 - `SnServiceContractServer` 清理后，SN 服务主流程仍必须保留 report、call、called、peer manager 更新、连接验证器和 control-stream-only 信令的既有职责；任何需要改变这些职责的发现都必须退回 design 或 proposal，而不是在 implementation 中扩大删除范围。
 
-## 高层结果
+## High-Level Outcomes
 - 未来的 `p2p-frame` 改动必须通过显式模块数据包进入流程。
 - 协议和运行时高风险改动必须触发更强的评审和验证。
 - 核心栈工作的 acceptance 必须把结果回溯到 proposal 意图。
@@ -253,8 +305,11 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - SN report/call/called/response 或等价低频小消息通过 control stream 交互，不再为每次 SN 信令建立新的普通业务 stream；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时不得 fallback 到普通 stream，而应按现有 SN 失败路径移除当前 SN 连接或返回错误。
 - 所有原 `unbounded_channel` 队列均具备容量上限，默认从顶层配置取得对应位置的 `1024`；外部调用方可以按队列类别或位置独立覆盖容量，不需要为未覆盖位置重复填写默认值；底层组件只消费对应位置已解析容量，并在队列满载时按设计定义的背压、拒绝、关闭或错误路径收敛。
 - `ChannelCapacityConfig` 后续清理完成后，stack 顶层不再暴露容量结构、getter 或 setter；默认调用方仍无需设置容量即可启动，保留队列继续以 `1024` 为固定容量上限收敛满载路径。
+- 多 PN server 部署下，`p2p-frame` 能按上层指定的 PN server 建立或复用 relay tunnel，并通过该 PN server 与分配在该 PN server 上的 target 用户建立 proxy tunnel；如果指定错误 PN server，应返回失败而不是自动查询或切换。
+- 每个用户保持连接自身 assigned PN server 的断线重连、分配更新和目录查询由库使用者负责；`p2p-frame` 只把连接其他 PN server 的路径当作普通 tunnel/relay tunnel 使用。
+- `PnServer` 默认 `PnConnectionValidator` 是显式 allow-all，`PnServer::new(...)` 未注入策略时保持现有连接兼容；多 PN 需求下 assigned target 策略通过显式 validator 或 policy 构造路径限制新建 proxy tunnel target 归属。
 
-## 风险
+## Risks
 - 旧设计说明与未来实现之间的协议漂移
 - 传输或 tunnel 改动缺少运行时证据
 - `cyfs-p2p` 和运行时二进制中的跨 crate 回归
@@ -293,8 +348,12 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - unbounded channel 改为 bounded channel 会把原先隐藏的积压转化为背压或错误；如果容量传递遗漏、满载语义不一致，可能导致 accept/open 等待路径卡住、过早关闭或错误传播不清。
 - 若底层组件继续保留局部默认值，实际容量会与顶层配置漂移，造成不同 transport 或测试替身的内存上限不可预测。
 - 若不同队列位置继续共用单一容量配置，调用方无法针对高吞吐 tunnel accept、TTP registry、subscription fanout 或 PN 内部队列分别调参，可能在某些路径容量不足时被迫整体放大所有队列上限。
+- 多 PN server 需求若边界不清，容易被误实现为库内目录、自动负载均衡或跨 PN server 二跳 bridge，扩大协议和运行时复杂度。
+- 如果指定错误 PN server 时错误语义不清，上层目录无法区分“需要重新查询/切换 PN”的失败与普通 target offline 或权限拒绝；design/testing 必须给出可观测失败路径。
+- 如果 assigned target 准入与默认 allow-all 兼容路径混淆，实现会在显式多 PN 策略和未配置默认路径之间产生歧义，增加错误 PN 被误放行或默认部署被误拒绝的风险。
+- 多 PN server 下统计和限速若被误扩展为跨 PN 聚合或跨 server 共享预算，会超出 `p2p-frame` relay 本地职责并与库使用者的部署策略冲突。
 
-## 验收锚点
+## Success Criteria
 - source 侧用户能够通过 `pn_server` 的查询入口看到属于自己这条 bridge 的累计统计，且记账主体使用 relay 规范化后的已认证 `req.from`，不受源端伪造 `from` 影响。
 - target 侧用户能够通过 `pn_server` 的查询入口看到属于自己这条 bridge 的累计统计，且记账主体锚定到 relay 成功打开的目标用户 `req.to`，不依赖未认证的业务载荷字段。
 - source 与 target 的统计视图都只统计成功握手后的 bridge payload，不统计 `ProxyOpenReq` / `ProxyOpenResp`，并且只在成功写出后入账。
@@ -334,6 +393,11 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - 顶层配置未显式设置 channel 容量时，仍存在的每个队列类别或位置的默认值必须为 `1024`；显式设置某一位置容量时，只有对应 network、PN、TTP、manager 等底层队列使用该覆盖值，其他位置继续使用顶层默认值，且底层不得自行覆盖默认值；TCP/QUIC tunnel 不再暴露旧 accept queue 容量项。
 - 验收必须确认用户可以不设置任何 channel 容量并获得完整默认配置，也可以只覆盖单个位置容量而不影响其他位置容量。
 - bounded channel 满载路径必须有可验收行为：按设计定义背压等待、返回错误、关闭迟到 tunnel/channel 或丢弃已关闭 listener 的迟到事件，不得静默无限缓存。
+- 多 PN server 支持必须可验收：`B` 被分配到 `PN-B` 时，`A` 按上层指定的 `PN-B` 能成功建立 `A -> PN-B -> B` proxy tunnel。
+- 当 `A` 按上层指定的错误 `PN-A` 连接 `B`，且 `B` 不属于 `PN-A` 的 assigned target 时，`PN-A` 必须在打开目标侧 stream 前返回失败；库内不得自动查询、自动切换到 `PN-B` 或尝试 `PN-A -> PN-B` 二跳 bridge。
+- `PnServer::new(...)` 默认构造路径必须使用显式 allow-all validator 并允许未配置部署继续连接；多 PN assigned target 行为必须由显式 validator 或 policy 构造路径覆盖并测试错误 PN 拒绝。
+- 多 PN 新路径不得依赖默认 allow-all validator 掩盖错误 PN；未指定目标 PN server 时，应按设计定义返回配置或参数错误，而不是隐式选择某个 PN server。
+- 多 PN server 支持不得改变 PN `ProxyOpenReq` / `ProxyOpenResp` 线协议、TLS-over-proxy 边界、source/target 统计口径或 source 单边限速语义；统计和限速只要求本 PN server relay 本地视图，不要求库内跨 PN 聚合。
 
 ## Proposal Items
 | proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
@@ -349,10 +413,11 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 | P-SN-CONTROL-STREAM-1 | sn_control_stream_signaling | SN report、call、called、response 或等价低频小消息通过 `Tunnel` control stream 交互，不再为每次 SN 信令新建普通业务 `open_stream()`，且不保留普通 stream fallback。 | 不把 control stream 扩展成 SN 大流量数据平面；不公开或依赖内部 `control_stream` frame/stream id/window 协议；不改变 SN 最终连通性语义、单 SN 边界、SN 观察 endpoint 分类或 `SnCallResp` 只表示 SN 受理结果的语义；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时当前 SN 命令通道建立或发送失败，不得 fallback 到普通 stream。 | schema/admission 能以 `sn_control_stream_signaling` 建立后续准入；unit 或编译证据确认 SN 信令路径调用 `open_control_stream` / `listen_control_stream` 而不是 `open_stream` / `listen_stream`；测试覆盖 control stream purpose 过滤、控制通道不可用或未监听时失败，以及 SN report/call/called/response 小消息仍能通过 control stream 完成。 |
 | P-SN-SERVER-CONNECTION-VALIDATOR-1 | sn_server_connection_validator | SN server 增加连接验证器装配点，用于判断客户端是否允许连接或发起 SN server 入站请求；默认构造路径必须安装显式 allow-all validator，保持未配置部署的兼容行为；validator 上下文只包含已认证 `client_id` 与该客户端证书。 | 不改变 SN command 线协议、`SnCallResp` 最终连通性语义、单 SN 边界、endpoint 分类或 control-stream-only 信令选择；不把 validator 扩展为认证协议、计费系统、限速器、NAT 类型推断、请求语义审计器或跨 SN 策略同步；不信任客户端自填报文字段作为准入身份来源；不在 validator 上下文中暴露 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段。 | schema/admission 能以 `sn_server_connection_validator` 建立后续准入；design/testing 需要定义只含 `client_id` 与客户端证书的 validator 上下文、默认 allow-all 构造路径、自定义 reject 行为和错误映射；implementation 必须移除当前 `SnConnectionValidateContext` 中的 command、tunnel id、reported peer 和 target peer 字段；unit 覆盖默认 allow-all 允许连接，自定义 validator 拒绝时 SN server 不继续处理对应 report/call 或等价请求，并覆盖 validator 可读取客户端证书但无法读取报文派生字段。 |
 | P-SN-CONTRACT-CLEANUP-1 | remove_sn_service_contract_server | 移除 `SnServiceContractServer` 相关服务合约/回执生产路径，包括服务侧生产代码、公开导出、构造装配、后台任务、仅服务于该方向的存储/统计路径，以及 `client/contract.rs` / `service/receipt.rs` 等等价模块；保留 `sn/protocol` receipt wire 兼容结构、SN 基础 report/call/called、连接验证器和 control-stream-only 信令。 | 不删除 SN server/client 基础能力、不改变 SN command 线协议、不改变 `SnCallResp` 语义、不改变 peer manager、endpoint 分类、连接验证器或 control stream 信令选择；不引入新的计费、合约评估、配额或持久化账本替代方案；不在相邻模块保留旧 contract server 兼容旁路。 | schema/admission 能以 `remove_sn_service_contract_server` 建立后续准入；design/testing 需要明确删除路径、公开 API 影响、下游启动路径适配和验证命令；implementation 后代码搜索确认服务侧生产代码和公开导出不再引用 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs` 或等价 contract/receipt 装配逻辑，且 SN report/call/called、连接验证器和 control-stream-only 信令对应 unit/compile 验证仍通过。 |
+| P-PN-MULTI-SERVER-ASSIGNED-TARGET-1 | pn_multi_server_assigned_target | 支持多 PN server 部署下由上层指定目标 PN server 建立 proxy tunnel；每个用户到自身 assigned PN server 的保持连接、断线重连、分配和目录查询由库使用者负责；`PnServer` 默认 `PnConnectionValidator` 为显式 allow-all，显式 assigned target validator / policy 路径限制本 server 可作为新建 proxy tunnel target 的用户。 | 不做库内 `peer_id -> PN` 全局目录、不自动发现或切换 PN server、不做用户迁移/重平衡/多副本在线策略、不做 PN server 间目录同步、不做 `A -> PN-A -> PN-B -> B` 跨 PN 二跳业务 bridge；不改变 PN wire 协议、TLS-over-proxy、统计限速口径；不允许多 PN 新路径依赖默认 allow-all 掩盖错误 PN；不删除 `PnServer::new(...)` 默认 allow-all 兼容路径。 | schema/admission 能以 `pn_multi_server_assigned_target` 建立后续准入；design/testing 需要覆盖默认 `PnServer::new(...)` allow-all 兼容、显式 assigned target 策略下上层指定正确 PN 成功、指定错误 PN 在打开目标侧 stream 前失败且不自动切换、未指定目标 PN server 时按配置/参数错误失败、统计/限速保持本 PN server 本地视图且不要求跨 PN 聚合。 |
 | P-BOUNDED-CHANNELS-1 | bounded_channel_capacity_config | `p2p-frame` 内部所有 `unbounded_channel` 队列改为 bounded channel；容量由顶层配置按队列类别或位置独立向下传递，每个容量项默认值为 `1024`，用户默认不需要设置，外部可只覆盖某一位置容量，底层组件不定义默认值。 | 不改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不在底层散落硬编码默认容量；不强制所有队列共用一个容量配置；不通过额外 unbounded buffer 绕开容量限制。 | schema/admission 能以 `bounded_channel_capacity_config` 建立后续准入；unit 或编译覆盖默认用户不设置时各容量默认 `1024`、单个位置自定义容量只影响对应底层构造路径；代码搜索确认生产路径不再存在 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；满载路径具备按设计定义的错误、关闭或背压覆盖。 |
 | P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | stack_channel_capacity_config_removal | 删除 `ChannelCapacityConfig`、`P2pConfig` / `P2pStackConfig` 的 channel capacity getter/setter、`P2pEnv` 的容量快照和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime` 不再接收无效 channel capacity 参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel，内部使用固定 `DEFAULT_CHANNEL_CAPACITY == 1024`。 | 不改变已有 bounded channel 类型、满载错误语义、TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不新增替代公开容量配置 API；不把容量清理扩展为移除所有底层显式构造参数。 | schema/admission 能以 `stack_channel_capacity_config_removal` 建立后续准入；编译或 unit 覆盖 `stack.rs` 不再导出 `ChannelCapacityConfig` 或 stack 层容量 getter/setter，`NetManager::new(...)` / `new_with_incoming_tunnel_validator(...)`、`TtpRuntime::new()` 和 `PnClient::new*` 不再要求容量参数；代码搜索确认生产路径仍无 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；unit 或 compile 覆盖默认 stack 构造继续使用固定容量启动相关 bounded queue。 |
 
-## Downstream Follow-up
+## Downstream Follow-Up
 - 本次 proposal 新增 `tunnel_stream_datagram_listen_callback`，并已完成 proposal 审批、design/testing 同步和 implementation admission。
 - Design 已补齐 `Tunnel` trait 新签名、stream/datagram 回调类型、回调 future 的运行时归属、重复注册/关闭后注册/回调错误处理、内部队列与 bounded channel 容量关系，以及 TCP/QUIC/PN/TTP/manager 调用点迁移方案。
 - Testing 已补齐公共 trait 编译覆盖、TCP/QUIC/PN tunnel 入站回调、未 listen 拒绝、关闭后不回调、回调背压或满载、TTP/stream/datagram manager 迁移和 workspace integration 覆盖。
@@ -369,3 +434,10 @@ approved_content_sha256: 49161a6e9ee0abf902abe6686e59f113d30255470c220b028d5ecc8
 - 本次 proposal 已按用户要求收紧 `sn_server_connection_validator`：SN server 连接验证器上下文只允许包含 `client_id` 与客户端证书，默认实现仍为显式 allow-all。Design/Testing/Implementation/Acceptance 必须同步移除 command、tunnel id、reported peer、target peer 和其他报文载荷派生字段的上下文依赖，补齐证书来源、默认构造路径、自定义拒绝行为、错误映射和对应验证证据后，才能进入实现准入。
 - 本次 proposal 已按用户要求新增 `remove_sn_service_contract_server` 并由自动流水线批准；Design 必须补齐 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs`、公开导出、构造装配、下游调用点、协议 receipt wire 兼容结构保留和 SN 基础能力之间的删除边界。
 - Testing 必须补齐代码搜索、编译、SN 基础 report/call/called、连接验证器和 control-stream-only 信令不回归的验证映射；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `remove_sn_service_contract_server` 通过后，才能删除生产代码。
+- 本次 proposal 已按用户要求修订 `pn_multi_server_assigned_target`：`PnServer` 默认 `PnConnectionValidator` 必须是显式 allow-all，assigned target 准入是多 PN 部署的显式 validator / policy 路径；Design 必须补齐默认 allow-all 兼容构造、显式 assigned target 策略输入、错误 PN 返回错误、未指定 PN server 的失败语义、单 relay bridge 约束和统计/限速本地视图边界。
+- Testing 必须补齐默认 `PnServer::new(...)` allow-all 兼容、显式 assigned target 策略下正确 PN 成功、错误 PN 失败且不自动切换、未指定目标 PN server 时失败、以及不做跨 PN 二跳 bridge 或库内目录查询的验证映射；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `pn_multi_server_assigned_target` 通过后，才能修改生产代码。
+
+## Approval Record
+- approver: user
+- approval_date: 2026-06-15T01:22:00+08:00
+- user_statement: 确认，自动处理后续步骤

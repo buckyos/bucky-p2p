@@ -24,7 +24,9 @@
 - external interface verification
 - validation rationale that ties checks to concrete behaviors, risks, or success criteria
 - coverage rationale for relevant normal, boundary, negative, error, compatibility, lifecycle, and cross-module cases
-- case-type coverage table for normal, boundary, negative, error, compatibility, lifecycle, and cross-module coverage for each tested `change_id`
+- case-type coverage table for normal, boundary, negative, error, compatibility, lifecycle, and cross-module coverage for each tested `change_id`, including the test `level` that implements each covered case
+- per-level test design tables (`## Unit Tests`, `## DV Tests`, `## Integration Tests`) following the level contracts in `harness/rules/test-design-rules.md`
+- design element coverage table mapping parameter domains, state transitions, failure paths, error categories, invariants, and concurrency declarations to derived cases or explicit gaps
 - definition of done
 - stable test entrypoints aligned with `testplan.yaml` for completed testing work
 - direct change coverage for implemented work
@@ -36,6 +38,10 @@
 - Testing must operationalize approved proposal/design intent against the delivered implementation.
 - Optional testing documents that use approval metadata follow the same approval authority rule: agents MUST NOT set `status: approved` on their own initiative; user approvals require a filled `## Approval Record`, and auto-pipeline approvals require `harness/pipeline-plan.md` launch evidence.
 - Testing tasks run after implementation completes and MUST inspect `proposal.md`, `design.md`, and the delivered code before designing test cases.
+- Test case design MUST follow the per-level contracts in `harness/rules/test-design-rules.md`: unit tests execute every conditional branch of changed code or record per-branch gap reasons; DV tests cover module lifecycle, each main workflow, and at least one failure workflow; integration tests cover success and failure semantics for every consumed exported interface.
+- Test cases MUST be derived from design elements per `harness/rules/test-design-rules.md`: parameter domains, state transitions, failure paths, error categories, invariants, and concurrency declarations each map to concrete cases or explicit rows in `## Design Element Coverage`; `not-applicable` rows need a concrete reason naming the design evidence.
+- Each behavior MUST be verified at the lowest test level that can expose its failure; higher-level tests MUST NOT substitute for missing lower-level coverage, and duplicate cross-level verification records a reason.
+- Failure paths, error categories, or state transitions discovered in delivered code but missing from design MUST be returned to the design stage instead of being tested without a design source.
 - Testing tasks are single-stage by default and MUST NOT edit `proposal.md`, `design.md`, `design/`, acceptance artifacts, or production code unless the user explicitly requested those additional stages.
 - Testing tasks may modify test code, test fixtures, test runners, and optional testing artifacts.
 - Testing tasks may modify unified test entrypoint wiring when needed to register the generated tests.
@@ -48,7 +54,7 @@
 - Every implemented `change_id` MUST have `## Case-Type Coverage` rows for normal, boundary, negative, error, compatibility, lifecycle, and cross-module coverage. Each non-covered, manual, disabled, or not-applicable row MUST include a concrete reason.
 - Every generated or changed automated test MUST be reachable through `harness/scripts/test-run.py`.
 - Testing is not complete until `uv run --active python ./harness/scripts/test-run.py <module> all` reaches the module tests and `uv run --active python ./harness/scripts/test-run.py all all` reaches all project tests registered with the harness.
-- Test execution evidence is the machine-written run artifact under `harness/evidence/test-runs/` that `test-run.py` produces; cite the artifact path in testing evidence instead of pasting command output. Claimed runs without an artifact do not count.
+- Test execution evidence is the machine-written run artifact under the git-ignored `test-results/test-runs/` directory that `test-run.py` produces; cite the artifact path in testing evidence instead of pasting command output. Claimed runs without an artifact do not count.
 - For bugfix work, testing MUST produce a regression test bound to the bugfix `change_id` that reproduces the defect before the fix and passes after it (red-green). Record the failing pre-fix run artifact when reproduction is feasible; when it is not (for example the fix landed before testing started, or the defect needs an unavailable environment), record the concrete reason in the testing evidence instead. A bugfix validated only by happy-path tests is incomplete testing.
 - Case-type exemptions are tighter for triggered categories: when the proposal/design trigger matrix marks a category as `applies: yes`, the corresponding case-type rows (for example negative/error for security triggers, compatibility for data/contract triggers) may be `manual`, `disabled`, or not-covered only with a recorded owner, risk, and acceptance impact, not just a free-text reason.
 - Validation paths MUST prove a named behavior or risk; do not add unrelated checks as evidence.

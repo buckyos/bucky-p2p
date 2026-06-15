@@ -2,7 +2,6 @@ use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
-use crate::pn::pn_virtual_endpoint;
 use crate::runtime;
 use crate::sn::client::SNClientServiceRef;
 use crate::sn::protocol::v0::{SnCalled, TunnelType};
@@ -24,7 +23,7 @@ use super::{ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionI
 use crate::networks::{
     IncomingTunnelCallback, ListenVPortsRef, NetManagerRef, TunnelCommandResult,
     TunnelConnectIntent, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelListenerInfo,
-    TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    TunnelNetwork, TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
 };
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
@@ -1054,7 +1053,7 @@ impl TunnelManager {
         let tunnel = pn_network
             .create_tunnel_with_intent(
                 &self.local_identity,
-                &pn_virtual_endpoint(),
+                &Endpoint::default(),
                 remote_id,
                 remote_name,
                 intent,
@@ -1671,6 +1670,8 @@ mod nat_strategy_tests {
         P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pIdentitySignType,
         P2pSignature,
     };
+    use crate::pn::{PnClient, PnProxyRouteResolver};
+    use crate::ttp::TtpClient;
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
 
@@ -2502,6 +2503,149 @@ mod tests {
         fn new(local_id: P2pId, result: Result<(), P2pErrorCode>) -> Arc<Self> {
             Arc::new(Self { local_id, result })
         }
+    }
+
+    struct StaticPnRouteResolver {
+        relay_id: P2pId,
+    }
+
+    #[async_trait::async_trait]
+    impl PnProxyRouteResolver for StaticPnRouteResolver {
+        async fn resolve_pn_server(&self, _target: &P2pId) -> P2pResult<P2pId> {
+            Ok(self.relay_id.clone())
+        }
+    }
+
+    struct MockRelayTunnel {
+        local_id: P2pId,
+        relay_id: P2pId,
+    }
+
+    impl MockRelayTunnel {
+        fn new(local_id: P2pId, relay_id: P2pId) -> Arc<Self> {
+            Arc::new(Self { local_id, relay_id })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::networks::Tunnel for MockRelayTunnel {
+        fn tunnel_id(&self) -> TunnelId {
+            TunnelId::from(9001)
+        }
+
+        fn candidate_id(&self) -> TunnelCandidateId {
+            TunnelCandidateId::from(9001)
+        }
+
+        fn form(&self) -> TunnelForm {
+            TunnelForm::Direct
+        }
+
+        fn is_reverse(&self) -> bool {
+            false
+        }
+
+        fn protocol(&self) -> Protocol {
+            Protocol::Ext(1)
+        }
+
+        fn local_id(&self) -> P2pId {
+            self.local_id.clone()
+        }
+
+        fn remote_id(&self) -> P2pId {
+            self.relay_id.clone()
+        }
+
+        fn local_ep(&self) -> Option<Endpoint> {
+            Some(Endpoint::default())
+        }
+
+        fn remote_ep(&self) -> Option<Endpoint> {
+            Some(Endpoint::default())
+        }
+
+        fn state(&self) -> TunnelState {
+            TunnelState::Connected
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        fn close(&self) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_stream(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingStreamCallback,
+        ) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn listen_datagram(
+            &self,
+            _vports: crate::networks::ListenVPortsRef,
+            _callback: crate::networks::IncomingDatagramCallback,
+        ) -> P2pResult<()> {
+            Ok(())
+        }
+
+        async fn open_stream(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+            let (client_side, relay_side) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_side);
+            let (mut relay_read, mut relay_write) = tokio::io::split(relay_side);
+            runtime::task::spawn(async move {
+                let result = async {
+                    let header =
+                        crate::networks::read_tunnel_command_header(&mut relay_read).await?;
+                    let req = crate::networks::read_tunnel_command_body::<
+                        _,
+                        crate::pn::ProxyControlOpenReq,
+                    >(&mut relay_read, header)
+                    .await?
+                    .body;
+                    let resp = crate::pn::ProxyControlOpenResp {
+                        tunnel_id: req.tunnel_id,
+                        result: TunnelCommandResult::Success as u8,
+                    };
+                    let command = crate::networks::TunnelCommand::new(resp)?;
+                    crate::networks::write_tunnel_command(&mut relay_write, &command).await
+                }
+                .await;
+                if let Err(err) = result {
+                    log::debug!("mock relay tunnel failed to respond control open: {err}");
+                }
+            });
+            Ok((Box::pin(client_read), Box::pin(client_write)))
+        }
+
+        async fn open_datagram(
+            &self,
+            _purpose: crate::networks::TunnelPurpose,
+        ) -> P2pResult<TunnelDatagramWrite> {
+            Err(p2p_err!(P2pErrorCode::NotSupport, "mock relay datagram"))
+        }
+    }
+
+    fn new_test_pn_client(local_identity: P2pIdentityRef, relay_id: P2pId) -> TunnelNetworkRef {
+        let net_manager =
+            crate::networks::NetManager::new(vec![], DefaultTlsServerCertResolver::new()).unwrap();
+        let ttp_client = TtpClient::new(local_identity.clone(), net_manager);
+        ttp_client.remember_tunnel(MockRelayTunnel::new(
+            local_identity.get_id(),
+            relay_id.clone(),
+        ));
+        let pn_client = PnClient::new(
+            ttp_client,
+            Some(Arc::new(StaticPnRouteResolver { relay_id })),
+        );
+        pn_client
     }
 
     #[async_trait::async_trait]
@@ -4486,9 +4630,9 @@ mod tests {
 
         let local_identity = new_identity("local-open-proxy-track");
         let remote_identity = new_identity("remote-open-proxy-track");
-        let proxy_network = MockProxyNetwork::new(local_identity.get_id(), Ok(()))
-            as crate::networks::TunnelNetworkRef;
-        let manager = new_test_manager(local_identity.clone(), HashMap::new(), Some(proxy_network));
+        let relay_id = P2pId::from(vec![201; 32]);
+        let proxy_client = new_test_pn_client(local_identity.clone(), relay_id);
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), Some(proxy_client));
 
         let proxy = manager
             .open_proxy_path(
@@ -4611,12 +4755,12 @@ mod tests {
                 },
             )]),
         );
-        let proxy_network = MockProxyNetwork::new(local_identity.get_id(), Ok(()))
-            as crate::networks::TunnelNetworkRef;
+        let relay_id = P2pId::from(vec![202; 32]);
+        let proxy_client = new_test_pn_client(local_identity.clone(), relay_id);
         let manager = new_test_manager_with_networks(
             local_identity.clone(),
             HashMap::from([(remote_identity.get_id(), remote_cert)]),
-            Some(proxy_network),
+            Some(proxy_client),
             vec![direct_network.clone()],
         );
 

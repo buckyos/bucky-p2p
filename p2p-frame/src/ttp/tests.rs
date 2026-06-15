@@ -532,7 +532,7 @@ async fn client_open_stream_and_datagram_reuse_same_tunnel() {
 }
 
 #[tokio::test]
-async fn client_open_control_stream_reuses_ttp_tunnel() {
+async fn client_open_control_stream_with_id_target_reuses_ttp_tunnel() {
     let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24011".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24012".parse().unwrap()));
     let local = make_identity(21, "local-control-client", local_ep);
@@ -553,14 +553,20 @@ async fn client_open_control_stream_reuses_ttp_tunnel() {
         .open_control_stream(&target, purpose_of(1011))
         .await
         .unwrap();
-    let (latest_meta, _latest_read, _latest_write) = client
-        .open_control_stream_on_latest_tunnel(purpose_of(1012))
+    let cached_target = TtpTarget {
+        local_ep: None,
+        remote_ep: Endpoint::default(),
+        remote_id: target.remote_id.clone(),
+        remote_name: None,
+    };
+    let (cached_meta, _cached_read, _cached_write) = client
+        .open_control_stream(&cached_target, purpose_of(1012))
         .await
         .unwrap();
 
     assert_eq!(meta.remote_id, target.remote_id);
     assert_eq!(meta.purpose, purpose_of(1011));
-    assert_eq!(latest_meta.purpose, purpose_of(1012));
+    assert_eq!(cached_meta.purpose, purpose_of(1012));
     assert_eq!(network.create_count(), 1);
     assert_eq!(tunnel.opened_control_stream_vports(), vec![1011, 1012]);
     assert!(tunnel.opened_stream_vports().is_empty());
@@ -779,13 +785,19 @@ async fn server_open_control_stream_reuses_existing_incoming_tunnel() {
         .open_control_stream(&target, purpose_of(4012))
         .await
         .unwrap();
-    let (by_id_meta, _by_id_read, _by_id_write) = server
-        .open_control_stream_by_id(&remote.get_id(), Some(remote.get_name()), purpose_of(4013))
+    let cached_target = TtpTarget {
+        local_ep: None,
+        remote_ep: Endpoint::default(),
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+    let (cached_meta, _cached_read, _cached_write) = server
+        .open_control_stream(&cached_target, purpose_of(4013))
         .await
         .unwrap();
 
     assert_eq!(meta.purpose, purpose_of(4012));
-    assert_eq!(by_id_meta.purpose, purpose_of(4013));
+    assert_eq!(cached_meta.purpose, purpose_of(4013));
     assert_eq!(tunnel.opened_control_stream_vports(), vec![4012, 4013]);
     assert!(tunnel.opened_stream_vports().is_empty());
     assert!(tunnel.opened_datagram_vports().is_empty());

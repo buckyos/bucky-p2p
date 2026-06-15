@@ -116,62 +116,6 @@ impl TtpServer {
             )
         })
     }
-
-    fn get_existing_tunnel_by_id(&self, remote_id: &P2pId) -> P2pResult<TunnelRef> {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
-        tunnels.get(remote_id).cloned().ok_or_else(|| {
-            p2p_err!(
-                P2pErrorCode::NotFound,
-                "ttp server has no incoming tunnel for {}",
-                remote_id
-            )
-        })
-    }
-
-    pub async fn open_stream_by_id(
-        &self,
-        remote_id: &P2pId,
-        remote_name: Option<String>,
-        purpose: TunnelPurpose,
-    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
-        let tunnel = self.get_existing_tunnel_by_id(remote_id)?;
-        let (read, write) = tunnel.open_stream(purpose.clone()).await?;
-        Ok((
-            TtpStreamMeta {
-                local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep(),
-                local_id: tunnel.local_id(),
-                remote_id: tunnel.remote_id(),
-                remote_name,
-                purpose,
-            },
-            read,
-            write,
-        ))
-    }
-
-    pub async fn open_control_stream_by_id(
-        &self,
-        remote_id: &P2pId,
-        remote_name: Option<String>,
-        purpose: TunnelPurpose,
-    ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
-        let tunnel = self.get_existing_tunnel_by_id(remote_id)?;
-        let (read, write) = tunnel.open_control_stream(purpose.clone()).await?;
-        Ok((
-            TtpStreamMeta {
-                local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep(),
-                local_id: tunnel.local_id(),
-                remote_id: tunnel.remote_id(),
-                remote_name,
-                purpose,
-            },
-            read,
-            write,
-        ))
-    }
 }
 
 #[async_trait::async_trait]

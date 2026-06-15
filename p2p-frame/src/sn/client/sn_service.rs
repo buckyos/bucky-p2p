@@ -105,14 +105,23 @@ impl SnClientTunnelFactory {
         remote_id: &P2pId,
         remote_name: String,
     ) -> CmdResult<ClassifiedCmdTunnel<SnTunnelRead, SnTunnelWrite>> {
-        let purpose = sn_cmd_purpose()
-            .map_err(into_cmd_err!(CmdErrorCode::Failed, "encode sn cmd purpose failed"))?;
+        let purpose = sn_cmd_purpose().map_err(into_cmd_err!(
+            CmdErrorCode::Failed,
+            "encode sn cmd purpose failed"
+        ))?;
         let target = TtpTarget {
             local_ep: local_ep.copied(),
             remote_ep: *remote_ep,
             remote_id: remote_id.clone(),
             remote_name: Some(remote_name.clone()),
         };
+        self.ttp_client
+            .connect_server(target.clone())
+            .await
+            .map_err(into_cmd_err!(
+                CmdErrorCode::Failed,
+                "connect sn ttp server failed"
+            ))?;
         let (meta, read, write) = self
             .ttp_client
             .open_control_stream(&target, purpose)

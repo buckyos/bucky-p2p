@@ -3,13 +3,13 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-05T18:58:53+08:00
-approved_content_sha256: 8d9a8a7e46900bf144cf0d47a2c123f7bfcc01d0bc7c52f32915ef51a9523143
+approved_at: 2026-06-15T01:22:00+08:00
+approved_content_sha256: fed26d75eec46cad6f1c8b7a1c9cb505df1666c1c3ebd276532b4ecd49fd4153
 ---
 
 # p2p-frame 测试
 
-## 测试文档索引
+## Test Document Index
 | 文档 | 主题 | 范围 |
 |------|------|------|
 | `testing.md` | 模块级验证基线 | 完整模块 |
@@ -24,13 +24,13 @@ approved_content_sha256: 8d9a8a7e46900bf144cf0d47a2c123f7bfcc01d0bc7c52f32915ef5
 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-control-stream-api.md` | `Tunnel` control stream API、内部 runtime、`Data` 控制命令承载和关闭传播验证补充 | `networks/tunnel`、`networks/tcp`、`networks/quic`、`pn/client` |
 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md` | TCP tunnel 协议用例 | transport/tunnel |
 
-## 统一测试入口
+## Unified Test Entry
 - 机器可读计划：`docs/versions/v0.1/modules/p2p-frame/testplan.yaml`
 - Unit: `python3 ./harness/scripts/test-run.py p2p-frame unit`
 - DV: 当前 disabled；`cyfs-p2p-test all-in-one` 不作为 p2p-frame 或其他模块的 DV 证据
 - Integration: `python3 ./harness/scripts/test-run.py p2p-frame integration`
 
-## 子模块测试
+## Submodule Tests
 | 子模块 | 职责 | 详细测试文档 | 必需行为 | 边界/失败场景 | 测试类型 | 测试文件 |
 |--------|------|--------------|----------|----------------|----------|----------|
 | `networks` | TCP/QUIC 传输和 listener 行为 | `p2p-frame/docs/tcp_tunnel_protocol_test_cases.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sfo-reuseport-listeners.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-control-stream-api.md` | 连接建立、复用、地址处理、network manager 行为、TCP listener 由 `sfo_reuseport::TcpServer` 驱动、QUIC listener 由 `sfo_reuseport::QuicServer::serve_socket(...)` 驱动并通过 per-worker 自定义 `AsyncUdpSocket` 交给 Quinn，QUIC connect queue 使用顶层按位置传入的 bounded channel，TCP/QUIC tunnel 入站 stream/datagram 不再保留旧 accept queue 容量参数，TCP/QUIC control stream API 通过控制命令 `Data` 承载内部 frame | listener 失败、连接复用边界、协议不匹配、`ServerRuntime` 注入/default 启动失败、QUIC worker CID 路由不稳定、主动发送 socket 获取失败，bounded queue 满载时不得无限缓存，`Data` payload 超过 64KiB 必须拒绝，底层控制通道断开后派生 control stream 必须关闭 | unit + integration | `p2p-frame/src/networks/tcp/network.rs`、`p2p-frame/src/networks/tcp/listener.rs`、`p2p-frame/src/networks/tcp/tunnel.rs`、`p2p-frame/src/networks/net_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/listener.rs`、`p2p-frame/src/networks/quic/tunnel.rs` |
@@ -38,17 +38,17 @@ approved_content_sha256: 8d9a8a7e46900bf144cf0d47a2c123f7bfcc01d0bc7c52f32915ef5
 | `tunnel` | tunnel 生命周期和 manager 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-publish-lifecycle.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | active/passive/proxy tunnel 创建、统一 register/publish 生命周期、reverse waiter 命中时的延后 publish 和完成后的 publish、reverse incoming 无 waiter close、proxy tunnel 发布后的后台 direct/reverse 升级重试、已有多个 candidate 时非 proxy 优先复用、direct/reverse 统一 300ms 短延迟竞速、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启同源 UDP punch 调度、proxy 短窗口脱代理、按协议隔离 endpoint 评分、`ServerReflexive` 与静态 `Wan` / `Mapped` 区分 | 同时存在多个 tunnel、选择回退、后注册 proxy 不得覆盖已有可用非 proxy candidate、reverse waiter 命中时的延后 publish、无 waiter reverse incoming close 且不 register/publish、失败清理、proxy 升级路径持续失败后的退避封顶，升级流程不得回退成 proxy，TCP 失败不得拖累 QUIC/UDP 候选，默认 intent、无 SN service 和非 `ServerReflexive` 路径不得发送 punch，punch 发送失败不得改变建链结果，SN 反射地址不得被误判为静态公网 | unit | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/tunnel.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client 协议交互 | 无效命令流、channel 关闭 | unit | `p2p-frame/src/ttp/tests.rs` |
 | `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sn-control-stream-signaling.md` | 注册、查询、呼叫路由、`SnCall` 携带本次 `reverse_endpoint_array`、SN called 转发保留调用方候选并扩展单 SN 观察候选、SN 观察地址按节点自上报地址一致性标记 `Wan` 或 `ServerReflexive`、SN 低频小消息通过 control stream 的 SN purpose 交付、SN server 连接验证器默认 allow-all 且自定义 reject 能短路入站请求，且 validator 上下文只包含 `client_id` 与 `client_cert`；SN service 不再导出或构造 `SnServiceContractServer` / service receipt 装配路径，`sn/protocol` receipt wire 兼容结构保留 | 对端缺失、并发、候选去重和单 SN 边界，观察地址不一致时不得标记为 `Wan`，control stream purpose 未监听或控制通道不可用时必须显式失败且不得 fallback 到普通 stream，自定义 validator reject 后不得继续更新 peer 状态或转发 call，证书解析 id 与 cmd tunnel peer id 不一致时不得调用 validator 或更新状态；contract/receipt 清理不得删除基础 SN command 字段或在相邻模块重建兼容旁路 | unit + integration | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/client/sn_service.rs`、`p2p-frame/src/sn/service/*.rs`、`p2p-frame/src/sn/protocol/sn.rs` |
-| `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-control-channel.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-control-stream-api.md` | PN tunnel relay、请求校验、响应转发、source/target 双边用户流量统计、仅 source 侧生效的 server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照、`datagram` 在 `TlsRequired` 下继续保持明文兼容、`PnTunnel` idle timeout 本地关闭、`PnTunnel` control channel ready gate、heartbeat 和远端关闭感知，以及 PN control stream API 通过 `PnControlCmd::Data` 承载内部 frame | relay 启动失败、validator 拒绝、target 打开失败、control ready 失败或超时、control 与业务 channel 混淆、control EOF/decode/write 失败未关闭 tunnel、heartbeat timeout 不收敛、remote close 后 open/accept/control stream 仍挂起、PN `Data` 超过 64KiB 未拒绝、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、idle close 误关闭 active channel、idle close 后 accept 不醒、open 继续等待 timeout、迟到 inbound open 被错误投递到 closed tunnel、统计失真、source/target 串户、target 统计错误触发限速、限速背压异常 | unit + integration | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
+| `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-control-channel.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-control-stream-api.md` | PN tunnel relay、请求校验、默认 `PnConnectionValidator` 显式 allow-all、显式 validator/assigned-target policy 控制 wrong-PN 准入、响应转发、source/target 双边用户流量统计、仅 source 侧生效的 server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照、`datagram` 在 `TlsRequired` 下继续保持明文兼容、`PnTunnel` idle timeout 本地关闭、`PnTunnel` control channel ready gate、heartbeat 和远端关闭感知，以及 PN control stream API 通过 `PnControlCmd::Data` 承载内部 frame | relay 启动失败、validator 拒绝、target 打开失败、control ready 失败或超时、control 与业务 channel 混淆、control EOF/decode/write 失败未关闭 tunnel、heartbeat timeout 不收敛、remote close 后 open/accept/control stream 仍挂起、PN `Data` 超过 64KiB 未拒绝、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、默认构造误拒绝未配置连接、assigned-target policy 漏拒 wrong-PN 目标、idle close 误关闭 active channel、idle close 后 accept 不醒、open 继续等待 timeout、迟到 inbound open 被错误投递到 closed tunnel、统计失真、source/target 串户、target 统计错误触发限速、限速背压异常 | unit + integration | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
 | `identity_tls` | 身份、TLS、X509 辅助逻辑 | none | 证书处理和身份正确性 | 无效证书、握手不匹配、feature-gated 路径 | unit | `p2p-frame/src/x509.rs`、`p2p-frame/src/tls/**` |
 | `channel_capacity_config` | 顶层 bounded channel 容量配置 | `design.md` | `P2pConfig` 默认构造时各位置容量均为 `1024`，可只覆盖单个位置；`P2pStackConfig` 从 `P2pEnv` 继承分位置容量且可覆盖，生产路径不再存在 unbounded mpsc 类型 | 显式容量未下发、底层残留默认值、测试替身继续使用 unbounded queue | unit + integration | `p2p-frame/src/stack.rs`、`p2p-frame/src/**/*.rs` 搜索证据 |
 
-## 模块级测试
+## Module-Level Tests
 | 测试项 | 覆盖边界 | 入口 | 预期结果 | 测试类型 | 测试文件/脚本 |
 |--------|----------|------|----------|----------|-----------------|
-| 核心库 unit 测试集 | `p2p-frame` 内部直接子模块，包括 endpoint area 编解码、SN 观察地址分类、SN control stream 信令、`TunnelManager` 的统一 publish 生命周期、NAT-aware direct/reverse 竞速、`ServerReflexive` only 同源 UDP punch 调度、QUIC heartbeat timeout、proxy 短窗口脱代理、endpoint 评分隔离、`SnCall` 本次候选、`pn_server` 的统计/限速桥接路径、proxy stream 的 TLS-over-proxy 行为、`PnTunnel` idle close 状态机和 `PnTunnel` control channel 生命周期 | `cargo test -p p2p-frame` | crate 测试通过，且 `ServerReflexive` / `S` 编解码、SN 观察地址一致/不一致 area 分类、SN command service 可从 control stream SN purpose 包装为 cmd tunnel、tunnel publish 生命周期断言、NAT 打洞调度断言、UDP punch 仅对 `ServerReflexive` QUIC candidate 开启、QUIC heartbeat interval 保持现有值且 timeout 为 30 秒、SN 候选断言、relay 统计/限速断言、proxy TLS 断言、`PnTunnel` idle close 断言与 control ready/close/heartbeat 断言成立 | unit | 源码内 `#[test]` 和 `#[tokio::test]` 测试集 |
+| 核心库 unit 测试集 | `p2p-frame` 内部直接子模块，包括 endpoint area 编解码、SN 观察地址分类、SN control stream 信令、`TunnelManager` 的统一 publish 生命周期、NAT-aware direct/reverse 竞速、`ServerReflexive` only 同源 UDP punch 调度、QUIC heartbeat timeout、proxy 短窗口脱代理、endpoint 评分隔离、`SnCall` 本次候选、`pn_server` 的默认 validator allow-all、显式 reject/assigned-target policy 路径、统计/限速桥接路径、proxy stream 的 TLS-over-proxy 行为、`PnTunnel` idle close 状态机和 `PnTunnel` control channel 生命周期 | `cargo test -p p2p-frame` | crate 测试通过，且 `ServerReflexive` / `S` 编解码、SN 观察地址一致/不一致 area 分类、SN command service 可从 control stream SN purpose 包装为 cmd tunnel、tunnel publish 生命周期断言、NAT 打洞调度断言、UDP punch 仅对 `ServerReflexive` QUIC candidate 开启、QUIC heartbeat interval 保持现有值且 timeout 为 30 秒、SN 候选断言、PN 默认连接验证器 allow-all、显式 reject/assigned-target policy 可拒绝、relay 统计/限速断言、proxy TLS 断言、`PnTunnel` idle close 断言与 control ready/close/heartbeat 断言成立 | unit | 源码内 `#[test]` 和 `#[tokio::test]` 测试集 |
 | 工作区兼容性 | 下游使用方仍能与核心库一起编译和测试 | `cargo test --workspace` | 工作区测试通过 | integration | workspace |
 
-## 外部接口测试
+## External Interface Tests
 | 接口 | 职责 | 成功场景 | 失败/边界场景 | 测试类型 | 测试文档/文件 |
 |------|------|----------|----------------|----------|----------------|
 | `cyfs-p2p` 适配层边界 | 在无语义漂移的前提下消费 `p2p-frame` | stack 创建和身份适配成功 | 核心行为变化破坏适配层假设 | integration | `cargo test --workspace` |
@@ -78,6 +78,8 @@ approved_content_sha256: 8d9a8a7e46900bf144cf0d47a2c123f7bfcc01d0bc7c52f32915ef5
 |------------|----------|-----------|----------|
 | relay bridge 上的 source/target 双边独立统计视图 | `p2p-frame/src/pn/service/pn_server.rs` 的统计查询与 bridge 计量路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能分别断言 source 与 target 两侧查询结果存在、互不覆盖、且只统计成功写出的 payload 字节 |
 | 仅 source 侧生效的用户级限速，与 target 统计视图解耦 | `p2p-frame/src/pn/service/pn_server.rs` 的限速配置与 bridge 背压路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 source 侧限速仍生效，而 target 侧新增统计查询不会引入新的限速行为 |
+| `PnServer::new(...)` 默认连接验证器显式 allow-all | `p2p-frame/src/pn/service/pn_server.rs` 的默认构造和 validator helper | targeted unit: `cargo test -p p2p-frame pn_connection_validator -- --nocapture` | unit 测试能断言 `allow_all_pn_connection_validator()` 对规范化上下文返回 `Accept`，且 `reject_all_pn_connection_validator()` 保留显式拒绝路径 |
+| 多 PN assigned target 通过显式策略路径准入 | `assigned_target_pn_connection_validator(...)` / `PnServer::new_with_assigned_target_policy(...)` | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | 默认构造不承担 wrong-PN 拒绝；只有显式 validator 或 assigned-target policy 才能拒绝未分配目标 |
 | 双边统计对默认构造路径和下游调用方保持兼容 | `PnServer::new(...)` 调用点与运行时使用方 | integration: `python3 ./harness/scripts/test-run.py p2p-frame integration` | workspace 入口继续可运行，不要求下游立刻理解新的 target 统计查询接口细节 |
 | `PnTunnel` idle timeout 生命周期关闭 | `p2p-frame/src/pn/client/pn_tunnel.rs` 的状态机、channel lease、idle sweeper 和 close notify 路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 channel 计数归零并超过 idle timeout 后 tunnel 进入 closed/error 终态，pending `accept_*` 被唤醒并失败，后续 `open_*` 立即失败 |
 | `PnTunnel` 关闭后重新创建 | `p2p-frame/src/pn/client/pn_client.rs` 与 `p2p-frame/src/pn/client/pn_listener.rs` 的 inbound 分发路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 idle close 后同 `(remote_id, tunnel_id)` 的后续 inbound `ProxyOpenReq` 不会投递到已关闭对象，而是能创建新的 passive tunnel |
@@ -102,46 +104,72 @@ approved_content_sha256: 8d9a8a7e46900bf144cf0d47a2c123f7bfcc01d0bc7c52f32915ef5
 | SN service contract/receipt 清理 | `p2p-frame/src/sn/service/service.rs`、`p2p-frame/src/sn/service/mod.rs`、`p2p-frame/src/sn/client/mod.rs`、`p2p-frame/src/sn/protocol/sn.rs` | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit`；compile: `cargo check -p p2p-frame`；search: `rg -n 'SnServiceContractServer|DefaultSnServiceContractServer|set_contract|mod contract|mod receipt|receipt::' p2p-frame/src/sn p2p-frame/src/lib.rs` | 编译证据确认 `SnServiceConfig::new(...)`、`create_sn_service(...)`、SN control stream 信令和 validator 装配仍可用；搜索证据确认服务侧不再导出或构造 contract server / receipt 装配入口；`sn/protocol` 中 `contract_id` / `receipt` wire 字段和 `SnServiceReceipt` 编解码结构保留，不作为失败证据。 |
 
 ## Direct Change Coverage
-| change_id | validation_id | testplan_level | testplan_step_id | Coverage | gap | gap_manual_reason |
-|-----------|---------------|----------------|------------------|----------|-----|-------------------|
-| endpoint_area_server_reflexive | V-ENDPOINT-AREA-UNIT | unit | p2p-frame-unit | 覆盖 `EndpointArea::ServerReflexive` 命名、`S` 文本编解码、raw codec 往返、`is_sys_default()` 删除、`is_static_wan()` 不包含 `ServerReflexive`，以及 SN 观察地址一致/不一致时的 `Wan` / `ServerReflexive` 分类。 | no | |
-| endpoint_area_server_reflexive | V-ENDPOINT-AREA-DV | dv |  | 当前无自动 DV 入口；`cyfs-p2p-test all-in-one` 不作为模块 DV 证据。 | yes | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
-| endpoint_area_server_reflexive | V-ENDPOINT-AREA-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认公开 enum/method 和文本编码变更不会破坏下游编译测试边界。 | no | |
-| server_reflexive_quic_nat_keepalive | V-SR-QUIC-NAT-UNIT | unit | p2p-frame-unit | 覆盖 UDP punch candidate policy 只接受 `ServerReflexive` QUIC endpoint，反例覆盖 `Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口和无 SN service；覆盖 QUIC heartbeat interval 保持 5 秒且 timeout 为 30 秒。 | no | |
-| server_reflexive_quic_nat_keepalive | V-SR-QUIC-NAT-DV | dv |  | 当前无自动 DV 入口；`cyfs-p2p-test all-in-one` 不作为模块 DV 证据。 | yes | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
-| server_reflexive_quic_nat_keepalive | V-SR-QUIC-NAT-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 punch policy 收窄和 heartbeat timeout 调整不会要求下游修改公开 trait 或新增 raw UDP 处理。 | no | |
-| reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-UNIT | unit | p2p-frame-unit | 覆盖 reverse incoming 无同 `(remote_id, tunnel_id)` waiter 时被关闭，且不会 register、publish、进入订阅流或被 `get_tunnel()` 返回；覆盖命中 waiter 时 incoming 分支只交付、不注册，waiter 接收方随后 register/publish。 | no | |
-| reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-DV | dv |  | 当前无自动 DV 入口；`cyfs-p2p-test all-in-one` 不作为模块 DV 证据。 | yes | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
-| reverse_timeout_close_late_tunnel | V-REV-TIMEOUT-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 reverse incoming 无 waiter close 不改变公开 trait、SN 协议或下游构造路径。 | no | |
-| networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 `TcpTunnelNetwork` / stack 编译路径、`P2pConfig::set_server_runtime` 公开注入入口、`TcpTunnelListener` 以 `TcpServer::serve(...)` 接管 accept handler，且 unit 套件保持现有 TCP/网络调用方兼容。 | no | |
-| networks_sfo_reuseport_tcp_listener | V-SFO-TCP-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 `ServerRuntime` 注入和 `TcpServer` listener 不改变下游构造边界或 tunnel publish 语义。 | no | |
-| networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 `QuicTunnelNetwork` / stack 编译路径、`QuicTunnelListener` 以 `QuicServer::serve_socket(...)` 接收 worker socket、自定义 `AsyncUdpSocket` 委托 `UdpSocket::poll_recv_from_vectored` / `try_send_to` / `poll_send_ready`、per-worker CID generator 使用对应 worker shard、UDP punch 使用首个可用 worker socket。 | no | |
-| networks_sfo_reuseport_quic_listener_socket | V-SFO-QUIC-LISTENER-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 QUIC listener socket 抽象不要求下游处理 raw UDP payload 或修改 NAT 专用公开参数。 | no | |
-| tunnel_network_listen_callback | V-TUNNEL-NETWORK-CALLBACK-UNIT | unit | p2p-frame-unit | 覆盖 `TunnelNetwork::listen(...)` 接收入站 tunnel 回调并返回 `P2pResult<()>`，`NetManager::listen(...)` 通过回调继续执行 incoming validator、订阅发布和 reject close，PN listener 幂等 listen 不依赖 `listeners()`。 | no | |
-| tunnel_network_listen_callback | V-TUNNEL-NETWORK-CALLBACK-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认移除公共 `listeners()` 和 `listen(...) -> TunnelListenerRef` 后，下游仍可通过 `NetManager`/stack 接收入站 tunnel。 | no | |
-| bounded_channel_capacity_config | V-BOUNDED-CHANNELS-UNIT | unit | p2p-frame-unit | 覆盖 `P2pConfig` 默认用户不配置时仍存在的各队列位置 `DEFAULT_CHANNEL_CAPACITY == 1024`，覆盖单个位置显式覆盖不影响其他位置，覆盖 `P2pStackConfig` 从 `P2pEnv` 继承分位置容量并可显式覆盖；`cargo test -p p2p-frame` 编译并运行所有 bounded sender/receiver 测试替身。 | no | |
-| bounded_channel_capacity_config | V-BOUNDED-CHANNELS-SEARCH | unit | p2p-frame-unit | 通过 `rg -n 'unbounded_channel|UnboundedSender|UnboundedReceiver' p2p-frame/src -g '*.rs'` 确认源码内不再存在 unbounded mpsc 类型和构造函数。 | no | |
-| bounded_channel_capacity_config | V-BOUNDED-CHANNELS-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认顶层分位置配置 API、默认无需用户配置和 bounded channel 迁移不破坏下游 crate 编译与运行入口。 | no | |
-| stack_channel_capacity_config_removal | V-STACK-CAPACITY-REMOVAL-UNIT | unit | p2p-frame-unit | 覆盖或编译确认 `p2p-frame/src/stack.rs` 不再导出 `ChannelCapacityConfig`，`P2pConfig` / `P2pStackConfig` / `P2pEnv` 不再提供 channel capacity getter/setter 或容量快照继承；`NetManager` 不再保存或暴露 channel capacity；`QuicTunnelNetwork::new(...)` 和 `TtpRuntime::new()` 不再接收容量参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 读取 `NetManager` 容量；`PnClient` 不再提供显式 channel capacity 构造入口。 | no | |
-| stack_channel_capacity_config_removal | V-STACK-CAPACITY-REMOVAL-SEARCH | unit | p2p-frame-unit | 通过 `rg -n 'ChannelCapacityConfig|channel_capacities|set_channel_capacity|set_ttp_channel_capacity|set_tunnel_manager_channel_capacity|set_pn_channel_capacity|new_with_channel_capacity|new_with_tls_material_and_channel_capacity|pn_channel_capacity|TtpRuntime::new\\([^)]|QuicTunnelNetwork::new\\([^)]*DEFAULT_CHANNEL_CAPACITY|pub fn channel_capacity|\\.channel_capacity\\(\\)|channel_capacity:' p2p-frame/src/stack.rs p2p-frame/src/networks/net_manager.rs p2p-frame/src/networks/quic/network.rs p2p-frame/src/ttp p2p-frame/src/pn/client/pn_client.rs` 确认 stack/NetManager/QUIC/TTP/PN 层公开容量配置逻辑已删除，并通过 unbounded mpsc 搜索确认容量清理未退回无界队列。 | no | |
-| stack_channel_capacity_config_removal | V-STACK-CAPACITY-REMOVAL-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认删除 stack 顶层容量配置 API 不破坏下游默认构造路径；若发现下游仍直接依赖该 API，应退回 proposal/design 明确兼容窗口。 | no | |
-| tunnel_stream_datagram_listen_callback | V-TUNNEL-CHANNEL-CALLBACK-UNIT | unit | p2p-frame-unit | 覆盖公共 `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()` 后，TCP/QUIC/PN tunnel、TTP server、stream manager 和 datagram manager 通过 `listen_stream(...)` / `listen_datagram(...)` callback 接收入站 channel；PN `PortNotListen` 错误通过 callback 返回并继续分发，idle close 后 pending callback receiver 收敛。 | no | |
-| tunnel_stream_datagram_listen_callback | V-TUNNEL-CHANNEL-CALLBACK-COMPILE | unit | p2p-frame-unit | `rustup run stable cargo test -p p2p-frame --no-run` 编译所有 p2p-frame test target，确认生产调用点和测试替身不再依赖公共 `accept_*` trait 方法。 | no | |
-| tunnel_stream_datagram_listen_callback | V-TUNNEL-CHANNEL-CALLBACK-INTEGRATION | integration | p2p-frame-integration | 现阶段由 p2p-frame unit 覆盖直接行为；workspace integration 仍沿用既有 p2p-frame integration 入口，用于确认下游调用方不会因 trait 签名变更残留旧 `accept_*` 依赖。 | yes | 本轮已执行 unit 和 test target 编译；完整 workspace integration 未在本次运行中执行，需作为后续下游兼容证据补跑。 |
-| tunnel_control_stream_api | V-TUNNEL-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 `open_control_stream(...)` / `listen_control_stream(...)` 成功路径、purpose 过滤、未 listen 拒绝、重复 listen 替换、关闭后 open/listen 失败、用户大 buffer 切分为不超过 64KiB 的 `Data` payload、接收侧超限拒绝，以及底层控制通道断开后所有派生 stream、pending open 和 pending write 失败。 | no | |
-| tunnel_control_stream_api | V-TUNNEL-CONTROL-STREAM-COMPILE | unit | p2p-frame-unit | `rustup run stable cargo test -p p2p-frame --no-run` 编译所有 p2p-frame test target，确认公共 API 不导出内部 `control_stream` runtime/frame 类型，TCP/QUIC/PN tunnel 均实现新增 trait 方法和 `Data` 控制命令接入。 | no | |
-| tunnel_control_stream_api | V-TUNNEL-CONTROL-STREAM-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认新增 trait 方法不会要求下游直接依赖内部 frame/runtime，也不会改变现有 stream/datagram、TLS 身份校验、PN proxy 业务 channel 或 tunnel publish 行为。 | no | |
-| sn_control_stream_signaling | V-SN-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 SN command service 可从 SN purpose 的 control stream 入站包装为 cmd tunnel，复用既有 SN cmd handler；代码审查确认 SN client 建 cmd tunnel 时只调用 `open_control_stream(...)`，失败后不 fallback 到普通 `open_stream(...)`，SN service 不注册普通 `listen_stream(...)` 作为 SN 命令入口。 | no | |
-| sn_control_stream_signaling | V-SN-CONTROL-STREAM-TARGETED | unit | p2p-frame-unit | `cargo test -p p2p-frame sn_server_wraps_sn_control_stream_into_cmd_tunnel -- --nocapture` 直接覆盖 SN control stream purpose 入站路径。 | no | |
-| sn_control_stream_signaling | V-SN-CONTROL-STREAM-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认 SN control stream 信令不要求下游依赖内部 control stream frame/runtime，也不改变 SN 单 SN、endpoint 分类或 `SnCallResp` 语义；SN 普通 stream fallback 不再作为兼容边界。 | no | |
-| sn_server_connection_validator | V-SN-SERVER-VALIDATOR-UNIT | unit | p2p-frame-unit | 覆盖 `allow_all_sn_connection_validator()` 默认允许带客户端证书的 report；覆盖自定义 validator reject 时 `handle_report_sn(...)` 返回 `PermissionDenied`，上下文只包含来自 cmd tunnel `peer_id` 的 `client_id` 和匹配该 id 的 `client_cert`，并且 reject 后不更新 peer manager；覆盖证书 id 与 `client_id` 不一致时不调用 validator 且不更新 peer manager。 | no | |
-| sn_server_connection_validator | V-SN-SERVER-VALIDATOR-TARGETED | unit | p2p-frame-unit | `cargo test -p p2p-frame sn_service -- --nocapture` 直接运行新增 SN service validator 单元测试。 | no | |
-| sn_server_connection_validator | V-SN-SERVER-VALIDATOR-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试，确认默认 allow-all 构造路径不要求 `sn-miner-rust`、`cyfs-p2p-test` 或其他下游调用方显式配置 validator。 | no | |
-| remove_sn_service_contract_server | V-SN-CONTRACT-CLEANUP-COMPILE | unit | p2p-frame-unit | `cargo check -p p2p-frame` 编译确认删除 `SnServiceContractServer`、`service/receipt.rs` 和 `client/contract.rs` 后，`SnServiceConfig::new(...)`、`create_sn_service(...)`、SN control stream 信令、validator 装配和 report/call/called handler 仍可用。 | no | |
-| remove_sn_service_contract_server | V-SN-CONTRACT-CLEANUP-SEARCH | unit | p2p-frame-unit | 通过 `rg -n 'SnServiceContractServer|DefaultSnServiceContractServer|set_contract|mod contract|mod receipt|receipt::' p2p-frame/src/sn p2p-frame/src/lib.rs` 确认服务侧生产代码和公开导出不再引用 contract server / receipt 装配逻辑；保留 `sn/protocol` receipt wire 兼容结构。 | no | |
-| remove_sn_service_contract_server | V-SN-CONTRACT-CLEANUP-INTEGRATION | integration | p2p-frame-integration | 运行 workspace 测试或 p2p-frame integration 入口，确认删除 contract server 公开装配点不要求 `sn-miner-rust`、`cyfs-p2p-test` 或其他默认 SN service 调用方重建兼容旁路。 | no | |
+| change_id | design_source | validation_id | testplan_level | testplan_step_id | Coverage | gap | gap_manual_reason |
+|-----------|---------------|---------------|----------------|------------------|----------|-----|-------------------|
+| endpoint_area_server_reflexive | `design.md` Directly Mapped Change Items | V-ENDPOINT-AREA-UNIT | unit | p2p-frame-unit | 覆盖 `EndpointArea::ServerReflexive` 命名、`S` 编解码、raw codec、`is_sys_default()` 删除、`is_static_wan()` 语义和 SN 观察地址分类；integration 由 `p2p-frame-integration` 继承。 | no | |
+| server_reflexive_quic_nat_keepalive | `design.md` Directly Mapped Change Items | V-SR-QUIC-NAT-UNIT | unit | p2p-frame-unit | 覆盖 UDP punch candidate policy、反例、QUIC heartbeat interval 与 30 秒 timeout；integration 由 `p2p-frame-integration` 继承。 | no | |
+| reverse_timeout_close_late_tunnel | `design.md` Directly Mapped Change Items | V-REV-TIMEOUT-UNIT | unit | p2p-frame-unit | 覆盖 incoming reverse 无 waiter close、不 register/publish，以及命中 waiter 后由接收方 register/publish。 | no | |
+| networks_sfo_reuseport_tcp_listener | `design/sfo-reuseport-listeners.md` | V-SFO-TCP-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 TCP listener runtime 注入、`TcpServer::serve(...)` accept handler 和下游兼容编译边界。 | no | |
+| networks_sfo_reuseport_quic_listener_socket | `design/sfo-reuseport-listeners.md` | V-SFO-QUIC-LISTENER-UNIT | unit | p2p-frame-unit | 覆盖 QUIC listener worker socket、custom `AsyncUdpSocket`、worker CID 和 UDP punch worker socket 使用。 | no | |
+| tunnel_network_listen_callback | `design.md` Directly Mapped Change Items | V-TUNNEL-NETWORK-CALLBACK-UNIT | unit | p2p-frame-unit | 覆盖 `TunnelNetwork::listen(...)` 回调化、`NetManager` incoming dispatch/validator/publish/reject close 和 PN listener 幂等 listen。 | no | |
+| bounded_channel_capacity_config | `design.md` Directly Mapped Change Items | V-BOUNDED-CHANNELS-UNIT | unit | p2p-frame-unit | 覆盖默认容量、单项覆盖、`P2pStackConfig` 继承与源码 unbounded mpsc 搜索。 | no | |
+| stack_channel_capacity_config_removal | `design.md` Directly Mapped Change Items | V-STACK-CAPACITY-REMOVAL-UNIT | unit | p2p-frame-unit | 编译/搜索确认 stack 层容量 API、`NetManager` 容量字段、QUIC/TTP/PN 显式容量入口已删除。 | no | |
+| tunnel_stream_datagram_listen_callback | `design/tunnel-channel-listen-callback.md` | V-TUNNEL-CHANNEL-CALLBACK-UNIT | unit | p2p-frame-unit | 覆盖公共 `Tunnel` trait 入站 stream/datagram 回调化、PN `PortNotListen` 继续分发和关闭后收敛。 | no | |
+| tunnel_control_stream_api | `design/tunnel-control-stream-api.md` | V-TUNNEL-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 control stream open/listen、purpose 过滤、64KiB 边界、底层关闭传播和 TCP/QUIC/PN `Data` 控制命令接入。 | no | |
+| sn_control_stream_signaling | `design/sn-control-stream-signaling.md` | V-SN-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 SN command service 从 SN purpose control stream 入站包装为 cmd tunnel，且 client 不 fallback 普通 stream。 | no | |
+| sn_server_connection_validator | `design.md` Directly Mapped Change Items | V-SN-SERVER-VALIDATOR-UNIT | unit | p2p-frame-unit | 覆盖 SN server 默认 allow-all、validator reject、上下文只含 `client_id`/`client_cert`，以及证书 id 不匹配时不调用 validator。 | no | |
+| remove_sn_service_contract_server | `design.md` Directly Mapped Change Items | V-SN-CONTRACT-CLEANUP-COMPILE | unit | p2p-frame-unit | 编译和搜索确认 SN service contract/receipt 生产路径与公开导出已删除，SN 基础能力和 wire 兼容结构保留。 | no | |
+| pn_multi_server_assigned_target | `design.md` + `design/pn-server.md` Directly Mapped Change Items | V-PN-SERVER-DEFAULT-VALIDATOR-TARGETED | unit | p2p-frame-pn-validator | `cargo test -p p2p-frame pn_connection_validator -- --nocapture` 覆盖默认 PN validator 显式 allow-all 和显式 reject helper；`p2p-frame-unit` / `p2p-frame-integration` 继续覆盖显式 assigned-target policy 与下游默认构造兼容。 | no | |
 
-## 完成定义
+## Case-Type Coverage
+| change_id | case_type | required | validation_id | level | status | gap_manual_reason |
+|-----------|-----------|----------|---------------|-------|--------|-------------------|
+| pn_multi_server_assigned_target | normal | yes | V-PN-SERVER-DEFAULT-VALIDATOR-TARGETED | unit | covered | |
+| pn_multi_server_assigned_target | boundary | yes | V-PN-SERVER-ASSIGNED-TARGET-UNIT | unit | covered | |
+| pn_multi_server_assigned_target | negative | yes | V-PN-SERVER-ASSIGNED-TARGET-UNIT | unit | covered | |
+| pn_multi_server_assigned_target | error | yes | V-PN-SERVER-ASSIGNED-TARGET-UNIT | unit | covered | |
+| pn_multi_server_assigned_target | compatibility | yes | V-PN-SERVER-DEFAULT-VALIDATOR-INTEGRATION | integration | covered | |
+| pn_multi_server_assigned_target | lifecycle | yes | V-PN-SERVER-DEFAULT-VALIDATOR-INTEGRATION | integration | covered | |
+| pn_multi_server_assigned_target | cross-module | yes | V-PN-SERVER-DEFAULT-VALIDATOR-INTEGRATION | integration | covered | |
+
+## Design Element Coverage
+| element_type | design_source | derived_cases | level | status | gap_manual_reason |
+|--------------|---------------|---------------|-------|--------|-------------------|
+| parameter-domain | `design.md` Interfaces and Dependencies; `design/pn-server.md` Validator and Constructor Defaults | default allow-all, explicit reject, assigned-target policy | unit | covered | |
+| state-transition | `design.md` Data and State; `design/pn-server.md` Relay Session State | new logical tunnel admission, relay session reuse | unit | covered | |
+| failure-path | `design.md` Key Call Flows; `design/pn-server.md` Errors and Rollback | explicit reject before target open, wrong-PN via policy | unit | covered | |
+| error-handling | `p2p-frame/src/pn/service/pn_server.rs` validator result mapping | reject helper and service reject tests | unit | covered | |
+| invariant | approved proposal `pn_multi_server_assigned_target`; `design/pn-server.md` Downstream Compatibility | default `PnServer::new(...)` remains allow-all | unit | covered | |
+| concurrency | `design/pn-server.md` Relay Session State | relay session registry guards follow-up channels without rechecking assigned target | unit | covered | |
+
+## Validation Rationale
+| Behavior or Risk | Validation Signal | Why This Is Sufficient | Gap / Manual Reason |
+|------------------|-------------------|------------------------|---------------------|
+| 默认 PN server 不拒绝未配置连接 | targeted unit `pn_connection_validator` | 直接执行默认 validator helper 并断言 `Accept`，覆盖用户指出的默认语义 | |
+| 显式策略才承担 wrong-PN 拒绝 | unit validator reject / assigned-target policy 映射 | 默认 helper 与 reject helper 分开验证，防止默认 allow-all 掩盖策略路径 | |
+| 下游默认构造兼容 | integration testplan step `p2p-frame-integration` | 工作区入口验证默认 `PnServer::new(...)` 调用方无需显式配置 validator | |
+
+## Unit Tests
+| Function or Unit | Branch or Condition | Covered Behavior | Test File | Status | Gap / Manual Reason |
+|------------------|---------------------|------------------|-----------|--------|---------------------|
+| `allow_all_pn_connection_validator()` | default validator path | 返回 `ValidateResult::Accept` | `p2p-frame/src/pn/service/pn_server.rs` | covered | |
+| `reject_all_pn_connection_validator()` | explicit reject path | 返回 `ValidateResult::Reject` | `p2p-frame/src/pn/service/pn_server.rs` | covered | |
+| `PnService::validate_proxy_open_req(...)` | validator rejects | 不打开 target stream 并返回拒绝结果 | `p2p-frame/src/pn/service/pn_server.rs` | covered | |
+| `AssignedTargetConnectionValidator` | policy rejects target | wrong-PN target 由显式 policy 拒绝，默认路径不承担拒绝 | `p2p-frame/src/pn/service/pn_server.rs` | covered | |
+
+## DV Tests
+| Workflow | Kind | Entry | Expected Result | Test File or Script | Status | Gap / Manual Reason |
+|----------|------|-------|-----------------|---------------------|--------|---------------------|
+| p2p-frame DV lifecycle | lifecycle | disabled | 当前无自动 DV 入口 | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | disabled | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
+| p2p-frame DV main workflow | main | disabled | 当前无自动 DV 入口 | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | disabled | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
+| p2p-frame DV failure workflow | failure | disabled | 当前无自动 DV 入口 | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | disabled | 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口，runtime 兼容性由 unit 和 integration 承担。 |
+
+## Integration Tests
+| Contract or Flow | Modules Involved | Success Case | Failure Case | Test File | Status | Gap / Manual Reason |
+|------------------|------------------|--------------|--------------|-----------|--------|---------------------|
+| PN server default constructor compatibility | `p2p-frame`, `cyfs-p2p-test`, `sn-miner-rust` | 默认 `PnServer::new(...)` 调用方无需显式 validator | wrong-PN 拒绝只能通过显式 validator/policy 配置验证 | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | covered | |
+
+## Definition of Done
 - [ ] 直接子模块至少映射到一个验证面
 - [ ] `testplan.yaml` 与声明的命令一致
 - [ ] transport、tunnel、PN、SN 和 TTP 行为都声明了证据路径

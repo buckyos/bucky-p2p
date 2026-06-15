@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、SN control stream 信令断言、SN server 连接验证器默认 allow-all 与自定义 reject 断言、SN service contract/receipt 生产路径清理断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、基于 `sfo-reuseport` 的 TCP/QUIC listener runtime 注入和 socket 适配编译边界、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、bounded channel 顶层分位置容量默认值/单项覆盖、后续 stack 容量配置 API 删除和源码 unbounded mpsc 清理、`pn_server` 的 source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、SN control stream 信令断言、SN server 连接验证器默认 allow-all 与自定义 reject 断言、SN service contract/receipt 生产路径清理断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、基于 `sfo-reuseport` 的 TCP/QUIC listener runtime 注入和 socket 适配编译边界、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、bounded channel 顶层分位置容量默认值/单项覆盖、后续 stack 容量配置 API 删除和源码 unbounded mpsc 清理、`pn_server` 的默认 validator allow-all、显式 reject/assigned-target policy、source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -41,6 +41,7 @@ levels:
         - `endpoint.rs` 的 unit 测试必须覆盖 `EndpointArea::ServerReflexive` 使用 `S` 文本标记、raw codec 往返保持 area、`D` 不再作为新语义输入、`is_static_wan()` 不包含 `ServerReflexive`，并通过编译期覆盖确认 `is_sys_default()` 已移除。
         - `sn/service/service.rs` 的 unit 测试必须覆盖 SN 观察 socket address 与节点自上报 endpoint 完全一致时标记 `Wan`，不一致时标记 `ServerReflexive`。
         - `pn/service/pn_server.rs` 的 unit 测试必须覆盖 source/target 双边成功转发字节统计、仅 source 侧生效的用户级限速，以及 `sfo-io` 集成失败路径。
+        - `pn/service/pn_server.rs` 的 unit 测试必须覆盖默认 `allow_all_pn_connection_validator()` 返回 `Accept`，显式 `reject_all_pn_connection_validator()` 返回 `Reject`，并确认 wrong-PN/assigned-target 准入只能由显式 validator 或 assigned-target policy 承担，默认 `PnServer::new(...)` 不隐式拒绝未配置连接。
         - 当前 `pn/client/pn_tunnel.rs` 的 unit 测试已直接覆盖 passive 明文兼容、`TlsRequired` 成功、TLS 身份校验失败、`datagram` 忽略 `stream` 模式，以及 `create_tunnel_with_options(...)` / client 级模式配置下 datagram 不被本地拒绝。
         - active `PnTunnel::open_stream()` 的默认明文兼容、双端模式错配和真实 TLS client 握手失败路径仍应继续补足 direct unit 证据。
         - `pn/client/pn_tunnel.rs` 的 unit 测试必须覆盖 idle timeout 关闭、active/pending/queued channel 阻止 idle close、accept 等待者被唤醒、后续 open 立即失败、stream/datagram/TLS wrapper lease drop 归还计数，以及关闭后同一 `(remote_id, tunnel_id)` 的后续 inbound open 重新创建 tunnel。
@@ -48,18 +49,22 @@ levels:
     steps:
       - id: p2p-frame-unit
         name: 运行 p2p-frame unit 测试集
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server", "pn_multi_server_assigned_target"]
         run: ["cargo", "test", "-p", "p2p-frame"]
+      - id: p2p-frame-pn-validator
+        name: 运行 PN server validator targeted 测试
+        change_ids: ["pn_multi_server_assigned_target"]
+        run: ["cargo", "test", "-p", "p2p-frame", "pn_connection_validator", "--", "--nocapture"]
 
   dv:
     mode: disabled
     summary: p2p-frame 当前不定义自动 DV 入口；`cyfs-p2p-test all-in-one` 不得作为本模块或其他模块的 DV 证据。
-    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server"]
+    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server", "pn_multi_server_assigned_target"]
     reason: 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口；运行时兼容性由 unit 和 integration 承担，新增 DV 必须另行 proposal/design/testing。
 
   integration:
     mode: enabled
-    summary: 工作区级兼容性与下游使用方验证，确认 `ServerReflexive` endpoint area 语义、SN control stream 信令、SN server 连接验证器默认 allow-all 构造路径、SN service contract/receipt 生产路径清理、单 SN NAT 打洞优化和默认关闭、仅 SN 存在时对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch、QUIC heartbeat timeout 调整、基于 `sfo-reuseport` 的 TCP listener 与 QUIC per-worker endpoint runtime 注入和 socket 适配、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、bounded channel 顶层分位置容量配置及后续 stack 容量配置 API 删除、incoming reverse 无 waiter close、`pn_server` 新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
+    summary: 工作区级兼容性与下游使用方验证，确认 `ServerReflexive` endpoint area 语义、SN control stream 信令、SN server 连接验证器默认 allow-all 构造路径、SN service contract/receipt 生产路径清理、单 SN NAT 打洞优化和默认关闭、仅 SN 存在时对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch、QUIC heartbeat timeout 调整、基于 `sfo-reuseport` 的 TCP listener 与 QUIC per-worker endpoint runtime 注入和 socket 适配、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、bounded channel 顶层分位置容量配置及后续 stack 容量配置 API 删除、incoming reverse 无 waiter close、`pn_server` 默认 validator allow-all、显式 assigned-target policy、新增 source/target 双边统计、source 单边限速、proxy stream TLS-over-proxy 能力、`PnTunnel` idle close 内部状态和 `PnTunnel` control channel ready gate 不会破坏现有调用方
     test_targets:
       - cyfs-p2p
       - cyfs-p2p-test
@@ -71,6 +76,8 @@ levels:
       notes:
         - Integration 聚焦于核心 crate 的下游兼容性。
         - 特别关注 `cyfs-p2p-test` 与 `sn-miner-rust` 的 `PnServer::new(...)` 调用点兼容性。
+        - `PnServer::new(...)` 默认构造路径必须显式使用 allow-all validator，`cyfs-p2p-test`、`sn-miner-rust` 和其他默认调用方不得因为多 PN assigned-target 支持而必须显式传入 validator。
+        - 多 PN assigned-target 准入必须通过 `PnServer::new_with_connection_validator(...)` 或 `PnServer::new_with_assigned_target_policy(...)` 等显式策略路径启用，不得把默认 allow-all 路径当作 wrong-PN 拒绝证据。
         - 现有未显式启用 TLS-over-proxy 的调用方必须保持明文兼容，不得因新增 PN 专有 API 扩展而回归。
         - `PnTunnel` idle close 的新配置和 wrapper 类型不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名。
         - `PnTunnel` control channel 不得要求下游修改通用 `Tunnel` / `TunnelNetwork` 调用签名；`create_tunnel*` 可以更严格地等待 control ready 后返回可用 tunnel。
@@ -90,5 +97,5 @@ levels:
     steps:
       - id: p2p-frame-integration
         name: 运行工作区测试套件
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server", "pn_multi_server_assigned_target"]
         run: ["cargo", "test", "--workspace"]

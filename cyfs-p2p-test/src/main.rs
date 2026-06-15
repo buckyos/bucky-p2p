@@ -2,25 +2,25 @@ extern crate core;
 
 use bucky_crypto::PrivateKey;
 use bucky_objects::{
-    sign_and_push_named_object, Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner,
-    SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF,
+    Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner, SIGNATURE_SOURCE_REFINDEX_SELF,
+    SignatureSource, UniqueId, sign_and_push_named_object,
 };
 use bucky_objects::{Endpoint, EndpointArea, Protocol};
 use bucky_raw_codec::FileDecoder;
 use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
 use cyfs_p2p::p2p_identity::P2pId;
 use cyfs_p2p::pn::PnServer;
-use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
-use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
+use cyfs_p2p::sn::service::{SnServiceConfig, create_sn_service};
+use cyfs_p2p::stack::{P2pStackRef, create_p2p_env, create_p2p_stack};
 use cyfs_p2p::{
-    create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint, CyfsIdentity,
-    CyfsIdentityCertFactory, CyfsIdentityFactory,
+    CyfsIdentity, CyfsIdentityCertFactory, CyfsIdentityFactory, create_cyfs_p2p_config,
+    create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint,
 };
 use p2p_frame::endpoint::Endpoint as P2pEndpoint;
 use p2p_frame::networks::TunnelPurpose;
 use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
 use p2p_frame::sn::client::{SNClientServiceRef, SnLocalIpProvider, SnLocalIpProviderRef};
-use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef};
+use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef, PnServerAddress};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -1297,6 +1297,7 @@ async fn create_stack_with_device_finder(
 
     let mut config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list)
         .set_support_proxy(true)
+        .set_proxy_server(PnServerAddress::Sn)
         .set_proxy_stream_encrypted(true);
     if let Some(device_finder) = device_finder {
         config = config.set_device_finder(device_finder);

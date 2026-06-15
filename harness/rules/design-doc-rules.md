@@ -17,14 +17,18 @@
 - `approved_at`
 
 ## Required Content
-- submodule list and responsibilities
+- submodule list and responsibilities, with submodule type (business / shared / technical / assembly)
 - dependencies between submodules and affected external modules
-- key call flows
+- key call flows with failure handling for flows that cross submodule or module boundaries
 - implementation order
-- exported interfaces
-- acyclic module and submodule dependency graph
+- exported interfaces with named consumers and compatibility decisions
+- acyclic module and submodule dependency graph with business -> shared/technical dependency direction
 - business-logic submodule boundaries and shared implementation submodules when they affect external behavior or ownership
 - boundary decision matrix with concrete business/shared/technical decisions
+- single-owner data and state modeling with failure-inclusive state transitions
+- rejected alternatives for boundary, technical-choice, and cross-module collaboration decisions
+- testability seams reserved for post-implementation test design
+- invariants to preserve when changing an existing module
 - trigger matrix with design coverage for every triggered category
 - document index
 - direct change mapping for implementation-ready work
@@ -48,6 +52,16 @@
 - If multiple business submodules share implementation logic, that common logic MUST be modeled as its own shared submodule instead of being duplicated or hidden inside one business submodule.
 - Business, shared, and technical boundary choices MUST be recorded in `## Boundary Decision Matrix`; `doc-structure-check.py --docs design` MUST fail if decisions are missing, malformed, or placeholder-only.
 - Technically distinct implementation areas inside a business module, such as HTTP interfaces, persistence/database access, external adapters, codecs, schedulers, or storage, MUST be modeled in `## Boundary Decision Matrix`; if not split into a dedicated submodule, the matrix MUST record the reason.
+- Every submodule `Type` MUST be one of `business`, `shared`, `technical`, or `assembly`. Dependencies MUST flow business -> shared / technical: shared and technical submodules MUST NOT depend on business submodules, and nothing may depend on an assembly submodule; `doc-structure-check.py --docs design` MUST fail direction violations.
+- A shared submodule MUST have at least 2 consumers visible in the dependency graph (record external module consumers as explicit edges) and one nameable responsibility. Implementation logic with a single consumer stays inside that consumer. Grab-bag shared submodules named `common`, `utils`, `misc`, `helpers`, or similar are design defects.
+- Every exported interface MUST name at least one concrete consumer: an existing module or a `change_id` from the current version. Exports without a named consumer are speculative; remove them and record the removal in `## Simplicity Check`.
+- Adding or changing an exported interface MUST record a compatibility decision: `new`, `backward-compatible`, `migration-required`, or `breaking`. A breaking or migration-required change MUST list every affected caller and its migration path.
+- Every persistent datum or shared state MUST have exactly one owning submodule recorded in `## Data and State`; other submodules access it only through the owner's exported interface. Cross-submodule direct writes to the same data are boundary defects and return work to design.
+- Entities with a lifecycle MUST document state transitions that include failure and interruption states, not only the normal flow.
+- Key call flows that cross a submodule or module boundary MUST describe failure handling: who owns the failure or timeout, whether the call retries, whether it must be idempotent, and what state remains on partial completion. Happy-path-only call flow design is incomplete.
+- Boundary split, technical submodule choice, and cross-module collaboration decisions MUST each record at least one seriously considered alternative and its rejection reason in `## Key Decisions`; a decision that genuinely has no viable alternative records `not-applicable: <concrete reason>`.
+- Because tests are designed after implementation, `## Testability` MUST reserve the seams: each submodule's exported interface verifiable without the other business submodules, external service/system dependencies behind a replaceable boundary, and a stated way to trigger error and boundary cases — or an alternative verification when a failure path cannot be constructed in tests.
+- Changes to an existing module MUST list the externally observable behavior and invariants that must not change in `## Invariants to Preserve`; acceptance treats that list as the regression boundary. Greenfield modules record `not-applicable: new module`.
 - A small implementation submodule MAY be represented by a single file. A larger implementation submodule that contains internal sub-responsibilities MUST describe its visible responsibilities and external dependencies here and keep detailed internal layout out of `design.md` unless required for the planned change.
 - For existing code, describe current structure before describing the change.
 - When the target module is a large subproject package, crate, service, or similar module root that already contains logically independent submodules — operationally, 3 or more directories or files with distinct externally visible responsibilities — a new logically independent feature MUST be modeled as its own direct submodule unless the design explains why it belongs inside an existing submodule.

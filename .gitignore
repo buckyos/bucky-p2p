@@ -5,6 +5,7 @@ logs
 # Python/runtime generated files
 __pycache__/
 *.py[cod]
+test-results/
 
 # Local editor and agent state
 .codex

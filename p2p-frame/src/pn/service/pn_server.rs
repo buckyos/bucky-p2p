@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
@@ -14,6 +15,7 @@ use sfo_io::{
 };
 use tokio::io::{ReadBuf, copy_bidirectional};
 
+use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::networks::{
@@ -27,7 +29,7 @@ use crate::pn::{
     ProxyOpenResp,
 };
 use crate::runtime;
-use crate::ttp::{TtpPortListener, TtpServer, TtpServerRef};
+use crate::ttp::{TtpConnector, TtpPortListener, TtpServer, TtpServerRef, TtpTarget};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -216,6 +218,52 @@ pub fn allow_all_pn_connection_validator() -> PnConnectionValidatorRef {
     Arc::new(AllowAllPnConnectionValidator)
 }
 
+pub struct RejectAllPnConnectionValidator;
+
+#[async_trait::async_trait]
+impl PnConnectionValidator for RejectAllPnConnectionValidator {
+    async fn validate(&self, _ctx: &PnConnectionValidateContext) -> P2pResult<ValidateResult> {
+        Ok(ValidateResult::Reject(
+            "pn assigned target policy not configured".to_owned(),
+        ))
+    }
+}
+
+pub fn reject_all_pn_connection_validator() -> PnConnectionValidatorRef {
+    Arc::new(RejectAllPnConnectionValidator)
+}
+
+#[async_trait::async_trait]
+pub trait PnAssignedTargetPolicy: Send + Sync + 'static {
+    async fn is_assigned_target(&self, target: &P2pId) -> P2pResult<bool>;
+}
+
+pub type PnAssignedTargetPolicyRef = Arc<dyn PnAssignedTargetPolicy>;
+
+struct AssignedTargetConnectionValidator {
+    policy: PnAssignedTargetPolicyRef,
+}
+
+#[async_trait::async_trait]
+impl PnConnectionValidator for AssignedTargetConnectionValidator {
+    async fn validate(&self, ctx: &PnConnectionValidateContext) -> P2pResult<ValidateResult> {
+        if self.policy.is_assigned_target(&ctx.to).await? {
+            Ok(ValidateResult::Accept)
+        } else {
+            Ok(ValidateResult::Reject(format!(
+                "target {} is not assigned to this pn server",
+                ctx.to
+            )))
+        }
+    }
+}
+
+pub fn assigned_target_pn_connection_validator(
+    policy: PnAssignedTargetPolicyRef,
+) -> PnConnectionValidatorRef {
+    Arc::new(AssignedTargetConnectionValidator { policy })
+}
+
 #[async_trait::async_trait]
 pub trait PnTargetStreamFactory: Send + Sync + 'static {
     async fn open_target_stream(
@@ -232,10 +280,15 @@ impl PnTargetStreamFactory for TtpServer {
         &self,
         target: &P2pId,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let ttp_target = TtpTarget {
+            local_ep: None,
+            remote_ep: Endpoint::default(),
+            remote_id: target.clone(),
+            remote_name: Some(target.to_string()),
+        };
         let (_meta, read, write) = self
-            .open_stream_by_id(
-                target,
-                Some(target.to_string()),
+            .open_stream(
+                &ttp_target,
                 crate::networks::TunnelPurpose::from_value(&PROXY_SERVICE.to_string()).unwrap(),
             )
             .await?;
@@ -247,6 +300,14 @@ pub struct PnService {
     target_stream_factory: PnTargetStreamFactoryRef,
     connection_validator: PnConnectionValidatorRef,
     traffic_manager: Arc<PnTrafficManager>,
+    relay_sessions: Mutex<HashSet<PnRelaySessionKey>>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct PnRelaySessionKey {
+    tunnel_id: crate::types::TunnelId,
+    from: P2pId,
+    to: P2pId,
 }
 
 impl PnService {
@@ -270,10 +331,62 @@ impl PnService {
             target_stream_factory,
             connection_validator,
             traffic_manager,
+            relay_sessions: Mutex::new(HashSet::new()),
         })
     }
 
+    fn has_relay_session(
+        &self,
+        tunnel_id: crate::types::TunnelId,
+        from: &P2pId,
+        to: &P2pId,
+    ) -> bool {
+        let sessions = self.relay_sessions.lock().unwrap();
+        sessions.contains(&PnRelaySessionKey {
+            tunnel_id,
+            from: from.clone(),
+            to: to.clone(),
+        }) || sessions.contains(&PnRelaySessionKey {
+            tunnel_id,
+            from: to.clone(),
+            to: from.clone(),
+        })
+    }
+
+    fn register_relay_session(&self, tunnel_id: crate::types::TunnelId, from: &P2pId, to: &P2pId) {
+        self.relay_sessions
+            .lock()
+            .unwrap()
+            .insert(PnRelaySessionKey {
+                tunnel_id,
+                from: from.clone(),
+                to: to.clone(),
+            });
+    }
+
+    fn unregister_relay_session(
+        &self,
+        tunnel_id: crate::types::TunnelId,
+        from: &P2pId,
+        to: &P2pId,
+    ) {
+        let mut sessions = self.relay_sessions.lock().unwrap();
+        sessions.remove(&PnRelaySessionKey {
+            tunnel_id,
+            from: from.clone(),
+            to: to.clone(),
+        });
+        sessions.remove(&PnRelaySessionKey {
+            tunnel_id,
+            from: to.clone(),
+            to: from.clone(),
+        });
+    }
+
     async fn validate_proxy_open_req(&self, req: &ProxyOpenReq) -> P2pResult<()> {
+        if self.has_relay_session(req.tunnel_id, &req.from, &req.to) {
+            return Ok(());
+        }
         let ctx = PnConnectionValidateContext {
             from: req.from.clone(),
             to: req.to.clone(),
@@ -401,6 +514,7 @@ impl PnService {
                         )
                         .await;
                         if result == TunnelCommandResult::Success {
+                            self.register_relay_session(req.tunnel_id, &req.from, &req.to);
                             Ok((target_read, target_write))
                         } else {
                             Err(result.into_p2p_error(format!(
@@ -629,6 +743,7 @@ impl PnService {
             let mut target_stream =
                 StatStream::new_with_tracker(target_stream, traffic_session.target_tracker);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
+            self.unregister_relay_session(req.tunnel_id, &req.from, &req.to);
             log::debug!(
                 "pn server control bridge stop tunnel_id={:?} from={} to={} proxy_service={}",
                 req.tunnel_id,
@@ -688,6 +803,16 @@ impl PnService {
 impl PnServer {
     pub fn new(ttp_server: TtpServerRef) -> PnServerRef {
         Self::new_with_connection_validator(ttp_server, allow_all_pn_connection_validator())
+    }
+
+    pub fn new_with_assigned_target_policy(
+        ttp_server: TtpServerRef,
+        assigned_target_policy: PnAssignedTargetPolicyRef,
+    ) -> PnServerRef {
+        Self::new_with_connection_validator(
+            ttp_server,
+            assigned_target_pn_connection_validator(assigned_target_policy),
+        )
     }
 
     pub fn new_with_connection_validator(
@@ -1272,6 +1397,37 @@ mod tests {
         }
     }
 
+    fn test_connection_validate_context() -> PnConnectionValidateContext {
+        PnConnectionValidateContext {
+            from: P2pId::from(vec![2u8; 32]),
+            to: P2pId::from(vec![3u8; 32]),
+            tunnel_id: TunnelId::from(24),
+            kind: PnChannelKind::Stream,
+            purpose: crate::networks::TunnelPurpose::from_value(&2000u16).unwrap(),
+            is_control: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn default_pn_connection_validator_allows_connections() {
+        let result = allow_all_pn_connection_validator()
+            .validate(&test_connection_validate_context())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, ValidateResult::Accept));
+    }
+
+    #[tokio::test]
+    async fn reject_all_pn_connection_validator_rejects_connections() {
+        let result = reject_all_pn_connection_validator()
+            .validate(&test_connection_validate_context())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, ValidateResult::Reject(_)));
+    }
+
     #[tokio::test]
     async fn pn_service_uses_injected_target_stream_factory() {
         let source_id = P2pId::from(vec![2u8; 32]);
@@ -1282,7 +1438,7 @@ mod tests {
             FakeTargetStreamFactory::new((service_target_read, service_target_write));
         let service = PnService::new(
             target_stream_factory.clone(),
-            allow_all_pn_connection_validator(),
+            TestPnConnectionValidator::new(ValidateResult::Accept),
         );
 
         let ((service_source_read, service_source_write), (mut source_read, mut source_write)) =
@@ -1485,7 +1641,7 @@ mod tests {
         );
         let service = PnService::new_with_traffic_manager(
             target_stream_factory,
-            allow_all_pn_connection_validator(),
+            TestPnConnectionValidator::new(ValidateResult::Accept),
             traffic_manager.clone(),
         );
 
@@ -1591,7 +1747,7 @@ mod tests {
         let traffic_manager = PnTrafficManager::new();
         let service = PnService::new_with_traffic_manager(
             target_stream_factory,
-            allow_all_pn_connection_validator(),
+            TestPnConnectionValidator::new(ValidateResult::Accept),
             traffic_manager.clone(),
         );
 
@@ -1711,7 +1867,7 @@ mod tests {
         );
         let service = PnService::new_with_traffic_manager(
             target_stream_factory,
-            allow_all_pn_connection_validator(),
+            TestPnConnectionValidator::new(ValidateResult::Accept),
             traffic_manager.clone(),
         );
 
@@ -1819,7 +1975,7 @@ mod tests {
         );
         let service = PnService::new_with_traffic_manager(
             target_stream_factory,
-            allow_all_pn_connection_validator(),
+            TestPnConnectionValidator::new(ValidateResult::Accept),
             traffic_manager.clone(),
         );
 
@@ -1925,7 +2081,10 @@ mod tests {
         net_manager.listen(&[local_ep], None).await.unwrap();
         let ttp_server = TtpServer::new(identity.clone(), net_manager).unwrap();
 
-        let pn_server = PnServer::new(ttp_server.clone());
+        let pn_server = PnServer::new_with_connection_validator(
+            ttp_server.clone(),
+            TestPnConnectionValidator::new(ValidateResult::Accept),
+        );
         pn_server.start().await.unwrap();
 
         let (target_tunnel, mut target_open_rx, target_attached) = FakeTunnel::new_with_open_stream(

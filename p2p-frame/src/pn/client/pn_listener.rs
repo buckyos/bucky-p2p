@@ -5,6 +5,7 @@ use crate::networks::{
     Tunnel, TunnelCommandBody, TunnelCommandResult, TunnelRef, TunnelStreamRead, TunnelStreamWrite,
     read_tunnel_command_body, read_tunnel_command_header,
 };
+use crate::p2p_identity::P2pId;
 use crate::pn::{ProxyControlOpenReq, ProxyControlOpenResp, ProxyOpenReq};
 
 use super::pn_client::write_pn_command;
@@ -23,6 +24,7 @@ impl PnListener {
 impl PnListener {
     pub(super) async fn handle_stream(
         &self,
+        relay_id: P2pId,
         mut read: TunnelStreamRead,
         write: TunnelStreamWrite,
     ) -> P2pResult<Option<TunnelRef>> {
@@ -39,7 +41,10 @@ impl PnListener {
                 req.tunnel_id
             );
             let mut write = write;
-            match self.shared.register_passive_control_tunnel(req.clone()) {
+            match self
+                .shared
+                .register_passive_control_tunnel(req.clone(), relay_id)
+            {
                 Ok(tunnel) => {
                     tunnel.set_control_channel(read, write).await;
                     if let Err(err) = tunnel
@@ -221,6 +226,7 @@ mod tests {
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(91));
         let local_id = local_identity.get_id();
         let remote_id = p2p_id(92);
+        let relay_id = p2p_id(192);
         let shared = PnShared::new_local(local_identity);
         let listener = make_listener(shared.clone());
         let (listener_read, listener_write, mut peer_read, mut peer_write) = make_stream_pair();
@@ -228,7 +234,11 @@ mod tests {
         let _meta = meta(local_id.clone(), remote_id.clone());
         let accept_task = tokio::spawn({
             let listener = listener.clone();
-            async move { listener.handle_stream(listener_read, listener_write).await }
+            async move {
+                listener
+                    .handle_stream(relay_id, listener_read, listener_write)
+                    .await
+            }
         });
         write_pn_command(
             &mut peer_write,
@@ -260,6 +270,7 @@ mod tests {
         let local_identity: P2pIdentityRef = Arc::new(FakeIdentity::new(93));
         let local_id = local_identity.get_id();
         let remote_id = p2p_id(94);
+        let relay_id = p2p_id(194);
         let shared = PnShared::new_local(local_identity);
         let listener = make_listener(shared.clone());
         let (listener_read, listener_write, mut peer_read, mut peer_write) = make_stream_pair();
@@ -276,7 +287,7 @@ mod tests {
         .unwrap();
 
         let tunnel = listener
-            .handle_stream(listener_read, listener_write)
+            .handle_stream(relay_id.clone(), listener_read, listener_write)
             .await
             .unwrap()
             .unwrap();
@@ -321,7 +332,7 @@ mod tests {
         .unwrap();
 
         listener
-            .handle_stream(business_read, business_write)
+            .handle_stream(relay_id, business_read, business_write)
             .await
             .unwrap();
         let err = timeout(Duration::from_secs(1), accepted_rx.recv())
