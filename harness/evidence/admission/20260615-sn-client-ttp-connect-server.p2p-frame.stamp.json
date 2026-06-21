@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-14T17:09:51+00:00",
+  "evidence_file": "harness/evidence/admission/20260615-sn-client-ttp-connect-server.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "sn_control_stream_signaling"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "40781e1709b82117f8ae9ffaa40d636612056910458d2e29430f33dfe616aef5",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "f1dafd6a84aec0b7193242add91ca13c470399359583584c3bb1c994d9eac0ef"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/client/sn_service.rs",
+    "p2p-frame/src/sn/service/service.rs",
+    "p2p-frame/src/sn/**",
+    "p2p-frame/src/networks/tunnel.rs",
+    "docs/versions/v0.1/modules/p2p-frame/design/sn-control-stream-signaling.md"
+  ]
+}

@@ -10,11 +10,20 @@ use crate::networks::{
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
 };
+use crate::sn::directory::{
+    OwnerDirectoryClientRef, OwnerMembership, ServingLease, StaticOwnerDirectoryClient,
+    noop_owner_directory_client,
+};
+use crate::sn::inter_sn::{
+    InterSnCommand, InterSnCommandContext, InterSnConnectionContext, InterSnPeer, InterSnRegistry,
+    RelayCallOutcome, ServingPeerDetail, SnInterServiceValidatorRef, TtpInterSnClientRef,
+    allow_all_sn_inter_service_validator, require_accept,
+};
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
-use crate::ttp::{TtpPortListener, TtpServer, TtpServerRef};
+use crate::ttp::{TtpClient, TtpConnector, TtpPortListener, TtpServer, TtpServerRef};
 use crate::types::{SequenceGenerator, Timestamp, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
@@ -75,6 +84,10 @@ pub struct SnService {
     cert_factory: P2pIdentityCertFactoryRef,
     cmd_server: SnCmdServiceRef,
     connection_validator: SnConnectionValidatorRef,
+    inter_service_validator: SnInterServiceValidatorRef,
+    inter_sn_client: Option<TtpInterSnClientRef>,
+    owner_client: OwnerDirectoryClientRef,
+    local_sn_id: Option<P2pId>,
     cmd_version: u8,
 }
 
@@ -83,6 +96,24 @@ impl SnService {
         cert_factory: P2pIdentityCertFactoryRef,
         connection_validator: SnConnectionValidatorRef,
     ) -> SnServiceRef {
+        Self::new_with_options(
+            cert_factory,
+            connection_validator,
+            allow_all_sn_inter_service_validator(),
+            noop_owner_directory_client(),
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_options(
+        cert_factory: P2pIdentityCertFactoryRef,
+        connection_validator: SnConnectionValidatorRef,
+        inter_service_validator: SnInterServiceValidatorRef,
+        owner_client: OwnerDirectoryClientRef,
+        inter_sn_client: Option<TtpInterSnClientRef>,
+        local_sn_id: Option<P2pId>,
+    ) -> SnServiceRef {
         let service = Arc::new(SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
             peer_mgr: PeerManager::new(),
@@ -90,9 +121,14 @@ impl SnService {
             cert_factory,
             cmd_server: DefaultCmdServerService::new(),
             connection_validator,
+            inter_service_validator,
+            owner_client,
+            inter_sn_client,
+            local_sn_id,
             cmd_version: 0,
         });
         service.register_sn_cmd_handler();
+        InterSnRegistry::global().register(service.clone() as Arc<dyn InterSnPeer>);
         service
     }
 
@@ -171,16 +207,19 @@ impl SnService {
         let service = self.clone();
         self.cmd_server.register_cmd_handler(
             PackageCmdCode::SnQuery as u8,
-            move |_local_id: PeerId,
+            move |local_id: PeerId,
                   peer_id: PeerId,
                   tunnel_id: CmdTunnelId,
                   _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
+                    let local_id = P2pId::from(local_id.as_slice());
                     let query = SnQuery::clone_from_slice(cmd_body.read_all().await?.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    service.handle_query_sn(&peer_id, tunnel_id, query).await;
+                    service
+                        .handle_query_sn(&local_id, &peer_id, tunnel_id, query)
+                        .await;
                     Ok(None)
                 }
             },
@@ -189,6 +228,10 @@ impl SnService {
 
     fn peer_manager(&self) -> &PeerManagerRef {
         &self.peer_mgr
+    }
+
+    fn effective_local_sn_id(&self, local_id: &P2pId) -> P2pId {
+        self.local_sn_id.clone().unwrap_or_else(|| local_id.clone())
     }
 
     async fn validate_connection(&self, ctx: SnConnectionValidateContext) -> P2pResult<()> {
@@ -201,6 +244,37 @@ impl SnService {
                 reason
             )),
         }
+    }
+
+    async fn validate_inter_connection(&self, remote_sn_id: &P2pId) -> P2pResult<()> {
+        require_accept(
+            self.inter_service_validator
+                .validate_connection(&InterSnConnectionContext {
+                    remote_sn_id: remote_sn_id.clone(),
+                })
+                .await?,
+            "connection",
+        )
+        .await
+    }
+
+    async fn validate_inter_command(
+        &self,
+        remote_sn_id: &P2pId,
+        command: InterSnCommand,
+        peer_id: &P2pId,
+    ) -> P2pResult<()> {
+        require_accept(
+            self.inter_service_validator
+                .validate_command(&InterSnCommandContext {
+                    remote_sn_id: remote_sn_id.clone(),
+                    command,
+                    peer_id: peer_id.clone(),
+                })
+                .await?,
+            "command",
+        )
+        .await
     }
 
     fn validate_context_from_cert(
@@ -288,6 +362,217 @@ impl SnService {
         endpoints
     }
 
+    fn local_peer_detail(&self, peer_id: &P2pId) -> Option<ServingPeerDetail> {
+        self.peer_manager().find_peer(peer_id).and_then(|peer| {
+            let mut endpoints = Self::reported_endpoints_for_peer(&peer);
+            Self::dedup_endpoints(&mut endpoints);
+            peer.desc
+                .get_encoded_cert()
+                .ok()
+                .map(|peer_info| ServingPeerDetail {
+                    peer_info,
+                    endpoints,
+                })
+        })
+    }
+
+    async fn query_serving_leases(
+        &self,
+        local_sn_id: &P2pId,
+        peer_id: &P2pId,
+    ) -> Vec<ServingLease> {
+        match self
+            .owner_client
+            .query_serving_leases(local_sn_id, peer_id)
+            .await
+        {
+            Ok(leases) => leases,
+            Err(err) => {
+                warn!(
+                    "query serving leases failed local_sn={} peer={} err={:?}",
+                    local_sn_id, peer_id, err
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    async fn query_remote_details(
+        &self,
+        local_sn_id: &P2pId,
+        peer_id: &P2pId,
+    ) -> Vec<ServingPeerDetail> {
+        let mut details = Vec::new();
+        for lease in self.query_serving_leases(local_sn_id, peer_id).await {
+            if lease.serving_sn_id == *local_sn_id {
+                continue;
+            }
+            if let Some(inter_sn_client) = self.inter_sn_client.as_ref() {
+                match inter_sn_client
+                    .query_detail_from_sn(&lease.serving_sn_id, peer_id.clone())
+                    .await
+                {
+                    Ok(Some(detail)) => {
+                        details.push(detail);
+                        continue;
+                    }
+                    Ok(None) => continue,
+                    Err(err) if err.code() == P2pErrorCode::NotFound => {}
+                    Err(err) => {
+                        warn!(
+                            "query remote detail failed peer={} serving_sn={} err={:?}",
+                            peer_id, lease.serving_sn_id, err
+                        );
+                        continue;
+                    }
+                }
+            }
+            let Some(serving_sn) = InterSnRegistry::global().get(&lease.serving_sn_id) else {
+                continue;
+            };
+            match serving_sn
+                .query_detail_from_sn(local_sn_id.clone(), peer_id.clone())
+                .await
+            {
+                Ok(Some(detail)) => details.push(detail),
+                Ok(None) => {}
+                Err(err) => warn!(
+                    "query remote detail failed peer={} serving_sn={} err={:?}",
+                    peer_id, lease.serving_sn_id, err
+                ),
+            }
+        }
+        details
+    }
+
+    async fn relay_call_to_serving_sn(
+        &self,
+        local_sn_id: &P2pId,
+        call_req: SnCall,
+    ) -> Option<SnCallResp> {
+        for lease in self
+            .query_serving_leases(local_sn_id, &call_req.to_peer_id)
+            .await
+        {
+            if lease.serving_sn_id == *local_sn_id {
+                continue;
+            }
+            if let Some(inter_sn_client) = self.inter_sn_client.as_ref() {
+                match inter_sn_client
+                    .relay_call_to_sn(&lease.serving_sn_id, call_req.clone())
+                    .await
+                {
+                    Ok(outcome) if outcome.accepted => {
+                        return Some(SnCallResp {
+                            seq: call_req.seq,
+                            sn_peer_id: local_sn_id.clone(),
+                            result: P2pErrorCode::Ok.into_u8(),
+                            to_peer_info: outcome.to_peer_info,
+                        });
+                    }
+                    Ok(_) => continue,
+                    Err(err) if err.code() == P2pErrorCode::NotFound => {}
+                    Err(err) => {
+                        warn!(
+                            "relay call failed from={} to={} serving_sn={} err={:?}",
+                            call_req.from_peer_id, call_req.to_peer_id, lease.serving_sn_id, err
+                        );
+                        continue;
+                    }
+                }
+            }
+            let Some(serving_sn) = InterSnRegistry::global().get(&lease.serving_sn_id) else {
+                continue;
+            };
+            match serving_sn
+                .relay_call_from_sn(local_sn_id.clone(), call_req.clone())
+                .await
+            {
+                Ok(outcome) if outcome.accepted => {
+                    return Some(SnCallResp {
+                        seq: call_req.seq,
+                        sn_peer_id: local_sn_id.clone(),
+                        result: P2pErrorCode::Ok.into_u8(),
+                        to_peer_info: outcome.to_peer_info,
+                    });
+                }
+                Ok(_) => {}
+                Err(err) => warn!(
+                    "relay call failed from={} to={} serving_sn={} err={:?}",
+                    call_req.from_peer_id, call_req.to_peer_id, lease.serving_sn_id, err
+                ),
+            }
+        }
+        None
+    }
+
+    async fn deliver_called_to_local_peer(
+        &self,
+        mut call_req: SnCall,
+        local_sn_id: P2pId,
+    ) -> P2pResult<RelayCallOutcome> {
+        let Some(to_peer_cache) = self.peer_manager().find_peer(&call_req.to_peer_id) else {
+            return Ok(RelayCallOutcome {
+                accepted: false,
+                to_peer_info: None,
+            });
+        };
+        let Some(from_peer_info) = call_req.peer_info.clone() else {
+            return Ok(RelayCallOutcome {
+                accepted: false,
+                to_peer_info: Some(to_peer_cache.desc.get_encoded_cert()?),
+            });
+        };
+        let from_peer_desc = self.cert_factory.create(&from_peer_info)?;
+
+        if self
+            .call_stub
+            .insert(&call_req.from_peer_id, &call_req.tunnel_id)
+            && (call_req.is_always_call || !to_peer_cache.is_wan)
+        {
+            let called_seq = self.seq_generator.generate();
+            let mut called_req = SnCalled {
+                seq: called_seq,
+                to_peer_id: call_req.to_peer_id.clone(),
+                sn_peer_id: local_sn_id,
+                peer_info: from_peer_desc.get_encoded_cert()?,
+                tunnel_id: call_req.tunnel_id,
+                call_send_time: call_req.send_time,
+                call_type: call_req.call_type,
+                payload: vec![],
+                reverse_endpoint_array: vec![],
+                active_pn_list: vec![],
+            };
+
+            std::mem::swap(&mut call_req.payload, &mut called_req.payload);
+            if let Some(eps) = call_req.reverse_endpoint_array.as_mut() {
+                std::mem::swap(eps, &mut called_req.reverse_endpoint_array);
+            }
+            if let Some(pn_list) = call_req.active_pn_list.as_mut() {
+                std::mem::swap(pn_list, &mut called_req.active_pn_list);
+            }
+            Self::dedup_endpoints(&mut called_req.reverse_endpoint_array);
+
+            self.cmd_server
+                .send_by_all_tunnels(
+                    &PeerId::from(call_req.to_peer_id.as_slice()),
+                    PackageCmdCode::SnCalled as u8,
+                    self.cmd_version,
+                    called_req
+                        .to_vec()
+                        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
+                        .as_slice(),
+                )
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        }
+
+        Ok(RelayCallOutcome {
+            accepted: true,
+            to_peer_info: Some(to_peer_cache.desc.get_encoded_cert()?),
+        })
+    }
+
     async fn handle_call(
         &self,
         mut call_req: SnCall,
@@ -301,6 +586,7 @@ impl SnService {
             self.client_cert_from_request_or_cache(&client_id, call_req.peer_info.clone())?;
         self.validate_connection(self.validate_context_from_cert(peer_id, client_cert)?)
             .await?;
+        let local_sn_id = self.effective_local_sn_id(local_id);
 
         let from_peer_id = &call_req.from_peer_id;
         let log_key = format!(
@@ -418,11 +704,18 @@ impl SnService {
                     }
                 } else {
                     warn!("{} to-peer not found.", log_key);
-                    SnCallResp {
-                        seq: call_req.seq,
-                        sn_peer_id: local_id.clone(),
-                        result: P2pErrorCode::NotFound.into_u8(),
-                        to_peer_info: None,
+                    if let Some(relay_resp) = self
+                        .relay_call_to_serving_sn(&local_sn_id, call_req.clone())
+                        .await
+                    {
+                        relay_resp
+                    } else {
+                        SnCallResp {
+                            seq: call_req.seq,
+                            sn_peer_id: local_id.clone(),
+                            result: P2pErrorCode::NotFound.into_u8(),
+                            to_peer_info: None,
+                        }
                     }
                 }
             } else {
@@ -541,15 +834,26 @@ impl SnService {
         }
         let remote_ep = self.get_peer_wan_ep(peer_id, reported_eps.as_slice()).await;
 
-        if report_sn.from_peer_id.is_some() {
+        if let Some(from_peer_id) = report_sn.from_peer_id.clone() {
             self.peer_mgr.add_or_update_peer(
-                report_sn.from_peer_id.as_ref().unwrap(),
+                &from_peer_id,
                 &report_sn
                     .peer_info
                     .map(|info| self.cert_factory.create(&info).unwrap()),
                 report_sn.map_ports,
                 &report_sn.local_eps,
             );
+            if let Err(err) = self
+                .owner_client
+                .publish_serving_lease(
+                    self.effective_local_sn_id(local_id),
+                    from_peer_id,
+                    u64::from(report_sn.seq.value()),
+                )
+                .await
+            {
+                warn!("serving lease publish failed after report: {:?}", err);
+            }
         }
         if let Err(e) = self
             .cmd_server
@@ -583,11 +887,16 @@ impl SnService {
 
     async fn handle_query_sn(
         &self,
+        local_id: &P2pId,
         peer_id: &PeerId,
         tunnel_id: CmdTunnelId,
         query: SnQuery,
     ) -> P2pResult<()> {
+        let requester_sn_id = self.effective_local_sn_id(local_id);
         let device_info = self.peer_mgr.find_peer(&query.query_id);
+        let mut remote_details = self
+            .query_remote_details(&requester_sn_id, &query.query_id)
+            .await;
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();
             let reported_eps = Self::reported_endpoints_for_peer(&device_info);
@@ -599,9 +908,22 @@ impl SnService {
                 )
                 .await;
             Self::extend_unique_endpoints(&mut end_point_array, device_info.local_eps.as_slice());
+            for detail in remote_details.drain(..) {
+                Self::extend_unique_endpoints(&mut end_point_array, detail.endpoints.as_slice());
+            }
             SnQueryResp {
                 seq: query.seq,
                 peer_info: Some(device_info.desc.get_encoded_cert().unwrap()),
+                end_point_array,
+            }
+        } else if let Some(first_detail) = remote_details.first().cloned() {
+            let mut end_point_array = Vec::new();
+            for detail in remote_details.iter() {
+                Self::extend_unique_endpoints(&mut end_point_array, detail.endpoints.as_slice());
+            }
+            SnQueryResp {
+                seq: query.seq,
+                peer_info: Some(first_detail.peer_info),
                 end_point_array,
             }
         } else {
@@ -635,6 +957,44 @@ impl CmdTunnelService<(), SnTunnelRead, SnTunnelWrite> for SnService {
     }
 }
 
+#[async_trait::async_trait]
+impl InterSnPeer for SnService {
+    fn sn_id(&self) -> Option<P2pId> {
+        self.local_sn_id.clone()
+    }
+
+    async fn query_detail_from_sn(
+        &self,
+        remote_sn_id: P2pId,
+        peer_id: P2pId,
+    ) -> P2pResult<Option<ServingPeerDetail>> {
+        self.validate_inter_connection(&remote_sn_id).await?;
+        self.validate_inter_command(&remote_sn_id, InterSnCommand::QueryDetail, &peer_id)
+            .await?;
+        Ok(self.local_peer_detail(&peer_id))
+    }
+
+    async fn relay_call_from_sn(
+        &self,
+        remote_sn_id: P2pId,
+        call_req: SnCall,
+    ) -> P2pResult<RelayCallOutcome> {
+        self.validate_inter_connection(&remote_sn_id).await?;
+        self.validate_inter_command(
+            &remote_sn_id,
+            InterSnCommand::RelayCall,
+            &call_req.to_peer_id,
+        )
+        .await?;
+        let local_sn_id = self
+            .local_sn_id
+            .clone()
+            .unwrap_or_else(|| call_req.sn_peer_id.clone());
+        self.deliver_called_to_local_peer(call_req, local_sn_id)
+            .await
+    }
+}
+
 pub struct SnServer {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
@@ -651,6 +1011,8 @@ impl SnServer {
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
         connection_validator: SnConnectionValidatorRef,
+        inter_service_validator: SnInterServiceValidatorRef,
+        owner_client_membership: Option<OwnerMembership>,
         congestion_algorithm: QuicCongestionAlgorithm,
         reuse_address: bool,
         server_runtime: ServerRuntime,
@@ -694,7 +1056,28 @@ impl SnServer {
 
         let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
         let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
-        let service = SnService::new(cert_factory, connection_validator);
+        let inter_sn_client = None;
+        let serving_connector = owner_client_membership.as_ref().map(|_| {
+            TtpClient::new(local_identity.clone(), net_manager.clone()) as Arc<dyn TtpConnector>
+        });
+        let owner_client = owner_client_membership
+            .clone()
+            .map(|membership| {
+                StaticOwnerDirectoryClient::new_with_serving_connector(
+                    membership,
+                    serving_connector,
+                    inter_sn_client.clone(),
+                )
+            })
+            .unwrap_or_else(noop_owner_directory_client);
+        let service = SnService::new_with_options(
+            cert_factory,
+            connection_validator,
+            inter_service_validator,
+            owner_client,
+            inter_sn_client,
+            Some(local_identity.get_id()),
+        );
 
         Arc::new(Self {
             local_identity,
@@ -876,6 +1259,8 @@ pub struct SnServiceConfig {
     identity_factory: P2pIdentityFactoryRef,
     cert_factory: P2pIdentityCertFactoryRef,
     connection_validator: SnConnectionValidatorRef,
+    inter_service_validator: SnInterServiceValidatorRef,
+    owner_client_membership: Option<OwnerMembership>,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
     server_runtime: Option<ServerRuntime>,
@@ -892,6 +1277,8 @@ impl SnServiceConfig {
             identity_factory,
             cert_factory,
             connection_validator: allow_all_sn_connection_validator(),
+            inter_service_validator: allow_all_sn_inter_service_validator(),
+            owner_client_membership: None,
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
             server_runtime: None,
@@ -900,6 +1287,16 @@ impl SnServiceConfig {
 
     pub fn set_connection_validator(mut self, validator: SnConnectionValidatorRef) -> Self {
         self.connection_validator = validator;
+        self
+    }
+
+    pub fn set_owner_client_membership(mut self, owner_client_membership: OwnerMembership) -> Self {
+        self.owner_client_membership = Some(owner_client_membership);
+        self
+    }
+
+    pub fn set_inter_service_validator(mut self, validator: SnInterServiceValidatorRef) -> Self {
+        self.inter_service_validator = validator;
         self
     }
 
@@ -931,6 +1328,8 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
         config.identity_factory,
         config.cert_factory,
         config.connection_validator,
+        config.inter_service_validator,
+        config.owner_client_membership,
         config.quic_congestion_algorithm,
         config.reuse_address,
         server_runtime,
@@ -952,6 +1351,7 @@ mod tests {
         EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
         P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pSn,
     };
+    use crate::sn::directory::{OwnerDirectoryServer, OwnerDirectoryServerRef};
     use crate::tls::DefaultTlsServerCertResolver;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, WriteHalf, split};
@@ -1083,6 +1483,45 @@ mod tests {
     impl SnConnectionValidator for TestSnConnectionValidator {
         async fn validate(&self, ctx: &SnConnectionValidateContext) -> P2pResult<ValidateResult> {
             *self.last_ctx.lock().unwrap() = Some(ctx.clone());
+            match &self.decision {
+                ValidateResult::Accept => Ok(ValidateResult::Accept),
+                ValidateResult::Reject(reason) => Ok(ValidateResult::Reject(reason.clone())),
+            }
+        }
+    }
+
+    struct TestInterServiceValidator {
+        decision: ValidateResult,
+        commands: Mutex<Vec<InterSnCommandContext>>,
+    }
+
+    impl TestInterServiceValidator {
+        fn new(decision: ValidateResult) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                commands: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn command_count(&self) -> usize {
+            self.commands.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sn::inter_sn::SnInterServiceValidator for TestInterServiceValidator {
+        async fn validate_connection(
+            &self,
+            _ctx: &InterSnConnectionContext,
+        ) -> P2pResult<ValidateResult> {
+            match &self.decision {
+                ValidateResult::Accept => Ok(ValidateResult::Accept),
+                ValidateResult::Reject(reason) => Ok(ValidateResult::Reject(reason.clone())),
+            }
+        }
+
+        async fn validate_command(&self, ctx: &InterSnCommandContext) -> P2pResult<ValidateResult> {
+            self.commands.lock().unwrap().push(ctx.clone());
             match &self.decision {
                 ValidateResult::Accept => Ok(ValidateResult::Accept),
                 ValidateResult::Reject(reason) => Ok(ValidateResult::Reject(reason.clone())),
@@ -1361,6 +1800,10 @@ mod tests {
         P2pId::from(vec![2u8; 32])
     }
 
+    fn test_id(seed: u8) -> P2pId {
+        P2pId::from(vec![seed; 32])
+    }
+
     fn make_stream_pair() -> (
         (TunnelStreamRead, TunnelStreamWrite),
         WriteHalf<DuplexStream>,
@@ -1373,6 +1816,32 @@ mod tests {
 
     fn test_sn_service(validator: SnConnectionValidatorRef) -> SnServiceRef {
         SnService::new(Arc::new(TestIdentityCertFactory), validator)
+    }
+
+    fn test_sn_service_with_directory(
+        local_sn_id: P2pId,
+        membership: Option<OwnerMembership>,
+        inter_validator: SnInterServiceValidatorRef,
+    ) -> SnServiceRef {
+        let owner_client = membership
+            .map(|membership| StaticOwnerDirectoryClient::new(membership, None))
+            .unwrap_or_else(noop_owner_directory_client);
+        SnService::new_with_options(
+            Arc::new(TestIdentityCertFactory),
+            allow_all_sn_connection_validator(),
+            inter_validator,
+            owner_client,
+            None,
+            Some(local_sn_id),
+        )
+    }
+
+    fn test_owner_service(
+        local_sn_id: P2pId,
+        membership: OwnerMembership,
+        inter_validator: SnInterServiceValidatorRef,
+    ) -> OwnerDirectoryServerRef {
+        OwnerDirectoryServer::new_detached(local_sn_id, membership, Some(inter_validator))
     }
 
     fn test_report(from_peer_id: P2pId, client_cert: EncodedP2pIdentityCert) -> ReportSn {
@@ -1550,6 +2019,123 @@ mod tests {
         assert_eq!(err.code(), P2pErrorCode::PermissionDenied);
         assert!(service.peer_manager().find_peer(&reported_peer).is_none());
         assert!(validator.last_ctx().is_none());
+    }
+
+    #[tokio::test]
+    async fn sn_distributed_directory_inter_validator_reject_blocks_owner_write() {
+        let owner_sn = test_id(70);
+        let serving_sn = test_id(71);
+        let peer = test_id(72);
+        let validator =
+            TestInterServiceValidator::new(ValidateResult::Reject("blocked-by-test".to_owned()));
+        let membership =
+            OwnerMembership::with_options(vec![owner_sn.clone()], 1, Duration::from_secs(60))
+                .unwrap();
+        let owner = test_owner_service(owner_sn, membership, validator.clone());
+        let lease = ServingLease {
+            peer_id: peer.clone(),
+            serving_sn_id: serving_sn.clone(),
+            sequence: 1,
+            expires_at: bucky_time_now() + 60_000_000,
+        };
+
+        let err = owner
+            .publish_lease_from_sn(serving_sn, lease)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), P2pErrorCode::PermissionDenied);
+        assert!(owner.query_serving_leases(&peer).is_empty());
+        assert_eq!(validator.command_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn sn_directory_client_server_boundary_keeps_sn_service_serving_only() {
+        let owner_sn = test_id(74);
+        let local_sn = test_id(75);
+        let peer = test_id(76);
+        let membership =
+            OwnerMembership::with_options(vec![owner_sn.clone()], 1, Duration::from_secs(60))
+                .unwrap();
+        let owner = test_owner_service(
+            owner_sn,
+            membership.clone(),
+            allow_all_sn_inter_service_validator(),
+        );
+        let service = test_sn_service_with_directory(
+            local_sn.clone(),
+            Some(membership),
+            allow_all_sn_inter_service_validator(),
+        );
+
+        service
+            .owner_client
+            .publish_serving_lease(local_sn.clone(), peer.clone(), 3)
+            .await
+            .unwrap();
+
+        let leases = owner.query_serving_leases(&peer);
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].serving_sn_id, local_sn);
+        assert_eq!(leases[0].sequence, 3);
+        assert!(service.local_peer_detail(&peer).is_none());
+
+        service.peer_mgr.add_peer_info(
+            peer.clone(),
+            Arc::new(TestIdentityCert {
+                id: peer.clone(),
+                encoded: peer.as_slice().to_vec(),
+            }),
+        );
+        assert_eq!(
+            service.local_peer_detail(&peer).unwrap().peer_info,
+            peer.as_slice().to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn sn_distributed_directory_publish_query_and_detail_use_registered_serving_sn() {
+        let owner_sn = test_id(80);
+        let serving_sn = test_id(81);
+        let peer = test_id(82);
+        let membership =
+            OwnerMembership::with_options(vec![owner_sn.clone()], 1, Duration::from_secs(60))
+                .unwrap();
+        let owner = test_owner_service(
+            owner_sn.clone(),
+            membership.clone(),
+            allow_all_sn_inter_service_validator(),
+        );
+        let serving = test_sn_service_with_directory(
+            serving_sn.clone(),
+            Some(membership),
+            allow_all_sn_inter_service_validator(),
+        );
+        serving.peer_mgr.add_peer_info(
+            peer.clone(),
+            Arc::new(TestIdentityCert {
+                id: peer.clone(),
+                encoded: peer.as_slice().to_vec(),
+            }),
+        );
+
+        serving
+            .owner_client
+            .publish_serving_lease(serving_sn.clone(), peer.clone(), 7)
+            .await
+            .unwrap();
+
+        let leases = owner.query_serving_leases(&peer);
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].serving_sn_id, serving_sn);
+        assert_eq!(leases[0].sequence, 7);
+
+        let detail = serving
+            .query_detail_from_sn(owner_sn, peer.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.peer_info, peer.as_slice().to_vec());
     }
 
     #[tokio::test]

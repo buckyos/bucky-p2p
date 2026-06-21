@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-15T16:32:43+00:00",
+  "evidence_file": "harness/evidence/admission/20260615-sn-distributed-directory.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "sn-distributed-directory",
+  "change_ids": [
+    "sn_distributed_directory",
+    "sn_distributed_query_merge",
+    "sn_distributed_relay_call",
+    "sn_inter_service_validation"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md": "f9efb4f925dc9efe37f2df9148c0cac17a3148f783f249481661519f16cc1c40",
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md": "7e6139f854963cf2094e01850b208d35086ae6221bec99fab8d90a580b07967c"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/directory/**",
+    "p2p-frame/src/sn/mod.rs",
+    "p2p-frame/src/sn/service/service.rs",
+    "sn-miner-rust/**",
+    "p2p-frame/src/sn/inter_sn/**",
+    "p2p-frame/src/sn/protocol/**"
+  ]
+}

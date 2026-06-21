@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-12T09:08:36+00:00",
+  "evidence_file": "harness/evidence/admission/20260612-quic-listener-socket-port.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "networks_sfo_reuseport_quic_listener_socket"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "3276e5ab90a040d487dd00e11e3b569ed19384dbb48dfa766bfbf0c2f4fdb6e8",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "3ae37756c97a595f48e0d255767005698a5a32d0439fc5e5869b124b1407bdf9"
+  },
+  "scope_paths": [
+    "p2p-frame/src/stack.rs",
+    "p2p-frame/src/networks/quic/listener.rs",
+    "p2p-frame/src/networks/quic/network.rs",
+    "docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md"
+  ]
+}

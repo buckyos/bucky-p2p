@@ -877,17 +877,17 @@ pub(crate) async fn connect_with_ep(
             remote
         ))?;
     runtime::timeout(timeout, connecting)
-    .await
-    .map_err(into_p2p_err!(
-        P2pErrorCode::ConnectFailed,
-        "quic to {} connect failed",
-        remote
-    ))?
-    .map_err(into_p2p_err!(
-        P2pErrorCode::ConnectFailed,
-        "quic to {} connect failed",
-        remote
-    ))
+        .await
+        .map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} connect failed",
+            remote
+        ))?
+        .map_err(into_p2p_err!(
+            P2pErrorCode::ConnectFailed,
+            "quic to {} connect failed",
+            remote
+        ))
 }
 
 #[cfg(test)]

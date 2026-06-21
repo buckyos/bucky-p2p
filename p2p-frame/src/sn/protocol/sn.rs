@@ -10,6 +10,118 @@ use bucky_time::{MIN_BUCKY_TIME, bucky_time_to_system_time, system_time_to_bucky
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum InterSnCommandCode {
+    Heartbeat = 0x80,
+    PublishLease = 0x81,
+    QueryLease = 0x82,
+    QueryDetail = 0x83,
+    RelayCall = 0x84,
+}
+
+impl TryFrom<u8> for InterSnCommandCode {
+    type Error = P2pError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x80 => Ok(Self::Heartbeat),
+            0x81 => Ok(Self::PublishLease),
+            0x82 => Ok(Self::QueryLease),
+            0x83 => Ok(Self::QueryDetail),
+            0x84 => Ok(Self::RelayCall),
+            _ => Err(P2pError::new(
+                P2pErrorCode::InvalidParam,
+                format!("invalid inter-sn command code: {}", value),
+            )),
+        }
+    }
+}
+
+impl RawFixedBytes for InterSnCommandCode {
+    fn raw_bytes() -> Option<usize> {
+        Some(1)
+    }
+}
+
+impl RawEncode for InterSnCommandCode {
+    fn raw_measure(&self, _purpose: &Option<RawEncodePurpose>) -> Result<usize, CodecError> {
+        Ok(Self::raw_bytes().unwrap())
+    }
+
+    fn raw_encode<'a>(
+        &self,
+        buf: &'a mut [u8],
+        _purpose: &Option<RawEncodePurpose>,
+    ) -> Result<&'a mut [u8], CodecError> {
+        if buf.is_empty() {
+            return Err(CodecError::new(
+                CodecErrorCode::OutOfLimit,
+                "not enough buffer for inter-sn command code",
+            ));
+        }
+        buf[0] = *self as u8;
+        Ok(&mut buf[1..])
+    }
+}
+
+impl<'de> RawDecode<'de> for InterSnCommandCode {
+    fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), CodecError> {
+        if buf.is_empty() {
+            return Err(CodecError::new(
+                CodecErrorCode::OutOfLimit,
+                "not enough buffer for inter-sn command code",
+            ));
+        }
+        let code = Self::try_from(buf[0]).map_err(|err| {
+            CodecError::new(
+                CodecErrorCode::Failed,
+                format!("decode inter-sn command code failed: {:?}", err),
+            )
+        })?;
+        Ok((code, &buf[1..]))
+    }
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnOwnerHeartbeat {
+    pub member_sn_id: P2pId,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnPublishLease {
+    pub peer_id: P2pId,
+    pub serving_sn_id: P2pId,
+    pub sequence: u64,
+    pub expires_at: Timestamp,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnQueryLease {
+    pub peer_id: P2pId,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnQueryLeaseResp {
+    pub leases: Vec<SnPublishLease>,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnDetailQuery {
+    pub peer_id: P2pId,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnDetailResp {
+    pub peer_info: Option<EncodedP2pIdentityCert>,
+    pub end_point_array: Vec<Endpoint>,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct SnRelayCall {
+    pub call: SnCall,
+}
+
 #[derive(Clone, RawEncode, RawDecode)]
 pub struct SnCall {
     pub protocol_version: u8,

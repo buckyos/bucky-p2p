@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-14T17:09:51+00:00",
+  "evidence_file": "harness/evidence/admission/20260615-cyfs-test-pnserver-default-sn.md",
+  "version": "v0.1",
+  "module": "cyfs-p2p-test",
+  "submodule": null,
+  "change_ids": [
+    "cyfs_test_harness_audit"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/cyfs-p2p-test/proposal.md": "57b2908e447676d242b5edd6f8dc944f4afbc44c89af9a0467bbd4f80795a543",
+    "docs/versions/v0.1/modules/cyfs-p2p-test/design.md": "315695732e726065f17e4be05dd194168dd81908ecbe84b06ff130a514a9721e"
+  },
+  "scope_paths": [
+    "cyfs-p2p-test/src/main.rs"
+  ]
+}

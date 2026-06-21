@@ -7,7 +7,7 @@ use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::client::{TtpConnector, is_tunnel_available, match_target};
+use super::client::{TtpConnector, find_existing_tunnel_in, remember_tunnel_in};
 use super::listener::{
     TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStreamCallback,
     TtpPortListener,
@@ -92,18 +92,11 @@ impl TtpServer {
     }
 
     fn remember_tunnel(&self, tunnel: TunnelRef) {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|_, existing| is_tunnel_available(existing.as_ref()));
-        tunnels.insert(tunnel.remote_id(), tunnel);
+        remember_tunnel_in(&self.tunnels, tunnel);
     }
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
-        tunnels
-            .get(&target.remote_id)
-            .filter(|tunnel| match_target(tunnel.as_ref(), target))
-            .cloned()
+        find_existing_tunnel_in(&self.tunnels, target)
     }
 
     fn get_existing_tunnel(&self, target: &TtpTarget) -> P2pResult<TunnelRef> {

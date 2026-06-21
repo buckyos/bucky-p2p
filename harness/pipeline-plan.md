@@ -1,59 +1,59 @@
-# Pipeline Plan: PN Server Default Allow-All Validator
+# Pipeline Plan: SN Distributed Directory Online State Refresh
 
 ## Trigger
-- Approved proposal: `docs/versions/v0.1/modules/p2p-frame/proposal.md`
+- Approved proposal: `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md`
 - User launch confirmed: confirmed
-- Per-stage user confirmation: not required; user said "确认，自动处理后续步骤"
+- Per-stage user confirmation: not required; user said "自动处理后续步骤"
 - Auto-confirm completed document stages: yes
 - Version: v0.1
 - Module(s): p2p-frame
-- change_id values: pn_multi_server_assigned_target
+- Submodule(s): sn-distributed-directory
+- change_id values: sn_owner_control_plane_online_state, sn_owner_network_leader_election, sn_owner_leader_online_replication, sn_partitioned_peer_route, sn_owner_serving_role_boundary, sn_directory_client_server_boundary, sn_owner_directory_peer_transport, sn_owner_serving_listener_transport, sn_distributed_query_merge, sn_distributed_relay_call, sn_inter_service_validation
 
 ## Acceptance Baseline
-- Final acceptance uses the approved `pn_multi_server_assigned_target` proposal item as authority.
-- `PnServer::new(...)` and the default `PnConnectionValidator` must remain explicit allow-all for unconfigured deployments.
-- Multi-PN assigned target enforcement must be enabled through an explicit validator or policy path and must not rely on the default allow-all path to hide wrong-PN failures.
-- The change must not introduce a library-owned peer-to-PN directory, automatic PN switching, cross-PN relay bridge, or PN wire protocol change.
+- Final acceptance uses the approved `sn-distributed-directory` proposal as authority.
+- Serving SN availability is modeled as online/offline state only; Serving SN session/epoch is not a required distinction.
+- Serving SN online state is an independent low-frequency report/renew/offline flow and is not coupled to every client `ReportSn`.
+- `ReportSn` no longer forces `PeerRoute` publish on every report; route publish is first-report, migration, repair, refresh-window, or explicit route-update driven.
+- Owner SN leader/follower behavior, leader failover, and leader replication of Serving SN online/offline state remain required.
+- OwnerDirectoryServer serving-facing access must be wired through server/listener transport rather than same-process shortcuts.
+- Owner control forward must validate the remote owner identity before accepting forwarded owner control commands.
 
 ## Stage Graph
 | task_id | stage | status | responsibility | scope | parent_task | depends_on | output | done_condition |
 |---------|-------|--------|----------------|-------|-------------|------------|--------|----------------|
-| P-PN-DEFAULT-ALLOW-ALL-1 | proposal | confirmed | Approve revised PN default validator requirement | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | root | user launch | approved proposal | proposal approved with `pn_multi_server_assigned_target` requiring default allow-all |
-| D-PN-DEFAULT-ALLOW-ALL-1 | design | complete | Synchronize PN server constructor and admission design with approved proposal | `docs/versions/v0.1/modules/p2p-frame/design.md`, `docs/versions/v0.1/modules/p2p-frame/design/pn-server.md` | root | P-PN-DEFAULT-ALLOW-ALL-1 | approved design | design maps default allow-all compatibility and explicit assigned target policy path |
-| I-PN-DEFAULT-ALLOW-ALL-1 | implementation | complete | Change production PN server default validator only after admission | `p2p-frame/src/pn/service/pn_server.rs`, necessary allowed scope paths from design | root | D-PN-DEFAULT-ALLOW-ALL-1 | production code | `PnServer::new(...)` uses allow-all while explicit validator path still controls admission |
-| T-PN-DEFAULT-ALLOW-ALL-1 | testing | complete | Add or update post-implementation validation coverage and metadata | tests, `docs/versions/v0.1/modules/p2p-frame/testing.md`, `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | root | I-PN-DEFAULT-ALLOW-ALL-1 | testing artifacts and runnable evidence | default allow-all and explicit reject behavior are covered or gaps recorded |
-| A-PN-DEFAULT-ALLOW-ALL-1 | acceptance | blocked | Audit proposal/design/implementation/testing consistency | `docs/versions/v0.1/reviews/` | root | T-PN-DEFAULT-ALLOW-ALL-1 | acceptance report | implementation/testing scope checks are blocked by unrelated dirty workspace paths |
+| P-SN-DIST-ONLINE-REFRESH-1 | proposal | confirmed | Approved Serving SN online/offline and route publish decoupling requirements | `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md` | root | user approval | approved proposal | proposal structure/schema passed and approval metadata records user statement |
+| D-SN-DIST-ONLINE-REFRESH-1 | design | blocked | Refresh design for online/offline state, route publish decoupling, SnServer wiring, and remote owner validation | `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md` | root | P-SN-DIST-ONLINE-REFRESH-1 | draft design | design doc/check/schema passed, but stage-scope is blocked by pre-existing mixed worktree changes |
+| I-SN-DIST-ONLINE-REFRESH-1 | implementation | pending | Implement the approved design under admitted directory/inter-SN/service/sn-miner scope | `p2p-frame/src/sn/directory/**`, `p2p-frame/src/sn/inter_sn/**`, `p2p-frame/src/sn/service/**`, `p2p-frame/src/sn/protocol/**`, `p2p-frame/src/sn/mod.rs`, `sn-miner-rust/**` as admitted by design | root | D-SN-DIST-ONLINE-REFRESH-1 | production code and admission evidence | schema/admission passed before code edits; targeted tests pass |
+| T-SN-DIST-ONLINE-REFRESH-1 | testing | pending | Add post-implementation tests/evidence for online/offline, route publish decoupling, server wiring, validation, query, and call behavior | tests, testing docs, fixtures, runner wiring | root | I-SN-DIST-ONLINE-REFRESH-1 | runnable evidence | coverage check and targeted unit/DV/integration tests pass or recorded gaps are accepted by acceptance |
+| A-SN-DIST-ONLINE-REFRESH-1 | acceptance | pending | Audit proposal/design/implementation/testing consistency and final behavior | `docs/versions/v0.1/reviews/` | root | T-SN-DIST-ONLINE-REFRESH-1 | acceptance report | acceptance report check passed and conclusion is accepted |
 
 ## Return Routing
-- Proposal issue: return to proposal if default allow-all conflicts with a broader requirement.
-- Design issue: return to design if constructor compatibility, explicit assigned target policy, or wrong-PN failure semantics are ambiguous.
-- Implementation issue: return to implementation if default constructor still rejects by default or explicit validator no longer controls admission.
-- Testing issue: return to testing if default allow-all compatibility or explicit rejection has no runnable or recorded validation path.
+- Proposal issue: return to proposal only if Serving SN online/offline, route publish cadence, role boundary, or authorization requirements change.
+- Design issue: return to design if online-state flow, route publish policy, SnServer wiring, owner validation, or Scope Paths are incomplete.
+- Implementation issue: return to implementation if code does not satisfy approved design or violates admitted paths.
+- Testing issue: return to testing if runnable evidence does not cover the approved behavior.
 - Acceptance issue: return to the owning stage named by the finding.
 
 ## Exit Condition
 - [x] proposal approved
-- [x] pipeline plan checked
-- [x] design approved
-- [x] implementation admission passed
-- [x] production code updated
-- [x] testing completed
+- [ ] design approved
+- [ ] implementation admission passed
+- [ ] production code updated
+- [ ] testing completed
 - [ ] acceptance completed
 
 ## Evidence
-- User approval and launch statement: `确认，自动处理后续步骤`
-- `uv run --active python ./harness/scripts/pipeline-plan-check.py harness/pipeline-plan.md` passed.
-- `uv run --active python ./harness/scripts/doc-structure-check.py --version v0.1 --module p2p-frame --docs design` passed.
-- `uv run --active python ./harness/scripts/schema-check.py --version v0.1 --module p2p-frame` passed.
-- `uv run --active python ./harness/scripts/admission-check.py --version v0.1 --module p2p-frame --change-id pn_multi_server_assigned_target --evidence-file harness/evidence/admission/20260615-pnserver-default-allow-all.md` passed.
-- Admission stamp: `harness/evidence/admission/20260615-pnserver-default-allow-all.p2p-frame.stamp.json`.
-- Production code: `p2p-frame/src/pn/service/pn_server.rs` default `PnServer::new(...)` uses `allow_all_pn_connection_validator()`; explicit reject and assigned-target policy paths remain available.
-- `uv run --active python ./harness/scripts/doc-structure-check.py --version v0.1 --module p2p-frame --docs testing` passed.
-- `uv run --active python ./harness/scripts/testing-coverage-check.py --version v0.1 --module p2p-frame --change-id pn_multi_server_assigned_target` passed.
-- `cargo test -p p2p-frame pn_connection_validator -- --nocapture` passed: 2 tests passed.
-- `uv run --active python ./harness/scripts/test-run.py p2p-frame unit` passed: 122 lib unit tests passed, doc tests 0, targeted PN validator step passed.
-- `uv run --active python ./harness/scripts/stage-scope-check.py --stage implementation --version v0.1 --module p2p-frame --change-id pn_multi_server_assigned_target` failed because the workspace already contains broad cross-stage dirty/untracked changes outside this task's admitted scope; this task did not revert those user/workspace changes.
-- `uv run --active python ./harness/scripts/stage-scope-check.py --stage testing --version v0.1 --module p2p-frame` failed for the same broad dirty workspace condition.
-- `uv run --active python ./harness/scripts/quality-check.py` passed; `harness/quality-gates.yaml` declares an explicitly empty gates list.
-- Acceptance report: `docs/versions/v0.1/reviews/p2p-frame-pnserver-default-allow-all-acceptance-2026-06-15.md`; conclusion `needs changes` because stage-scope gates cannot close in the current dirty workspace.
-- `uv run --active python ./harness/scripts/acceptance-report-check.py docs/versions/v0.1/reviews/p2p-frame-pnserver-default-allow-all-acceptance-2026-06-15.md` passed.
+- User launch statement: `自动处理后续步骤`
+- Approved proposal hash: `5b8cba1a856fc438f76ba1b83ef56ce1c604ff39787a7228048b342f30f0c349`.
+- Proposal path: `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md`.
+- Current pipeline starts by refreshing stale design that still used Serving SN session/epoch semantics.
+- `python3 ./harness/scripts/pipeline-plan-check.py harness/pipeline-plan.md` passed after recording the user launch.
+- `python3 ./harness/scripts/doc-structure-check.py --version v0.1 --module p2p-frame --submodule sn-distributed-directory --docs design` passed for refreshed draft design.
+- `python3 ./harness/scripts/schema-check.py --version v0.1 --module p2p-frame --submodule sn-distributed-directory` passed for refreshed draft design.
+- `python3 ./harness/scripts/stage-scope-check.py --stage design --version v0.1 --module p2p-frame --submodule sn-distributed-directory` failed because the shared worktree contains many pre-existing tracked/untracked modifications outside the design scope.
+
+## Return Records
+| blocking_issue_id | owning_stage | target_task | reason | expected_fix_output |
+|-------------------|--------------|-------------|--------|---------------------|
+| SCOPE-WORKTREE-MIXED | design | D-SN-DIST-ONLINE-REFRESH-1 | Stage scope sees unrelated tracked/untracked changes across docs, harness, production code, tests, and reviews, so the design stage cannot be mechanically confirmed. | Re-run the design stage scope check in a clean/isolated worktree or after unrelated changes are committed/stashed/removed; then auto-confirm design and continue implementation admission. |

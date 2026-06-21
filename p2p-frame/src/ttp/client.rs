@@ -61,18 +61,11 @@ impl TtpClient {
     }
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
-        tunnels
-            .get(&target.remote_id)
-            .filter(|tunnel| match_target(tunnel.as_ref(), target))
-            .cloned()
+        find_existing_tunnel_in(&self.tunnels, target)
     }
 
     pub(crate) fn remember_tunnel(&self, tunnel: TunnelRef) {
-        let mut tunnels = self.tunnels.lock().unwrap();
-        tunnels.retain(|_, existing| is_tunnel_available(existing.as_ref()));
-        tunnels.insert(tunnel.remote_id(), tunnel);
+        remember_tunnel_in(&self.tunnels, tunnel);
     }
 
     pub fn local_id(&self) -> P2pId {
@@ -142,35 +135,14 @@ impl TtpClient {
     }
 
     async fn get_or_create_tunnel(&self, target: &TtpTarget) -> P2pResult<TunnelRef> {
-        if let Some(tunnel) = self.find_existing_tunnel(target) {
-            return Ok(tunnel);
-        }
-
-        let network = self.net_manager.get_network(target.remote_ep.protocol())?;
-        let tunnel = if let Some(local_ep) = target.local_ep.as_ref() {
-            network
-                .create_tunnel_with_local_ep(
-                    &self.local_identity,
-                    local_ep,
-                    &target.remote_ep,
-                    &target.remote_id,
-                    target.remote_name.clone(),
-                )
-                .await?
-        } else {
-            network
-                .create_tunnel(
-                    &self.local_identity,
-                    &target.remote_ep,
-                    &target.remote_id,
-                    target.remote_name.clone(),
-                )
-                .await?
-        };
-
-        self.runtime.attach_tunnel(tunnel.clone()).await?;
-        self.remember_tunnel(tunnel.clone());
-        Ok(tunnel)
+        get_or_create_tunnel_for(
+            &self.local_identity,
+            &self.net_manager,
+            &self.runtime,
+            &self.tunnels,
+            target,
+        )
+        .await
     }
 }
 
@@ -283,6 +255,62 @@ impl TtpConnector for TtpClient {
 
 pub(crate) fn is_tunnel_available(tunnel: &dyn crate::networks::Tunnel) -> bool {
     !tunnel.is_closed() && tunnel.state() == TunnelState::Connected
+}
+
+pub(crate) fn remember_tunnel_in(tunnels: &Mutex<HashMap<P2pId, TunnelRef>>, tunnel: TunnelRef) {
+    let mut tunnels = tunnels.lock().unwrap();
+    tunnels.retain(|_, existing| is_tunnel_available(existing.as_ref()));
+    tunnels.insert(tunnel.remote_id(), tunnel);
+}
+
+pub(crate) fn find_existing_tunnel_in(
+    tunnels: &Mutex<HashMap<P2pId, TunnelRef>>,
+    target: &TtpTarget,
+) -> Option<TunnelRef> {
+    let mut tunnels = tunnels.lock().unwrap();
+    tunnels.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
+    tunnels
+        .get(&target.remote_id)
+        .filter(|tunnel| match_target(tunnel.as_ref(), target))
+        .cloned()
+}
+
+pub(crate) async fn get_or_create_tunnel_for(
+    local_identity: &P2pIdentityRef,
+    net_manager: &NetManagerRef,
+    runtime: &Arc<TtpRuntime>,
+    tunnels: &Mutex<HashMap<P2pId, TunnelRef>>,
+    target: &TtpTarget,
+) -> P2pResult<TunnelRef> {
+    if let Some(tunnel) = find_existing_tunnel_in(tunnels, target) {
+        return Ok(tunnel);
+    }
+
+    let network = net_manager.get_network(target.remote_ep.protocol())?;
+    let tunnel = if let Some(local_ep) = target.local_ep.as_ref() {
+        network
+            .create_tunnel_with_local_ep(
+                local_identity,
+                local_ep,
+                &target.remote_ep,
+                &target.remote_id,
+                target.remote_name.clone(),
+            )
+            .await?
+    } else {
+        network
+            .create_tunnel(
+                local_identity,
+                &target.remote_ep,
+                &target.remote_id,
+                target.remote_name.clone(),
+            )
+            .await?
+    };
+
+    runtime.attach_tunnel(tunnel.clone()).await?;
+    remember_tunnel_in(tunnels, tunnel.clone());
+    Ok(tunnel)
 }
 
 pub(crate) fn match_target(tunnel: &dyn crate::networks::Tunnel, target: &TtpTarget) -> bool {

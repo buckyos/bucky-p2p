@@ -574,6 +574,115 @@ async fn client_open_control_stream_with_id_target_reuses_ttp_tunnel() {
 }
 
 #[tokio::test]
+async fn node_open_stream_and_control_stream_create_missing_tunnel() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24021".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24022".parse().unwrap()));
+    let local = make_identity(31, "local-node", local_ep);
+    let remote = make_identity(32, "remote-node-peer", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let node = TtpNode::new(local, manager).unwrap();
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    let (stream_meta, _stream_read, _stream_write) =
+        node.open_stream(&target, purpose_of(1021)).await.unwrap();
+    let (control_meta, _control_read, _control_write) = node
+        .open_control_stream(&target, purpose_of(1022))
+        .await
+        .unwrap();
+
+    assert_eq!(stream_meta.local_ep, Some(local_ep));
+    assert_eq!(stream_meta.remote_ep, Some(remote_ep));
+    assert_eq!(stream_meta.remote_id, target.remote_id);
+    assert_eq!(stream_meta.purpose, purpose_of(1021));
+    assert_eq!(control_meta.remote_id, target.remote_id);
+    assert_eq!(control_meta.purpose, purpose_of(1022));
+    assert_eq!(network.create_count(), 1);
+    assert_eq!(tunnel.opened_stream_vports(), vec![1021]);
+    assert_eq!(tunnel.opened_control_stream_vports(), vec![1022]);
+    assert!(tunnel.opened_datagram_vports().is_empty());
+}
+
+#[tokio::test]
+async fn node_reuses_existing_tunnel_for_id_target_and_datagram() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24031".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24032".parse().unwrap()));
+    let local = make_identity(33, "local-node-reuse", local_ep);
+    let remote = make_identity(34, "remote-node-reuse", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let node = TtpNode::new(local, manager).unwrap();
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    let _ = node.open_stream(&target, purpose_of(1031)).await.unwrap();
+    let cached_target = TtpTarget {
+        local_ep: None,
+        remote_ep: Endpoint::default(),
+        remote_id: target.remote_id.clone(),
+        remote_name: None,
+    };
+    let (control_meta, _control_read, _control_write) = node
+        .open_control_stream(&cached_target, purpose_of(1032))
+        .await
+        .unwrap();
+    let (datagram_meta, _datagram_write) = node
+        .open_datagram(&cached_target, purpose_of(1033))
+        .await
+        .unwrap();
+
+    assert_eq!(control_meta.remote_id, target.remote_id);
+    assert_eq!(control_meta.remote_ep, Some(remote_ep));
+    assert_eq!(control_meta.purpose, purpose_of(1032));
+    assert_eq!(datagram_meta.remote_id, target.remote_id);
+    assert_eq!(datagram_meta.remote_ep, Some(remote_ep));
+    assert_eq!(datagram_meta.purpose, purpose_of(1033));
+    assert_eq!(network.create_count(), 1);
+    assert_eq!(tunnel.opened_stream_vports(), vec![1031]);
+    assert_eq!(tunnel.opened_control_stream_vports(), vec![1032]);
+    assert_eq!(tunnel.opened_datagram_vports(), vec![1033]);
+}
+
+#[tokio::test]
+async fn node_open_stream_propagates_create_tunnel_error() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24041".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24042".parse().unwrap()));
+    let local = make_identity(35, "local-node-error", local_ep);
+    let remote = make_identity(36, "remote-node-error", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let node = TtpNode::new(local, manager).unwrap();
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    let err = node
+        .open_stream(&target, purpose_of(1041))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(err.code(), P2pErrorCode::NotFound);
+    assert_eq!(network.create_count(), 1);
+}
+
+#[tokio::test]
 async fn server_listeners_receive_incoming_stream_and_datagram() {
     let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24101".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24102".parse().unwrap()));

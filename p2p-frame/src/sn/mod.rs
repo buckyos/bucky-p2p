@@ -1,4 +1,6 @@
 pub mod client;
+pub mod directory;
+pub mod inter_sn;
 pub mod protocol;
 pub mod service;
 pub mod types;

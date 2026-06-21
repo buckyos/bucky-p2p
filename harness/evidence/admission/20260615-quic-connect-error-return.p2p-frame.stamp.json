@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-15T03:34:45+00:00",
+  "evidence_file": "harness/evidence/admission/20260615-quic-connect-error-return.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "networks_sfo_reuseport_quic_listener_socket"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "50a0afc03075dd5b917b352d1f9999cae20e388f3445bb5e7a4ee2b051f3eb77",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "5f4c07f452a1ae72d597255f5ce26f7057d08646cf724abc560d7dfc82403ae1"
+  },
+  "scope_paths": [
+    "p2p-frame/src/stack.rs",
+    "p2p-frame/src/networks/quic/listener.rs",
+    "p2p-frame/src/networks/quic/network.rs",
+    "docs/versions/v0.1/modules/p2p-frame/design/sfo-reuseport-listeners.md"
+  ]
+}
