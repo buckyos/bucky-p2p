@@ -26,7 +26,7 @@
 | task_id | stage | status | responsibility | scope | parent_task | depends_on | output | done_condition |
 |---------|-------|--------|----------------|-------|-------------|------------|--------|----------------|
 | P-SN-5X5-CMD-MATRIX-1 | proposal | confirmed | Approve 5 Owner SN, 5 Serving SN, 5 user peer command matrix requirement | `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md` | root | user approval | approved proposal | proposal structure/schema passed and approval metadata records user statement |
-| D-SN-5X5-CMD-MATRIX-1 | design | pending | Define command matrix topology, command coverage, testability seams, and admitted scope paths | `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md` | root | P-SN-5X5-CMD-MATRIX-1 | approved design | design doc/check/schema passed, stage-scope result recorded, and auto-pipeline approval metadata recorded |
+| D-SN-5X5-CMD-MATRIX-1 | design | confirmed | Define command matrix topology, command coverage, testability seams, and admitted scope paths | `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md` | root | P-SN-5X5-CMD-MATRIX-1 | approved design | design doc/check/schema passed, stage-scope result recorded, and auto-pipeline approval metadata recorded |
 | I-SN-5X5-CMD-MATRIX-1 | implementation | pending | Implement minimal test support or runtime hooks admitted for the 5x5 command matrix | `p2p-frame/src/sn/**` and admission evidence as admitted by design | root | D-SN-5X5-CMD-MATRIX-1 | implementation/test support and admission evidence | schema/admission passed and targeted checks pass |
 | T-SN-5X5-CMD-MATRIX-1 | testing | pending | Add post-implementation 5x5 command matrix testing docs, testplan step, and runnable test evidence | testing docs, testplan, test code, fixtures, runner wiring | root | I-SN-5X5-CMD-MATRIX-1 | runnable test evidence | coverage check and `test-run.py p2p-frame/sn-distributed-directory unit` pass or record concrete blocker |
 | A-SN-5X5-CMD-MATRIX-1 | acceptance | pending | Audit 5x5 command matrix proposal/design/implementation/testing consistency | `docs/versions/v0.1/reviews/` | root | T-SN-5X5-CMD-MATRIX-1 | acceptance report | acceptance report check passed and conclusion is accepted |
@@ -51,6 +51,9 @@
 - Approved proposal hash: `09ed2a3390f2fbce1c81adf9212d44e4335c71a5a368aa8c295c52a0ab564e81`.
 - Proposal path: `docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md`.
 - Current pipeline starts by refreshing design for `sn_five_by_five_command_matrix`.
+- `uv run --active python ./harness/scripts/doc-structure-check.py --version v0.1 --module p2p-frame --submodule sn-distributed-directory --docs design` passed.
+- `uv run --active python ./harness/scripts/stage-scope-check.py --stage design --version v0.1 --module p2p-frame --submodule sn-distributed-directory --ignore-untracked` passed with no changed files after the baseline commit.
+- Design approval hash: `25d58bd9da9d4dfbf78bde82e4ed59340998452ed07e1ae53a9a4ca75d7d1f9e`.
 - `python3 ./harness/scripts/doc-structure-check.py --version v0.1 --module p2p-frame --submodule sn-distributed-directory --docs design` passed for refreshed draft design.
 - `python3 ./harness/scripts/schema-check.py --version v0.1 --module p2p-frame --submodule sn-distributed-directory` passed for refreshed draft design.
 - `python3 ./harness/scripts/stage-scope-check.py --stage design --version v0.1 --module p2p-frame --submodule sn-distributed-directory` failed because the shared worktree contains many pre-existing tracked/untracked modifications outside the design scope.

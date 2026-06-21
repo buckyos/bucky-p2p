@@ -2,10 +2,10 @@
 module: p2p-frame
 submodule: sn-distributed-directory
 version: v0.1
-status: draft
-approved_by:
-approved_at:
-approved_content_sha256:
+status: approved
+approved_by: auto-pipeline
+approved_at: 2026-06-22T00:23:39+08:00
+approved_content_sha256: 25d58bd9da9d4dfbf78bde82e4ed59340998452ed07e1ae53a9a4ca75d7d1f9e
 ---
 
 # SN 分布式目录 Design

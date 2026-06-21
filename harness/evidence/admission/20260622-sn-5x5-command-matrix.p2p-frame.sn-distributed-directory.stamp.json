@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-21T16:24:56+00:00",
+  "evidence_file": "harness/evidence/admission/20260622-sn-5x5-command-matrix.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "sn-distributed-directory",
+  "change_ids": [
+    "sn_five_by_five_command_matrix"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md": "884246e455716e0013dd52360080cb5d7f5bb03e5639ba0931f509c548516164",
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md": "37e4606785a1a85646bb7b4b8c58a7c3d76f43c4bb28cc8747730d0b58adea46"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/**"
+  ]
+}
