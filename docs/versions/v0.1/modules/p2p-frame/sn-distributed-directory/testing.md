@@ -2,10 +2,10 @@
 module: p2p-frame
 submodule: sn-distributed-directory
 version: v0.1
-status: draft
-approved_by:
-approved_at:
-approved_content_sha256:
+status: approved
+approved_by: auto-pipeline
+approved_at: 2026-06-22T00:48:05+08:00
+approved_content_sha256: 1ab4446cd6fab85a4a359b741423d40aaa5b995feaa8a3941c97eb4df6c113d5
 ---
 
 # SN Distributed Directory Testing
@@ -35,6 +35,7 @@ approved_content_sha256:
 | sn_directory | owner directory server and serving-side directory client | this file | directory server owns lease publish/query; `SnService` uses directory client only | validator reject; serving detail remains separate | unit | `p2p-frame/src/sn/directory/mod.rs`, `p2p-frame/src/sn/service/service.rs` | ready | |
 | sn_directory | OwnerDirectoryServer serving-facing listener | this file | `OwnerDirectoryServer::new` creates owner-peer and serving-facing listen endpoints; serving-facing publish/query uses `DefaultCmdServerService + TtpServer`; serving-side client opens the serving connector path instead of registry shortcut | mismatched serving SN id is rejected before owner store write | unit | `p2p-frame/src/sn/directory/server.rs`, `p2p-frame/src/sn/directory/client.rs` | ready | real Serving SN to OwnerDirectoryServer TTP process workflow remains an integration gap. |
 | sn_inter_service | inter-SN validator, registry fallback, and owner command node dispatch | this file | validator blocks side effects; registered serving SN can return detail; owner command code mapping and `DefaultCmdNodeService` handler dispatch are covered | connection/command reject; endpoint-less member falls back to local registry path | unit | `p2p-frame/src/sn/service/service.rs`, `p2p-frame/src/sn/inter_sn/mod.rs` | ready | |
+| sn_service_integration | 5x5 SN command matrix | this file | 5 owner ids, 5 serving services, and 5 user peers with distinct serving bindings cover peer-facing report/query/call/called, inter-SN detail/relay, owner directory publish/query, and command enum coverage | validator reject returns permission denied without command side effects; real multi-process transport lifecycle remains a DV/integration gap | unit | `p2p-frame/src/sn/service/service.rs` | ready | |
 
 ## Module-Level Tests
 | Test Item | Covered Boundary | Entry | Expected Result | Test Type | Test File/Script | Status | Gap / Manual Reason |
@@ -48,6 +49,7 @@ approved_content_sha256:
 | SN ReportSn route decoupling targeted unit | `ReportSn` local detail update vs owner route publish | `cargo test -p p2p-frame sn_report_updates_local_detail_without_publishing_route -- --nocapture` | report updates local `PeerManager` detail without writing owner route | unit | inline Rust unit tests | ready | |
 | SN partitioned route targeted unit | Peer route filtering by Serving SN online/offline | `cargo test -p p2p-frame sn_partitioned_peer_route_filters_revoked_serving_session -- --nocapture` | route is returned while Serving SN is online and filtered after offline | unit | inline Rust unit tests | ready | |
 | SN owner serving listener targeted unit | OwnerDirectoryServer serving-facing command server and serving-side connector selection | `cargo test -p p2p-frame owner_serving_listener -- --nocapture` | serving publish command is dispatched through the serving-facing command handler, mismatched serving SN id is rejected, and serving client opens the serving connector path | unit | inline Rust unit tests | ready | |
+| SN 5x5 command matrix targeted unit | 5 Owner SN / 5 Serving SN / 5 user peer topology and all SN command families | `cargo test -p p2p-frame sn_five_by_five_command_matrix -- --nocapture` | the targeted test passes and proves distinct user-to-serving bindings, report, owner route publish/query, remote detail query, relay call/Called acceptance, command enum coverage, and validator reject | unit | inline Rust unit tests | ready | |
 
 ## External Interface Tests
 | Interface | Responsibility | Success Cases | Failure/Edge Cases | Test Type | Test Doc/File | Status | Gap / Manual Reason |
@@ -72,6 +74,7 @@ approved_content_sha256:
 | sn_owner_network_leader_election | `design.md` Owner-to-owner vote request/response, candidate/follower/leader roles, leader heartbeat, heartbeat timeout, failover election, follower redirect/forward | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | sn-owner-network-election-unit | no | owner command dispatch adapter is unit-covered; real multi-process TTP lifecycle remains a DV/integration gap. |
 | sn_owner_leader_online_replication | `design.md` leader-only Serving SN online state mutation, follower forwarding, quorum replication, committed-only follower apply, offline propagation | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | sn-owner-leader-online-replication-unit | no | real multi-process replication remains a DV/integration gap. |
 | sn_partitioned_peer_route | `design.md` Fixed partition route owner set, route publish/query, online/offline filter, route miss behavior, and route publish cadence independent from `ReportSn` | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | sn-partitioned-peer-route-unit | no | ReportSn decoupling is additionally covered by `sn-report-route-decoupling-unit`. |
+| sn_five_by_five_command_matrix | `design.md` 5x5 command matrix topology, command coverage, testability seams, and Directly Mapped Change Items | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | sn-5x5-command-matrix-unit | no | real multi-process TTP lifecycle remains a DV/integration gap recorded below. |
 
 ## Case-Type Coverage
 | change_id | case_type | required | validation_id | level | status | gap_manual_reason |
@@ -167,6 +170,13 @@ approved_content_sha256:
 | sn_partitioned_peer_route | compatibility | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | existing `ServingLease` compatibility tests pass after route-store replacement. |
 | sn_partitioned_peer_route | lifecycle | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | route moves from visible to hidden when session is revoked. |
 | sn_partitioned_peer_route | cross-module | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | gap | owner: testing; risk: real multi-owner route fanout regression; acceptance impact: no multi-process partitioned route DV exists yet. |
+| sn_five_by_five_command_matrix | normal | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | covered | 5 serving services publish/query routes and remote detail for 5 distinct user peers. |
+| sn_five_by_five_command_matrix | boundary | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | covered | asserts exactly 5 owner ids, 5 serving services, 5 user peers, and one-to-one user-to-serving bindings. |
+| sn_five_by_five_command_matrix | negative | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | covered | rejecting inter-SN validator denies query detail. |
+| sn_five_by_five_command_matrix | error | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | covered | permission-denied reject path returns an error and records no command side effect. |
+| sn_five_by_five_command_matrix | compatibility | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | covered | peer-facing `PackageCmdCode` SN command range remains unchanged and client-visible command names are not extended. |
+| sn_five_by_five_command_matrix | lifecycle | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | covered | report -> route publish -> route query -> detail query -> relay call/Called acceptance is exercised for remote serving peers. |
+| sn_five_by_five_command_matrix | cross-module | yes | VAL-SN-5X5-COMMAND-MATRIX-UNIT | unit | gap | owner: testing; risk: real process/network lifecycle regression; acceptance impact: unit topology covers command semantics but no multi-process DV exists. |
 
 ## Design Element Coverage
 | element_type | design_source | derived_cases | level | status | gap_manual_reason |
@@ -184,6 +194,8 @@ approved_content_sha256:
 | concurrency | store protected by mutex; global registry weak references | deterministic unit exercises mutex-backed writes | unit | covered | |
 | invariant | OwnerDirectoryServer uses two transport/listener responsibilities | owner peer command path remains `DefaultCmdNodeService + TtpNode`; serving-facing command path uses separate `DefaultCmdServerService` handler set and local serving registry fallback | unit | covered | |
 | failure-path | serving-facing publish/query validation in `design.md` Key Call Flows | mismatched serving SN id is rejected before lease write through `owner_serving_listener_rejects_publish_for_different_serving_sn` | unit | covered | |
+| parameter-domain | `sn_five_by_five_command_matrix` owner/serving/user cardinality | exactly 5 owner ids, 5 serving services, and 5 user peers with distinct bindings | unit | covered | |
+| invariant | all SN command families from proposal | peer-facing command enum range, inter-SN command enum sequence, owner route publish/query, remote detail, relay call/Called acceptance | unit | covered | real wire/process lifecycle remains a DV gap. |
 
 ## Validation Rationale
 | Behavior or Risk | Validation Signal | Why This Is Sufficient | Gap / Manual Reason |
@@ -202,6 +214,7 @@ approved_content_sha256:
 | ownerSN network voting must elect and fail over leaders | targeted election unit uses an in-memory owner peer network to vote, propagate heartbeat, mark old leader offline, elect a new leader after timeout, and dispatch TTP owner command payloads | covers the control-plane election contract and TTP command dispatch independent of OS port lifecycle | owner: testing; risk: real owner-to-owner TTP listener/connect lifecycle may differ; acceptance impact: multi-process election remains a DV gap. |
 | leader must own Serving SN online state mutation and replicate to followers | targeted online-state replication unit sends renew/revoke through a follower, verifies forwarding to leader, and asserts all owner nodes converge | covers leader-only mutation and quorum replication semantics at the state-machine/network abstraction boundary | owner: testing; risk: real transport serialization/timeout path remains unproven; acceptance impact: multi-process replication remains a DV gap. |
 | partitioned peer route must be filtered by Serving SN online/offline | targeted unit writes a route under a live session, then revokes the session and verifies the route disappears from query | directly covers abnormal Serving SN disconnect semantics at the route-store layer | |
+| 5x5 command matrix must cover all requested SN command families | `sn_five_by_five_command_matrix_covers_all_sn_commands` creates 5 owner ids, 5 serving services, 5 user peers with distinct serving bindings, reports each user, publishes and queries routes, queries remote detail, relays calls to remote serving nodes, checks SN command enums, and checks validator reject | directly covers the approved command matrix at the lowest available deterministic layer without adding client-visible commands | real multi-process TTP lifecycle remains a DV/integration gap. |
 | real multi-process TTP-backed SN-to-SN transport | no automated DV/integration test yet | unit verifies TTP frame path, but not listener/client behavior across real SN processes | owner: testing; risk: distributed runtime regression; acceptance impact: true multi-process behavior remains a gap. |
 
 ## Unit Tests
@@ -228,6 +241,7 @@ approved_content_sha256:
 | `OwnerElectionNode::tick` | heartbeat timeout after old leader is offline | ownerSN leader failover and re-election | `p2p-frame/src/sn/directory/election.rs` | covered | |
 | `OwnerElectionNode::commit_or_forward_session` and replication handlers | follower forward, leader replicate, follower apply committed entry | Serving SN online state renew/revoke converges on all owner nodes | `p2p-frame/src/sn/directory/election.rs` | covered | |
 | `PeerRouteStore::query` through `OwnerDirectoryStore::query_peer_routes` | live session and revoked session | partitioned route is visible only while Serving SN online/offline is alive | `p2p-frame/src/sn/directory/mod.rs` | covered | |
+| `sn_five_by_five_command_matrix_covers_all_sn_commands` | 5 owner ids, 5 serving services, 5 user peers, route publish/query, remote detail, relay call, command enum coverage, validator reject | approved 5x5 SN command matrix | `p2p-frame/src/sn/service/service.rs` | covered | |
 
 ## DV Tests
 | Workflow | Kind | Entry | Expected Result | Test File or Script | Status | Gap / Manual Reason |
@@ -239,6 +253,7 @@ approved_content_sha256:
 | multi-SN query and relay workflow | main | not-applicable: no automated DV harness exists yet | query merge and relay call cross serving SN boundaries | not-applicable: gap recorded for future DV harness | gap | owner: testing; risk: distributed runtime regression; acceptance impact: true multi-SN query/call remains unevidenced. |
 | default no-config compatibility | config | unit fallback test | single SN owner set is local only | unit tests | covered | |
 | validator reject workflow | failure | unit inter validator test | reject has no owner write side effect | unit tests | covered | |
+| 5x5 SN command matrix | main | unit service topology | 5 owner ids, 5 serving services, and 5 user peers exercise all approved SN command families through deterministic in-memory seams | `cargo test -p p2p-frame sn_five_by_five_command_matrix -- --nocapture` | covered | real multi-process topology remains a DV gap. |
 
 ## Integration Tests
 | Contract or Flow | Modules Involved | Success Case | Failure Case | Test File | Status | Gap / Manual Reason |
@@ -269,6 +284,7 @@ approved_content_sha256:
 - [x] Unit tests cover ownerSN network voting, leader heartbeat propagation, and leader failover.
 - [x] Unit tests cover follower-to-leader Serving SN online state forwarding and leader replication to followers.
 - [x] Unit tests cover partitioned peer route filtering by Serving SN online/offline.
+- [x] Unit tests cover the 5 Owner SN / 5 Serving SN / 5 user peer command matrix at the deterministic service/inter-SN seam.
 - [x] Each implemented change_id has direct validation coverage.
 - [x] DV and integration gaps record owner, risk, and acceptance impact.
 - [ ] Full multi-process DV/integration evidence exists for TTP-backed inter-SN transport.

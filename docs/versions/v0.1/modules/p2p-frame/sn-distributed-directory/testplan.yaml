@@ -9,7 +9,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: Targeted SN distributed directory unit coverage for serving lease compatibility, owner control plane sessions, partitioned peer route, directory client/server boundary, OwnerMember heartbeat validity, HRW owner resolution, inter-SN validator side effects, registry fallback publish/query detail, owner peer command dispatch, and owner serving listener command dispatch.
+    summary: Targeted SN distributed directory unit coverage for serving lease compatibility, owner control plane sessions, partitioned peer route, directory client/server boundary, OwnerMember heartbeat validity, HRW owner resolution, inter-SN validator side effects, registry fallback publish/query detail, owner peer command dispatch, owner serving listener command dispatch, and the 5x5 SN command matrix.
     steps:
       - id: sn-distributed-directory-unit
         name: Run SN distributed directory targeted unit tests
@@ -47,13 +47,17 @@ levels:
         name: Run SN OwnerDirectoryServer serving-facing listener targeted unit tests
         change_ids: ["sn_owner_serving_listener_transport"]
         run: ["cargo", "test", "-p", "p2p-frame", "owner_serving_listener", "--", "--nocapture"]
+      - id: sn-5x5-command-matrix-unit
+        name: Run SN 5 owner / 5 serving / 5 user command matrix targeted unit test
+        change_ids: ["sn_five_by_five_command_matrix"]
+        run: ["cargo", "test", "-p", "p2p-frame", "sn_five_by_five_command_matrix", "--", "--nocapture"]
   dv:
     mode: disabled
     summary: No automated multi-process SN DV harness exists for this first implementation.
-    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_online_state", "sn_owner_network_leader_election", "sn_owner_leader_online_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport"]
+    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_online_state", "sn_owner_network_leader_election", "sn_owner_leader_online_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport", "sn_five_by_five_command_matrix"]
     reason: "owner: testing; risk: distributed runtime, owner peer transport lifecycle, and serving listener lifecycle regression; acceptance impact: true multi-process report/query/call over TTP and Serving SN -> OwnerDirectoryServer listener lifecycle remain unevidenced."
   integration:
     mode: disabled
     summary: No automated workspace integration scenario exists for TTP-backed inter-SN transport or sn-miner owner-members startup.
-    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_online_state", "sn_owner_network_leader_election", "sn_owner_leader_online_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport"]
+    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_online_state", "sn_owner_network_leader_election", "sn_owner_leader_online_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport", "sn_five_by_five_command_matrix"]
     reason: "owner: testing; risk: deployment and network transport regression; acceptance impact: Serving SN -> OwnerDirectoryServer and owner peer integration remain recorded gaps."
