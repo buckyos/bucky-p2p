@@ -1370,8 +1370,11 @@ mod tests {
         EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
         P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pSn,
     };
-    use crate::sn::directory::{OwnerDirectoryServer, OwnerDirectoryServerRef};
+    use crate::sn::directory::{
+        OwnerDirectoryClient, OwnerDirectoryServer, OwnerDirectoryServerRef,
+    };
     use crate::tls::DefaultTlsServerCertResolver;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, WriteHalf, split};
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -1545,6 +1548,61 @@ mod tests {
                 ValidateResult::Accept => Ok(ValidateResult::Accept),
                 ValidateResult::Reject(reason) => Ok(ValidateResult::Reject(reason.clone())),
             }
+        }
+    }
+
+    struct MatrixOwnerDirectoryClient {
+        owner_ids: Vec<P2pId>,
+        leases: Mutex<HashMap<P2pId, Vec<ServingLease>>>,
+    }
+
+    impl MatrixOwnerDirectoryClient {
+        fn new(owner_ids: Vec<P2pId>) -> Arc<Self> {
+            Arc::new(Self {
+                owner_ids,
+                leases: Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn owner_count(&self) -> usize {
+            self.owner_ids.len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OwnerDirectoryClient for MatrixOwnerDirectoryClient {
+        async fn publish_serving_lease(
+            &self,
+            local_sn_id: P2pId,
+            peer_id: P2pId,
+            sequence: u64,
+        ) -> P2pResult<()> {
+            let lease = ServingLease::new(
+                peer_id.clone(),
+                local_sn_id,
+                sequence,
+                Duration::from_secs(60),
+                bucky_time_now(),
+            );
+            let mut leases = self.leases.lock().unwrap();
+            let peer_leases = leases.entry(peer_id).or_default();
+            peer_leases.retain(|existing| existing.serving_sn_id != lease.serving_sn_id);
+            peer_leases.push(lease);
+            Ok(())
+        }
+
+        async fn query_serving_leases(
+            &self,
+            _local_sn_id: &P2pId,
+            peer_id: &P2pId,
+        ) -> P2pResult<Vec<ServingLease>> {
+            Ok(self
+                .leases
+                .lock()
+                .unwrap()
+                .get(peer_id)
+                .cloned()
+                .unwrap_or_default())
         }
     }
 
@@ -2189,6 +2247,139 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(detail.peer_info, peer.as_slice().to_vec());
+    }
+
+    #[tokio::test]
+    async fn sn_five_by_five_command_matrix_covers_all_sn_commands() {
+        let owner_ids: Vec<P2pId> = (0..5).map(|index| test_id(110 + index)).collect();
+        let serving_ids: Vec<P2pId> = (0..5).map(|index| test_id(120 + index)).collect();
+        let user_ids: Vec<P2pId> = (0..5).map(|index| test_id(130 + index)).collect();
+        let matrix_owner = MatrixOwnerDirectoryClient::new(owner_ids);
+        let serving_services: Vec<SnServiceRef> = serving_ids
+            .iter()
+            .cloned()
+            .map(|serving_id| {
+                SnService::new_with_options(
+                    Arc::new(TestIdentityCertFactory),
+                    allow_all_sn_connection_validator(),
+                    allow_all_sn_inter_service_validator(),
+                    matrix_owner.clone(),
+                    None,
+                    Some(serving_id),
+                )
+            })
+            .collect();
+
+        assert_eq!(matrix_owner.owner_count(), 5);
+        assert_eq!(serving_services.len(), 5);
+        assert_eq!(user_ids.len(), 5);
+
+        for (index, (serving, user_id)) in
+            serving_services.iter().zip(user_ids.iter()).enumerate()
+        {
+            let serving_id = serving_ids[index].clone();
+            let peer_id = PeerId::from(user_id.as_slice());
+            serving
+                .handle_report_sn(
+                    &serving_id,
+                    &peer_id,
+                    CmdTunnelId::from((index + 1) as u32),
+                    test_report(user_id.clone(), user_id.as_slice().to_vec()),
+                )
+                .await
+                .unwrap();
+            assert!(serving.peer_manager().find_peer(user_id).is_some());
+
+            serving
+                .owner_client
+                .publish_serving_lease(serving_id.clone(), user_id.clone(), (index + 1) as u64)
+                .await
+                .unwrap();
+            let leases = serving
+                .owner_client
+                .query_serving_leases(&serving_id, user_id)
+                .await
+                .unwrap();
+            assert_eq!(leases.len(), 1);
+            assert_eq!(leases[0].serving_sn_id, serving_id);
+        }
+
+        let requester = &serving_services[0];
+        let requester_sn_id = &serving_ids[0];
+        for (index, user_id) in user_ids.iter().enumerate().skip(1) {
+            let details = requester
+                .query_remote_details(requester_sn_id, user_id)
+                .await;
+            assert_eq!(details.len(), 1);
+            assert_eq!(details[0].peer_info, user_id.as_slice().to_vec());
+
+            let call_req = SnCall {
+                protocol_version: 0,
+                stack_version: 0,
+                seq: ((index + 10) as u32).into(),
+                tunnel_id: TunnelId::from((index + 100) as u32),
+                sn_peer_id: requester_sn_id.clone(),
+                to_peer_id: user_id.clone(),
+                from_peer_id: user_ids[0].clone(),
+                reverse_endpoint_array: None,
+                active_pn_list: None,
+                peer_info: Some(user_ids[0].as_slice().to_vec()),
+                send_time: 0,
+                call_type: TunnelType::Stream,
+                payload: vec![index as u8],
+                is_always_call: true,
+            };
+            let relay = requester
+                .relay_call_to_serving_sn(requester_sn_id, call_req)
+                .await
+                .expect("remote serving relay should accept");
+            assert_eq!(relay.result, P2pErrorCode::Ok.into_u8());
+            assert_eq!(relay.to_peer_info, Some(user_id.as_slice().to_vec()));
+        }
+
+        assert_eq!(
+            [
+                PackageCmdCode::SnCall,
+                PackageCmdCode::SnCallResp,
+                PackageCmdCode::SnCalled,
+                PackageCmdCode::SnCalledResp,
+                PackageCmdCode::ReportSn,
+                PackageCmdCode::ReportSnResp,
+                PackageCmdCode::SnQuery,
+                PackageCmdCode::SnQueryResp,
+            ]
+            .iter()
+            .filter(|command| command.is_sn())
+            .count(),
+            8
+        );
+        assert_eq!(
+            [
+                InterSnCommandCode::Heartbeat,
+                InterSnCommandCode::PublishLease,
+                InterSnCommandCode::QueryLease,
+                InterSnCommandCode::QueryDetail,
+                InterSnCommandCode::RelayCall,
+            ]
+            .iter()
+            .map(|command| *command as u8)
+            .collect::<Vec<_>>(),
+            vec![0x80, 0x81, 0x82, 0x83, 0x84]
+        );
+
+        let reject_validator =
+            TestInterServiceValidator::new(ValidateResult::Reject("blocked-by-test".to_owned()));
+        let rejecting_service = test_sn_service_with_directory(
+            test_id(150),
+            None,
+            reject_validator.clone(),
+        );
+        let err = rejecting_service
+            .query_detail_from_sn(test_id(151), user_ids[0].clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), P2pErrorCode::PermissionDenied);
+        assert_eq!(reject_validator.command_count(), 0);
     }
 
     #[tokio::test]
