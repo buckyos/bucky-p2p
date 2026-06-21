@@ -6,7 +6,7 @@ use super::{
     OwnerVoteRequest, OwnerVoteResponse, ServingLease,
 };
 use crate::endpoint::Endpoint;
-use crate::error::{p2p_err, P2pErrorCode, P2pResult};
+use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::finder::{DeviceCache, DeviceCacheConfig};
 use crate::networks::{
@@ -18,13 +18,13 @@ use crate::p2p_identity::{
 };
 use crate::runtime;
 use crate::sn::inter_sn::{
-    allow_all_sn_inter_service_validator, require_accept, InterSnCommand, InterSnCommandContext,
-    InterSnConnectionContext, InterSnError, InterSnPeer, InterSnRegistry,
-    SnInterServiceValidatorRef, TtpInterSnClient, TtpInterSnClientRef,
+    InterSnCommand, InterSnCommandContext, InterSnConnectionContext, InterSnError, InterSnPeer,
+    InterSnRegistry, SnInterServiceValidatorRef, TtpInterSnClient, TtpInterSnClientRef,
+    allow_all_sn_inter_service_validator, require_accept,
 };
 use crate::sn::protocol::{SnPublishLease, SnQueryLease, SnQueryLeaseResp};
 use crate::sn::types::{SnTunnelRead, SnTunnelWrite};
-use crate::tls::{init_tls, DefaultTlsServerCertResolver, TlsServerCertResolver};
+use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
 use crate::ttp::{TtpNode, TtpNodeRef, TtpPortListener, TtpServer, TtpServerRef};
 use async_trait::async_trait;
 use bucky_raw_codec::{
@@ -33,14 +33,14 @@ use bucky_raw_codec::{
 };
 use bucky_time::bucky_time_now;
 use once_cell::sync::Lazy;
-use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
+use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
 use sfo_cmd_server::server::CmdServer;
 use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, PeerId};
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{self, AtomicBool},
     Arc, Mutex, Weak,
+    atomic::{self, AtomicBool},
 };
 use std::time::Duration;
 
@@ -1096,7 +1096,12 @@ mod tests {
             OwnerServingResponse::Published(true) => {}
             other => panic!("unexpected response: {:?}", other),
         }
-        assert_eq!(service.query_serving_leases(&peer_id), vec![lease]);
+        let leases = service.query_serving_leases(&peer_id);
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].peer_id, lease.peer_id);
+        assert_eq!(leases[0].serving_sn_id, lease.serving_sn_id);
+        assert_eq!(leases[0].sequence, lease.sequence);
+        assert!(leases[0].expires_at >= lease.expires_at);
     }
 
     #[tokio::test]

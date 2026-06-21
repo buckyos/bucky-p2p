@@ -16,14 +16,14 @@ use crate::sn::directory::{
 };
 use crate::sn::inter_sn::{
     InterSnCommand, InterSnCommandContext, InterSnConnectionContext, InterSnPeer, InterSnRegistry,
-    RelayCallOutcome, ServingPeerDetail, SnInterServiceValidatorRef, TtpInterSnClientRef,
-    allow_all_sn_inter_service_validator, require_accept,
+    RelayCallOutcome, ServingPeerDetail, SnInterServiceValidatorRef, TtpInterSnClient,
+    TtpInterSnClientRef, allow_all_sn_inter_service_validator, require_accept,
 };
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
 use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
-use crate::ttp::{TtpClient, TtpConnector, TtpPortListener, TtpServer, TtpServerRef};
+use crate::ttp::{TtpClient, TtpConnector, TtpNode, TtpPortListener, TtpServer, TtpServerRef};
 use crate::types::{SequenceGenerator, Timestamp, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
@@ -85,7 +85,7 @@ pub struct SnService {
     cmd_server: SnCmdServiceRef,
     connection_validator: SnConnectionValidatorRef,
     inter_service_validator: SnInterServiceValidatorRef,
-    inter_sn_client: Option<TtpInterSnClientRef>,
+    inter_sn_client: Mutex<Option<TtpInterSnClientRef>>,
     owner_client: OwnerDirectoryClientRef,
     local_sn_id: Option<P2pId>,
     cmd_version: u8,
@@ -123,7 +123,7 @@ impl SnService {
             connection_validator,
             inter_service_validator,
             owner_client,
-            inter_sn_client,
+            inter_sn_client: Mutex::new(inter_sn_client),
             local_sn_id,
             cmd_version: 0,
         });
@@ -134,6 +134,14 @@ impl SnService {
 
     pub fn get_cmd_server(&self) -> &SnCmdServiceRef {
         &self.cmd_server
+    }
+
+    pub fn set_inter_sn_client(&self, inter_sn_client: Option<TtpInterSnClientRef>) {
+        *self.inter_sn_client.lock().unwrap() = inter_sn_client;
+    }
+
+    fn inter_sn_client(&self) -> Option<TtpInterSnClientRef> {
+        self.inter_sn_client.lock().unwrap().clone()
     }
 
     fn register_sn_cmd_handler(self: &Arc<Self>) {
@@ -407,7 +415,7 @@ impl SnService {
             if lease.serving_sn_id == *local_sn_id {
                 continue;
             }
-            if let Some(inter_sn_client) = self.inter_sn_client.as_ref() {
+            if let Some(inter_sn_client) = self.inter_sn_client() {
                 match inter_sn_client
                     .query_detail_from_sn(&lease.serving_sn_id, peer_id.clone())
                     .await
@@ -457,7 +465,7 @@ impl SnService {
             if lease.serving_sn_id == *local_sn_id {
                 continue;
             }
-            if let Some(inter_sn_client) = self.inter_sn_client.as_ref() {
+            if let Some(inter_sn_client) = self.inter_sn_client() {
                 match inter_sn_client
                     .relay_call_to_sn(&lease.serving_sn_id, call_req.clone())
                     .await
@@ -843,17 +851,6 @@ impl SnService {
                 report_sn.map_ports,
                 &report_sn.local_eps,
             );
-            if let Err(err) = self
-                .owner_client
-                .publish_serving_lease(
-                    self.effective_local_sn_id(local_id),
-                    from_peer_id,
-                    u64::from(report_sn.seq.value()),
-                )
-                .await
-            {
-                warn!("serving lease publish failed after report: {:?}", err);
-            }
         }
         if let Err(e) = self
             .cmd_server
@@ -1056,7 +1053,6 @@ impl SnServer {
 
         let net_manager = NetManager::new(tunnel_networks, cert_resolver).unwrap();
         let ttp_server = TtpServer::new(local_identity.clone(), net_manager.clone()).unwrap();
-        let inter_sn_client = None;
         let serving_connector = owner_client_membership.as_ref().map(|_| {
             TtpClient::new(local_identity.clone(), net_manager.clone()) as Arc<dyn TtpConnector>
         });
@@ -1066,7 +1062,7 @@ impl SnServer {
                 StaticOwnerDirectoryClient::new_with_serving_connector(
                     membership,
                     serving_connector,
-                    inter_sn_client.clone(),
+                    None,
                 )
             })
             .unwrap_or_else(noop_owner_directory_client);
@@ -1075,9 +1071,32 @@ impl SnServer {
             connection_validator,
             inter_service_validator,
             owner_client,
-            inter_sn_client,
+            None,
             Some(local_identity.get_id()),
         );
+        if let Some(membership) = owner_client_membership.as_ref() {
+            match TtpNode::new(local_identity.clone(), net_manager.clone()) {
+                Ok(ttp_node) => {
+                    match TtpInterSnClient::new(
+                        ttp_node,
+                        membership,
+                        service.clone() as Arc<dyn InterSnPeer>,
+                    )
+                    .await
+                    {
+                        Ok(inter_sn_client) => {
+                            service.set_inter_sn_client(Some(inter_sn_client));
+                        }
+                        Err(err) => {
+                            warn!("create inter-sn client failed: {:?}", err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("create inter-sn ttp node failed: {:?}", err);
+                }
+            }
+        }
 
         Arc::new(Self {
             local_identity,
@@ -1967,6 +1986,40 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sn_report_updates_local_detail_without_publishing_route() {
+        let owner_sn = test_id(83);
+        let serving_sn = test_id(84);
+        let reported_peer = test_id(85);
+        let membership =
+            OwnerMembership::with_options(vec![owner_sn.clone()], 1, Duration::from_secs(60))
+                .unwrap();
+        let owner = test_owner_service(
+            owner_sn,
+            membership.clone(),
+            allow_all_sn_inter_service_validator(),
+        );
+        let service = test_sn_service_with_directory(
+            serving_sn.clone(),
+            Some(membership),
+            allow_all_sn_inter_service_validator(),
+        );
+        let peer_id = PeerId::from(reported_peer.as_slice());
+
+        service
+            .handle_report_sn(
+                &serving_sn,
+                &peer_id,
+                1u32.into(),
+                test_report(reported_peer.clone(), reported_peer.as_slice().to_vec()),
+            )
+            .await
+            .unwrap();
+
+        assert!(service.peer_manager().find_peer(&reported_peer).is_some());
+        assert!(owner.query_serving_leases(&reported_peer).is_empty());
     }
 
     #[tokio::test]

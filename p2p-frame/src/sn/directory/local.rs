@@ -110,7 +110,7 @@ impl LocalSnDirectory {
 
     pub fn put_lease_route(&self, lease: ServingLease) -> bool {
         self.store
-            .put_peer_route(PeerRoute::from_lease(lease, 0), bucky_time_now())
+            .put_peer_route(PeerRoute::from_lease(lease), bucky_time_now())
     }
 
     pub fn query(&self, peer_id: &P2pId) -> Vec<ServingLease> {

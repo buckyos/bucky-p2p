@@ -56,6 +56,7 @@ pub struct OwnerSessionReplication {
     pub leader_id: P2pId,
     pub entry: OwnerSessionEntry,
     pub now: Timestamp,
+    pub committed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, RawEncode, RawDecode)]
@@ -397,13 +398,12 @@ impl OwnerElectionNode {
     pub async fn renew_serving_session(
         &self,
         serving_sn_id: P2pId,
-        epoch: u64,
+        _epoch: u64,
         ttl: Duration,
         now: Timestamp,
     ) -> P2pResult<u64> {
-        let entry = OwnerSessionEntry::RenewServingSession(ServingSnSession::alive(
+        let entry = OwnerSessionEntry::RenewServingSession(ServingSnSession::online(
             serving_sn_id,
-            epoch,
             ttl,
             now,
         ));
@@ -413,14 +413,11 @@ impl OwnerElectionNode {
     pub async fn revoke_serving_session(
         &self,
         serving_sn_id: P2pId,
-        epoch: u64,
+        _epoch: u64,
         now: Timestamp,
     ) -> P2pResult<u64> {
         self.commit_or_forward_session(
-            OwnerSessionEntry::RevokeServingSession {
-                serving_sn_id,
-                epoch,
-            },
+            OwnerSessionEntry::RevokeServingSession { serving_sn_id },
             now,
         )
         .await
@@ -456,9 +453,17 @@ impl OwnerElectionNode {
 
     pub async fn receive_session_forward(
         &self,
-        _remote_owner_id: P2pId,
+        remote_owner_id: P2pId,
         request: OwnerSessionForward,
     ) -> OwnerSessionForwardResponse {
+        if !self.is_member(&remote_owner_id) {
+            return OwnerSessionForwardResponse {
+                term: self.current_term(),
+                accepted: false,
+                committed_index: self.control_plane.committed_index(),
+                leader_id: self.current_leader(),
+            };
+        }
         match self
             .commit_or_forward_session(request.entry, request.now)
             .await
@@ -509,6 +514,14 @@ impl OwnerElectionNode {
                 leader_id: heartbeat.leader_id,
             };
         }
+        if !request.committed {
+            return OwnerSessionReplicationResponse {
+                term: self.current_term(),
+                accepted: true,
+                committed_index: self.control_plane.committed_index(),
+                leader_id: self.current_leader(),
+            };
+        }
         match self.control_plane.apply_committed_session_entry(
             &request.leader_id,
             request.term,
@@ -543,7 +556,7 @@ impl OwnerElectionNode {
             Some(self.peer_client())
         };
         let mut accepted = 1usize;
-        for member in remote_members {
+        for member in remote_members.iter() {
             let response = peer_client
                 .as_ref()
                 .expect("peer client exists when remote members are present")
@@ -554,6 +567,7 @@ impl OwnerElectionNode {
                         leader_id: leader_id.clone(),
                         entry: entry.clone(),
                         now,
+                        committed: false,
                     },
                 )
                 .await;
@@ -578,8 +592,36 @@ impl OwnerElectionNode {
                 "owner session replication cannot commit without quorum"
             ));
         }
-        self.control_plane
-            .apply_committed_session_entry(&leader_id, term, entry, now)
+        let committed_index = self.control_plane.apply_committed_session_entry(
+            &leader_id,
+            term,
+            entry.clone(),
+            now,
+        )?;
+        for member in remote_members {
+            let response = peer_client
+                .as_ref()
+                .expect("peer client exists when remote members are present")
+                .replicate_session(
+                    &member,
+                    OwnerSessionReplication {
+                        term,
+                        leader_id: leader_id.clone(),
+                        entry: entry.clone(),
+                        now,
+                        committed: true,
+                    },
+                )
+                .await;
+            if let Err(err) = response {
+                log::debug!(
+                    "owner committed session replication to {} failed: {:?}",
+                    member,
+                    err
+                );
+            }
+        }
+        Ok(committed_index)
     }
 
     fn become_leader(&self, term: u64, now: Timestamp) -> P2pResult<()> {
@@ -774,7 +816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sn_owner_leader_session_replication_forwards_and_replicates() {
+    async fn sn_owner_leader_online_replication_forwards_and_replicates() {
         let (nodes, _) = owner_cluster();
         let leader = nodes[0].start_election(1_000_000).await.unwrap();
         nodes[0].send_heartbeat(1_000_001).await.unwrap();
@@ -805,5 +847,79 @@ mod tests {
                     .is_serving_session_alive(&serving, 7, 1_000_005)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sn_owner_replication_does_not_apply_before_commit() {
+        let (nodes, _) = owner_cluster();
+        let leader = nodes[0].start_election(1_000_000).await.unwrap();
+        let serving = test_id(10);
+        let entry = OwnerSessionEntry::RenewServingSession(ServingSnSession::online(
+            serving.clone(),
+            Duration::from_secs(30),
+            1_000_001,
+        ));
+
+        let pending = nodes[1].receive_session_replication(
+            leader.clone(),
+            OwnerSessionReplication {
+                term: nodes[0].current_term(),
+                leader_id: leader.clone(),
+                entry: entry.clone(),
+                now: 1_000_001,
+                committed: false,
+            },
+            1_000_001,
+        );
+
+        assert!(pending.accepted);
+        assert!(
+            !nodes[1]
+                .control_plane()
+                .is_serving_session_alive(&serving, 0, 1_000_002)
+        );
+
+        let committed = nodes[1].receive_session_replication(
+            leader.clone(),
+            OwnerSessionReplication {
+                term: nodes[0].current_term(),
+                leader_id: leader,
+                entry,
+                now: 1_000_003,
+                committed: true,
+            },
+            1_000_003,
+        );
+
+        assert!(committed.accepted);
+        assert!(
+            nodes[1]
+                .control_plane()
+                .is_serving_session_alive(&serving, 0, 1_000_004)
+        );
+    }
+
+    #[tokio::test]
+    async fn sn_owner_forward_rejects_non_member_remote_owner() {
+        let (nodes, _) = owner_cluster();
+        nodes[0].start_election(1_000_000).await.unwrap();
+        let serving = test_id(11);
+        let entry = OwnerSessionEntry::RenewServingSession(ServingSnSession::online(
+            serving,
+            Duration::from_secs(30),
+            1_000_001,
+        ));
+
+        let response = nodes[0]
+            .receive_session_forward(
+                test_id(99),
+                OwnerSessionForward {
+                    entry,
+                    now: 1_000_001,
+                },
+            )
+            .await;
+
+        assert!(!response.accepted);
     }
 }

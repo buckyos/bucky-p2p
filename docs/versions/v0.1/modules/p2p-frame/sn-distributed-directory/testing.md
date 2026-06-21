@@ -2,10 +2,10 @@
 module: p2p-frame
 submodule: sn-distributed-directory
 version: v0.1
-status: approved
-approved_by: auto-pipeline
-approved_at: 2026-06-20T21:07:00+08:00
-approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d34fe519ef
+status: draft
+approved_by:
+approved_at:
+approved_content_sha256:
 ---
 
 # SN Distributed Directory Testing
@@ -28,10 +28,10 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 |-----------|----------------|-------------------|--------------------|--------------------|-----------|------------|--------|---------------------|
 | sn_directory | owner resolver, serving lease, owner store data model | this file | multi-serving lease, HRW owner set, local-only fallback | stale sequence and TTL expiry | unit | `p2p-frame/src/sn/directory/mod.rs` | ready | |
 | sn_directory | OwnerMember heartbeat validity | this file | valid owner filtering and heartbeat recovery | expired member health is not returned to serving owner set | unit | `p2p-frame/src/sn/directory/mod.rs` | ready | |
-| sn_directory | Owner control plane sessions | this file | leader election, leader-only mutation, quorum commit, Serving SN session renewal | stale leader and missing quorum reject mutation | unit | `p2p-frame/src/sn/directory/mod.rs` | ready | |
+| sn_directory | Owner control plane sessions | this file | leader election, leader-only mutation, quorum commit, Serving SN online state renewal | stale leader and missing quorum reject mutation | unit | `p2p-frame/src/sn/directory/mod.rs` | ready | |
 | sn_directory | owner network leader election | this file | owner-to-owner vote quorum, leader heartbeat propagation, leader failover after heartbeat timeout, and TTP owner command dispatch for election payloads | stale/missing leader cannot commit; no quorum blocks election | unit | `p2p-frame/src/sn/directory/election.rs`, `p2p-frame/src/sn/inter_sn/mod.rs` | ready | real multi-process TTP transport lifecycle remains a DV/integration gap. |
-| sn_directory | owner leader session replication | this file | follower forwards Serving SN session mutation to leader; leader replicates renew/revoke to followers | leader revoke hides session on every owner node | unit | `p2p-frame/src/sn/directory/election.rs` | ready | real multi-process replication remains a DV/integration gap. |
-| sn_directory | partitioned peer route | this file | route publish/query is filtered by committed Serving SN session/epoch | revoked session hides existing route | unit | `p2p-frame/src/sn/directory/mod.rs` | ready | |
+| sn_directory | owner leader online-state replication | this file | follower forwards Serving SN online state mutation to leader; leader replicates renew/revoke to followers | leader revoke hides session on every owner node | unit | `p2p-frame/src/sn/directory/election.rs` | ready | real multi-process replication remains a DV/integration gap. |
+| sn_directory | partitioned peer route | this file | route publish/query is filtered by committed Serving SN online/offline | revoked session hides existing route | unit | `p2p-frame/src/sn/directory/mod.rs` | ready | |
 | sn_directory | owner directory server and serving-side directory client | this file | directory server owns lease publish/query; `SnService` uses directory client only | validator reject; serving detail remains separate | unit | `p2p-frame/src/sn/directory/mod.rs`, `p2p-frame/src/sn/service/service.rs` | ready | |
 | sn_directory | OwnerDirectoryServer serving-facing listener | this file | `OwnerDirectoryServer::new` creates owner-peer and serving-facing listen endpoints; serving-facing publish/query uses `DefaultCmdServerService + TtpServer`; serving-side client opens the serving connector path instead of registry shortcut | mismatched serving SN id is rejected before owner store write | unit | `p2p-frame/src/sn/directory/server.rs`, `p2p-frame/src/sn/directory/client.rs` | ready | real Serving SN to OwnerDirectoryServer TTP process workflow remains an integration gap. |
 | sn_inter_service | inter-SN validator, registry fallback, and owner command node dispatch | this file | validator blocks side effects; registered serving SN can return detail; owner command code mapping and `DefaultCmdNodeService` handler dispatch are covered | connection/command reject; endpoint-less member falls back to local registry path | unit | `p2p-frame/src/sn/service/service.rs`, `p2p-frame/src/sn/inter_sn/mod.rs` | ready | |
@@ -42,10 +42,11 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | SN distributed directory targeted unit | directory/inter-SN/service integration | `cargo test -p p2p-frame sn_distributed_directory -- --nocapture` | 7 targeted tests pass | unit | inline Rust unit tests | ready | |
 | SN directory client/server boundary targeted unit | directory server/client vs serving-only `SnService` | `cargo test -p p2p-frame sn_directory_client_server_boundary -- --nocapture` | directory client/server boundary test passes and serving detail remains separate from owner lease state | unit | inline Rust unit tests | ready | |
 | SN owner member heartbeat targeted unit | OwnerMember health filtering and recovery | `cargo test -p p2p-frame sn_owner_member_heartbeat_validity -- --nocapture` | expired owner health is filtered and refreshed health is returned again | unit | inline Rust unit tests | ready | |
-| SN owner control plane targeted unit | Owner control plane leader/quorum/session behavior | `cargo test -p p2p-frame sn_owner_control_plane_sessions_require_leader_and_quorum -- --nocapture` | non-leader mutation is rejected, leader mutation commits with quorum, and missing quorum rejects new mutation | unit | inline Rust unit tests | ready | |
+| SN owner control plane targeted unit | Owner control plane leader/quorum/session behavior | `cargo test -p p2p-frame sn_owner_control_plane_online_state_require_leader_and_quorum -- --nocapture` | non-leader mutation is rejected, leader mutation commits with quorum, and missing quorum rejects new mutation | unit | inline Rust unit tests | ready | |
 | SN owner network election targeted unit | Owner network vote and leader failover behavior | `cargo test -p p2p-frame sn_owner_network -- --nocapture` | owner peers elect a leader by vote quorum and elect a new leader after old leader heartbeat timeout | unit | inline Rust unit tests | ready | |
-| SN owner leader session replication targeted unit | leader-only Serving SN session replication | `cargo test -p p2p-frame sn_owner_leader_session_replication -- --nocapture` | follower forwards session renew/revoke to leader and all owner nodes converge on committed session state | unit | inline Rust unit tests | ready | |
-| SN partitioned route targeted unit | Peer route filtering by Serving SN session/epoch | `cargo test -p p2p-frame sn_partitioned_peer_route_filters_revoked_serving_session -- --nocapture` | route is returned while session is alive and filtered after session revoke | unit | inline Rust unit tests | ready | |
+| SN owner leader online-state replication targeted unit | leader-only Serving SN online state replication | `cargo test -p p2p-frame sn_owner_leader_online_replication -- --nocapture` | follower forwards online renew/offline to leader and all owner nodes converge on committed online state | unit | inline Rust unit tests | ready | |
+| SN ReportSn route decoupling targeted unit | `ReportSn` local detail update vs owner route publish | `cargo test -p p2p-frame sn_report_updates_local_detail_without_publishing_route -- --nocapture` | report updates local `PeerManager` detail without writing owner route | unit | inline Rust unit tests | ready | |
+| SN partitioned route targeted unit | Peer route filtering by Serving SN online/offline | `cargo test -p p2p-frame sn_partitioned_peer_route_filters_revoked_serving_session -- --nocapture` | route is returned while Serving SN is online and filtered after offline | unit | inline Rust unit tests | ready | |
 | SN owner serving listener targeted unit | OwnerDirectoryServer serving-facing command server and serving-side connector selection | `cargo test -p p2p-frame owner_serving_listener -- --nocapture` | serving publish command is dispatched through the serving-facing command handler, mismatched serving SN id is rejected, and serving client opens the serving connector path | unit | inline Rust unit tests | ready | |
 
 ## External Interface Tests
@@ -67,10 +68,10 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | sn_inter_service_validation | `design.md` validation and authorization interfaces | VAL-SN-INTER-AUTH-UNIT | unit | sn-distributed-directory-unit | no | |
 | sn_owner_directory_peer_transport | `design.md` Owner peer transport and command node using `NetManager + TtpNode + DefaultCmdNodeService`; no `TtpClient`/`TtpServer` substitution | VAL-SN-OWNER-PEER-TRANSPORT-UNIT | unit | sn-distributed-directory-unit | no | |
 | sn_owner_serving_listener_transport | `design.md` Serving-facing listener and command server using `NetManager + TtpServer + DefaultCmdServerService`; owner peer listener remains `NetManager + TtpNode + DefaultCmdNodeService` | VAL-SN-OWNER-SERVING-LISTENER-UNIT | unit | sn-owner-serving-listener-unit | no | |
-| sn_owner_control_plane_sessions | `design.md` Owner control plane, Serving SN session/epoch, leader/quorum commit, revoke/expiry filtering | VAL-SN-OWNER-CONTROL-UNIT | unit | sn-owner-control-plane-unit | no | |
+| sn_owner_control_plane_online_state | `design.md` Owner control plane, Serving SN online/offline, leader/quorum commit, revoke/expiry filtering | VAL-SN-OWNER-CONTROL-UNIT | unit | sn-owner-control-plane-unit | no | |
 | sn_owner_network_leader_election | `design.md` Owner-to-owner vote request/response, candidate/follower/leader roles, leader heartbeat, heartbeat timeout, failover election, follower redirect/forward | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | sn-owner-network-election-unit | no | owner command dispatch adapter is unit-covered; real multi-process TTP lifecycle remains a DV/integration gap. |
-| sn_owner_leader_session_replication | `design.md` leader-only Serving SN session mutation, follower forwarding, quorum replication, committed session apply on followers, offline/revoke propagation | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | sn-owner-leader-session-replication-unit | no | real multi-process replication remains a DV/integration gap. |
-| sn_partitioned_peer_route | `design.md` Fixed partition route owner set, route publish/query, session/epoch filter, route miss behavior | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | sn-partitioned-peer-route-unit | no | |
+| sn_owner_leader_online_replication | `design.md` leader-only Serving SN online state mutation, follower forwarding, quorum replication, committed-only follower apply, offline propagation | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | sn-owner-leader-online-replication-unit | no | real multi-process replication remains a DV/integration gap. |
+| sn_partitioned_peer_route | `design.md` Fixed partition route owner set, route publish/query, online/offline filter, route miss behavior, and route publish cadence independent from `ReportSn` | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | sn-partitioned-peer-route-unit | no | ReportSn decoupling is additionally covered by `sn-report-route-decoupling-unit`. |
 
 ## Case-Type Coverage
 | change_id | case_type | required | validation_id | level | status | gap_manual_reason |
@@ -138,13 +139,13 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | sn_owner_serving_listener_transport | compatibility | yes | VAL-SN-OWNER-SERVING-LISTENER-UNIT | unit | covered | owner-peer `DefaultCmdNodeService + TtpNode` path remains separate and existing distributed directory unit suite still passes. |
 | sn_owner_serving_listener_transport | lifecycle | yes | VAL-SN-OWNER-SERVING-LISTENER-UNIT | unit | gap | owner: testing; risk: listener start/stop or port lifecycle regression; acceptance impact: no real `TtpServer` process lifecycle DV exists yet. |
 | sn_owner_serving_listener_transport | cross-module | yes | VAL-SN-OWNER-SERVING-LISTENER-UNIT | unit | gap | owner: testing; risk: Serving SN remote transport regression; acceptance impact: no end-to-end Serving SN -> OwnerDirectoryServer integration workflow exists yet. |
-| sn_owner_control_plane_sessions | normal | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | leader renews a Serving SN session and committed state becomes readable. |
-| sn_owner_control_plane_sessions | boundary | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | mutation through a non-leader is rejected. |
-| sn_owner_control_plane_sessions | negative | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | missing quorum rejects a new session mutation. |
-| sn_owner_control_plane_sessions | error | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | no-quorum mutation returns an error and leaves committed state unchanged. |
-| sn_owner_control_plane_sessions | compatibility | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | existing distributed directory lease tests still pass through the compatibility wrapper. |
-| sn_owner_control_plane_sessions | lifecycle | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | session is renewed and later can be revoked by the route test. |
-| sn_owner_control_plane_sessions | cross-module | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | gap | owner: testing; risk: real multi-owner Raft transport regression; acceptance impact: only in-memory state machine coverage exists in this task. |
+| sn_owner_control_plane_online_state | normal | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | leader renews a Serving SN online state and committed state becomes readable. |
+| sn_owner_control_plane_online_state | boundary | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | mutation through a non-leader is rejected. |
+| sn_owner_control_plane_online_state | negative | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | missing quorum rejects a new session mutation. |
+| sn_owner_control_plane_online_state | error | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | no-quorum mutation returns an error and leaves committed state unchanged. |
+| sn_owner_control_plane_online_state | compatibility | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | existing distributed directory lease tests still pass through the compatibility wrapper. |
+| sn_owner_control_plane_online_state | lifecycle | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | covered | session is renewed and later can be revoked by the route test. |
+| sn_owner_control_plane_online_state | cross-module | yes | VAL-SN-OWNER-CONTROL-UNIT | unit | gap | owner: testing; risk: real multi-owner Raft transport regression; acceptance impact: only in-memory state machine coverage exists in this task. |
 | sn_owner_network_leader_election | normal | yes | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | covered | owner peers vote and elect a leader. |
 | sn_owner_network_leader_election | boundary | yes | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | covered | heartbeat timeout triggers a new election. |
 | sn_owner_network_leader_election | negative | yes | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | covered | offline old leader cannot prevent quorum failover. |
@@ -152,14 +153,14 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | sn_owner_network_leader_election | compatibility | yes | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | covered | existing owner control plane and distributed directory tests still pass. |
 | sn_owner_network_leader_election | lifecycle | yes | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | covered | follower -> candidate -> leader and old leader offline -> new leader. |
 | sn_owner_network_leader_election | cross-module | yes | VAL-SN-OWNER-NETWORK-ELECTION-UNIT | unit | gap | owner: testing; risk: real owner-to-owner TTP listener/connect lifecycle regression; acceptance impact: no multi-process owner election DV exists yet. |
-| sn_owner_leader_session_replication | normal | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | follower forwards renew to leader and all nodes observe alive session. |
-| sn_owner_leader_session_replication | boundary | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | revoke is replicated and hides the session on all nodes. |
-| sn_owner_leader_session_replication | negative | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | follower does not locally commit before forwarding to leader. |
-| sn_owner_leader_session_replication | error | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | replication requires quorum ack before leader applies the entry. |
-| sn_owner_leader_session_replication | compatibility | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | user-level `PeerRoute` replication remains separate and existing route tests pass. |
-| sn_owner_leader_session_replication | lifecycle | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | alive -> replicated -> revoked across owner nodes. |
-| sn_owner_leader_session_replication | cross-module | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | gap | owner: testing; risk: real multi-process session replication regression; acceptance impact: no TTP-backed replication DV exists yet. |
-| sn_partitioned_peer_route | normal | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | route is returned while its Serving SN session is alive. |
+| sn_owner_leader_online_replication | normal | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | follower forwards renew to leader and all nodes observe alive session. |
+| sn_owner_leader_online_replication | boundary | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | revoke is replicated and hides the session on all nodes. |
+| sn_owner_leader_online_replication | negative | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | follower does not locally commit before forwarding to leader. |
+| sn_owner_leader_online_replication | error | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | replication requires quorum ack before leader applies the entry. |
+| sn_owner_leader_online_replication | compatibility | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | user-level `PeerRoute` replication remains separate and existing route tests pass. |
+| sn_owner_leader_online_replication | lifecycle | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | covered | alive -> replicated -> revoked across owner nodes. |
+| sn_owner_leader_online_replication | cross-module | yes | VAL-SN-OWNER-SESSION-REPLICATION-UNIT | unit | gap | owner: testing; risk: real multi-process online-state replication regression; acceptance impact: no TTP-backed replication DV exists yet. |
+| sn_partitioned_peer_route | normal | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | route is returned while its Serving SN online state is alive. |
 | sn_partitioned_peer_route | boundary | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | route query consults the matching serving epoch. |
 | sn_partitioned_peer_route | negative | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | revoked session hides a previously written route. |
 | sn_partitioned_peer_route | error | yes | VAL-SN-PARTITIONED-ROUTE-UNIT | unit | covered | route write requires an alive session and returns false otherwise through implementation branch. |
@@ -173,10 +174,10 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | parameter-domain | `OwnerMembership`, validator setters, SN ids | empty membership reject, owner count clamp, comma parsing noted | unit | covered | |
 | state-transition | `ServingLease` absent -> fresh -> refreshed -> expired | multi-lease insert, stale sequence reject, TTL expiry | unit | covered | |
 | state-transition | `OwnerMemberHealth` unknown -> fresh -> expired -> refreshed | valid owner filter, expired owner removal, heartbeat recovery | unit | covered | |
-| state-transition | `OwnerControlPlane` follower/candidate/leader and committed session state | leader election, non-leader rejection, quorum loss rejection, session renewal | unit | covered | |
+| state-transition | `OwnerControlPlane` follower/candidate/leader and committed online state | leader election, non-leader rejection, quorum loss rejection, session renewal | unit | covered | |
 | state-transition | `OwnerElectionNode` follower/candidate/leader network role | vote quorum, leader heartbeat, heartbeat timeout, failover election, owner command payload dispatch | unit | covered | real multi-process owner-to-owner transport lifecycle remains a DV gap. |
-| state-transition | leader session replication | follower forward, leader quorum replication, follower committed apply, revoke propagation | unit | covered | real multi-process replication remains a DV gap. |
-| state-transition | `PeerRoute` visible -> hidden by dead session | route returned with live session and filtered after session revoke | unit | covered | |
+| state-transition | leader online-state replication | follower forward, leader quorum replication, follower committed apply, revoke propagation | unit | covered | real multi-process replication remains a DV gap. |
+| state-transition | `PeerRoute` visible -> hidden by offline Serving SN | route returned with live session and filtered after offline | unit | covered | |
 | failure-path | publish/query/detail validator reject and missing remote registration | reject blocks owner write; missing registry ignored in implementation | unit | covered | |
 | error-handling | `PermissionDenied`, `NotFound`, stale lease | reject returns permission denied; no owner accepted returns not found | unit | covered | |
 | invariant | single SN fallback, client-visible response compatibility, owner/serving role separation | local-only owner resolver; no peer-facing command code replacement; directory client/server test keeps lease state separate from serving detail | unit | covered | |
@@ -199,8 +200,8 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | OwnerMember heartbeat validity must filter stale owner nodes | resolver unit refreshes one owner, verifies expiry removes it, then verifies refresh restores another owner | directly covers heartbeat validity lifecycle without conflating it with ServingLease TTL | |
 | owner control plane must gate session writes through leader/quorum | targeted unit elects a leader, rejects stale leader mutation, commits session renewal, then rejects mutation after quorum loss | directly covers the first-version in-memory Raft-style state machine without requiring multi-process transport | |
 | ownerSN network voting must elect and fail over leaders | targeted election unit uses an in-memory owner peer network to vote, propagate heartbeat, mark old leader offline, elect a new leader after timeout, and dispatch TTP owner command payloads | covers the control-plane election contract and TTP command dispatch independent of OS port lifecycle | owner: testing; risk: real owner-to-owner TTP listener/connect lifecycle may differ; acceptance impact: multi-process election remains a DV gap. |
-| leader must own Serving SN session mutation and replicate to followers | targeted session replication unit sends renew/revoke through a follower, verifies forwarding to leader, and asserts all owner nodes converge | covers leader-only mutation and quorum replication semantics at the state-machine/network abstraction boundary | owner: testing; risk: real transport serialization/timeout path remains unproven; acceptance impact: multi-process replication remains a DV gap. |
-| partitioned peer route must be filtered by Serving SN session/epoch | targeted unit writes a route under a live session, then revokes the session and verifies the route disappears from query | directly covers abnormal Serving SN disconnect semantics at the route-store layer | |
+| leader must own Serving SN online state mutation and replicate to followers | targeted online-state replication unit sends renew/revoke through a follower, verifies forwarding to leader, and asserts all owner nodes converge | covers leader-only mutation and quorum replication semantics at the state-machine/network abstraction boundary | owner: testing; risk: real transport serialization/timeout path remains unproven; acceptance impact: multi-process replication remains a DV gap. |
+| partitioned peer route must be filtered by Serving SN online/offline | targeted unit writes a route under a live session, then revokes the session and verifies the route disappears from query | directly covers abnormal Serving SN disconnect semantics at the route-store layer | |
 | real multi-process TTP-backed SN-to-SN transport | no automated DV/integration test yet | unit verifies TTP frame path, but not listener/client behavior across real SN processes | owner: testing; risk: distributed runtime regression; acceptance impact: true multi-process behavior remains a gap. |
 
 ## Unit Tests
@@ -225,8 +226,8 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | `OwnerControlPlane::elect_leader` and `renew_serving_session` | leader election, stale leader mutation, quorum loss | first-version Raft-style owner control/session behavior | `p2p-frame/src/sn/directory/mod.rs` | covered | |
 | `OwnerElectionNode::start_election` and vote handlers | quorum vote and heartbeat propagation | ownerSN network leader election | `p2p-frame/src/sn/directory/election.rs` | covered | |
 | `OwnerElectionNode::tick` | heartbeat timeout after old leader is offline | ownerSN leader failover and re-election | `p2p-frame/src/sn/directory/election.rs` | covered | |
-| `OwnerElectionNode::commit_or_forward_session` and replication handlers | follower forward, leader replicate, follower apply committed entry | Serving SN session renew/revoke converges on all owner nodes | `p2p-frame/src/sn/directory/election.rs` | covered | |
-| `PeerRouteStore::query` through `OwnerDirectoryStore::query_peer_routes` | live session and revoked session | partitioned route is visible only while Serving SN session/epoch is alive | `p2p-frame/src/sn/directory/mod.rs` | covered | |
+| `OwnerElectionNode::commit_or_forward_session` and replication handlers | follower forward, leader replicate, follower apply committed entry | Serving SN online state renew/revoke converges on all owner nodes | `p2p-frame/src/sn/directory/election.rs` | covered | |
+| `PeerRouteStore::query` through `OwnerDirectoryStore::query_peer_routes` | live session and revoked session | partitioned route is visible only while Serving SN online/offline is alive | `p2p-frame/src/sn/directory/mod.rs` | covered | |
 
 ## DV Tests
 | Workflow | Kind | Entry | Expected Result | Test File or Script | Status | Gap / Manual Reason |
@@ -234,7 +235,7 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 | multi-SN service lifecycle | lifecycle | not-applicable: no automated DV harness exists yet | multiple SN processes publish/query/call through TTP | not-applicable: gap recorded for future DV harness | gap | owner: testing; risk: distributed runtime regression; acceptance impact: no automated DV exists yet. |
 | OwnerDirectoryServer dual-listener lifecycle | lifecycle | not-applicable: no automated DV harness exists yet | owner peer listener and serving-facing listener can start on independent ports, reject wrong-purpose traffic, and shut down cleanly | not-applicable: gap recorded for future DV harness | gap | owner: testing; risk: serving listener port lifecycle regression; acceptance impact: no automated DV exists yet. |
 | ownerSN network election lifecycle | lifecycle | unit owner peer network | owner peers vote, propagate leader heartbeat, and fail over after leader timeout | `cargo test -p p2p-frame sn_owner_network -- --nocapture` | covered | real TTP-backed multi-process election remains a gap. |
-| ownerSN leader session replication | main | unit owner peer network | follower forwards Serving SN session mutation and leader replicates committed state to followers | `cargo test -p p2p-frame sn_owner_leader_session_replication -- --nocapture` | covered | real TTP-backed multi-process replication remains a gap. |
+| ownerSN leader online-state replication | main | unit owner peer network | follower forwards Serving SN online state mutation and leader replicates committed state to followers | `cargo test -p p2p-frame sn_owner_leader_online_replication -- --nocapture` | covered | real TTP-backed multi-process replication remains a gap. |
 | multi-SN query and relay workflow | main | not-applicable: no automated DV harness exists yet | query merge and relay call cross serving SN boundaries | not-applicable: gap recorded for future DV harness | gap | owner: testing; risk: distributed runtime regression; acceptance impact: true multi-SN query/call remains unevidenced. |
 | default no-config compatibility | config | unit fallback test | single SN owner set is local only | unit tests | covered | |
 | validator reject workflow | failure | unit inter validator test | reject has no owner write side effect | unit tests | covered | |
@@ -266,8 +267,8 @@ approved_content_sha256: 94f222ccce7279ded9a495b45c43533973a81b3d91233036b64360d
 - [x] Unit tests cover OwnerDirectoryServer serving-facing command dispatch, wrong-serving-id rejection, and serving-side connector selection.
 - [x] Unit tests cover owner control plane leader/quorum/session behavior.
 - [x] Unit tests cover ownerSN network voting, leader heartbeat propagation, and leader failover.
-- [x] Unit tests cover follower-to-leader Serving SN session forwarding and leader replication to followers.
-- [x] Unit tests cover partitioned peer route filtering by Serving SN session/epoch.
+- [x] Unit tests cover follower-to-leader Serving SN online state forwarding and leader replication to followers.
+- [x] Unit tests cover partitioned peer route filtering by Serving SN online/offline.
 - [x] Each implemented change_id has direct validation coverage.
 - [x] DV and integration gaps record owner, risk, and acceptance impact.
 - [ ] Full multi-process DV/integration evidence exists for TTP-backed inter-SN transport.

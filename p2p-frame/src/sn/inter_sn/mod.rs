@@ -1089,9 +1089,8 @@ mod tests {
         ));
 
         let entry = crate::sn::directory::OwnerSessionEntry::RenewServingSession(
-            crate::sn::directory::ServingSnSession::alive(
+            crate::sn::directory::ServingSnSession::online(
                 serving_id.clone(),
-                7,
                 Duration::from_secs(30),
                 1_000_000,
             ),
@@ -1105,6 +1104,7 @@ mod tests {
                 leader_id,
                 entry: entry.clone(),
                 now: 1_000_000,
+                committed: true,
             }),
         )
         .await;

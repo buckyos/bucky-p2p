@@ -39,11 +39,10 @@ impl OwnerDirectoryStore {
     }
 
     pub fn put_route(&self, route: PeerRoute, now: Timestamp) -> bool {
-        if !self.control_plane.is_serving_session_alive(
-            &route.serving_sn_id,
-            route.serving_epoch,
-            now,
-        ) {
+        if !self
+            .control_plane
+            .is_serving_online(&route.serving_sn_id, now)
+        {
             return false;
         }
         self.routes.put_route(route)
@@ -68,7 +67,7 @@ impl OwnerDirectoryStore {
         {
             return false;
         }
-        self.put_route(PeerRoute::from_lease(lease, 0), now)
+        self.put_route(PeerRoute::from_lease(lease), now)
     }
 
     pub fn revoke_serving_session(
@@ -117,7 +116,7 @@ impl OwnerDirectoryStore {
             .into_iter()
             .filter_map(|route| {
                 self.control_plane
-                    .serving_session_expires_at(&route.serving_sn_id, route.serving_epoch, now)
+                    .serving_online_expires_at(&route.serving_sn_id, now)
                     .map(|expires_at| route.to_lease(expires_at))
             })
             .collect()
@@ -192,7 +191,6 @@ mod tests {
             PeerRoute {
                 peer_id: peer.clone(),
                 serving_sn_id: serving.clone(),
-                serving_epoch: 3,
                 sequence: 1,
             },
             now + 1

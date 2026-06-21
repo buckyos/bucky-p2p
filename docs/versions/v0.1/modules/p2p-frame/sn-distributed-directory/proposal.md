@@ -4,8 +4,8 @@ submodule: sn-distributed-directory
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-06-21T21:28:14+08:00
-approved_content_sha256: 5b8cba1a856fc438f76ba1b83ef56ce1c604ff39787a7228048b342f30f0c349
+approved_at: 2026-06-21T23:46:28+08:00
+approved_content_sha256: 09ed2a3390f2fbce1c81adf9212d44e4335c71a5a368aa8c295c52a0ab564e81
 ---
 
 # SN 分布式目录 Proposal
@@ -40,6 +40,7 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 - Serving SN 到 OwnerDirectoryServer 的通信必须经过 owner directory server 的 serving-facing listener，不得通过 SnServer listener 或 owner peer listener 旁路。
 - SN 间连接建立和 publish/query/detail/relay 命令通过可插拔验证接口控制准入与授权。
 - `sn-miner` 可以加载 owner membership 配置并传入 SN service。
+- 增加一个自动化多节点 SN 命令矩阵验证边界：构造 5 个 Owner SN、5 个 Serving SN、5 个用户节点，每个用户节点分别连接不同 Serving SN，并覆盖 peer-facing SN 命令、inter-SN 命令和 owner serving-facing directory 命令的成功与关键失败路径。
 
 ### Out of scope
 - 不改变现有客户端可见 `SnQueryResp` 结构。
@@ -115,6 +116,8 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 | Should ownerSN synchronize all directory state to every ownerSN node? | 不应同步全部状态。ownerSN 集群只需要同步 owner/member/config 和 Serving SN online/offline 等小状态；用户级 route 应由固定分区逻辑管理。 | 分区 route 需要处理副本数、读 fanout、写失败和 membership 变更限制，但可避免全局复制压力。 | add `sn_partitioned_peer_route` |
 | Should ownerSN health use full-mesh heartbeat as the main requirement? | 不作为 proposal 固定要求。ownerSN 可用性属于 control plane 小状态，可参考 leader/quorum/lease；具体探活和提交机制由 design 决定。 | leader/quorum 增加实现复杂度，但比所有 ownerSN 之间同步所有业务状态更可控。 | add `sn_owner_control_plane_online_state`; design selects mechanism |
 | Is an in-memory-only Raft-style state machine sufficient? | 不够。它只能验证本机 term/quorum/online-state 语义，不能满足 ownerSN 之间网络投票、leader failover 和 leader 复制 Serving SN 在线状态的部署要求。 | 需要 owner-to-owner command、状态机角色转换、leader heartbeat 和复制确认，复杂度高于本地状态机。 | add `sn_owner_network_leader_election`; still exclude full etcd/Raft persistence and membership migration |
+| Is a fixed 5 ownerSN + 5 servingSN + 5 user topology reasonable as required evidence? | 合理，但它应作为自动化命令矩阵验证边界，而不是改变协议本身的部署上限。5 个 ownerSN 可以覆盖 quorum、follower forward 和 leader failover；5 个 servingSN 和 5 个用户分别连接不同 servingSN 可以覆盖跨 serving query/call、route 分区和 command fanout。 | 如果直接要求真实多进程集成，现有 testing 文档已记录 DV/integration harness gap，可能阻塞实现；design/testing 必须决定使用可运行 simulator/unit harness、DV harness，或明确先补真实多进程 harness。 | add `sn_five_by_five_command_matrix` as required downstream design/testing/implementation evidence |
+| What does "all SN commands" cover? | 覆盖三类命令边界：peer-facing `ReportSn`/`ReportSnResp`、`SnQuery`/`SnQueryResp`、`SnCall`/`SnCallResp`、`SnCalled`/`SnCalledResp`；inter-SN `Heartbeat`、`PublishLease`、`QueryLease`、`QueryDetail`、`RelayCall`；owner serving-facing directory `PublishLease`、`QueryLease`。 | 若不明确命令集合，后续可能只测试 query/call happy path，遗漏 owner election、route publish/query、detail relay、response decode 和 validator reject。 | define command matrix coverage under `sn_five_by_five_command_matrix` |
 | Is scope ambiguous? | 已明确 proposal 不写具体结构定义，只写需求相关关注；control plane 小状态和 partitioned route 的字段、日志、命令和算法细节留给 design。 | 如果 proposal 写入过细结构，会限制设计空间并导致阶段边界混乱。 | keep proposal at requirement level |
 
 ## Large Module Submodule Decision
@@ -143,6 +146,7 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 - 查询方 SN 能通过分区 route 找到一个或多个 Serving SN，并把所有可用 detail 合并成现有 `SnQueryResp` 返回给客户端。
 - SN call 本地 miss 时可跨 SN relay，remote serving SN 负责向本机被叫投递 `SnCalled`。
 - SN 间连接和内部命令可由使用方提供验证实现控制。
+- 自动化验证能在 5 Owner SN、5 Serving SN、5 user peer 的拓扑中覆盖所有 SN 命令族，并证明每个 user peer 分别连接不同 Serving SN 时 report/query/call/called 与内部 route/detail/relay/control 命令仍保持一致。
 
 ## Proposal Items
 | proposal_id | change_id | Outcome | Scope Boundary | Success Evidence | Explicit Non-Goal |
@@ -158,6 +162,7 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 | P-SN-DIST-QUERY-1 | sn_distributed_query_merge | `SnQuery` 本地 miss 或多 SN 命中时，由 serving SN 拉取 remote detail 并合并 endpoint 后返回现有 `SnQueryResp`。 | `p2p-frame/src/sn/service/**`、`p2p-frame/src/sn/inter_sn/**`、现有 `SnQueryResp` 构造路径。 | 客户端 API 不变；多个 serving SN detail endpoint 去重合并；无可用 detail 时返回当前空 query 语义。 | 不新增客户端可见 `SnQueryServing` 或多 serving SN 选择接口。 |
 | P-SN-DIST-CALL-1 | sn_distributed_relay_call | `SnCall` 本地 miss 时通过分区 route 找到 remote serving SN 并 relay call，由 remote serving SN 投递 `SnCalled`。 | `p2p-frame/src/sn/service/**`、`p2p-frame/src/sn/inter_sn/**`。 | 本地 call 路径不变；remote serving SN accepted 后 `SnCallResp` 仍只表示受理/转发。 | 不改变最终 tunnel 连通性语义；第一版不要求 fanout 到所有 serving SN。 |
 | P-SN-INTER-AUTH-1 | sn_inter_service_validation | 新增 SN 间连接建立准入和命令级 publish/query/detail/relay 授权接口。 | `p2p-frame/src/sn/inter_sn/validator.rs`、`SnServiceConfig` 装配路径。 | validator reject 时不建立 SN 间内部协议连接或不产生 owner write/detail/relay side effect。 | 不固化使用方权限模型；默认实现可 allow-all。 |
+| P-SN-DIST-CMD-MATRIX-1 | sn_five_by_five_command_matrix | 自动化构造 5 Owner SN、5 Serving SN、5 user peer 的测试拓扑，每个 user peer 分别连接不同 Serving SN，并覆盖所有 SN 命令族的成功、跨 serving 和关键失败路径。 | `p2p-frame/src/sn/**` 中测试或必要测试支撑；如需真实多进程 harness，范围必须在后续 design/testing 中明确。 | 测试证据显示 5 个用户分别通过不同 Serving SN 完成 `ReportSn`、跨 Serving SN `SnQuery`、`SnCall`/`SnCalled`，并覆盖 inter-SN `Heartbeat`、`PublishLease`、`QueryLease`、`QueryDetail`、`RelayCall` 以及 owner serving-facing `PublishLease`、`QueryLease` 的 dispatch/response/reject 路径。 | 不新增客户端可见命令；不要求客户端选择 Serving SN；不把测试拓扑规模解释为生产部署上限。 |
 
 ## Success Criteria
 - Concrete user-visible or system-visible result:
@@ -172,9 +177,11 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
   - 分区 route 的读写目标可由固定 ownerSN 列表和分区算法动态计算。
   - ownerSN 和 servingSN 角色边界在设计与实现中可被独立审计，不依赖同进程混合逻辑；`SnService` 审计面只包含 servingSN。
   - 客户端仍使用现有 `SNClientService::query()` / `call()` 与现有响应结构。
+  - 5 Owner SN、5 Serving SN、5 user peer 的自动化命令矩阵可运行，并证明 5 个用户分别连接不同 Serving SN 时所有 SN 命令族按设计工作。
 - Required evidence:
   - Design 直接映射全部 change_id，并把结构定义、协议字段、分区算法和控制面机制放在 design。
   - Post-implementation testing 覆盖单 SN 等价、多 SN online/offline invalidation、partitioned route、query merge、relay call、validator reject。
+  - Post-implementation testing 必须为 `sn_five_by_five_command_matrix` 记录可运行入口、命令覆盖矩阵、拓扑规模、每个 user peer 到不同 Serving SN 的绑定证据、成功路径结果和关键失败路径结果。
 - Explicit non-goals:
   - 不提供客户端选择 serving SN 的新 API。
   - 不引入 DHT/gossip owner 计算。
@@ -203,6 +210,9 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 | FU-SN-OWNER-PEER-TRANSPORT-DESIGN | design | 需要定义 OwnerDirectoryServer 独立 listener、owner peer/control transport、连接身份、连接恢复、command id/handler/request-response 映射和与 Serving SN directory client 的边界。 | P-SN-DIST-OWNER-PEER-TRANSPORT-1 | yes |
 | FU-SN-OWNER-SERVING-LISTENER-DESIGN | design | 需要定义 OwnerDirectoryServer serving-facing listener、Serving SN online/route publish/query 命令、端口配置、命令空间隔离、验证策略和与 owner peer listener 的边界。 | P-SN-DIST-OWNER-SERVING-LISTENER-1 | yes |
 | FU-SN-DIST-TESTING | testing | 需要 post-implementation 测试设计覆盖多 SN runtime、online/offline invalidation、partitioned route、`ReportSn` 不逐次 publish、query merge、relay 和 validator reject。 | all proposal items | yes |
+| FU-SN-FIVE-BY-FIVE-DESIGN | design | 需要定义 5 Owner SN、5 Serving SN、5 user peer 命令矩阵验证使用真实多进程 DV、in-memory harness 还是混合方式，并映射所有命令族、响应和失败路径。 | P-SN-DIST-CMD-MATRIX-1 | yes |
+| FU-SN-FIVE-BY-FIVE-TESTING | testing | 需要生成或更新测试设计、testplan 和可运行测试入口，证明每个 user peer 绑定不同 Serving SN 且所有 SN 命令族被执行或明确记录不可自动化原因。 | P-SN-DIST-CMD-MATRIX-1 | yes |
+| FU-SN-FIVE-BY-FIVE-IMPLEMENTATION | implementation | 需要在 design/testing 批准后实现必要测试支撑或 runtime wiring，使命令矩阵测试不依赖 chat-only 假设。 | P-SN-DIST-CMD-MATRIX-1 | yes |
 | FU-SN-DIST-ACCEPTANCE | acceptance | 需要审计 proposal/design/code/testing 一致性，尤其客户端兼容性、分区路由、online/offline 批量失效和权限边界。 | all proposal items | yes |
 
 ## Proposal Guardrails
@@ -219,5 +229,5 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 
 ## Approval Record
 - approver: user
-- approval_date: 2026-06-21T21:28:14+08:00
-- user_statement: "确认"
+- approval_date: 2026-06-21T23:46:28+08:00
+- user_statement: "确认，自动完成后续步骤"

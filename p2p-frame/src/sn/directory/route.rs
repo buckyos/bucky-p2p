@@ -12,16 +12,14 @@ pub type PeerRouteStoreRef = Arc<PeerRouteStore>;
 pub struct PeerRoute {
     pub peer_id: P2pId,
     pub serving_sn_id: P2pId,
-    pub serving_epoch: u64,
     pub sequence: u64,
 }
 
 impl PeerRoute {
-    pub fn from_lease(lease: ServingLease, serving_epoch: u64) -> Self {
+    pub fn from_lease(lease: ServingLease) -> Self {
         Self {
             peer_id: lease.peer_id,
             serving_sn_id: lease.serving_sn_id,
-            serving_epoch,
             sequence: lease.sequence,
         }
     }
@@ -52,12 +50,6 @@ impl PeerRouteStore {
         let peer_routes = routes.entry(route.peer_id.clone()).or_default();
         match peer_routes.get(&route.serving_sn_id) {
             Some(existing) if existing.sequence > route.sequence => false,
-            Some(existing)
-                if existing.sequence == route.sequence
-                    && existing.serving_epoch > route.serving_epoch =>
-            {
-                false
-            }
             _ => {
                 peer_routes.insert(route.serving_sn_id.clone(), route);
                 true
@@ -75,9 +67,7 @@ impl PeerRouteStore {
         let Some(peer_routes) = routes.get_mut(peer_id) else {
             return Vec::new();
         };
-        peer_routes.retain(|_, route| {
-            control_plane.is_serving_session_alive(&route.serving_sn_id, route.serving_epoch, now)
-        });
+        peer_routes.retain(|_, route| control_plane.is_serving_online(&route.serving_sn_id, now));
         let mut result = peer_routes.values().cloned().collect::<Vec<_>>();
         result.sort_by(|left, right| {
             right

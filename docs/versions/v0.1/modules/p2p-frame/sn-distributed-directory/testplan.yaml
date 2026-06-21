@@ -25,16 +25,20 @@ levels:
         run: ["cargo", "test", "-p", "p2p-frame", "sn_owner_member_heartbeat_validity", "--", "--nocapture"]
       - id: sn-owner-control-plane-unit
         name: Run SN owner control plane targeted unit tests
-        change_ids: ["sn_owner_control_plane_sessions"]
-        run: ["cargo", "test", "-p", "p2p-frame", "sn_owner_control_plane_sessions_require_leader_and_quorum", "--", "--nocapture"]
+        change_ids: ["sn_owner_control_plane_online_state"]
+        run: ["cargo", "test", "-p", "p2p-frame", "sn_owner_control_plane_online_state_require_leader_and_quorum", "--", "--nocapture"]
       - id: sn-owner-network-election-unit
         name: Run SN owner network election targeted unit tests
         change_ids: ["sn_owner_network_leader_election"]
         run: ["cargo", "test", "-p", "p2p-frame", "sn_owner_network", "--", "--nocapture"]
-      - id: sn-owner-leader-session-replication-unit
-        name: Run SN owner leader session replication targeted unit tests
-        change_ids: ["sn_owner_leader_session_replication"]
-        run: ["cargo", "test", "-p", "p2p-frame", "sn_owner_leader_session_replication", "--", "--nocapture"]
+      - id: sn-owner-leader-online-replication-unit
+        name: Run SN owner leader online-state replication targeted unit tests
+        change_ids: ["sn_owner_leader_online_replication"]
+        run: ["cargo", "test", "-p", "p2p-frame", "sn_owner_leader_online_replication", "--", "--nocapture"]
+      - id: sn-report-route-decoupling-unit
+        name: Run SN ReportSn route publish decoupling targeted unit test
+        change_ids: ["sn_partitioned_peer_route"]
+        run: ["cargo", "test", "-p", "p2p-frame", "sn_report_updates_local_detail_without_publishing_route", "--", "--nocapture"]
       - id: sn-partitioned-peer-route-unit
         name: Run SN partitioned peer route targeted unit tests
         change_ids: ["sn_partitioned_peer_route"]
@@ -46,10 +50,10 @@ levels:
   dv:
     mode: disabled
     summary: No automated multi-process SN DV harness exists for this first implementation.
-    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_sessions", "sn_owner_network_leader_election", "sn_owner_leader_session_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport"]
+    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_online_state", "sn_owner_network_leader_election", "sn_owner_leader_online_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport"]
     reason: "owner: testing; risk: distributed runtime, owner peer transport lifecycle, and serving listener lifecycle regression; acceptance impact: true multi-process report/query/call over TTP and Serving SN -> OwnerDirectoryServer listener lifecycle remain unevidenced."
   integration:
     mode: disabled
     summary: No automated workspace integration scenario exists for TTP-backed inter-SN transport or sn-miner owner-members startup.
-    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_sessions", "sn_owner_network_leader_election", "sn_owner_leader_session_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport"]
+    change_ids: ["sn_distributed_directory", "sn_owner_serving_role_boundary", "sn_directory_client_server_boundary", "sn_owner_member_heartbeat_validity", "sn_owner_control_plane_online_state", "sn_owner_network_leader_election", "sn_owner_leader_online_replication", "sn_partitioned_peer_route", "sn_distributed_query_merge", "sn_distributed_relay_call", "sn_inter_service_validation", "sn_owner_directory_peer_transport", "sn_owner_serving_listener_transport"]
     reason: "owner: testing; risk: deployment and network transport regression; acceptance impact: Serving SN -> OwnerDirectoryServer and owner peer integration remain recorded gaps."

@@ -12,30 +12,28 @@ pub type OwnerControlPlaneRef = Arc<OwnerControlPlane>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, RawEncode, RawDecode)]
 pub enum ServingSnSessionState {
-    Alive,
-    Revoked,
+    Online,
+    Offline,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, RawEncode, RawDecode)]
 pub struct ServingSnSession {
     pub serving_sn_id: P2pId,
-    pub epoch: u64,
     pub state: ServingSnSessionState,
     pub expires_at: Timestamp,
 }
 
 impl ServingSnSession {
-    pub fn alive(serving_sn_id: P2pId, epoch: u64, ttl: Duration, now: Timestamp) -> Self {
+    pub fn online(serving_sn_id: P2pId, ttl: Duration, now: Timestamp) -> Self {
         Self {
             serving_sn_id,
-            epoch,
-            state: ServingSnSessionState::Alive,
+            state: ServingSnSessionState::Online,
             expires_at: now.saturating_add(duration_to_bucky_time(ttl)),
         }
     }
 
-    pub fn is_alive(&self, epoch: u64, now: Timestamp) -> bool {
-        self.epoch == epoch && self.state == ServingSnSessionState::Alive && self.expires_at > now
+    pub fn is_online(&self, now: Timestamp) -> bool {
+        self.state == ServingSnSessionState::Online && self.expires_at > now
     }
 }
 
@@ -48,7 +46,7 @@ mod tests {
     }
 
     #[test]
-    fn sn_owner_control_plane_sessions_require_leader_and_quorum() {
+    fn sn_owner_control_plane_online_state_require_leader_and_quorum() {
         let members = vec![test_id(60), test_id(61), test_id(62)];
         let membership =
             OwnerMembership::with_options(members.clone(), 2, Duration::from_secs(60)).unwrap();
@@ -103,7 +101,7 @@ mod tests {
 #[derive(Clone, Debug, Eq, PartialEq, RawEncode, RawDecode)]
 pub enum OwnerSessionEntry {
     RenewServingSession(ServingSnSession),
-    RevokeServingSession { serving_sn_id: P2pId, epoch: u64 },
+    RevokeServingSession { serving_sn_id: P2pId },
 }
 
 #[derive(Clone, Debug)]
@@ -199,11 +197,21 @@ impl OwnerControlPlane {
         &self,
         leader_id: &P2pId,
         serving_sn_id: P2pId,
-        epoch: u64,
+        _epoch: u64,
         ttl: Duration,
         now: Timestamp,
     ) -> P2pResult<u64> {
-        let session = ServingSnSession::alive(serving_sn_id, epoch, ttl, now);
+        self.renew_serving_online(leader_id, serving_sn_id, ttl, now)
+    }
+
+    pub fn renew_serving_online(
+        &self,
+        leader_id: &P2pId,
+        serving_sn_id: P2pId,
+        ttl: Duration,
+        now: Timestamp,
+    ) -> P2pResult<u64> {
+        let session = ServingSnSession::online(serving_sn_id, ttl, now);
         self.append_as_leader(
             leader_id,
             OwnerSessionEntry::RenewServingSession(session),
@@ -215,15 +223,21 @@ impl OwnerControlPlane {
         &self,
         leader_id: &P2pId,
         serving_sn_id: P2pId,
-        epoch: u64,
+        _epoch: u64,
+        now: Timestamp,
+    ) -> P2pResult<u64> {
+        self.mark_serving_offline(leader_id, serving_sn_id, now)
+    }
+
+    pub fn mark_serving_offline(
+        &self,
+        leader_id: &P2pId,
+        serving_sn_id: P2pId,
         now: Timestamp,
     ) -> P2pResult<u64> {
         self.append_as_leader(
             leader_id,
-            OwnerSessionEntry::RevokeServingSession {
-                serving_sn_id,
-                epoch,
-            },
+            OwnerSessionEntry::RevokeServingSession { serving_sn_id },
             now,
         )
     }
@@ -231,22 +245,34 @@ impl OwnerControlPlane {
     pub fn is_serving_session_alive(
         &self,
         serving_sn_id: &P2pId,
-        epoch: u64,
+        _epoch: u64,
         now: Timestamp,
     ) -> bool {
+        self.is_serving_online(serving_sn_id, now)
+    }
+
+    pub fn is_serving_online(&self, serving_sn_id: &P2pId, now: Timestamp) -> bool {
         self.state
             .lock()
             .unwrap()
             .sessions
             .get(serving_sn_id)
-            .map(|session| session.is_alive(epoch, now))
+            .map(|session| session.is_online(now))
             .unwrap_or(false)
     }
 
     pub fn serving_session_expires_at(
         &self,
         serving_sn_id: &P2pId,
-        epoch: u64,
+        _epoch: u64,
+        now: Timestamp,
+    ) -> Option<Timestamp> {
+        self.serving_online_expires_at(serving_sn_id, now)
+    }
+
+    pub fn serving_online_expires_at(
+        &self,
+        serving_sn_id: &P2pId,
         now: Timestamp,
     ) -> Option<Timestamp> {
         self.state
@@ -254,7 +280,7 @@ impl OwnerControlPlane {
             .unwrap()
             .sessions
             .get(serving_sn_id)
-            .filter(|session| session.is_alive(epoch, now))
+            .filter(|session| session.is_online(now))
             .map(|session| session.expires_at)
     }
 
@@ -332,7 +358,10 @@ impl OwnerControlPlane {
                 let should_update = state
                     .sessions
                     .get(&session.serving_sn_id)
-                    .map(|existing| existing.epoch <= session.epoch)
+                    .map(|existing| {
+                        existing.state != ServingSnSessionState::Online
+                            || existing.expires_at <= session.expires_at
+                    })
                     .unwrap_or(true);
                 if should_update {
                     state
@@ -340,13 +369,10 @@ impl OwnerControlPlane {
                         .insert(session.serving_sn_id.clone(), session);
                 }
             }
-            OwnerSessionEntry::RevokeServingSession {
-                serving_sn_id,
-                epoch,
-            } => {
+            OwnerSessionEntry::RevokeServingSession { serving_sn_id } => {
                 if let Some(existing) = state.sessions.get_mut(&serving_sn_id) {
-                    if existing.epoch == epoch && existing.expires_at > now {
-                        existing.state = ServingSnSessionState::Revoked;
+                    if existing.expires_at > now {
+                        existing.state = ServingSnSessionState::Offline;
                         existing.expires_at = now;
                     }
                 }
