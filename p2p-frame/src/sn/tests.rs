@@ -14,6 +14,9 @@ use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, creat
 use crate::types::TunnelId;
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
 
+#[path = "../../tests/sn_command_matrix/five_by_five_command_matrix_tests.rs"]
+mod five_by_five_command_matrix_tests;
+
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_MAX_RETRY: usize = 20;

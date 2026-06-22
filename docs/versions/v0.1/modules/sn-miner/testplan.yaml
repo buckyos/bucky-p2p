@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 启动本地验证
+    summary: 启动本地验证，包含配置解析和真实进程测试
     test_targets:
       - sn-miner-rust/src/main.rs
       - sn-miner-rust/config/package.cfg
@@ -21,12 +21,12 @@ levels:
     steps:
       - id: sn-miner-unit
         name: 运行 sn-miner crate 测试
-        change_ids: ["sn_miner_startup_audit"]
+        change_ids: ["sn_miner_startup_audit", "sn_miner_config_file_roles", "sn_miner_owner_role_startup", "sn_miner_serving_role_startup", "sn_miner_role_exclusive_validation"]
         run: ["cargo", "test", "-p", "sn-miner"]
 
   dv:
     mode: enabled
-    summary: 面向操作员的二进制入口验证
+    summary: 面向操作员的二进制入口和真实进程验证
     test_targets:
       - sn-miner-rust/src/main.rs
     preconditions:
@@ -40,10 +40,14 @@ levels:
         name: 运行 sn-miner help 入口
         change_ids: ["sn_miner_startup_audit"]
         run: ["cargo", "run", "-p", "sn-miner", "--", "--help"]
+      - id: sn-miner-real-process-dv
+        name: 运行 sn-miner owner/serving 真实进程测试
+        change_ids: ["sn_miner_config_file_roles", "sn_miner_owner_role_startup", "sn_miner_serving_role_startup", "sn_miner_role_exclusive_validation"]
+        run: ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"]
 
   integration:
     mode: enabled
-    summary: 面向启动使用方的工作区兼容性验证
+    summary: 面向启动使用方的兼容性验证
     test_targets:
       - cyfs-p2p
       - p2p-frame
@@ -54,6 +58,6 @@ levels:
       notes: []
     steps:
       - id: sn-miner-integration
-        name: 运行工作区测试套件
-        change_ids: ["sn_miner_artifact_defaults"]
-        run: ["cargo", "test", "--workspace"]
+        name: 运行 sn-miner 真实进程 integration 测试
+        change_ids: ["sn_miner_artifact_defaults", "sn_miner_config_file_roles", "sn_miner_owner_role_startup", "sn_miner_serving_role_startup", "sn_miner_role_exclusive_validation"]
+        run: ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"]

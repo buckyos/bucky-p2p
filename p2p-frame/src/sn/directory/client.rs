@@ -1,6 +1,6 @@
 use super::server::{
-    OwnerServingCommandCode, OwnerServingRegistry, OwnerServingResponse,
-    into_owner_serving_cmd_tunnel, owner_serving_purpose,
+    OwnerServingCommandCode, OwnerServingResponse, into_owner_serving_cmd_tunnel,
+    owner_serving_purpose,
 };
 use super::{
     LocalSnDirectory, LocalSnDirectoryRef, OwnerDirectoryClientRef, OwnerMembership, ServingLease,
@@ -132,18 +132,11 @@ impl StaticOwnerDirectoryClient {
             return send_owner_serving_publish(client, lease).await;
         }
 
-        let owner = OwnerServingRegistry::global()
-            .get(owner_sn_id)
-            .ok_or_else(|| {
-                p2p_err!(
-                    P2pErrorCode::NotFound,
-                    "owner serving endpoint not registered for {}",
-                    owner_sn_id
-                )
-            })?;
-        owner
-            .publish_lease_from_serving_sn(local_sn_id, lease)
-            .await
+        Err(p2p_err!(
+            P2pErrorCode::NotFound,
+            "owner serving transport client missing for {}",
+            owner_sn_id
+        ))
     }
 
     async fn query_owner(
@@ -163,18 +156,11 @@ impl StaticOwnerDirectoryClient {
             return send_owner_serving_query(client, peer_id).await;
         }
 
-        let owner = OwnerServingRegistry::global()
-            .get(owner_sn_id)
-            .ok_or_else(|| {
-                p2p_err!(
-                    P2pErrorCode::NotFound,
-                    "owner serving endpoint not registered for {}",
-                    owner_sn_id
-                )
-            })?;
-        owner
-            .query_leases_from_serving_sn(local_sn_id, peer_id)
-            .await
+        Err(p2p_err!(
+            P2pErrorCode::NotFound,
+            "owner serving transport client missing for {}",
+            owner_sn_id
+        ))
     }
 }
 

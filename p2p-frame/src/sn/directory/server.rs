@@ -19,7 +19,7 @@ use crate::p2p_identity::{
 use crate::runtime;
 use crate::sn::inter_sn::{
     InterSnCommand, InterSnCommandContext, InterSnConnectionContext, InterSnError, InterSnPeer,
-    InterSnRegistry, SnInterServiceValidatorRef, TtpInterSnClient, TtpInterSnClientRef,
+    SnInterServiceValidatorRef, TtpInterSnClient, TtpInterSnClientRef,
     allow_all_sn_inter_service_validator, require_accept,
 };
 use crate::sn::protocol::{SnPublishLease, SnQueryLease, SnQueryLeaseResp};
@@ -178,14 +178,6 @@ impl OwnerDirectoryService {
         self.validate_command(&remote_sn_id, InterSnCommand::PublishLease, &lease.peer_id)
             .await?;
         self.owner_directory.refresh_owner_member(&remote_sn_id);
-        self.election_node
-            .renew_serving_session(
-                lease.serving_sn_id.clone(),
-                0,
-                Duration::from_micros(lease.expires_at.saturating_sub(bucky_time_now()).max(1)),
-                bucky_time_now(),
-            )
-            .await?;
         Ok(self.owner_directory.publish_serving_lease(lease))
     }
 
@@ -214,14 +206,6 @@ impl OwnerDirectoryService {
             ));
         }
         self.validate_command(&serving_sn_id, InterSnCommand::PublishLease, &lease.peer_id)
-            .await?;
-        self.election_node
-            .renew_serving_session(
-                lease.serving_sn_id.clone(),
-                0,
-                Duration::from_micros(lease.expires_at.saturating_sub(bucky_time_now()).max(1)),
-                bucky_time_now(),
-            )
             .await?;
         Ok(self.owner_directory.publish_serving_lease(lease))
     }
@@ -484,8 +468,6 @@ impl OwnerDirectoryServer {
             started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
         });
-        InterSnRegistry::global().register(server.clone() as Arc<dyn InterSnPeer>);
-        OwnerServingRegistry::global().register(server.clone() as Arc<dyn OwnerServingEndpoint>);
         server
     }
 
@@ -1086,6 +1068,31 @@ mod tests {
 
         let response = dispatch_owner_serving_cmd(
             service.clone(),
+            serving_sn_id.clone(),
+            OwnerServingCommandCode::PublishLease,
+            &mut body,
+        )
+        .await;
+
+        match response {
+            OwnerServingResponse::Published(false) => {}
+            other => panic!("unexpected response: {:?}", other),
+        }
+        assert!(service.query_serving_leases(&peer_id).is_empty());
+
+        service
+            .election_node()
+            .renew_serving_session(
+                serving_sn_id.clone(),
+                0,
+                Duration::from_secs(60),
+                bucky_time::bucky_time_now(),
+            )
+            .await
+            .unwrap();
+        let mut body = CmdBody::from_bytes(SnPublishLease::from(lease.clone()).to_vec().unwrap());
+        let response = dispatch_owner_serving_cmd(
+            service.clone(),
             serving_sn_id,
             OwnerServingCommandCode::PublishLease,
             &mut body,
@@ -1094,7 +1101,7 @@ mod tests {
 
         match response {
             OwnerServingResponse::Published(true) => {}
-            other => panic!("unexpected response: {:?}", other),
+            other => panic!("unexpected response after online renew: {:?}", other),
         }
         let leases = service.query_serving_leases(&peer_id);
         assert_eq!(leases.len(), 1);

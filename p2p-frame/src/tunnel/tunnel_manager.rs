@@ -2313,8 +2313,11 @@ mod tests {
     use crate::executor::Executor;
     use crate::networks::{IncomingTunnelCallback, TunnelListenerInfo, TunnelNetwork};
     use crate::networks::{TcpTunnelListener, TcpTunnelNetwork, TcpTunnelRegistry, Tunnel};
+    use crate::pn::PnClient;
     use crate::sn::protocol::v0::{SnCalled, TunnelType};
+    use crate::stack::PnProxyRouteResolver;
     use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
+    use crate::ttp::TtpClient;
     use crate::tunnel::DefaultP2pConnectionInfoCache;
     use crate::types::{Sequence, TunnelCandidateId, TunnelIdGenerator};
     use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
@@ -2538,7 +2541,7 @@ mod tests {
         }
 
         fn form(&self) -> TunnelForm {
-            TunnelForm::Direct
+            TunnelForm::Active
         }
 
         fn is_reverse(&self) -> bool {

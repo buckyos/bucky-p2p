@@ -4,8 +4,8 @@ submodule: sn-distributed-directory
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-06-21T23:46:28+08:00
-approved_content_sha256: 09ed2a3390f2fbce1c81adf9212d44e4335c71a5a368aa8c295c52a0ab564e81
+approved_at: 2026-06-22T21:02:36+08:00
+approved_content_sha256: 17968fdefb7882fc64c292fe025c3131c3851157bcb48f9e2e56ffe259f025d0
 ---
 
 # SN 分布式目录 Proposal
@@ -20,6 +20,8 @@ Owner SN 和 Serving SN 是独立运行角色：Owner SN 负责 owner control pl
 Owner SN 集群只同步小规模控制面状态，包括 ownerSN membership/config、ownerSN 集群可用性和 Serving SN online/offline 状态。Serving SN 不需要区分 session 或 epoch；Owner SN 查询 route 时只需要确认对应 Serving SN 当前仍在线。用户级 `PeerRoute` 不在 ownerSN 全集群同步；它由固定分区算法根据 ownerSN 列表计算分区 owner set，并只在对应分区副本内保存和查询。
 
 Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 ownerSN 网络投票、leader 选举、leader 失效后重新选举，以及由 leader 向其它 ownerSN 同步 Serving SN online/offline 状态的能力。leader 正常工作期间，其它 ownerSN 作为 follower 通过 owner-to-owner 通道与 leader 通信，Serving SN 在线状态变更必须提交到 leader，再由 leader 复制给集群内其它 ownerSN。
+
+生产和测试路径都不得依赖全局 registry 或同进程 shortcut 作为 Owner SN 与 Serving SN 的目录访问方式。Serving SN 到 OwnerDirectoryServer 的 publish/query 必须走 serving-facing listener 或可替换的显式进程间 transport seam；Owner SN 之间的 vote/heartbeat/replication/forward 必须走 owner peer/control transport seam。单元测试可以使用显式 fake transport，但不能通过全局 registry 模拟 production fallback。
 
 ## Scope
 ### In scope
@@ -38,9 +40,11 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 - OwnerDirectoryServer 必须拥有独立的服务监听和 owner-to-owner 连接逻辑；监听端口、对端连接、连接恢复和目录命令收发属于 directory server/peer transport 边界。
 - OwnerDirectoryServer 必须拥有两个独立监听端口或等价独立 endpoint：一个用于 OwnerDirectoryServer 之间的 owner control/peer 通信，一个用于 Serving SN 向 OwnerDirectoryServer 发布/query directory 信息。
 - Serving SN 到 OwnerDirectoryServer 的通信必须经过 owner directory server 的 serving-facing listener，不得通过 SnServer listener 或 owner peer listener 旁路。
+- Serving SN 到 OwnerDirectoryServer 不得使用全局 registry fallback、同进程 owner lookup 或其它隐式 shortcut；test/compat 路径也不得保留该 fallback。
 - SN 间连接建立和 publish/query/detail/relay 命令通过可插拔验证接口控制准入与授权。
 - `sn-miner` 可以加载 owner membership 配置并传入 SN service。
 - 增加一个自动化多节点 SN 命令矩阵验证边界：构造 5 个 Owner SN、5 个 Serving SN、5 个用户节点，每个用户节点分别连接不同 Serving SN，并覆盖 peer-facing SN 命令、inter-SN 命令和 owner serving-facing directory 命令的成功与关键失败路径。
+- 增加真实进程 DV/integration 验证边界：启动独立 Owner SN 与 Serving SN 进程，验证 owner peer/control transport、serving-facing listener、Serving SN online 心跳、PeerRoute publish/query、跨 Serving SN query/call，以及关键失败路径。
 
 ### Out of scope
 - 不改变现有客户端可见 `SnQueryResp` 结构。
@@ -49,6 +53,7 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 - 不把 Owner SN 目录逻辑和 Serving SN peer-facing 逻辑混入同一个业务 handler、同一个 `SnService` 结构体或要求两种角色同进程运行。
 - 不把用户级 `PeerRoute` 全量复制到 ownerSN 集群的所有节点。
 - 不要求 Serving SN 按每个客户端 peer 高频刷新 ownerSN 状态，也不要求每次 `ReportSn` 都 publish `PeerRoute`。
+- 不保留 global registry fallback 作为 test/compat 路径；测试必须使用真实 transport 或显式 fake transport seam。
 - 不要求 ownerSN membership 大规模变更期间保持 `PeerRoute` 一定可读；第一版允许超出分区副本容忍范围的变更导致 route miss，并由 Serving SN 后续重报修复。
 - 不在 proposal 中固定控制面日志、online state、route、分区或 tombstone 的字段结构；这些属于 design 阶段。
 - 不在第一版实现 DHT、开放第三方 SN 准入或 gossip membership 作为 owner 计算输入。
@@ -78,6 +83,7 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
   - leader 向其它 ownerSN 复制 Serving SN online/offline 状态的 fanout、quorum 成功条件、重复消息幂等和落后节点恢复语义需要 design 固化。
   - Serving SN online renew、主动 offline、异常 offline 超时和恢复语义需要 design 固化。
   - `ReportSn` 与 `PeerRoute` publish 的解耦方式、route 长刷新周期、首次上报/迁移触发和重报修复策略需要 design 固化。
+  - Serving SN online heartbeat 与 PeerRoute publish 两条独立 runtime loop 的配置、生命周期和失败处理需要 design 固化。
   - `PeerRoute` 分区算法、replica count、读 fanout、写成功条件和路由缺失恢复策略需要 design 固化。
   - ownerSN membership 变更的第一版限制、拒绝条件和可观测告警需要 design 固化。
   - SN 间内部命令的 command code 区间需要 implementation 前确认。
@@ -100,6 +106,7 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
   - 不把用户级 `PeerRoute` 做成 ownerSN 全集群强一致在线会话数据库。
   - 不让 OwnerDirectoryServer 的运行依赖 SnServer 已经启动的 listener 或 servingSN peer-facing handler。
   - 不让 Serving SN 复用 owner peer 端口或 owner peer 命令节点访问 owner directory。
+  - 不使用全局 registry、同进程 lookup 或隐式 singleton 作为 Owner SN/Serving SN 目录通信 fallback。
 - System constraints:
   - 单 SN 必须是多 SN 的退化形态。
   - 单 SN 退化形态只能通过显式接口组合 owner/serving 能力，不能成为生产实现中混合角色逻辑或把 owner 字段放进 `SnService` 的理由。
@@ -118,6 +125,9 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 | Is an in-memory-only Raft-style state machine sufficient? | 不够。它只能验证本机 term/quorum/online-state 语义，不能满足 ownerSN 之间网络投票、leader failover 和 leader 复制 Serving SN 在线状态的部署要求。 | 需要 owner-to-owner command、状态机角色转换、leader heartbeat 和复制确认，复杂度高于本地状态机。 | add `sn_owner_network_leader_election`; still exclude full etcd/Raft persistence and membership migration |
 | Is a fixed 5 ownerSN + 5 servingSN + 5 user topology reasonable as required evidence? | 合理，但它应作为自动化命令矩阵验证边界，而不是改变协议本身的部署上限。5 个 ownerSN 可以覆盖 quorum、follower forward 和 leader failover；5 个 servingSN 和 5 个用户分别连接不同 servingSN 可以覆盖跨 serving query/call、route 分区和 command fanout。 | 如果直接要求真实多进程集成，现有 testing 文档已记录 DV/integration harness gap，可能阻塞实现；design/testing 必须决定使用可运行 simulator/unit harness、DV harness，或明确先补真实多进程 harness。 | add `sn_five_by_five_command_matrix` as required downstream design/testing/implementation evidence |
 | What does "all SN commands" cover? | 覆盖三类命令边界：peer-facing `ReportSn`/`ReportSnResp`、`SnQuery`/`SnQueryResp`、`SnCall`/`SnCallResp`、`SnCalled`/`SnCalledResp`；inter-SN `Heartbeat`、`PublishLease`、`QueryLease`、`QueryDetail`、`RelayCall`；owner serving-facing directory `PublishLease`、`QueryLease`。 | 若不明确命令集合，后续可能只测试 query/call happy path，遗漏 owner election、route publish/query、detail relay、response decode 和 validator reject。 | define command matrix coverage under `sn_five_by_five_command_matrix` |
+| Should global registry fallback remain for tests or compatibility? | 不应保留。fallback 会让测试绕过 owner serving-facing listener 和 owner peer transport，掩盖真实进程、端口、授权和序列化问题。 | 单元测试需要显式 fake transport seam 或真实 listener；旧的同进程便利性会下降。 | remove registry fallback from production, test, and compat paths |
+| Are Serving SN online heartbeat and PeerRoute publish one workflow? | 不是。online heartbeat 表示 serving 实例可用性；PeerRoute publish 表示用户归属路由刷新。两者可以使用同一个 owner directory client，但必须是独立 lifecycle、配置和触发条件。 | 实现需要拆分 runtime loop 和错误处理，配置项更多。 | require independent online heartbeat and route publish loops |
+| Is unit-level 5x5 evidence enough after adding process-startup requirements? | 不够。5x5 unit matrix 能证明命令语义，但不能证明 `sn-miner` 配置、真实进程、listener、connector、port conflict 和 shutdown。 | 需要新增较慢的 DV/integration harness，但这是部署边界必需证据。 | require real-process DV/integration evidence |
 | Is scope ambiguous? | 已明确 proposal 不写具体结构定义，只写需求相关关注；control plane 小状态和 partitioned route 的字段、日志、命令和算法细节留给 design。 | 如果 proposal 写入过细结构，会限制设计空间并导致阶段边界混乱。 | keep proposal at requirement level |
 
 ## Large Module Submodule Decision
@@ -147,6 +157,8 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 - SN call 本地 miss 时可跨 SN relay，remote serving SN 负责向本机被叫投递 `SnCalled`。
 - SN 间连接和内部命令可由使用方提供验证实现控制。
 - 自动化验证能在 5 Owner SN、5 Serving SN、5 user peer 的拓扑中覆盖所有 SN 命令族，并证明每个 user peer 分别连接不同 Serving SN 时 report/query/call/called 与内部 route/detail/relay/control 命令仍保持一致。
+- 真实进程 DV/integration 能证明配置驱动的 Owner SN 与 Serving SN 作为独立进程通过真实 owner peer/control 与 serving-facing transport 工作，不依赖全局 registry fallback。
+- Serving SN online 心跳与 PeerRoute publish 作为独立 runtime loop 可分别配置、分别失败和分别测试；`ReportSn` 不触发 online heartbeat，也不强制每次 publish route。
 
 ## Proposal Items
 | proposal_id | change_id | Outcome | Scope Boundary | Success Evidence | Explicit Non-Goal |
@@ -163,6 +175,9 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 | P-SN-DIST-CALL-1 | sn_distributed_relay_call | `SnCall` 本地 miss 时通过分区 route 找到 remote serving SN 并 relay call，由 remote serving SN 投递 `SnCalled`。 | `p2p-frame/src/sn/service/**`、`p2p-frame/src/sn/inter_sn/**`。 | 本地 call 路径不变；remote serving SN accepted 后 `SnCallResp` 仍只表示受理/转发。 | 不改变最终 tunnel 连通性语义；第一版不要求 fanout 到所有 serving SN。 |
 | P-SN-INTER-AUTH-1 | sn_inter_service_validation | 新增 SN 间连接建立准入和命令级 publish/query/detail/relay 授权接口。 | `p2p-frame/src/sn/inter_sn/validator.rs`、`SnServiceConfig` 装配路径。 | validator reject 时不建立 SN 间内部协议连接或不产生 owner write/detail/relay side effect。 | 不固化使用方权限模型；默认实现可 allow-all。 |
 | P-SN-DIST-CMD-MATRIX-1 | sn_five_by_five_command_matrix | 自动化构造 5 Owner SN、5 Serving SN、5 user peer 的测试拓扑，每个 user peer 分别连接不同 Serving SN，并覆盖所有 SN 命令族的成功、跨 serving 和关键失败路径。 | `p2p-frame/src/sn/**` 中测试或必要测试支撑；如需真实多进程 harness，范围必须在后续 design/testing 中明确。 | 测试证据显示 5 个用户分别通过不同 Serving SN 完成 `ReportSn`、跨 Serving SN `SnQuery`、`SnCall`/`SnCalled`，并覆盖 inter-SN `Heartbeat`、`PublishLease`、`QueryLease`、`QueryDetail`、`RelayCall` 以及 owner serving-facing `PublishLease`、`QueryLease` 的 dispatch/response/reject 路径。 | 不新增客户端可见命令；不要求客户端选择 Serving SN；不把测试拓扑规模解释为生产部署上限。 |
+| P-SN-DIST-NO-FALLBACK-1 | sn_directory_no_registry_fallback | 删除 Owner SN / Serving SN 目录通信的全局 registry fallback；生产、测试和兼容路径都必须使用真实 transport 或显式 fake transport seam。 | `p2p-frame/src/sn/directory/**`、`p2p-frame/src/sn/inter_sn/**`、`p2p-frame/src/sn/service/**`、必要测试支撑。 | 搜索和测试证据证明 Serving SN directory publish/query、inter-SN detail/relay、owner control command 不依赖 global registry fallback；unit fake 必须显式注入。 | 不禁止单元测试使用 fake transport trait；禁止隐式 singleton registry fallback。 |
+| P-SN-DIST-ONLINE-ROUTE-LOOPS-1 | sn_serving_online_route_independent_loops | Serving SN online heartbeat/renew/offline 与 PeerRoute publish/query 是独立 runtime loop、独立配置和独立失败处理。 | `p2p-frame/src/sn/service/**`、`p2p-frame/src/sn/directory/**`、`sn-miner-rust/**` 装配。 | 测试证明 `ReportSn` 只更新本地 detail；online heartbeat 不写 PeerRoute；route publish 不刷新 Serving SN online；两者失败可独立观测。 | 不要求两者使用不同网络连接；只要求语义和触发独立。 |
+| P-SN-DIST-REAL-PROCESS-1 | sn_real_process_owner_serving_dv | 新增真实进程 DV/integration，启动独立 Owner SN 与 Serving SN 进程验证配置、listener、connector、query/call 和失败路径。 | `p2p-frame` DV/integration harness、`sn-miner-rust/**` 配置/启动、必要测试夹具。 | 测试证据包含进程启动、端口分配、owner 双 listener、serving 连接 owner serving-facing endpoint、online heartbeat、route publish/query、跨 serving query/call、shutdown 和至少一个 invalid config/port conflict 失败路径。 | 不把 unit 5x5 command matrix 当作真实进程证据。 |
 
 ## Success Criteria
 - Concrete user-visible or system-visible result:
@@ -182,6 +197,8 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
   - Design 直接映射全部 change_id，并把结构定义、协议字段、分区算法和控制面机制放在 design。
   - Post-implementation testing 覆盖单 SN 等价、多 SN online/offline invalidation、partitioned route、query merge、relay call、validator reject。
   - Post-implementation testing 必须为 `sn_five_by_five_command_matrix` 记录可运行入口、命令覆盖矩阵、拓扑规模、每个 user peer 到不同 Serving SN 的绑定证据、成功路径结果和关键失败路径结果。
+  - Post-implementation testing 必须为 `sn_real_process_owner_serving_dv` 记录真实进程入口、配置文件、进程日志/退出码、端口分配、成功路径和失败路径结果。
+  - 静态搜索或等价审计必须证明全局 registry fallback 不再是 Owner SN / Serving SN directory 通信路径。
 - Explicit non-goals:
   - 不提供客户端选择 serving SN 的新 API。
   - 不引入 DHT/gossip owner 计算。
@@ -198,6 +215,8 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 - 跨 SN detail 查询暴露 NAT endpoint，需要验证接口在连接和命令两层都能拒绝未授权请求。
 - 多 SN query fanout 会增加延迟，第一版应有超时和失败忽略策略。
 - OwnerDirectoryServer 双监听端口增加部署复杂度；design 必须定义 owner peer/control 端口和 serving-facing 端口的配置、默认禁用/启用策略、冲突检测和启动失败行为。
+- 移除 registry fallback 后，未配置 endpoint 的测试和部署会失败；design/testing 必须提供显式 fake seam 或真实进程配置。
+- 真实进程 DV/integration 可能较慢且易受端口冲突影响；testing 必须定义稳定端口分配、超时、日志收集和 cleanup。
 
 ## Downstream Follow-Up
 | follow_up_id | Owning Stage | Reason | Triggering Proposal Item | Blocking |
@@ -213,6 +232,10 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 | FU-SN-FIVE-BY-FIVE-DESIGN | design | 需要定义 5 Owner SN、5 Serving SN、5 user peer 命令矩阵验证使用真实多进程 DV、in-memory harness 还是混合方式，并映射所有命令族、响应和失败路径。 | P-SN-DIST-CMD-MATRIX-1 | yes |
 | FU-SN-FIVE-BY-FIVE-TESTING | testing | 需要生成或更新测试设计、testplan 和可运行测试入口，证明每个 user peer 绑定不同 Serving SN 且所有 SN 命令族被执行或明确记录不可自动化原因。 | P-SN-DIST-CMD-MATRIX-1 | yes |
 | FU-SN-FIVE-BY-FIVE-IMPLEMENTATION | implementation | 需要在 design/testing 批准后实现必要测试支撑或 runtime wiring，使命令矩阵测试不依赖 chat-only 假设。 | P-SN-DIST-CMD-MATRIX-1 | yes |
+| FU-SN-NO-FALLBACK-DESIGN | design | 需要定义移除 global registry fallback 后的 production transport 和 unit fake seam。 | P-SN-DIST-NO-FALLBACK-1 | yes |
+| FU-SN-ONLINE-ROUTE-LOOPS-DESIGN | design | 需要定义 Serving SN online loop 与 route publish loop 的配置、触发、错误处理和观测信号。 | P-SN-DIST-ONLINE-ROUTE-LOOPS-1 | yes |
+| FU-SN-REAL-PROCESS-TESTING | testing | 需要设计真实进程 DV/integration，覆盖 sn-miner config、owner/serving 进程、transport 和失败路径。 | P-SN-DIST-REAL-PROCESS-1 | yes |
+| FU-SN-REAL-PROCESS-IMPLEMENTATION | implementation | 需要在 design/testing 批准后实现 transport/fallback 清理、loop 拆分和真实进程测试支撑。 | P-SN-DIST-NO-FALLBACK-1 / P-SN-DIST-ONLINE-ROUTE-LOOPS-1 / P-SN-DIST-REAL-PROCESS-1 | yes |
 | FU-SN-DIST-ACCEPTANCE | acceptance | 需要审计 proposal/design/code/testing 一致性，尤其客户端兼容性、分区路由、online/offline 批量失效和权限边界。 | all proposal items | yes |
 
 ## Proposal Guardrails
@@ -229,5 +252,5 @@ Owner SN control plane 不要求实现完整 etcd/Raft，但必须具备跨 owne
 
 ## Approval Record
 - approver: user
-- approval_date: 2026-06-21T23:46:28+08:00
-- user_statement: "确认，自动完成后续步骤"
+- approval_date: 2026-06-22T21:02:36+08:00
+- user_statement: "批准 sn-miner proposal 和 p2p-frame/sn-distributed-directory proposal，并启动 auto-pipeline 自动处理后续 design、implementation、testing、acceptance。"
