@@ -744,24 +744,32 @@ impl SnService {
         // }
     }
 
-    pub async fn get_peer_wan_ep(
+    pub async fn get_peer_wan_classied_ep(
         &self,
         peer_id: &PeerId,
         reported_eps: &[Endpoint],
     ) -> Vec<Endpoint> {
+        self.get_peer_wan_ep(peer_id)
+            .await
+            .into_iter()
+            .map(|remote| Self::classify_observed_endpoint(remote, reported_eps))
+            .collect()
+    }
+
+    pub async fn get_peer_wan_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
         let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
-            let remote = tunnel.send.get().await.remote();
+            let mut remote = tunnel.send.get().await.remote();
+            if remote.is_loopback() {
+                continue;
+            }
+            remote.set_area(EndpointArea::Wan);
             if !remotes.contains(&remote) {
                 remotes.push(remote);
             }
         }
         remotes
-            .iter_mut()
-            .filter(|remote| !remote.is_loopback())
-            .map(|remote| Self::classify_observed_endpoint(*remote, reported_eps))
-            .collect()
     }
 
     async fn get_peer_wan_ep_with_map_port(
@@ -770,7 +778,7 @@ impl SnService {
         map_ports: &[(Protocol, u16)],
         reported_eps: &[Endpoint],
     ) -> Vec<Endpoint> {
-        let mut remote_ep = self.get_peer_wan_ep(peer_id, reported_eps).await;
+        let mut remote_ep = self.get_peer_wan_classied_ep(peer_id, reported_eps).await;
         let mut map_eps = Vec::new();
         for ep in remote_ep.iter() {
             for (protocol, port) in map_ports.iter() {
@@ -814,7 +822,7 @@ impl SnService {
             let peer_desc = self.cert_factory.create(peer_info).unwrap();
             Self::extend_unique_endpoints(&mut reported_eps, peer_desc.endpoints().as_slice());
         }
-        let remote_ep = self.get_peer_wan_ep(peer_id, reported_eps.as_slice()).await;
+        let remote_ep = self.get_peer_wan_classied_ep(peer_id, reported_eps.as_slice()).await;
 
         if let Some(from_peer_id) = report_sn.from_peer_id.clone() {
             self.peer_mgr.add_or_update_peer(
