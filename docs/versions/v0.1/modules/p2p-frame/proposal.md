@@ -3,8 +3,8 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-06-18T16:15:42+08:00
-approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177785aa8ce2
+approved_at: 2026-06-25T11:57:50+08:00
+approved_content_sha256: 5d282a8045885ebafa0aac7fd65a60f3e07dc7e59c174d7a8d20cfe282061b90
 ---
 
 # p2p-frame 提案
@@ -25,6 +25,7 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - 本轮新增需求是为通用 `Tunnel` 提供低频外部控制数据通道能力：调用方可通过 `open_control_stream(...)` / `listen_control_stream(...)` 在现有 tunnel 控制命令通道上复用一组内部多路复用的 virtual control stream；具体实现必须作为 `Tunnel` 内部共享模块，不向外暴露 `control_stream` runtime、frame 或子协议类型。现有 TCP/QUIC/PN tunnel 控制命令只新增一个 `Data` 命令承载内部 control stream frame，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 必须断开。
 - 本轮新增需求是将 SN 低频信令通信迁移到 `Tunnel` control stream：SN report、call、called、响应或等价小消息不得为了每次交互都新建普通业务 `open_stream()`；在已有 tunnel 控制通道健康时，应复用 `open_control_stream(...)` / `listen_control_stream(...)` 承载 SN 小数据通信，以减少真实 stream 建立开销并保持 SN 信令属于控制面。
 - 本轮新增需求是为 TTP 子模块增加 `TtpNode`：它对外提供与 `TtpServer` 同类的监听和连接接口，但在 `open_stream(...)` 与 `open_control_stream(...)` 中，如果本地没有匹配 `TtpTarget` 的可用 tunnel，必须主动通过现有 `NetManager` / `TunnelNetwork` 建立 tunnel、attach 到 `TtpRuntime`，再打开对应 stream；如果已有可用 tunnel，则继续复用现有 tunnel。
+- 本轮新增需求是补齐 `TtpClient` 的连接生命周期管理：保持连接的 server target 集合必须支持删除，删除后对应 target 不再被 maintain loop 自动重建；非保持连接 target 创建或缓存的 tunnel 必须具备本地 idle release 机制，在无 active stream、control stream、datagram 或 pending open 使用且超过设计定义阈值后从 `TtpClient` 缓存释放，避免一次性普通连接无限占用本地 tunnel 缓存。
 - 本轮新增清理需求是移除 `SnServiceContractServer` 相关逻辑：当前 `contract.rs`、`service/receipt.rs` 和服务侧 receipt 装配方向尚未作为 SN 主流程的完整计费、评估或准入系统接入，不应继续作为生产路径或公开装配点保留；为避免改变 SN wire 兼容性，`sn/protocol` 中既有 receipt 字段和编解码类型可继续作为协议兼容结构存在。后续如需服务计费或合约评估，必须以新的 proposal 重新定义目标、接口、状态存储、验证与验收边界。
 - 本轮新增需求是支持多 PN server 部署下的 proxy tunnel 建链边界：每个用户保持连接自己的 assigned PN server，断线重连、分配、迁移和目录查询由库使用者负责；`p2p-frame` 只按上层指定的 PN server 建立或复用到该 PN 的 relay tunnel，并允许通过该 PN 与分配在该 PN 上的其他用户建立 `PnTunnel`。对于连接其他 PN server 的路径，库内按普通 tunnel 逻辑处理，不负责该 PN server 的长期保持连接或断线重连。
 - 本轮新增澄清是：`PnServer` 默认 `PnConnectionValidator` 必须是显式 allow-all，以保持未配置部署和现有 `PnServer::new(...)` 调用点的兼容行为；多 PN server 的 assigned target 准入必须通过显式 validator 或 policy 构造路径启用，而不是改变默认 validator 的语义。
@@ -85,6 +86,9 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - TTP 子模块必须新增 `TtpNode`，并提供与 `TtpServer` 同类的 `TtpPortListener` / `TtpConnector` 使用面；`TtpNode::open_stream(...)` 与 `TtpNode::open_control_stream(...)` 在未找到匹配 `TtpTarget` 的可用 tunnel 时必须主动建立 tunnel，而不是只返回 `NotFound`
 - `TtpNode` 主动建立 tunnel 必须复用现有 `NetManager` / `TunnelNetwork` 建链入口、`TtpRuntime::attach_tunnel(...)` 和既有 target 匹配规则；已有可用 tunnel 必须优先复用，失效 tunnel 必须清理后再重建
 - `TtpNode` 的主动建链只改变 TTP 封装层的 tunnel 获取策略，不改变 TCP/QUIC/PN/TTP 线协议、`Tunnel` / `TunnelNetwork` trait 签名、vport/purpose 编码、身份校验或 tunnel publish 规则
+- `TtpClient` 必须提供删除保持连接 server target 的能力；删除后 maintain loop 不得再因旧 target 重新创建 tunnel，且不得影响仍保留在集合中的其他 server target
+- `TtpClient` 对非保持连接 target 的 tunnel 缓存必须有 idle release 机制；只有没有 active stream、control stream、datagram 或 pending open 使用的 cached tunnel 才能被释放，保持连接 target 的 tunnel 不受该 idle release 清理
+- TTP idle release 只释放 `TtpClient` 本地缓存引用或等价本地资源，不得改变底层 TCP/QUIC/PN/TTP wire 协议、`Tunnel` / `TunnelNetwork` trait、tunnel publish 规则或 `TtpServer` lookup-only 语义
 - SN server 必须提供连接验证器装配点，用于判断发起 SN 连接、report、call 或等价 SN server 入站请求的客户端是否允许连接；默认实现必须是显式 allow-all，保持未配置部署的兼容行为；验证上下文只允许包含已认证的 `client_id` 和该客户端证书，不暴露 command、tunnel id 或报文载荷派生的 peer 字段。
 - 移除 `SnServiceContractServer` 相关生产逻辑、服务侧公开导出、构造装配、后台任务和仅服务于该方向的存储/统计路径；保留 `sn/protocol` 中既有 receipt wire 字段和编解码类型，SN report/call/called/连接验证器和 control-stream-only 信令不得依赖被移除的 contract/receipt 服务逻辑。
 - 多 PN server 支持只要求库内按上层指定的 PN server 建立 proxy tunnel；目标用户到 PN server 的分配、目录查询、迁移、重平衡、多副本在线策略、PN server 之间同步、以及每个用户到自身 assigned PN server 的断线重连都属于库使用者职责。
@@ -142,6 +146,8 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - 使用现有 tunnel 控制通道直接传输未经封装和限长的外部 byte stream，或让外部调用方直接读写内部控制通道 raw stream
 - 借 control stream 引入新的业务数据平面、大流量传输替代、公开 raw control frame 协议、全局 tunnel session 协议或 PN 之外的新 relay 语义
 - 借 `TtpNode` 新增能力改变 `Tunnel` / `TunnelNetwork` 公共 trait、改变 TCP/QUIC/PN/TTP 线协议、引入新的 target 路由目录、或让 TTP 层绕过 `NetManager` 自行选择底层网络
+- 将 `TtpClient` 的 server target 删除解释为删除底层 peer、关闭所有同 peer tunnel、修改 `NetManager` 候选注册，或影响仍被其他 target、TTP server/node、stream manager、datagram manager 持有的 tunnel
+- 将非保持连接 tunnel 的 idle release 解释为强制中断 active stream/control stream/datagram、改变底层 tunnel close 线协议、改变公共 `Tunnel` trait，或对保持连接 server target 生效
 - 因新增控制命令 `Data` 而重写现有 TCP/QUIC/PN 控制通道 ready、heartbeat、close、claim/open、PN control open 或业务 stream/datagram open 逻辑
 - 因引入 `sfo-reuseport` 而移除现有 QUIC NAT punch 的 `ServerReflexive` 准入条件、50ms cadence、active/reverse 起发时机或 1 秒默认截止
 - 在底层组件中散落硬编码 channel 容量默认值，或保留 `unbounded_channel` 作为容量限制的旁路
@@ -179,13 +185,16 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
   - 多 PN server 需求以 `p2p-frame/docs/pn_design.md` 中的单 relay bridge 模型为参考输入。
   - 每个用户到自身 assigned PN server 的保持连接、断线重连、分配和目录查询由库使用者负责。
   - 上层能够在发起 proxy tunnel 前指定目标用户当前应使用的 PN server。
+  - `TtpClient` 能够在本地识别哪些 cached tunnel 来自保持连接 server target，哪些来自一次性普通 target；具体标记方式、idle timeout 默认值和 active channel 计数方式由 design 决定。
 - Open ambiguities:
   - relay 如何在实现中区分新建逻辑 `PnTunnel` 与既有 tunnel 后续 channel 不在需求阶段规定，必须由 design 补齐。
   - assigned target 策略的具体接口形态、错误码映射和状态缓存生命周期由 design 决定。
   - `TtpNode::open_datagram(...)` 是否也应在 tunnel 缺失时主动建链尚未由本需求明确；design 必须直接决定保持 `TtpServer` lookup-only 语义、复用 `TtpClient` active-open 语义，或给出另一个可验收边界。
+  - TTP 非保持连接 idle release 的默认阈值、是否可配置、active stream/control stream/datagram 的 lease 计数实现、以及 release 时是否主动 close 底层 tunnel，都必须由 design 补齐。
 - Decision needed before approval:
   - 用户需审批 `pn_multi_server_assigned_target` 作为新的 proposal item 后，design/testing/implementation 才能继续。
   - 用户需审批 `ttp_node_active_open` 作为新的 proposal item 后，design/testing/implementation 才能继续。
+  - 用户需审批 `ttp_client_connection_lifecycle` 作为新的 proposal item 后，design/testing/implementation 才能继续。
 
 ## Requirement Challenge
 | question | evaluation | risk_or_tradeoff | decision |
@@ -196,23 +205,25 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 | Should `PnConnectionValidator` default to allow-all? | 是；默认 validator 应保持兼容行为，assigned target 是多 PN 部署显式启用的准入策略，不应让未配置部署默认拒绝连接。 | 默认 allow-all 不能作为多 PN 错误 PN 成功的依据；design 必须把默认兼容路径和显式 assigned target 路径分开。 | revise proposal to require default allow-all |
 | Is `TtpNode` active open reasonable for the stated TTP goal? | 合理；当前 `TtpServer` 只复用已接收 tunnel，`TtpClient` 会主动建链，`TtpNode` 可作为同时具备监听与按需主动建链的 TTP 组合入口。 | 如果不把边界写入 proposal，implementation 可能把该行为误塞进 `TtpServer`，破坏 server lookup-only 语义，或绕过 `NetManager` 自行建链。 | add `ttp_node_active_open` with explicit boundaries |
 | Is there a smaller TTP alternative? | 最小方案是新增 `TtpNode` 并复用现有 `TtpRuntime`、target 匹配和 `NetManager` 建链入口，而不是改 `TtpServer` 或新增 tunnel trait 方法。 | 调用方需要显式选择 `TtpNode` 才获得主动建链行为；旧 `TtpServer` 使用面保持可被 design 决定是否不变。 | chosen approach |
+| Is TTP client connection lifecycle management reasonable? | 合理；保持连接 server target 和一次性普通 target 的生命周期不同，当前只追加保持目标而没有删除入口，普通 target tunnel 也缺少本地释放边界。 | 如果直接在实现中临时删除或 close tunnel，可能误关仍有 active channel 的连接，或让 maintain loop 又重建已删除 target。 | add `ttp_client_connection_lifecycle`; require design to define delete semantics, idle timeout, active lease accounting, and release behavior |
+| Is there a safer first version for TTP idle release? | 更安全的第一版是只让 idle release 作用于非保持 target 的本地缓存，并在 active/pending channel 归零后触发；保持 target 继续由 maintain loop 管理。 | 该方案不会解决底层其他 owner 持有 tunnel 的全局释放问题，但能避免 TTP client 缓存无限增长且不扩大公共 tunnel API。 | chosen approach |
 
 ## Large Module Submodule Decision
 | submodule | new_or_existing | responsibility | proposal_packet | reason |
 |-----------|-----------------|----------------|-----------------|--------|
 | pn | existing | PN client/server relay、assigned target 准入和 proxy tunnel 建链边界 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/pn/**` 责任，不需要创建新的直接 submodule packet。 |
-| ttp | existing | TTP listener/connector 封装、target tunnel 查找、runtime attach 和主动建链节点 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/ttp/**` 责任，不需要创建新的直接 submodule packet。 |
+| ttp | existing | TTP listener/connector 封装、target tunnel 查找、runtime attach、主动建链节点和 client 本地连接生命周期 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/ttp/**` 责任，不需要创建新的直接 submodule packet。 |
 
 ## Trigger Matrix
 | trigger_category | applies | evidence | required_checks | deferred_checks_and_reason |
 |------------------|---------|----------|-----------------|----------------------------|
-| contract/protocol | yes | `pn_multi_server_assigned_target` 约束 PN relay 建链、assigned target 准入和错误 PN 行为，但不改变 `ProxyOpenReq` / `ProxyOpenResp` wire；`ttp_node_active_open` 新增 TTP 封装 API 行为，但不得改变 TCP/QUIC/PN/TTP wire 或 `Tunnel` trait。 | design must map PN protocol invariants and TTP node interface boundaries; testing must cover correct PN success/wrong PN failure and TtpNode active open without wire changes. | owner: design/testing; risk: PN wire compatibility and TTP API drift; acceptance impact: verify no wire protocol change. |
+| contract/protocol | yes | `pn_multi_server_assigned_target` 约束 PN relay 建链、assigned target 准入和错误 PN 行为，但不改变 `ProxyOpenReq` / `ProxyOpenResp` wire；`ttp_node_active_open` 新增 TTP 封装 API 行为；`ttp_client_connection_lifecycle` 新增 TTP client 本地 target/tunnel 生命周期行为，但不得改变 TCP/QUIC/PN/TTP wire 或 `Tunnel` trait。 | design must map PN protocol invariants and TTP node/client lifecycle boundaries; testing must cover correct PN success/wrong PN failure, TtpNode active open, maintained target removal, and non-maintained idle release without wire changes. | owner: design/testing; risk: PN wire compatibility, TTP API drift, and TTP lifecycle race; acceptance impact: verify no wire protocol or public tunnel trait change. |
 | data/schema | no | 需求不新增持久化 schema；用户到 PN 的目录和分配数据属于库使用者。 | not-applicable: no repository-owned schema change in proposal stage. | owner: none; risk: low; acceptance impact: confirm no repository-owned directory schema. |
 | security/privacy/permission | yes | assigned target 准入限制本 `PnServer` 可作为 target 打开的用户，错误 PN 必须失败。 | design must define validator/policy boundary; testing must cover non-assigned target rejection before target open. | owner: design/testing; risk: wrong target authorization; acceptance impact: reject non-assigned target before target open. |
-| runtime/integration | yes | 多 PN server 影响 relay tunnel 建立和 workspace 调用方行为；本变更要求保留 `PnServer::new(...)` 默认 allow-all 兼容路径，同时显式 assigned target 路径仍能拒绝错误 PN；`TtpNode` 会在 stream/control stream open 时触发实际 tunnel 建立。 | integration must cover specified PN flow, wrong PN failure under explicit assigned target policy, default allow-all compatibility, and TtpNode open_stream/open_control_stream creating missing tunnels. | owner: testing; risk: workspace migration and active-open side effects; acceptance impact: correct PN succeeds, wrong PN fails with policy, default constructor remains compatible, and TtpNode active open is observable. |
+| runtime/integration | yes | 多 PN server 影响 relay tunnel 建立和 workspace 调用方行为；本变更要求保留 `PnServer::new(...)` 默认 allow-all 兼容路径，同时显式 assigned target 路径仍能拒绝错误 PN；`TtpNode` 会在 stream/control stream open 时触发实际 tunnel 建立；`TtpClient` target 删除和 idle release 会改变本地缓存生命周期。 | integration must cover specified PN flow, wrong PN failure under explicit assigned target policy, default allow-all compatibility, TtpNode open_stream/open_control_stream creating missing tunnels, maintained target removal not reconnecting deleted targets, and non-maintained idle release preserving active channels. | owner: testing; risk: workspace migration, active-open side effects, and stale/over-eager TTP tunnel cleanup; acceptance impact: correct PN succeeds, wrong PN fails with policy, default constructor remains compatible, TtpNode active open is observable, and TTP client lifecycle cleanup is bounded. |
 | build/dependency/config/deployment | yes | 上层指定 PN server 和 assigned target 策略会影响配置/部署边界，但不要求库内目录。 | design must define configuration/interface boundary without adding global directory. | owner: design; risk: accidental global directory/config expansion; acceptance impact: no library-owned PN directory. |
 | ui/datamodel/workflow | no | 该 crate 无 UI，且不定义库外用户分配目录 datamodel。 | not-applicable: no UI/datamodel workflow owned by p2p-frame. | owner: none; risk: low; acceptance impact: no UI/datamodel artifact required. |
-| harness/process | yes | 新增 proposal item `pn_multi_server_assigned_target` 和 `ttp_node_active_open` 会使下游 design/testing/implementation admission 需要重新映射。 | run doc-structure-check and stage-scope-check for proposal; downstream admission must use new change_id. | owner: downstream stages; risk: admission gap; acceptance impact: design/testing must directly map new change_id. |
+| harness/process | yes | 新增 proposal item `pn_multi_server_assigned_target`、`ttp_node_active_open` 和 `ttp_client_connection_lifecycle` 会使下游 design/testing/implementation admission 需要重新映射。 | run doc-structure-check and stage-scope-check for proposal; downstream admission must use new change_id. | owner: downstream stages; risk: admission gap; acceptance impact: design/testing must directly map new change_id. |
 
 ## Constraints
 - 允许使用的库/组件：
@@ -236,6 +247,9 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
   - 公开导出内部 `control_stream` runtime/frame 类型，或让外部直接读写现有 tunnel raw 控制通道
   - 为保留旧服务合约方向而在 SN 主流程中继续构造、启动或导出 `SnServiceContractServer`、服务侧 receipt trait/module 或等价 contract/receipt 装配入口
   - 借 `TtpNode` 主动建链绕过 `NetManager` / `TunnelNetwork`、新增库内 peer directory、改变 tunnel publish 规则，或把 active-open 语义静默塞进现有 `TtpServer`
+  - 删除保持连接 server target 时继续让 maintain loop 依据旧 target 重建 tunnel
+  - 对非保持连接 tunnel 执行 idle release 时强制中断 active stream、control stream、datagram 或 pending open
+  - 借 TTP client 本地生命周期管理改变底层 tunnel publish/close 线协议、公共 tunnel trait 或 `TtpServer` lookup-only 语义
 - 系统约束：
   - 保持当前以 tokio 为优先的运行时策略
   - 保持混合 edition 的工作区布局
@@ -289,6 +303,9 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - `TtpNode` 主动建链必须在 `open_stream(...)` 与 `open_control_stream(...)` 入口按 `TtpTarget` 查找可用 tunnel；找不到时必须使用目标 endpoint 协议对应的现有 network 建链，成功后 attach 到同一个 `TtpRuntime`，再调用 tunnel 的对应 open 方法。
 - `TtpNode` 不得改变 `TtpServer` 已有 lookup-only 行为，除非 design 明确把 `TtpServer` 与 `TtpNode` 的关系重构为兼容别名或共享内部实现。
 - `TtpNode::open_datagram(...)` 的缺失 tunnel 行为必须在 design 中明确并映射测试，implementation 不得凭临时判断扩展或缩窄。
+- `TtpClient` 删除保持连接 server target 后，maintain loop 的下一轮快照不得包含已删除 target；重复删除必须幂等，删除一个 target 不得影响其他保持 target。
+- `TtpClient` 非保持连接 tunnel 的 idle release 必须先由 design 定义 active/pending channel lease 计数和超时阈值；implementation 不得在计数不清时强制释放或关闭 tunnel。
+- `TtpClient` idle release 必须保持在 TTP client 本地生命周期边界内；若 design 选择主动 close 底层 tunnel，必须证明不会影响仍由其他 owner 使用的 tunnel，并补齐测试覆盖。
 - `SnServiceContractServer` 清理后，SN 服务主流程仍必须保留 report、call、called、peer manager 更新、连接验证器和 control-stream-only 信令的既有职责；任何需要改变这些职责的发现都必须退回 design 或 proposal，而不是在 implementation 中扩大删除范围。
 
 ## High-Level Outcomes
@@ -319,6 +336,8 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - 当底层控制通道仍健康时，control stream 的 open、listen、read、write、fin/reset 和 purpose 过滤能独立于现有 stream/datagram 数据平面工作；当底层控制通道断开或 tunnel close 时，所有派生 control stream 立即失败或 EOF。
 - SN report/call/called/response 或等价低频小消息通过 control stream 交互，不再为每次 SN 信令建立新的普通业务 stream；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时不得 fallback 到普通 stream，而应按现有 SN 失败路径移除当前 SN 连接或返回错误。
 - `TtpNode` 为需要同时监听入站 TTP channel 和按需主动连接目标的调用方提供单一 TTP 节点入口；`open_stream(...)` / `open_control_stream(...)` 在没有匹配 tunnel 时会主动建链并 attach，已有匹配 tunnel 时继续复用。
+- `TtpClient` 能删除不再需要保持连接的 server target；删除后 maintain loop 不再对该 target 自动建链或重连，仍保留的 server target 继续按原有保持连接语义运行。
+- `TtpClient` 能释放非保持连接 target 的空闲 cached tunnel；当该 tunnel 没有 active stream、control stream、datagram 或 pending open 且超过 design 定义的 idle 阈值后，本地缓存不再无限期持有该 tunnel。
 - 所有原 `unbounded_channel` 队列均具备容量上限，默认从顶层配置取得对应位置的 `1024`；外部调用方可以按队列类别或位置独立覆盖容量，不需要为未覆盖位置重复填写默认值；底层组件只消费对应位置已解析容量，并在队列满载时按设计定义的背压、拒绝、关闭或错误路径收敛。
 - `ChannelCapacityConfig` 后续清理完成后，stack 顶层不再暴露容量结构、getter 或 setter；默认调用方仍无需设置容量即可启动，保留队列继续以 `1024` 为固定容量上限收敛满载路径。
 - 多 PN server 部署下，`p2p-frame` 能按上层指定的 PN server 建立或复用 relay tunnel，并通过该 PN server 与分配在该 PN server 上的 target 用户建立 proxy tunnel；如果指定错误 PN server，应返回失败而不是自动查询或切换。
@@ -361,6 +380,9 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - 若 SN 信令迁移到 control stream 后仍残留普通 stream fallback，可能导致控制面和数据面语义混杂，并重新引入每次小消息建立真实 stream 的开销；若控制通道不可用，应以明确失败暴露，而不是隐式降级。
 - 若 `TtpNode` 主动建链与现有 `TtpClient` / `TtpServer` tunnel cache、runtime attach 或 target 匹配规则不一致，可能出现重复建链、复用错误 tunnel、control stream 打到错误 remote，或旧 `TtpServer` 行为被意外改变。
 - 若 `TtpNode::open_control_stream(...)` 在 tunnel 建立和 control stream 打开之间没有清晰错误传播，调用方可能无法区分 tunnel 建立失败、attach 失败和远端未监听 control purpose。
+- 若保持连接 server target 删除只修改列表不处理 maintain loop 快照或并发，旧 target 可能在下一轮 maintain 中被重新建链。
+- 若 TTP 非保持连接 idle release 缺少 active channel 计数，可能误释放仍在使用的 tunnel，或因计数无法归零导致缓存泄漏继续存在。
+- 若 TTP idle release 试图关闭底层 tunnel 而不是先限定为本地缓存生命周期，可能影响其他 owner 或底层 tunnel manager 对同一 tunnel 的使用。
 - 若 SN server 连接验证器看到的客户端身份或证书不是由已认证连接元数据规范化后的值，可能允许客户端通过报文字段伪造身份绕过准入；验证上下文必须只暴露 `client_id` 与该客户端证书，默认 allow-all 必须是显式实现，避免部署方误以为已经启用限制策略。
 - 移除公共 `accept_*` 会影响所有测试替身和下游 crate；若迁移遗漏，可能形成编译回归或旧语义在某个 manager 中被私有队列重新暴露。
 - unbounded channel 改为 bounded channel 会把原先隐藏的积压转化为背压或错误；如果容量传递遗漏、满载语义不一致，可能导致 accept/open 等待路径卡住、过早关闭或错误传播不清。
@@ -419,6 +441,9 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - `TtpNode::open_stream(...)` 在没有匹配可用 tunnel 时必须主动建立 tunnel、attach 到 `TtpRuntime`，并成功打开指定 purpose 的 stream；已有匹配可用 tunnel 时必须复用，不得重复建链。
 - `TtpNode::open_control_stream(...)` 在没有匹配可用 tunnel 时必须主动建立 tunnel、attach 到 `TtpRuntime`，并成功打开指定 purpose 的 control stream；建链失败、attach 失败或 control stream open 失败必须以明确错误返回。
 - 验收必须确认新增 `TtpNode` 不改变 `Tunnel` / `TunnelNetwork` trait、TCP/QUIC/PN/TTP wire、vport/purpose 编码、身份校验或既有 `TtpServer` lookup-only 行为，除非后续 design 明确批准兼容别名或共享实现。
+- `TtpClient` 删除保持连接 server target 后，maintain loop 不得再为该 target 自动重建 tunnel；重复删除必须幂等，删除一个 target 不得影响其他仍保持 target。
+- 非保持连接 target 的 cached tunnel 在无 active stream/control stream/datagram/pending open 且超过 design 定义的 idle 阈值后必须从 `TtpClient` 本地缓存释放；active 或 pending channel 存在时不得释放。
+- 保持连接 target 的 tunnel 不得被非保持连接 idle release 清理；验收必须确认本变更不改变 TTP wire、公共 `Tunnel` / `TunnelNetwork` trait 或既有 `TtpServer` lookup-only 行为。
 
 ## Proposal Items
 | proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
@@ -436,6 +461,7 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 | P-SN-CONTRACT-CLEANUP-1 | remove_sn_service_contract_server | 移除 `SnServiceContractServer` 相关服务合约/回执生产路径，包括服务侧生产代码、公开导出、构造装配、后台任务、仅服务于该方向的存储/统计路径，以及 `client/contract.rs` / `service/receipt.rs` 等等价模块；保留 `sn/protocol` receipt wire 兼容结构、SN 基础 report/call/called、连接验证器和 control-stream-only 信令。 | 不删除 SN server/client 基础能力、不改变 SN command 线协议、不改变 `SnCallResp` 语义、不改变 peer manager、endpoint 分类、连接验证器或 control stream 信令选择；不引入新的计费、合约评估、配额或持久化账本替代方案；不在相邻模块保留旧 contract server 兼容旁路。 | schema/admission 能以 `remove_sn_service_contract_server` 建立后续准入；design/testing 需要明确删除路径、公开 API 影响、下游启动路径适配和验证命令；implementation 后代码搜索确认服务侧生产代码和公开导出不再引用 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs` 或等价 contract/receipt 装配逻辑，且 SN report/call/called、连接验证器和 control-stream-only 信令对应 unit/compile 验证仍通过。 |
 | P-PN-MULTI-SERVER-ASSIGNED-TARGET-1 | pn_multi_server_assigned_target | 支持多 PN server 部署下由上层指定目标 PN server 建立 proxy tunnel；每个用户到自身 assigned PN server 的保持连接、断线重连、分配和目录查询由库使用者负责；`PnServer` 默认 `PnConnectionValidator` 为显式 allow-all，显式 assigned target validator / policy 路径限制本 server 可作为新建 proxy tunnel target 的用户。 | 不做库内 `peer_id -> PN` 全局目录、不自动发现或切换 PN server、不做用户迁移/重平衡/多副本在线策略、不做 PN server 间目录同步、不做 `A -> PN-A -> PN-B -> B` 跨 PN 二跳业务 bridge；不改变 PN wire 协议、TLS-over-proxy、统计限速口径；不允许多 PN 新路径依赖默认 allow-all 掩盖错误 PN；不删除 `PnServer::new(...)` 默认 allow-all 兼容路径。 | schema/admission 能以 `pn_multi_server_assigned_target` 建立后续准入；design/testing 需要覆盖默认 `PnServer::new(...)` allow-all 兼容、显式 assigned target 策略下上层指定正确 PN 成功、指定错误 PN 在打开目标侧 stream 前失败且不自动切换、未指定目标 PN server 时按配置/参数错误失败、统计/限速保持本 PN server 本地视图且不要求跨 PN 聚合。 |
 | P-TTP-NODE-ACTIVE-OPEN-1 | ttp_node_active_open | 新增 `TtpNode`，提供与 `TtpServer` 同类的监听和连接接口；`open_stream(...)` 与 `open_control_stream(...)` 对匹配 `TtpTarget` 先复用已有可用 tunnel，缺失时主动通过现有 network 建立 tunnel、attach 到 `TtpRuntime`，再打开 stream/control stream。 | 不改变 `Tunnel` / `TunnelNetwork` trait、TCP/QUIC/PN/TTP 线协议、vport/purpose 编码、身份校验或 tunnel publish 规则；不新增库内 target directory 或自动路由系统；不绕过 `NetManager` / `TunnelNetwork`；不静默改变现有 `TtpServer` lookup-only 行为，除非 design 明确批准兼容重构；`open_datagram(...)` 的缺失 tunnel 行为必须由 design 单独明确。 | schema/admission 能以 `ttp_node_active_open` 建立后续准入；design/testing 需要覆盖 `TtpNode` 接口边界、tunnel cache/target match 复用、缺失 tunnel 时的 active open、runtime attach、`open_stream` / `open_control_stream` 错误传播、`open_datagram` 明确边界、以及代码审查确认 wire/trait/TtpServer 既有行为不被未授权改变。 |
+| P-TTP-CLIENT-CONNECTION-LIFECYCLE-1 | ttp_client_connection_lifecycle | `TtpClient` 支持删除保持连接的 server target，删除后 maintain loop 不再自动重建该 target；非保持连接 target 的 cached tunnel 在无 active stream/control stream/datagram/pending open 且超过 idle 阈值后释放本地缓存。 | 不改变 `Tunnel` / `TunnelNetwork` trait、TCP/QUIC/PN/TTP 线协议、vport/purpose 编码、身份校验、tunnel publish 规则或 `TtpServer` lookup-only 语义；不把 target 删除扩展为删除 peer 或全局关闭所有同 peer tunnel；idle release 不得强制中断 active channel，且不得作用于仍在 maintained target 集合中的 server target。 | schema/admission 能以 `ttp_client_connection_lifecycle` 建立后续准入；design/testing 需要覆盖 maintained target add/remove 幂等、删除后 maintain loop 不重连、其他 maintained target 不受影响、非 maintained tunnel idle release、active/pending channel 阻止 release、保持 target 不被 idle release 清理、以及代码审查确认 wire/trait/TtpServer 行为不变。 |
 | P-BOUNDED-CHANNELS-1 | bounded_channel_capacity_config | `p2p-frame` 内部所有 `unbounded_channel` 队列改为 bounded channel；容量由顶层配置按队列类别或位置独立向下传递，每个容量项默认值为 `1024`，用户默认不需要设置，外部可只覆盖某一位置容量，底层组件不定义默认值。 | 不改变 TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不在底层散落硬编码默认容量；不强制所有队列共用一个容量配置；不通过额外 unbounded buffer 绕开容量限制。 | schema/admission 能以 `bounded_channel_capacity_config` 建立后续准入；unit 或编译覆盖默认用户不设置时各容量默认 `1024`、单个位置自定义容量只影响对应底层构造路径；代码搜索确认生产路径不再存在 `mpsc::unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；满载路径具备按设计定义的错误、关闭或背压覆盖。 |
 | P-STACK-CHANNEL-CAPACITY-REMOVAL-1 | stack_channel_capacity_config_removal | 删除 `ChannelCapacityConfig`、`P2pConfig` / `P2pStackConfig` 的 channel capacity getter/setter、`P2pEnv` 的容量快照和继承逻辑；`NetManager` 不再保存或暴露 channel capacity；`TtpRuntime` 不再接收无效 channel capacity 参数，`TtpClient` / `TtpServer` 不再为了创建 TTP runtime 从 `NetManager` 读取容量；`PnClient` 不再提供 channel capacity 显式构造入口；保留 bounded channel，内部使用固定 `DEFAULT_CHANNEL_CAPACITY == 1024`。 | 不改变已有 bounded channel 类型、满载错误语义、TCP/QUIC/PN/TTP 线协议、身份校验、tunnel publish 规则或业务 payload 格式；不新增替代公开容量配置 API；不把容量清理扩展为移除所有底层显式构造参数。 | schema/admission 能以 `stack_channel_capacity_config_removal` 建立后续准入；编译或 unit 覆盖 `stack.rs` 不再导出 `ChannelCapacityConfig` 或 stack 层容量 getter/setter，`NetManager::new(...)` / `new_with_incoming_tunnel_validator(...)`、`TtpRuntime::new()` 和 `PnClient::new*` 不再要求容量参数；代码搜索确认生产路径仍无 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`；unit 或 compile 覆盖默认 stack 构造继续使用固定容量启动相关 bounded queue。 |
 
@@ -460,8 +486,10 @@ approved_content_sha256: a864882d69402b331147f2abe219d06825a7d42a3ab70cc74df1177
 - Testing 必须补齐默认 `PnServer::new(...)` allow-all 兼容、显式 assigned target 策略下正确 PN 成功、错误 PN 失败且不自动切换、未指定目标 PN server 时失败、以及不做跨 PN 二跳 bridge 或库内目录查询的验证映射；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `pn_multi_server_assigned_target` 通过后，才能修改生产代码。
 - 本次 proposal 已按用户要求新增 `ttp_node_active_open`，当前 proposal 回到 draft；用户审批后，Design 必须补齐 `TtpNode` 与 `TtpServer` / `TtpClient` 的关系、主动建链 helper 复用、target 匹配、runtime attach、错误传播和 `open_datagram(...)` 边界。
 - Testing 必须补齐 `TtpNode::open_stream(...)` / `open_control_stream(...)` 在 tunnel 缺失时主动建链、已有 tunnel 复用、失效 tunnel 清理、attach 失败和 open 失败传播，以及不改变 wire/trait/既有 `TtpServer` 行为的验证；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `ttp_node_active_open` 通过后，才能修改生产代码。
+- 本次 proposal 已按用户要求新增 `ttp_client_connection_lifecycle`，当前 proposal 回到 draft；用户审批后，Design 必须补齐 `TtpClient` 保持连接 target 删除 API、maintain loop 并发语义、非保持 target 的 tunnel idle timeout 默认值/配置边界、active/pending channel lease 计数、release 时是否主动 close 底层 tunnel、以及与 `TtpNode` / `TtpServer` 共享 helper 的边界。
+- Testing 必须补齐保持 target add/remove 幂等、删除后不重连、删除一个 target 不影响其他 target、非保持 target idle release、active stream/control stream/datagram/pending open 阻止 release、保持 target 不被 idle release 清理、以及不改变 wire/trait/既有 `TtpServer` 行为的验证；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `ttp_client_connection_lifecycle` 通过后，才能修改生产代码。
 
 ## Approval Record
 - approver: user
-- approval_date: 2026-06-18T16:15:42+08:00
-- user_statement: 确认，自动处理后续步骤
+- approval_date: 2026-06-25T11:57:50+08:00
+- user_statement: 确定，自动处理后续步骤

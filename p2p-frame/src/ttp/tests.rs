@@ -574,6 +574,135 @@ async fn client_open_control_stream_with_id_target_reuses_ttp_tunnel() {
 }
 
 #[tokio::test]
+async fn ttp_client_remove_server_deletes_exact_maintained_target() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24051".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24052".parse().unwrap()));
+    let local = make_identity(41, "local-remove-client", local_ep);
+    let remote = make_identity(42, "remote-remove-server", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let client = TtpClient::new(local, manager);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    client.connect_server(target.clone()).await.unwrap();
+    assert_eq!(
+        client.configured_server_id().unwrap(),
+        Some(target.remote_id.clone())
+    );
+    client.remove_server(&target).unwrap();
+    client.remove_server(&target).unwrap();
+
+    assert_eq!(client.configured_server_id().unwrap(), None);
+    assert_eq!(network.create_count(), 1);
+}
+
+#[tokio::test]
+async fn ttp_client_releases_non_maintained_idle_tunnel_cache() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24061".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24062".parse().unwrap()));
+    let local = make_identity(43, "local-idle-client", local_ep);
+    let remote = make_identity(44, "remote-idle-server", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let client = TtpClient::new_with_idle_timeout_for_test(
+        local,
+        manager,
+        Duration::from_millis(20),
+    );
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    let (_meta, read, write) = client.open_stream(&target, purpose_of(1051)).await.unwrap();
+    drop((read, write));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    client.release_idle_tunnels_for_test();
+    let (_meta, _read, _write) = client.open_stream(&target, purpose_of(1052)).await.unwrap();
+
+    assert_eq!(network.create_count(), 2);
+    assert_eq!(tunnel.opened_stream_vports(), vec![1051, 1052]);
+}
+
+#[tokio::test]
+async fn ttp_client_active_stream_lease_blocks_idle_release() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24071".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24072".parse().unwrap()));
+    let local = make_identity(45, "local-active-client", local_ep);
+    let remote = make_identity(46, "remote-active-server", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let client = TtpClient::new_with_idle_timeout_for_test(
+        local,
+        manager,
+        Duration::from_millis(20),
+    );
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    let (_meta, read, write) = client.open_stream(&target, purpose_of(1061)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    client.release_idle_tunnels_for_test();
+    assert_eq!(network.create_count(), 1);
+
+    drop((read, write));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    client.release_idle_tunnels_for_test();
+    let (_meta, _read, _write) = client.open_stream(&target, purpose_of(1062)).await.unwrap();
+
+    assert_eq!(network.create_count(), 2);
+    assert_eq!(tunnel.opened_stream_vports(), vec![1061, 1062]);
+}
+
+#[tokio::test]
+async fn ttp_client_maintained_target_is_not_idle_released() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24081".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24082".parse().unwrap()));
+    let local = make_identity(47, "local-maintained-client", local_ep);
+    let remote = make_identity(48, "remote-maintained-server", remote_ep);
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    network.set_created_tunnel(tunnel.clone());
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    let client = TtpClient::new_with_idle_timeout_for_test(
+        local,
+        manager,
+        Duration::from_millis(20),
+    );
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    client.connect_server(target.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    client.release_idle_tunnels_for_test();
+    let (_meta, _read, _write) = client.open_stream(&target, purpose_of(1071)).await.unwrap();
+
+    assert_eq!(network.create_count(), 1);
+    assert_eq!(tunnel.opened_stream_vports(), vec![1071]);
+}
+
+#[tokio::test]
 async fn node_open_stream_and_control_stream_create_missing_tunnel() {
     let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24021".parse().unwrap()));
     let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24022".parse().unwrap()));
