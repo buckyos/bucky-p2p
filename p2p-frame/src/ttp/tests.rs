@@ -5,7 +5,7 @@ use crate::executor::Executor;
 use crate::networks::{
     IncomingTunnelCallback, NetManager, NetManagerRef, Tunnel, TunnelDatagramRead,
     TunnelDatagramWrite, TunnelForm, TunnelListenerInfo, TunnelNetwork, TunnelNetworkRef,
-    TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite, ValidateResult,
 };
 use crate::p2p_identity::{
     EncodedP2pIdentity, P2pId, P2pIdentity, P2pIdentityCertRef, P2pIdentityRef, P2pSignature,
@@ -17,12 +17,85 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, split};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, sleep, timeout};
 
 const TEST_CHANNEL_CAPACITY: usize = 8;
 
 fn purpose_of(value: u16) -> crate::networks::TunnelPurpose {
     crate::networks::TunnelPurpose::from_value(&value).unwrap()
+}
+
+enum TestTtpIncomingTunnelValidatorMode {
+    Accept,
+    Reject(&'static str),
+    Error,
+}
+
+struct TestTtpIncomingTunnelValidator {
+    mode: TestTtpIncomingTunnelValidatorMode,
+    contexts: Mutex<Vec<TtpIncomingTunnelValidateContext>>,
+}
+
+impl TestTtpIncomingTunnelValidator {
+    fn new(mode: TestTtpIncomingTunnelValidatorMode) -> Arc<Self> {
+        Arc::new(Self {
+            mode,
+            contexts: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn contexts(&self) -> Vec<TtpIncomingTunnelValidateContext> {
+        self.contexts.lock().unwrap().clone()
+    }
+
+    fn context_count(&self) -> usize {
+        self.contexts.lock().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl TtpIncomingTunnelValidator for TestTtpIncomingTunnelValidator {
+    async fn validate(&self, ctx: &TtpIncomingTunnelValidateContext) -> P2pResult<ValidateResult> {
+        self.contexts.lock().unwrap().push(ctx.clone());
+        match self.mode {
+            TestTtpIncomingTunnelValidatorMode::Accept => Ok(ValidateResult::Accept),
+            TestTtpIncomingTunnelValidatorMode::Reject(reason) => {
+                Ok(ValidateResult::Reject(reason.to_owned()))
+            }
+            TestTtpIncomingTunnelValidatorMode::Error => Err(p2p_err!(
+                P2pErrorCode::ErrorState,
+                "test ttp incoming tunnel validator failed"
+            )),
+        }
+    }
+}
+
+async fn wait_for_validator_call(validator: &TestTtpIncomingTunnelValidator) {
+    for _ in 0..20 {
+        if validator.context_count() > 0 {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    panic!("validator was not called");
+}
+
+async fn wait_for_server_open_stream(
+    server: &TtpServer,
+    target: &TtpTarget,
+    vport: u16,
+) -> P2pResult<TtpIncomingStream> {
+    let mut last_err = None;
+    for _ in 0..20 {
+        match server.open_stream(target, purpose_of(vport)).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => {
+                last_err = Some(err);
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| p2p_err!(P2pErrorCode::NotFound, "stream did not open")))
 }
 
 struct DummyIdentity {
@@ -118,6 +191,7 @@ struct FakeTunnel {
     opened_stream_vports: Mutex<Vec<u16>>,
     opened_control_stream_vports: Mutex<Vec<u16>>,
     opened_datagram_vports: Mutex<Vec<u16>>,
+    close_count: AtomicUsize,
 }
 
 impl FakeTunnel {
@@ -149,6 +223,7 @@ impl FakeTunnel {
             opened_stream_vports: Mutex::new(Vec::new()),
             opened_control_stream_vports: Mutex::new(Vec::new()),
             opened_datagram_vports: Mutex::new(Vec::new()),
+            close_count: AtomicUsize::new(0),
         })
     }
 
@@ -238,6 +313,10 @@ impl FakeTunnel {
     fn opened_datagram_vports(&self) -> Vec<u16> {
         self.opened_datagram_vports.lock().unwrap().clone()
     }
+
+    fn close_count(&self) -> usize {
+        self.close_count.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
@@ -287,6 +366,7 @@ impl Tunnel for FakeTunnel {
     }
 
     fn close(&self) -> P2pResult<()> {
+        self.close_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -613,11 +693,8 @@ async fn ttp_client_releases_non_maintained_idle_tunnel_cache() {
     let network = FakeTunnelNetwork::new(Protocol::Tcp);
     network.set_created_tunnel(tunnel.clone());
     let manager = make_manager(network.clone() as TunnelNetworkRef);
-    let client = TtpClient::new_with_idle_timeout_for_test(
-        local,
-        manager,
-        Duration::from_millis(20),
-    );
+    let client =
+        TtpClient::new_with_idle_timeout_for_test(local, manager, Duration::from_millis(20));
     let target = TtpTarget {
         local_ep: None,
         remote_ep,
@@ -645,11 +722,8 @@ async fn ttp_client_active_stream_lease_blocks_idle_release() {
     let network = FakeTunnelNetwork::new(Protocol::Tcp);
     network.set_created_tunnel(tunnel.clone());
     let manager = make_manager(network.clone() as TunnelNetworkRef);
-    let client = TtpClient::new_with_idle_timeout_for_test(
-        local,
-        manager,
-        Duration::from_millis(20),
-    );
+    let client =
+        TtpClient::new_with_idle_timeout_for_test(local, manager, Duration::from_millis(20));
     let target = TtpTarget {
         local_ep: None,
         remote_ep,
@@ -681,11 +755,8 @@ async fn ttp_client_maintained_target_is_not_idle_released() {
     let network = FakeTunnelNetwork::new(Protocol::Tcp);
     network.set_created_tunnel(tunnel.clone());
     let manager = make_manager(network.clone() as TunnelNetworkRef);
-    let client = TtpClient::new_with_idle_timeout_for_test(
-        local,
-        manager,
-        Duration::from_millis(20),
-    );
+    let client =
+        TtpClient::new_with_idle_timeout_for_test(local, manager, Duration::from_millis(20));
     let target = TtpTarget {
         local_ep: None,
         remote_ep,
@@ -905,6 +976,150 @@ async fn server_listener_receives_incoming_control_stream() {
 
     assert_eq!(meta.remote_id, remote.get_id());
     assert_eq!(meta.purpose, purpose_of(2011));
+}
+
+#[tokio::test]
+async fn server_default_validator_accepts_incoming_tunnel() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24121".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24122".parse().unwrap()));
+    let local = make_identity(35, "local-server-default-validator", local_ep);
+    let remote = make_identity(36, "remote-server-default-validator", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let server = TtpServer::new(local.clone(), manager).unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    network.push_tunnel(tunnel.clone()).unwrap();
+
+    let (meta, _read, _write) = wait_for_server_open_stream(&server, &target, 4021)
+        .await
+        .unwrap();
+
+    assert_eq!(meta.remote_id, remote.get_id());
+    assert_eq!(meta.purpose, purpose_of(4021));
+    assert_eq!(tunnel.opened_stream_vports(), vec![4021]);
+    assert_eq!(tunnel.close_count(), 0);
+}
+
+#[tokio::test]
+async fn server_accept_validator_records_context_and_accepts_incoming_tunnel() {
+    let local_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24131".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Quic, "127.0.0.1:24132".parse().unwrap()));
+    let local = make_identity(37, "local-server-accept-validator", local_ep);
+    let remote = make_identity(38, "remote-server-accept-validator", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Quic);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let validator = TestTtpIncomingTunnelValidator::new(TestTtpIncomingTunnelValidatorMode::Accept);
+    let server =
+        TtpServer::new_with_incoming_tunnel_validator(local.clone(), manager, validator.clone())
+            .unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    network.push_tunnel(tunnel.clone()).unwrap();
+    wait_for_validator_call(&validator).await;
+    let (meta, _read, _write) = wait_for_server_open_stream(&server, &target, 4022)
+        .await
+        .unwrap();
+
+    let contexts = validator.contexts();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].local_id, local.get_id());
+    assert_eq!(contexts[0].remote_id, remote.get_id());
+    assert_eq!(contexts[0].protocol, Protocol::Quic);
+    assert_eq!(contexts[0].tunnel_id, tunnel.tunnel_id());
+    assert_eq!(contexts[0].candidate_id, tunnel.candidate_id());
+    assert_eq!(contexts[0].local_ep, Some(local_ep));
+    assert_eq!(contexts[0].remote_ep, Some(remote_ep));
+    assert_eq!(meta.remote_id, remote.get_id());
+    assert_eq!(tunnel.opened_stream_vports(), vec![4022]);
+    assert_eq!(tunnel.close_count(), 0);
+}
+
+#[tokio::test]
+async fn server_reject_validator_blocks_attach_and_cache() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24141".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24142".parse().unwrap()));
+    let local = make_identity(39, "local-server-reject-validator", local_ep);
+    let remote = make_identity(40, "remote-server-reject-validator", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let validator =
+        TestTtpIncomingTunnelValidator::new(TestTtpIncomingTunnelValidatorMode::Reject("blocked"));
+    let server =
+        TtpServer::new_with_incoming_tunnel_validator(local.clone(), manager, validator.clone())
+            .unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    network.push_tunnel(tunnel.clone()).unwrap();
+    wait_for_validator_call(&validator).await;
+
+    let err = server
+        .open_stream(&target, purpose_of(4023))
+        .await
+        .err()
+        .unwrap();
+    let contexts = validator.contexts();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].remote_id, remote.get_id());
+    assert_eq!(err.code(), P2pErrorCode::NotFound);
+    assert!(tunnel.opened_stream_vports().is_empty());
+    assert_eq!(tunnel.close_count(), 1);
+}
+
+#[tokio::test]
+async fn server_validator_error_blocks_attach_and_cache() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24151".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24152".parse().unwrap()));
+    let local = make_identity(41, "local-server-error-validator", local_ep);
+    let remote = make_identity(42, "remote-server-error-validator", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let validator = TestTtpIncomingTunnelValidator::new(TestTtpIncomingTunnelValidatorMode::Error);
+    let server =
+        TtpServer::new_with_incoming_tunnel_validator(local.clone(), manager, validator.clone())
+            .unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    network.push_tunnel(tunnel.clone()).unwrap();
+    wait_for_validator_call(&validator).await;
+
+    let err = server
+        .open_stream(&target, purpose_of(4024))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(validator.context_count(), 1);
+    assert_eq!(err.code(), P2pErrorCode::NotFound);
+    assert!(tunnel.opened_stream_vports().is_empty());
+    assert_eq!(tunnel.close_count(), 1);
 }
 
 #[tokio::test]

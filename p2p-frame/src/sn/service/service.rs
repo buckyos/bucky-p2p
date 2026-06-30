@@ -822,7 +822,9 @@ impl SnService {
             let peer_desc = self.cert_factory.create(peer_info).unwrap();
             Self::extend_unique_endpoints(&mut reported_eps, peer_desc.endpoints().as_slice());
         }
-        let remote_ep = self.get_peer_wan_classied_ep(peer_id, reported_eps.as_slice()).await;
+        let remote_ep = self
+            .get_peer_wan_classied_ep(peer_id, reported_eps.as_slice())
+            .await;
 
         if let Some(from_peer_id) = report_sn.from_peer_id.clone() {
             self.peer_mgr.add_or_update_peer(

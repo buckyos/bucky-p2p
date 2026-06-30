@@ -1,9 +1,11 @@
+use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
     NetManagerRef, TunnelDatagramWrite, TunnelPurpose, TunnelRef, TunnelStreamRead,
-    TunnelStreamWrite,
+    TunnelStreamWrite, ValidateResult,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
+use crate::types::{TunnelCandidateId, TunnelId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -20,20 +22,65 @@ pub struct TtpServer {
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
     tunnels: Mutex<HashMap<P2pId, TunnelRef>>,
+    incoming_tunnel_validator: TtpIncomingTunnelValidatorRef,
 }
 
 pub type TtpServerRef = Arc<TtpServer>;
+
+#[derive(Debug, Clone)]
+pub struct TtpIncomingTunnelValidateContext {
+    pub local_id: P2pId,
+    pub remote_id: P2pId,
+    pub protocol: Protocol,
+    pub tunnel_id: TunnelId,
+    pub candidate_id: TunnelCandidateId,
+    pub local_ep: Option<Endpoint>,
+    pub remote_ep: Option<Endpoint>,
+}
+
+#[async_trait::async_trait]
+pub trait TtpIncomingTunnelValidator: Send + Sync + 'static {
+    async fn validate(&self, ctx: &TtpIncomingTunnelValidateContext) -> P2pResult<ValidateResult>;
+}
+
+pub type TtpIncomingTunnelValidatorRef = Arc<dyn TtpIncomingTunnelValidator>;
+
+pub struct AllowAllTtpIncomingTunnelValidator;
+
+#[async_trait::async_trait]
+impl TtpIncomingTunnelValidator for AllowAllTtpIncomingTunnelValidator {
+    async fn validate(&self, _ctx: &TtpIncomingTunnelValidateContext) -> P2pResult<ValidateResult> {
+        Ok(ValidateResult::Accept)
+    }
+}
+
+pub fn allow_all_ttp_incoming_tunnel_validator() -> TtpIncomingTunnelValidatorRef {
+    Arc::new(AllowAllTtpIncomingTunnelValidator)
+}
 
 impl TtpServer {
     pub fn new(
         local_identity: P2pIdentityRef,
         net_manager: NetManagerRef,
     ) -> P2pResult<TtpServerRef> {
+        Self::new_with_incoming_tunnel_validator(
+            local_identity,
+            net_manager,
+            allow_all_ttp_incoming_tunnel_validator(),
+        )
+    }
+
+    pub fn new_with_incoming_tunnel_validator(
+        local_identity: P2pIdentityRef,
+        net_manager: NetManagerRef,
+        incoming_tunnel_validator: TtpIncomingTunnelValidatorRef,
+    ) -> P2pResult<TtpServerRef> {
         let server = Arc::new(Self {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
             tunnels: Mutex::new(HashMap::new()),
+            incoming_tunnel_validator,
         });
         server.register_accept_callback()?;
         Ok(server)
@@ -56,6 +103,55 @@ impl TtpServer {
                 };
 
                 Box::pin(async move {
+                    let context = TtpIncomingTunnelValidateContext {
+                        local_id: tunnel.local_id(),
+                        remote_id: tunnel.remote_id(),
+                        protocol: tunnel.protocol(),
+                        tunnel_id: tunnel.tunnel_id(),
+                        candidate_id: tunnel.candidate_id(),
+                        local_ep: tunnel.local_ep(),
+                        remote_ep: tunnel.remote_ep(),
+                    };
+                    match server
+                        .incoming_tunnel_validator
+                        .validate(&context)
+                        .await
+                    {
+                        Ok(ValidateResult::Accept) => {}
+                        Ok(ValidateResult::Reject(reason)) => {
+                            log::warn!(
+                                "ttp server rejected incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} reason={}",
+                                context.local_id,
+                                context.remote_id,
+                                context.protocol,
+                                context.tunnel_id,
+                                context.candidate_id,
+                                reason
+                            );
+                            if let Err(err) = tunnel.close() {
+                                log::debug!("ttp close rejected incoming tunnel failed: {:?}", err);
+                            }
+                            return true;
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "ttp server incoming tunnel validator failed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} err={:?}",
+                                context.local_id,
+                                context.remote_id,
+                                context.protocol,
+                                context.tunnel_id,
+                                context.candidate_id,
+                                err
+                            );
+                            if let Err(close_err) = tunnel.close() {
+                                log::debug!(
+                                    "ttp close validator-failed incoming tunnel failed: {:?}",
+                                    close_err
+                                );
+                            }
+                            return true;
+                        }
+                    }
                     log::debug!(
                         "ttp server accepted incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
                         tunnel.local_id(),
