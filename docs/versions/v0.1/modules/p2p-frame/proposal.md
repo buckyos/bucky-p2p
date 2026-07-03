@@ -3,8 +3,8 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: user
-approved_at: 2026-06-30T17:07:35+08:00
-approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc9268ebf38912
+approved_at: 2026-07-03T18:13:20+08:00
+approved_content_sha256: e0b802b318c8465e2ea8cd088e4580c1073a8d521dc8ab8210790984817d322d
 ---
 
 # p2p-frame 提案
@@ -17,6 +17,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 本轮新增需求是为 `PnTunnel` 在 logical tunnel 打开时建立一条控制通道，使其具备与 `TcpTunnel` / `QuicTunnel` 同类的对端关闭感知能力；当对端关闭或控制通道断开时，本端不能继续误认为该 tunnel 可用，而必须让本地 `PnTunnel` 进入关闭或错误终态，并唤醒相关 open/accept 等待路径。
 - 本轮新增需求是优化单 SN 场景下的 NAT 打洞成功率：在不引入多 SN、不重写 SN/PN 协议、不取消 proxy 兜底的前提下，让 tunnel 建立流程能够使用更实时的候选端点、更适合 QUIC/UDP NAT 打洞的 direct/reverse 竞速窗口、更快的 proxy 脱代理重试，以及更细粒度的 endpoint 评分和刷新策略。本轮新增澄清是：QUIC listener 的同源 UDP punch 不再限定为 2-4 个短包，而是改为在单次 candidate intent 内按固定 50ms 间隔发送，默认持续到 1 秒截止；其中 active punch 从 `250ms` offset 才开始发送，reverse punch 必须立即开始发送，并继续受 SN 存在性、同源 socket 和单次连接开关约束。
 - 本轮新增需求是收敛 endpoint area 语义：`EndpointArea::Default` 不再表示 system default，而应重命名为 `ServerReflexive`，用于标识 SN 从连接来源观察到的节点外网地址；SN 观察地址只有与节点自己上报的地址相同时才能升级为 `Wan`，否则必须保持为 `ServerReflexive`，从而区分节点自声明公网地址与 SN 侧反射地址。
+- 本轮新增澄清是收窄 SN 服务端对 TCP tunnel 来源地址的使用：TCP 连接来源地址本身不需要作为 `ReportSnResp`、`SnQueryResp` 或 `SnCalled` 候选返回给客户端，也不需要作为 SN server 的 peer endpoint 状态保存；只有客户端上报 `map_ports` 时，SN server 可以临时使用 TCP 来源 IP 与对应映射端口构造 `Mapped` 外网候选。
 - 本轮新增需求是进一步收窄 QUIC NAT 打洞辅助的触发条件：同源 UDP punch 只应面向 `EndpointArea::ServerReflexive` 的 QUIC endpoint 发起，不再面向普通 `Lan`、`Wan`、`Mapped` 或仅凭公网 IP 判断的 endpoint 发起；同时，现有 QUIC tunnel 控制心跳发送间隔保持不变，但心跳超时阈值应调整为 30 秒，降低弱网或调度抖动下的误关闭概率。
 - 本轮新增需求是收紧 reverse tunnel 入站可见性语义：reverse incoming tunnel 只有命中本地正在等待的同 `(remote_id, tunnel_id)` reverse waiter 时才可被接收；如果没有 waiter，说明本地并未等待或已经放弃该 reverse 结果，必须直接关闭，不得作为普通 tunnel 向上发布。
 - 本轮新增需求是将 `p2p-frame/src/networks/**` 的 TCP 与 QUIC listener 实现基于 `sfo-reuseport` 重构：TCP listener 必须直接使用 `sfo_reuseport::TcpServer` 接收入站连接，QUIC listener 必须直接使用 `sfo_reuseport::QuicServer::serve_socket(...)` 取得每个 worker 的 `sfo_reuseport::UdpSocket`，并为每个 worker socket 创建一个 `quinn::Endpoint::new_with_abstract_socket(...)`；`ServerRuntime` 必须允许由外部显式设置，同时保持默认构造路径可用。
@@ -24,6 +25,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 本轮新增需求是调整通用 `Tunnel` 的 stream/datagram 入站 channel 暴露模型：`Tunnel` trait 不再提供 `accept_stream()` 与 `accept_datagram()` 轮询式接口；`listen_stream(...)` 与 `listen_datagram(...)` 必须由调用方传入接收新 stream/datagram channel 的异步回调函数，Tunnel 内部在对应 listener 或 `sfo-reuseport` worker runtime 的入站处理路径中监听新 channel 并触发回调。
 - 本轮新增需求是为通用 `Tunnel` 提供低频外部控制数据通道能力：调用方可通过 `open_control_stream(...)` / `listen_control_stream(...)` 在现有 tunnel 控制命令通道上复用一组内部多路复用的 virtual control stream；具体实现必须作为 `Tunnel` 内部共享模块，不向外暴露 `control_stream` runtime、frame 或子协议类型。现有 TCP/QUIC/PN tunnel 控制命令只新增一个 `Data` 命令承载内部 control stream frame，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 必须断开。
 - 本轮新增需求是将 SN 低频信令通信迁移到 `Tunnel` control stream：SN report、call、called、响应或等价小消息不得为了每次交互都新建普通业务 `open_stream()`；在已有 tunnel 控制通道健康时，应复用 `open_control_stream(...)` / `listen_control_stream(...)` 承载 SN 小数据通信，以减少真实 stream 建立开销并保持 SN 信令属于控制面。
+- 本轮新增需求是收紧 SN 客户端连接同一 SN 服务端时的多协议候选选择：当同一 SN 同时存在 QUIC 与 TCP endpoint 且本地也具备对应 listener 时，客户端必须优先尝试 QUIC；只有 QUIC 建链或 `ReportSn` 失败后才尝试 TCP；QUIC 成功后不得继续为同一 SN 建立 TCP SN 命令连接或重复加入 active SN 列表。
 - 本轮新增需求是为 TTP 子模块增加 `TtpNode`：它对外提供与 `TtpServer` 同类的监听和连接接口，但在 `open_stream(...)` 与 `open_control_stream(...)` 中，如果本地没有匹配 `TtpTarget` 的可用 tunnel，必须主动通过现有 `NetManager` / `TunnelNetwork` 建立 tunnel、attach 到 `TtpRuntime`，再打开对应 stream；如果已有可用 tunnel，则继续复用现有 tunnel。
 - 本轮新增需求是为 `TtpServer` 接收新的 incoming tunnel 增加使用者可控的验证逻辑：`TtpServer` 在收到 `NetManager` 投递的新 tunnel 后、调用 `TtpRuntime::attach_tunnel(...)` 和记入 server tunnel cache 之前，必须允许调用方通过显式 validator/policy 决定 accept 或 reject；默认构造路径必须保持兼容的 allow-all 行为。
 - 本轮新增需求是补齐 `TtpClient` 的连接生命周期管理：保持连接的 server target 集合必须支持删除，删除后对应 target 不再被 maintain loop 自动重建；非保持连接 target 创建或缓存的 tunnel 必须具备本地 idle release 机制，在无 active stream、control stream、datagram 或 pending open 使用且超过设计定义阈值后从 `TtpClient` 缓存释放，避免一次性普通连接无限占用本地 tunnel 缓存。
@@ -57,8 +59,9 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 为 `PnTunnel` 增加 tunnel 级控制通道：logical tunnel 打开时必须完成控制通道建立或等价的 ready 握手，后续 stream/datagram channel 不得在缺少控制面生命周期依据的情况下被认为属于可用 tunnel
 - 控制通道必须能让本端感知对端关闭、控制面读写失败或控制通道断开，并按普通 tunnel close 的本地效果关闭当前 `PnTunnel`
 - `PnTunnel` 控制通道关闭和 idle timeout 关闭必须共享同一关闭状态机，避免同一对象被重复关闭、重新打开，或在 close 后继续接收新的 channel
-- 单 SN 场景下的 NAT 打洞优化，包括 direct/reverse 统一短延迟竞速、`SnCall` 携带本次反连候选端点、proxy 后短窗口脱代理升级、endpoint 评分按协议隔离，以及 tunnel 建立前组合 SN 观察端点或本地映射候选
+- 单 SN 场景下的 NAT 打洞优化，包括 direct/reverse 统一短延迟竞速、`SnCall` 携带本次反连候选端点、proxy 后短窗口脱代理升级、endpoint 评分按协议隔离，以及 tunnel 建立前组合允许暴露的 SN 观察端点或本地映射候选
 - endpoint area 语义更新：将 `Default` 改名为 `ServerReflexive`，将 SN 观察到但未与节点自上报地址一致的外网地址标记为 `ServerReflexive`，只有一致时才标记为 `Wan`
+- SN 服务端 TCP 来源地址使用边界：TCP tunnel 来源 socket address 不作为普通候选 endpoint 返回给客户端，不写入 peer endpoint 状态；当客户端上报 `map_ports` 时，仅使用来源 IP 与映射端口构造 `Mapped` 候选
 - QUIC NAT punch 策略收窄：只有目标 endpoint 的 area 是 `ServerReflexive` 时，`TunnelManager` 才能为本次 QUIC candidate intent 开启同源 UDP punch
 - QUIC tunnel 控制心跳超时策略：保持现有心跳发送间隔不变，将失活判定超时调整为 30 秒
 - NAT 打洞优化必须优先覆盖 QUIC/UDP tunnel；TCP 直连仍可保留现有静态 WAN 或明确映射端口路径，但不得把 TCP 失败扩散为 QUIC/UDP 候选降权依据
@@ -84,6 +87,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 底层 tunnel 控制通道断开、decode 失败、write 失败、heartbeat timeout、收到 remote close、本地 close 或 tunnel 进入 closing/closed/error 时，所有基于该控制通道派生的 control stream 都必须断开，pending read/write/open 必须返回 EOF 或 `Interrupted` 类错误，后续 `open_control_stream` 必须立即失败。
 - control stream 是低频控制扩展，不得承载普通业务大流量，不得改变现有 `open_stream` / `listen_stream`、`open_datagram` / `listen_datagram` 行为、线协议载荷格式、TLS 身份校验、PN proxy 业务 channel 协议、vport/purpose 编解码或 tunnel publish 规则。
 - SN 低频信令必须作为 control stream 的目标使用场景：SN report/call/called/response 或等价小消息必须走 control stream；不得保留普通业务 stream fallback，控制通道不可用或远端未监听 SN purpose 时当前 SN 命令通道建立或发送应失败。
+- SN 客户端连接同一 SN 服务端时必须按协议候选优先级执行：QUIC candidate 在 TCP candidate 之前尝试；QUIC 建链或 `ReportSn` 成功后停止该 SN 的 TCP 尝试；只有 QUIC 建链或 `ReportSn` 失败时才进入 TCP fallback。
 - TTP 子模块必须新增 `TtpNode`，并提供与 `TtpServer` 同类的 `TtpPortListener` / `TtpConnector` 使用面；`TtpNode::open_stream(...)` 与 `TtpNode::open_control_stream(...)` 在未找到匹配 `TtpTarget` 的可用 tunnel 时必须主动建立 tunnel，而不是只返回 `NotFound`
 - `TtpNode` 主动建立 tunnel 必须复用现有 `NetManager` / `TunnelNetwork` 建链入口、`TtpRuntime::attach_tunnel(...)` 和既有 target 匹配规则；已有可用 tunnel 必须优先复用，失效 tunnel 必须清理后再重建
 - `TtpNode` 的主动建链只改变 TTP 封装层的 tunnel 获取策略，不改变 TCP/QUIC/PN/TTP 线协议、`Tunnel` / `TunnelNetwork` trait 签名、vport/purpose 编码、身份校验或 tunnel publish 规则
@@ -124,6 +128,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 把 SN server 连接验证器解释为认证协议、计费系统、跨 SN 策略同步、NAT 类型判断或最终连通性判定；本轮只定义 server 侧准入判断装配点和默认 allow-all 行为
 - 将 SN server 连接验证器上下文扩展为请求语义审计接口；上下文不得包含 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段
 - 引入完整 STUN/TURN 协议栈、外部第三方 NAT 探测服务，或把 PN relay 替换为 TURN 等价服务
+- 将 TCP tunnel 来源 socket address 本身返回给客户端、写入 SN server peer endpoint 状态，或把它作为 `ServerReflexive` / `Wan` 候选参与 query/called 扩展；TCP 来源地址只能为上报 `map_ports` 的客户端提供来源 IP
 - 将 NAT 打洞优化扩展成二层广播域、L2 bridge、虚拟局域网自动发现或跨网段服务发现能力
 - 为本轮同时设计双边 NAT 类型数据库、长期全局路径质量服务或跨进程持久化的连接质量画像
 - 保留 `Default` 作为 endpoint area 的公开语义，或继续用 `D` 作为 `Display`/`FromStr` 的 area 标记
@@ -167,7 +172,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - proxy tunnel 的端到端加密语义属于 `p2p-frame` 的 PN/tunnel 责任边界；`cyfs-p2p` 只能消费或配置该能力，不能在适配层静默定义另一套不受 relay 约束的 proxy 加密语义。
 - proxy tunnel 的 `datagram` 明文兼容语义同样属于 `p2p-frame` 的 PN/tunnel 责任边界；`cyfs-p2p` 不得通过适配层把 `stream` 加密模式扩展成 `datagram` 拒绝或隐式加密语义。
 - NAT 打洞优化属于 `p2p-frame/src/tunnel/**`、`p2p-frame/src/sn/client/**` 和必要的 SN 服务端候选转发边界；`cyfs-p2p` 可以暴露配置或消费行为，但不得在适配层分叉 tunnel 建立策略。
-- SN 服务端在本轮只承担单 SN 的观察端点、上报候选和 call/called 转发职责；它不负责判定最终连通性，也不负责跨多个 SN 汇总 NAT 类型。
+- SN 服务端在本轮只承担单 SN 的允许暴露候选、映射端口候选和 call/called 转发职责；TCP tunnel 来源地址只可作为构造 `Mapped` 候选的临时来源 IP，不作为服务端持久 endpoint 状态或直接返回候选。
 - SN server 连接验证器属于 `p2p-frame/src/sn/service/**` 的 SN server 准入责任边界；`sn-miner-rust` 可以消费默认 allow-all 行为或后续配置能力，但不得在启动二进制中重新定义核心 SN 准入语义。
 - SN 观察地址分类属于 `p2p-frame` 的 SN/tunnel endpoint 语义边界；下游适配层不得把 `ServerReflexive` 与节点自声明 `Wan` 静默合并成同一类地址。
 - `sfo-reuseport` 负责 listener socket 绑定、reuse-port worker 分发、`TcpServer`/`QuicServer` 服务注册、`serve_socket` worker socket 回调、`UdpSocket` Quinn helper 接口和 QUIC worker-shard CID 生成辅助；`p2p-frame` 负责把这些 socket/stream/packet 接入已有 tunnel、TLS、QUIC 和 NAT punch 语义，不得把 `p2p-frame` 的协议语义下沉到 `sfo-reuseport`。
@@ -196,11 +201,13 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
   - `TtpNode::open_datagram(...)` 是否也应在 tunnel 缺失时主动建链尚未由本需求明确；design 必须直接决定保持 `TtpServer` lookup-only 语义、复用 `TtpClient` active-open 语义，或给出另一个可验收边界。
   - `TtpServer` incoming tunnel validator 的上下文字段、同步/异步接口形态、拒绝错误码、是否需要主动 close 被拒 tunnel、以及默认构造与显式策略构造的 API 命名必须由 design 补齐。
   - TTP 非保持连接 idle release 的默认阈值、是否可配置、active stream/control stream/datagram 的 lease 计数实现、以及 release 时是否主动 close 底层 tunnel，都必须由 design 补齐。
+  - TCP 来源地址收窄后，design 必须明确 `ReportSnResp`、`SnQueryResp` 和 `SnCalled.reverse_endpoint_array` 的候选来源，避免仍通过命令 tunnel `remote()` 直接暴露 TCP 来源 socket address。
 - Decision needed before approval:
   - 用户需审批 `pn_multi_server_assigned_target` 作为新的 proposal item 后，design/testing/implementation 才能继续。
   - 用户需审批 `ttp_node_active_open` 作为新的 proposal item 后，design/testing/implementation 才能继续。
   - 用户需审批 `ttp_server_tunnel_accept_validator` 作为新的 proposal item 后，design/testing/implementation 才能继续。
   - 用户需审批 `ttp_client_connection_lifecycle` 作为新的 proposal item 后，design/testing/implementation 才能继续。
+  - 用户需审批 `sn_tcp_source_mapped_only` 作为新的 proposal item 后，design/testing/implementation 才能继续。
 
 ## Requirement Challenge
 | question | evaluation | risk_or_tradeoff | decision |
@@ -215,23 +222,28 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 | Is there a safer TTP server validation shape? | 更安全的第一版是显式 validator/policy 构造路径加默认 allow-all；validator 只接收设计批准的 tunnel 元数据，拒绝时不 attach、不 remember，并由 design 决定是否 close 底层 tunnel。 | 该方案不会阻止底层 network/tunnel manager 先发现 tunnel；如果需要更早的传输层拒绝，必须另起 proposal。 | chosen approach |
 | Is TTP client connection lifecycle management reasonable? | 合理；保持连接 server target 和一次性普通 target 的生命周期不同，当前只追加保持目标而没有删除入口，普通 target tunnel 也缺少本地释放边界。 | 如果直接在实现中临时删除或 close tunnel，可能误关仍有 active channel 的连接，或让 maintain loop 又重建已删除 target。 | add `ttp_client_connection_lifecycle`; require design to define delete semantics, idle timeout, active lease accounting, and release behavior |
 | Is there a safer first version for TTP idle release? | 更安全的第一版是只让 idle release 作用于非保持 target 的本地缓存，并在 active/pending channel 归零后触发；保持 target 继续由 maintain loop 管理。 | 该方案不会解决底层其他 owner 持有 tunnel 的全局释放问题，但能避免 TTP client 缓存无限增长且不扩大公共 tunnel API。 | chosen approach |
+| Should SN client try TCP when QUIC is also available? | 应作为 fallback，而不是并行或无序选择。QUIC 是 NAT 打洞和现有默认 SN 连接的优先路径；TCP 保留为 QUIC 失败后的可达性兜底。 | 若成功后继续尝试 TCP，会重复 `connect_server`、重复 control stream、重复 active SN 记录，并可能让后续 query/call 选择不稳定。 | add `sn_client_protocol_priority`; QUIC success stops TCP |
+| Is this a TTP lifecycle change or SN client policy change? | 主要是 SN client policy。`TtpClient::connect_server(...)` 的幂等登记和 tunnel cache 行为保持既有边界；SN client 负责避免同一 SN 在 QUIC 成功后继续发起 TCP fallback。 | 若把该需求下沉到 TTP target matching，可能改变所有 TTP 使用者的 local endpoint 匹配语义。 | keep change in `p2p-frame/src/sn/client/**` unless design proves a narrower helper is needed |
+| Should SN return the TCP connection source address to clients? | 不应直接返回。TCP source socket address 常是 NAT 临时端口或中间网络出口，直接作为候选返回会把不可复用或误导性地址暴露给客户端；它只适合提供来源 IP。 | 若完全丢弃来源 IP，则客户端显式上报 `map_ports` 时无法构造映射公网候选；若直接返回完整来源地址，则会污染 query/called 候选。 | add `sn_tcp_source_mapped_only`; use source IP only with reported `map_ports` |
+| Is scope ambiguous for non-TCP observed endpoints? | 本次用户要求明确指向 TCP 连接来源地址；不在 proposal 阶段重写 QUIC `ServerReflexive` 和 endpoint area 语义。 | 如果 design 把该要求泛化到所有协议，可能破坏已批准的 QUIC ServerReflexive NAT punch 条件。 | limit to TCP source endpoint return/storage; preserve endpoint area semantics |
 
 ## Large Module Submodule Decision
 | submodule | new_or_existing | responsibility | proposal_packet | reason |
 |-----------|-----------------|----------------|-----------------|--------|
 | pn | existing | PN client/server relay、assigned target 准入和 proxy tunnel 建链边界 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/pn/**` 责任，不需要创建新的直接 submodule packet。 |
 | ttp | existing | TTP listener/connector 封装、target tunnel 查找、runtime attach、server incoming tunnel 准入、主动建链节点和 client 本地连接生命周期 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/ttp/**` 责任，不需要创建新的直接 submodule packet。 |
+| sn | existing | SN report/query/call/called 候选生成、TCP 来源地址使用边界和映射端口候选构造 | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | 本需求属于既有 `p2p-frame/src/sn/**` 责任，不需要创建新的直接 submodule packet。 |
 
 ## Trigger Matrix
 | trigger_category | applies | evidence | required_checks | deferred_checks_and_reason |
 |------------------|---------|----------|-----------------|----------------------------|
-| contract/protocol | yes | `pn_multi_server_assigned_target` 约束 PN relay 建链、assigned target 准入和错误 PN 行为，但不改变 `ProxyOpenReq` / `ProxyOpenResp` wire；`ttp_node_active_open` 新增 TTP 封装 API 行为；`ttp_server_tunnel_accept_validator` 新增 TTP server 本地 incoming tunnel 准入行为；`ttp_client_connection_lifecycle` 新增 TTP client 本地 target/tunnel 生命周期行为，但不得改变 TCP/QUIC/PN/TTP wire 或 `Tunnel` trait。 | design must map PN protocol invariants and TTP server/node/client lifecycle boundaries; testing must cover correct PN success/wrong PN failure, TtpServer accept/reject/default allow-all, TtpNode active open, maintained target removal, and non-maintained idle release without wire changes. | owner: design/testing; risk: PN wire compatibility, TTP API drift, and TTP lifecycle race; acceptance impact: verify no wire protocol or public tunnel trait change. |
+| contract/protocol | yes | `pn_multi_server_assigned_target` 约束 PN relay 建链、assigned target 准入和错误 PN 行为，但不改变 `ProxyOpenReq` / `ProxyOpenResp` wire；`ttp_node_active_open` 新增 TTP 封装 API 行为；`ttp_server_tunnel_accept_validator` 新增 TTP server 本地 incoming tunnel 准入行为；`ttp_client_connection_lifecycle` 新增 TTP client 本地 target/tunnel 生命周期行为；`sn_client_protocol_priority` 新增 SN 客户端多协议候选选择规则；`sn_tcp_source_mapped_only` 收窄 SN 返回的 TCP 来源候选集合，但不得改变 SN command wire、control-stream-only 信令、TCP/QUIC/PN/TTP wire 或 `Tunnel` trait。 | design must map PN protocol invariants, TTP server/node/client lifecycle boundaries, SN client QUIC-first/TCP-fallback ordering, and SN TCP source candidate filtering; testing must cover correct PN success/wrong PN failure, TtpServer accept/reject/default allow-all, TtpNode active open, maintained target removal, non-maintained idle release, SN client QUIC success stopping TCP fallback, and TCP source address not directly returned. | owner: design/testing; risk: PN wire compatibility, TTP API drift, TTP lifecycle race, duplicate SN active connections, and stale TCP source candidates leaking to clients; acceptance impact: verify no wire protocol or public tunnel trait change and verify only mapped candidates use TCP source IP. |
 | data/schema | no | 需求不新增持久化 schema；用户到 PN 的目录和分配数据属于库使用者。 | not-applicable: no repository-owned schema change in proposal stage. | owner: none; risk: low; acceptance impact: confirm no repository-owned directory schema. |
 | security/privacy/permission | yes | assigned target 准入限制本 `PnServer` 可作为 target 打开的用户，错误 PN 必须失败。 | design must define validator/policy boundary; testing must cover non-assigned target rejection before target open. | owner: design/testing; risk: wrong target authorization; acceptance impact: reject non-assigned target before target open. |
-| runtime/integration | yes | 多 PN server 影响 relay tunnel 建立和 workspace 调用方行为；本变更要求保留 `PnServer::new(...)` 默认 allow-all 兼容路径，同时显式 assigned target 路径仍能拒绝错误 PN；`TtpServer` validator 会改变 incoming tunnel 是否 attach/remember；`TtpNode` 会在 stream/control stream open 时触发实际 tunnel 建立；`TtpClient` target 删除和 idle release 会改变本地缓存生命周期。 | integration must cover specified PN flow, wrong PN failure under explicit assigned target policy, default allow-all compatibility, TtpServer default allow-all and explicit reject behavior, TtpNode open_stream/open_control_stream creating missing tunnels, maintained target removal not reconnecting deleted targets, and non-maintained idle release preserving active channels. | owner: testing; risk: workspace migration, active-open side effects, rejected tunnel cleanup, and stale/over-eager TTP tunnel cleanup; acceptance impact: correct PN succeeds, wrong PN fails with policy, default constructors remain compatible, TtpServer reject is observable, TtpNode active open is observable, and TTP client lifecycle cleanup is bounded. |
+| runtime/integration | yes | 多 PN server 影响 relay tunnel 建立和 workspace 调用方行为；本变更要求保留 `PnServer::new(...)` 默认 allow-all 兼容路径，同时显式 assigned target 路径仍能拒绝错误 PN；`TtpServer` validator 会改变 incoming tunnel 是否 attach/remember；`TtpNode` 会在 stream/control stream open 时触发实际 tunnel 建立；`TtpClient` target 删除和 idle release 会改变本地缓存生命周期；SN 客户端协议选择会改变同时存在 QUIC/TCP endpoint 时的上线连接顺序和 fallback 行为；SN TCP 来源候选过滤会改变 `ReportSnResp`、`SnQueryResp` 和 `SnCalled` 中的候选列表。 | integration or unit coverage must cover specified PN flow, wrong PN failure under explicit assigned target policy, default allow-all compatibility, TtpServer default allow-all and explicit reject behavior, TtpNode open_stream/open_control_stream creating missing tunnels, maintained target removal not reconnecting deleted targets, non-maintained idle release preserving active channels, SN client choosing QUIC before TCP while trying TCP only after QUIC failure, and SN TCP source address filtering with/without `map_ports`. | owner: testing; risk: workspace migration, active-open side effects, rejected tunnel cleanup, stale/over-eager TTP tunnel cleanup, duplicate SN active connection records, and mapped endpoint omission/regression; acceptance impact: correct PN succeeds, wrong PN fails with policy, default constructors remain compatible, TtpServer reject is observable, TtpNode active open is observable, TTP client lifecycle cleanup is bounded, SN client active SN selection is deterministic, and TCP source address is not directly exposed. |
 | build/dependency/config/deployment | yes | 上层指定 PN server 和 assigned target 策略会影响配置/部署边界，但不要求库内目录。 | design must define configuration/interface boundary without adding global directory. | owner: design; risk: accidental global directory/config expansion; acceptance impact: no library-owned PN directory. |
 | ui/datamodel/workflow | no | 该 crate 无 UI，且不定义库外用户分配目录 datamodel。 | not-applicable: no UI/datamodel workflow owned by p2p-frame. | owner: none; risk: low; acceptance impact: no UI/datamodel artifact required. |
-| harness/process | yes | 新增 proposal item `pn_multi_server_assigned_target`、`ttp_node_active_open`、`ttp_server_tunnel_accept_validator` 和 `ttp_client_connection_lifecycle` 会使下游 design/testing/implementation admission 需要重新映射。 | run doc-structure-check and stage-scope-check for proposal; downstream admission must use new change_id. | owner: downstream stages; risk: admission gap; acceptance impact: design/testing must directly map new change_id. |
+| harness/process | yes | 新增 proposal item `pn_multi_server_assigned_target`、`ttp_node_active_open`、`ttp_server_tunnel_accept_validator`、`ttp_client_connection_lifecycle` 和 `sn_tcp_source_mapped_only` 会使下游 design/testing/implementation admission 需要重新映射。 | run doc-structure-check and stage-scope-check for proposal; downstream admission must use new change_id. | owner: downstream stages; risk: admission gap; acceptance impact: design/testing must directly map new change_id. |
 
 ## Constraints
 - 允许使用的库/组件：
@@ -249,7 +261,8 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
   - 通过增加多 SN 依赖来解决本轮单 SN 打洞问题
   - 通过库内目录、跨 PN server 转发或自动 PN 切换来掩盖上层指定错误 PN server 的问题
   - 将 SN 观察端点或本地映射端口提升为跨 SN NAT 类型推断依据
-  - 因 TCP direct 失败而全局惩罚同一远端的 QUIC/UDP 打洞候选
+- 因 TCP direct 失败而全局惩罚同一远端的 QUIC/UDP 打洞候选
+- 在同一 SN 的 QUIC 连接成功后继续建立 TCP SN 命令连接，或把 TCP 作为与 QUIC 同优先级的无序候选
   - 为规避 bounded channel 满载而在任一路径保留或重新引入 `unbounded_channel`
   - 为兼容旧调用方而在公共 `Tunnel` trait 中保留 `accept_stream()` 或 `accept_datagram()`
   - 公开导出内部 `control_stream` runtime/frame 类型，或让外部直接读写现有 tunnel raw 控制通道
@@ -291,6 +304,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - QUIC tunnel 控制心跳必须保持现有发送间隔不变，仅将 heartbeat timeout 调整为 30 秒；该策略不得新增 `TunnelNetwork` NAT 专用参数，也不得要求下游调用方显式传入 NAT 类型。
 - `SnCall` 携带的反连候选必须来自本次可解释的本地 listener、SN 观察端点或映射端口集合，且必须避免重复候选。
 - SN 服务端生成或扩展观察端点时，若观察到的外网地址与节点自上报地址相同，才允许把该 endpoint 标记为 `Wan`；若不同，必须标记为 `ServerReflexive`。
+- 对 TCP tunnel，SN 服务端不得把来源 socket address 本身放入返回给客户端的 endpoint 数组，也不得把该地址保存为 peer endpoint 状态；客户端上报 `map_ports` 时，SN 只可取 TCP 来源 IP 与上报端口构造 `EndpointArea::Mapped` 候选。
 - `EndpointArea::ServerReflexive` 的文本编码必须使用 `S`，`Display`、`FromStr` 和 raw codec 的 area 语义必须同步；原 `is_sys_default()` system-default 语义不再保留为公开判定入口。
 - proxy 脱代理升级必须在 proxy 连通后进入短窗口重试，再回到有上限的指数退避；后台升级路径不得把再次建立 proxy 视为升级成功。
 - `ServerRuntime` 注入必须是显式配置能力；默认路径仍必须在不要求调用方传入 runtime 的情况下启动 TCP/QUIC listener。
@@ -335,6 +349,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - endpoint 选择能区分协议、历史成功和失败；TCP 与 QUIC/UDP 的失败统计不得互相污染。
 - SN report / call 相关候选传递保持 `SnCallResp` 与最终 tunnel 连通性结果解耦。
 - endpoint area 能明确区分节点自声明公网地址与 SN 反射地址：相同地址可作为 `Wan`，不相同地址作为 `ServerReflexive`，并通过 `S` 文本标记序列化。
+- SN 服务端不再把 TCP tunnel 来源 socket address 本身作为候选 endpoint 返回给客户端或保存到服务端 peer endpoint 状态；上报了 `map_ports` 的客户端仍可获得由 TCP 来源 IP 和映射端口组成的 `Mapped` 候选。
 - TCP listener 的底层 accept 分发由 `sfo_reuseport::TcpServer` 承担，但入站 tunnel 的 TLS accept、control/data connection 分流、registry/publish 语义保持现有协议行为。
 - QUIC listener 的底层 UDP packet 分发由 `sfo_reuseport::QuicServer` 承担，Quinn 仍通过 `Endpoint::new_with_abstract_socket(...)` 管理 QUIC connection 和 incoming tunnel；每个 worker socket 拥有一个 Quinn endpoint，主动 QUIC connect 可随机或轮询选择一个 endpoint，同源 UDP punch 使用首个可用 worker socket。
 - `ServerRuntime` 可由外部设置并复用于 TCP/QUIC listener；未设置时仍由 `p2p-frame` 默认创建，保持现有调用方无需显式 runtime 的兼容启动路径。
@@ -343,6 +358,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 通用 `Tunnel` 调用方能通过 `open_control_stream(purpose)` / `listen_control_stream(purposes, on_incoming_control_stream)` 获得低频控制数据通道；该能力通过现有 tunnel 控制命令通道上的单一 `Data` 命令承载内部多路复用 frame，但 `control_stream` runtime 和 frame 类型不成为公开 API。
 - 当底层控制通道仍健康时，control stream 的 open、listen、read、write、fin/reset 和 purpose 过滤能独立于现有 stream/datagram 数据平面工作；当底层控制通道断开或 tunnel close 时，所有派生 control stream 立即失败或 EOF。
 - SN report/call/called/response 或等价低频小消息通过 control stream 交互，不再为每次 SN 信令建立新的普通业务 stream；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时不得 fallback 到普通 stream，而应按现有 SN 失败路径移除当前 SN 连接或返回错误。
+- SN 客户端在同一 SN 同时具备 QUIC 与 TCP endpoint 时优先使用 QUIC 完成 SN command tunnel 和 `ReportSn`；QUIC 成功后不会继续尝试 TCP，也不会为同一 SN 追加重复 active SN；只有 QUIC 建链或 `ReportSn` 失败时才尝试 TCP fallback。
 - `TtpNode` 为需要同时监听入站 TTP channel 和按需主动连接目标的调用方提供单一 TTP 节点入口；`open_stream(...)` / `open_control_stream(...)` 在没有匹配 tunnel 时会主动建链并 attach，已有匹配 tunnel 时继续复用。
 - `TtpClient` 能删除不再需要保持连接的 server target；删除后 maintain loop 不再对该 target 自动建链或重连，仍保留的 server target 继续按原有保持连接语义运行。
 - `TtpClient` 能释放非保持连接 target 的空闲 cached tunnel；当该 tunnel 没有 active stream、control stream、datagram 或 pending open 且超过 design 定义的 idle 阈值后，本地缓存不再无限期持有该 tunnel。
@@ -425,6 +441,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - endpoint 评分必须能按协议独立影响候选顺序，且 TCP 失败不得降低 QUIC/UDP 候选的打洞优先级。
 - 单 SN 优化不得引入多 SN fanout 或跨 SN NAT 类型推断；acceptance 必须确认最终实现仍只依赖单 SN 信令与观察端点。
 - SN 观察 endpoint 分类必须可验收：当 SN 观察地址与节点自上报地址一致时输出 `Wan`，不一致时输出 `ServerReflexive`；`EndpointArea` 的显示、解析和 raw codec 语义必须使用 `ServerReflexive` / `S`，且不再暴露 `is_sys_default()` 判定。
+- TCP 来源地址候选过滤必须可验收：无 `map_ports` 时，`ReportSnResp`、`SnQueryResp` 和 `SnCalled.reverse_endpoint_array` 不得包含 TCP tunnel 来源 socket address；有 `map_ports` 时，只能用 TCP 来源 IP 加上上报端口构造 `Mapped` endpoint，不能返回原始来源端口。
 - TCP listener 必须通过 `sfo_reuseport::TcpServer` 接收入站连接；acceptance 必须确认 `TcpServer` handler 收到的 stream 进入现有 TLS accept、control/data connection 分流、tunnel registry 和 publish 路径，且 listener close 后不再发布新 tunnel。
 - QUIC listener 必须通过 `sfo_reuseport::QuicServer::serve_socket(...)` 接收入站 worker socket，并通过 Quinn `AsyncUdpSocket` 适配器交给每个 worker 的 `quinn::Endpoint`；acceptance 必须确认 worker endpoint 的 `accept()` 仍能产出 incoming QUIC tunnel，且不新增 raw UDP tunnel 或业务载荷解析路径。
 - QUIC 主动 connect 可使用任一 worker endpoint；同源 UDP punch 必须使用首个可用 worker socket；acceptance 必须确认 punch 的本地端口与 QUIC listener 端口一致，且 `ServerReflexive` candidate policy、50ms cadence、active/reverse 起发时机和截止规则保持不变。
@@ -459,6 +476,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 | proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
 |-------------|-----------|---------|--------------------------|------------------|
 | P-ENDPOINT-AREA-1 | endpoint_area_server_reflexive | `EndpointArea::Default` 重命名为 `ServerReflexive`，SN 观察到的节点外网地址只有与节点自上报地址一致时标记为 `Wan`，否则标记为 `ServerReflexive`；文本编码使用 `S`，不再保留 `is_sys_default()` system-default 判定。 | 不引入 STUN/TURN、多 SN NAT 类型推断或新的 endpoint area；不继续把 `D` 作为 `ServerReflexive` 的文本标记；不把 SN 反射地址静默等同于节点自声明公网地址。 | unit 能覆盖 SN 观察地址一致/不一致时的 area 分类，覆盖 `Display`/`FromStr`/raw codec 的 `ServerReflexive` / `S` 编解码，并确认 `is_sys_default()` 不再作为公开方法存在。 |
+| P-SN-TCP-SOURCE-MAPPED-ONLY-1 | sn_tcp_source_mapped_only | SN 服务端不把 TCP tunnel 来源 socket address 本身作为候选 endpoint 返回给客户端或保存为 peer endpoint 状态；客户端上报 `map_ports` 时，SN 可使用 TCP 来源 IP 与映射端口构造 `Mapped` 外网候选。 | 不改变 SN command wire、control-stream-only 信令、TCP tunnel wire、TLS 身份校验、QUIC `ServerReflexive` NAT punch 语义或 `EndpointArea` 编解码；不把原始 TCP 来源端口作为候选返回；不删除客户端自报 endpoint 或 desc endpoint 的既有处理。 | schema/admission 能以 `sn_tcp_source_mapped_only` 建立后续准入；unit 覆盖无 `map_ports` 时 report/query/called 不包含 TCP 来源 socket address，有 `map_ports` 时返回来源 IP + 上报端口的 `Mapped` endpoint，并确认 SN peer cache 不保存原始 TCP 来源 endpoint。 |
 | P-QUIC-SR-NAT-KEEPALIVE-1 | server_reflexive_quic_nat_keepalive | QUIC 同源 UDP punch 只对 `EndpointArea::ServerReflexive` candidate 开启；QUIC tunnel 保持现有控制心跳发送间隔不变，但 heartbeat timeout 调整为 30 秒。 | 不对 `Lan`、`Wan`、`Mapped`、TCP、IPv6、0 端口或默认 intent 发起 punch；不新增 raw UDP keepalive 协议、业务载荷解析或公共 `TunnelNetwork` trait 参数；不改变 QUIC tunnel 现有心跳发送间隔。 | unit 能覆盖 punch candidate policy 只接受 `ServerReflexive` QUIC endpoint，覆盖非 `ServerReflexive` endpoint 不开启 punch；unit 能覆盖 QUIC heartbeat interval 保持现有值且 heartbeat timeout 为 30 秒，且 heartbeat timeout 仍收敛到既有关闭路径。 |
 | P-REV-TIMEOUT-1 | reverse_timeout_close_late_tunnel | reverse incoming tunnel 只有命中同 `(remote_id, tunnel_id)` reverse waiter 时才可接收；无 waiter 时必须关闭，不得作为普通 tunnel publish。 | 不改变 direct、proxy、普通 incoming tunnel 的 publish 规则；不改变 SN call/called 协议；不引入 reverse 过期表或跨进程状态；不按 remote 粗粒度关闭其他 tunnel。 | unit 能覆盖无 waiter reverse tunnel 被 close、未 register、未 publish、订阅者收不到、`get_tunnel()` 不返回；unit 能覆盖命中 waiter 的 reverse tunnel 仍正常交付并延后 publish。 |
 | P-SFO-TCP-LISTENER-1 | networks_sfo_reuseport_tcp_listener | TCP tunnel listener 基于 `sfo_reuseport::TcpServer` 重构，入站 `sfo_reuseport::TcpStream` 接入现有 TLS accept、TCP control/data connection 分流、registry 和 tunnel publish 流程；`ServerRuntime` 可由外部显式设置，默认路径仍自动创建。 | 不新增 `NetworkServerRuntime` 或 socket factory trait；不改变 TCP tunnel 线协议、TLS 身份校验或 tunnel publish 语义；不把 close 后的旧服务继续暴露为当前 listener 的入站 tunnel。 | unit 能覆盖外部 `ServerRuntime` 被 TCP listener 使用、默认 runtime 可用、`TcpServer` handler 的 stream 进入现有 control/data 分流路径、listener close 后不再发布新 tunnel；integration 能覆盖 TCP tunnel 仍可建立并传输。 |
@@ -467,6 +485,7 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 | P-TUNNEL-CHANNEL-CALLBACK-1 | tunnel_stream_datagram_listen_callback | `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`，`listen_stream(...)` / `listen_datagram(...)` 改为接收可克隆、线程安全的异步回调；Tunnel 内部在入站 stream/datagram channel 到达时按 vport/purpose listen 规则触发回调。 | 不改变 TCP/QUIC/PN/TTP 线协议、TLS 身份校验、PN proxy channel 协议、业务 payload 格式、vport/purpose 编解码、tunnel publish 规则或 `TunnelNetwork` listener 回调语义；不保留公共 `accept_*` 兼容旁路；不要求调用方同时注册回调又轮询队列。 | schema/admission 能以 `tunnel_stream_datagram_listen_callback` 建立后续准入；unit 或编译覆盖公共 `Tunnel` trait 不再包含 `accept_*`，TCP/QUIC/PN tunnel 以及 TTP/stream/datagram manager 调用点均迁移到 listen 回调；unit 覆盖关闭后不再调用回调、未 listen 的 purpose 仍拒绝或报错、回调满载/背压/错误路径按 design 收敛；integration 覆盖 workspace 调用方迁移后 stream/datagram 仍可建立并传输。 |
 | P-TUNNEL-CONTROL-STREAM-API-1 | tunnel_control_stream_api | `Tunnel` trait 新增 `open_control_stream(...)` / `listen_control_stream(...)`，为外部提供低频控制数据通道；内部 `control_stream` 模块通过现有 TCP/QUIC/PN tunnel 控制命令通道上的单一 `Data` 命令多路复用 virtual stream，`Data` payload 最大 `64 KiB`，底层控制通道断开时所有派生 control stream 断开。 | 不公开内部 `control_stream` runtime/frame/stream id/window 类型；不让外部直接读写现有 raw 控制通道；不改变现有 stream/datagram 逻辑、业务 payload 格式、TLS 身份校验、PN proxy 业务 channel 协议、vport/purpose 编解码或 tunnel publish 规则；不将该能力扩展为大流量业务数据平面。 | schema/admission 能以 `tunnel_control_stream_api` 建立后续准入；unit 或编译证据确认公共 API 只有 `Tunnel` trait 方法和 callback/stream 类型，内部 control stream 类型未公开导出；TCP/QUIC/PN 只新增 `Data` 控制命令承载内部 frame；测试覆盖 open/listen、purpose 过滤、64KiB 切分/超限拒绝、控制通道断开后所有派生 stream 和 pending open/write 失败。 |
 | P-SN-CONTROL-STREAM-1 | sn_control_stream_signaling | SN report、call、called、response 或等价低频小消息通过 `Tunnel` control stream 交互，不再为每次 SN 信令新建普通业务 `open_stream()`，且不保留普通 stream fallback。 | 不把 control stream 扩展成 SN 大流量数据平面；不公开或依赖内部 `control_stream` frame/stream id/window 协议；不改变 SN 最终连通性语义、单 SN 边界、SN 观察 endpoint 分类或 `SnCallResp` 只表示 SN 受理结果的语义；控制通道不可用、远端未监听 SN purpose 或 control stream 打开失败时当前 SN 命令通道建立或发送失败，不得 fallback 到普通 stream。 | schema/admission 能以 `sn_control_stream_signaling` 建立后续准入；unit 或编译证据确认 SN 信令路径调用 `open_control_stream` / `listen_control_stream` 而不是 `open_stream` / `listen_stream`；测试覆盖 control stream purpose 过滤、控制通道不可用或未监听时失败，以及 SN report/call/called/response 小消息仍能通过 control stream 完成。 |
+| P-SN-CLIENT-PROTOCOL-PRIORITY-1 | sn_client_protocol_priority | SN 客户端连接同一 SN 服务端时，对同时可用的 QUIC 与 TCP endpoint 按 QUIC 优先、TCP fallback 的顺序尝试；QUIC SN command tunnel 建立并 `ReportSn` 成功后停止该 SN 的 TCP 尝试，只有 QUIC 建链或 report 失败后才尝试 TCP。 | 不改变 SN command wire、control-stream-only 信令、不新增客户端选择 Serving SN API、不改变 TCP/QUIC tunnel 线协议、TLS 身份校验、TTP target 语义或 `TtpClient::connect_server(...)` 的 maintained target 语义；不把 TCP 失败用于降低同一远端 QUIC/UDP 候选优先级。 | schema/admission 能以 `sn_client_protocol_priority` 建立后续准入；design/testing 需要覆盖 SN client 候选排序、QUIC 成功后不触发 TCP fallback、不重复 active SN、QUIC 建链失败或 `ReportSn` 失败后尝试 TCP、以及 `connect_server` 不因同一成功 SN 被协议循环重复调用。 |
 | P-SN-SERVER-CONNECTION-VALIDATOR-1 | sn_server_connection_validator | SN server 增加连接验证器装配点，用于判断客户端是否允许连接或发起 SN server 入站请求；默认构造路径必须安装显式 allow-all validator，保持未配置部署的兼容行为；validator 上下文只包含已认证 `client_id` 与该客户端证书。 | 不改变 SN command 线协议、`SnCallResp` 最终连通性语义、单 SN 边界、endpoint 分类或 control-stream-only 信令选择；不把 validator 扩展为认证协议、计费系统、限速器、NAT 类型推断、请求语义审计器或跨 SN 策略同步；不信任客户端自填报文字段作为准入身份来源；不在 validator 上下文中暴露 command、tunnel id、reported peer、target peer、来源 endpoint 或其他报文载荷派生字段。 | schema/admission 能以 `sn_server_connection_validator` 建立后续准入；design/testing 需要定义只含 `client_id` 与客户端证书的 validator 上下文、默认 allow-all 构造路径、自定义 reject 行为和错误映射；implementation 必须移除当前 `SnConnectionValidateContext` 中的 command、tunnel id、reported peer 和 target peer 字段；unit 覆盖默认 allow-all 允许连接，自定义 validator 拒绝时 SN server 不继续处理对应 report/call 或等价请求，并覆盖 validator 可读取客户端证书但无法读取报文派生字段。 |
 | P-SN-CONTRACT-CLEANUP-1 | remove_sn_service_contract_server | 移除 `SnServiceContractServer` 相关服务合约/回执生产路径，包括服务侧生产代码、公开导出、构造装配、后台任务、仅服务于该方向的存储/统计路径，以及 `client/contract.rs` / `service/receipt.rs` 等等价模块；保留 `sn/protocol` receipt wire 兼容结构、SN 基础 report/call/called、连接验证器和 control-stream-only 信令。 | 不删除 SN server/client 基础能力、不改变 SN command 线协议、不改变 `SnCallResp` 语义、不改变 peer manager、endpoint 分类、连接验证器或 control stream 信令选择；不引入新的计费、合约评估、配额或持久化账本替代方案；不在相邻模块保留旧 contract server 兼容旁路。 | schema/admission 能以 `remove_sn_service_contract_server` 建立后续准入；design/testing 需要明确删除路径、公开 API 影响、下游启动路径适配和验证命令；implementation 后代码搜索确认服务侧生产代码和公开导出不再引用 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs` 或等价 contract/receipt 装配逻辑，且 SN report/call/called、连接验证器和 control-stream-only 信令对应 unit/compile 验证仍通过。 |
 | P-PN-MULTI-SERVER-ASSIGNED-TARGET-1 | pn_multi_server_assigned_target | 支持多 PN server 部署下由上层指定目标 PN server 建立 proxy tunnel；每个用户到自身 assigned PN server 的保持连接、断线重连、分配和目录查询由库使用者负责；`PnServer` 默认 `PnConnectionValidator` 为显式 allow-all，显式 assigned target validator / policy 路径限制本 server 可作为新建 proxy tunnel target 的用户。 | 不做库内 `peer_id -> PN` 全局目录、不自动发现或切换 PN server、不做用户迁移/重平衡/多副本在线策略、不做 PN server 间目录同步、不做 `A -> PN-A -> PN-B -> B` 跨 PN 二跳业务 bridge；不改变 PN wire 协议、TLS-over-proxy、统计限速口径；不允许多 PN 新路径依赖默认 allow-all 掩盖错误 PN；不删除 `PnServer::new(...)` 默认 allow-all 兼容路径。 | schema/admission 能以 `pn_multi_server_assigned_target` 建立后续准入；design/testing 需要覆盖默认 `PnServer::new(...)` allow-all 兼容、显式 assigned target 策略下上层指定正确 PN 成功、指定错误 PN 在打开目标侧 stream 前失败且不自动切换、未指定目标 PN server 时按配置/参数错误失败、统计/限速保持本 PN server 本地视图且不要求跨 PN 聚合。 |
@@ -490,6 +509,8 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - 本次后续清理已按用户确认新增 `stack_channel_capacity_config_removal`，允许删除 `ChannelCapacityConfig` 及 stack 层容量覆盖逻辑；Design/Testing/Implementation/Acceptance 必须同步改为以固定默认容量和无 unbounded channel 作为证据重点。
 - 本次自动流水线已按用户确认新增 `tunnel_control_stream_api`，必须先补齐 Design/Testing，再通过 implementation admission 后实现；该能力的内部 `control_stream` 模块不得公开导出。
 - 本次 proposal 已按用户要求新增并收紧 `sn_control_stream_signaling`：SN 信令必须使用 `Tunnel` control stream，且不保留普通 stream fallback；Design/Testing/Implementation/Acceptance 必须以 control-stream-only 为准。
+- 本次 proposal 已按用户要求新增 `sn_client_protocol_priority`，当前 proposal 回到 draft；用户审批后，Design 必须补齐 SN client 候选收集与排序、QUIC 成功后的停止条件、QUIC 建链失败和 `ReportSn` 失败后的 TCP fallback、active SN 去重，以及该策略与 `TtpClient::connect_server(...)` 幂等登记和 TTP target 匹配之间的边界。
+- Testing 必须补齐同一 SN 同时具备 QUIC/TCP endpoint 时 QUIC 优先、QUIC 成功不尝试 TCP、QUIC 失败后 TCP fallback、同一 SN 不重复 active、以及 `connect_server` 不因成功路径被协议循环重复调用的验证映射；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `sn_client_protocol_priority` 通过后，才能修改生产代码。
 - 本次 proposal 已按用户要求收紧 `sn_server_connection_validator`：SN server 连接验证器上下文只允许包含 `client_id` 与客户端证书，默认实现仍为显式 allow-all。Design/Testing/Implementation/Acceptance 必须同步移除 command、tunnel id、reported peer、target peer 和其他报文载荷派生字段的上下文依赖，补齐证书来源、默认构造路径、自定义拒绝行为、错误映射和对应验证证据后，才能进入实现准入。
 - 本次 proposal 已按用户要求新增 `remove_sn_service_contract_server` 并由自动流水线批准；Design 必须补齐 `SnServiceContractServer`、`client/contract.rs`、`service/receipt.rs`、公开导出、构造装配、下游调用点、协议 receipt wire 兼容结构保留和 SN 基础能力之间的删除边界。
 - Testing 必须补齐代码搜索、编译、SN 基础 report/call/called、连接验证器和 control-stream-only 信令不回归的验证映射；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `remove_sn_service_contract_server` 通过后，才能删除生产代码。
@@ -501,8 +522,10 @@ approved_content_sha256: b669a9b90e0c72f23fbbb876ebc35abffed6d16886470e888cdc926
 - Testing 必须补齐 `TtpServer` 默认 allow-all attach/remember、自定义 validator reject 不 attach/不 remember、被拒 tunnel 不能被后续 `open_stream` / `open_control_stream` / `open_datagram` 复用，以及不改变 wire/trait/`TtpNode`/`TtpClient` 行为的验证；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `ttp_server_tunnel_accept_validator` 通过后，才能修改生产代码。
 - 本次 proposal 已按用户要求新增 `ttp_client_connection_lifecycle`，当前 proposal 回到 draft；用户审批后，Design 必须补齐 `TtpClient` 保持连接 target 删除 API、maintain loop 并发语义、非保持 target 的 tunnel idle timeout 默认值/配置边界、active/pending channel lease 计数、release 时是否主动 close 底层 tunnel、以及与 `TtpNode` / `TtpServer` 共享 helper 的边界。
 - Testing 必须补齐保持 target add/remove 幂等、删除后不重连、删除一个 target 不影响其他 target、非保持 target idle release、active stream/control stream/datagram/pending open 阻止 release、保持 target 不被 idle release 清理、以及不改变 wire/trait/既有 `TtpServer` 行为的验证；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `ttp_client_connection_lifecycle` 通过后，才能修改生产代码。
+- 本次 proposal 已按用户要求新增 `sn_tcp_source_mapped_only`，当前 proposal 回到 draft；用户审批后，Design 必须补齐 SN server TCP 来源地址候选过滤、`map_ports` 映射候选构造、`ReportSnResp` / `SnQueryResp` / `SnCalled.reverse_endpoint_array` 的候选来源、以及 peer cache 不保存原始 TCP 来源 endpoint 的边界。
+- Testing 必须补齐无 `map_ports` 时 TCP 来源 socket address 不返回、有 `map_ports` 时只返回来源 IP + 映射端口的 `Mapped` endpoint、原始来源端口不泄漏、SN peer cache 不保存 TCP 来源 endpoint、以及不改变 SN command wire/control-stream-only 信令/TCP tunnel wire 的验证；Implementation 只有在 proposal/design/testing 均 approved 且 admission 以 `sn_tcp_source_mapped_only` 通过后，才能修改生产代码。
 
 ## Approval Record
 - approver: user
-- approval_date: 2026-06-30T17:07:35+08:00
-- user_statement: 确认，自动处理后续步骤
+- approval_date: 2026-07-03T18:13:20+08:00
+- user_statement: "确认，自动处理后续步骤"

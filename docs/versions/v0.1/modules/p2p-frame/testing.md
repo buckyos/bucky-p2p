@@ -3,8 +3,8 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-30T17:38:00+08:00
-approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1293608da2
+approved_at: 2026-07-03T18:23:13+08:00
+approved_content_sha256: 0453dfef45c4bc997b90c45a53af2e722cf9540ea99e5ce290f2c01540a47a62
 ---
 
 # p2p-frame 测试
@@ -37,7 +37,7 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | `endpoint` | endpoint area、协议和地址编解码 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | `ServerReflexive` enum 命名、`S` 文本编解码、raw codec area 映射、`is_sys_default()` 移除 | 旧 `D` 文本不得继续作为新语义输入，`ServerReflexive` 不得被 `is_static_wan()` 判定为静态公网 | unit | `p2p-frame/src/endpoint.rs` |
 | `tunnel` | tunnel 生命周期和 manager 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/tunnel-publish-lifecycle.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md` | active/passive/proxy tunnel 创建、统一 register/publish 生命周期、reverse waiter 命中时的延后 publish 和完成后的 publish、reverse incoming 无 waiter close、proxy tunnel 发布后的后台 direct/reverse 升级重试、已有多个 candidate 时非 proxy 优先复用、direct/reverse 统一 300ms 短延迟竞速、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启同源 UDP punch 调度、proxy 短窗口脱代理、按协议隔离 endpoint 评分、`ServerReflexive` 与静态 `Wan` / `Mapped` 区分 | 同时存在多个 tunnel、选择回退、后注册 proxy 不得覆盖已有可用非 proxy candidate、reverse waiter 命中时的延后 publish、无 waiter reverse incoming close 且不 register/publish、失败清理、proxy 升级路径持续失败后的退避封顶，升级流程不得回退成 proxy，TCP 失败不得拖累 QUIC/UDP 候选，默认 intent、无 SN service 和非 `ServerReflexive` 路径不得发送 punch，punch 发送失败不得改变建链结果，SN 反射地址不得被误判为静态公网 | unit | `p2p-frame/src/tunnel/tunnel_manager.rs`、`p2p-frame/src/networks/quic/network.rs`、`p2p-frame/src/networks/quic/tunnel.rs` |
 | `ttp` | 复用命令/流协议 | `p2p-frame/docs/ttp_module_design.md` | 流注册、server/client/node 协议交互，`TtpNode` 缺失 tunnel 时主动创建并 attach 后打开 stream/control stream/datagram，已有 tunnel 时按 target 复用，`TtpClient` 支持删除 maintained target 并释放 non-maintained idle tunnel cache，`TtpServer` 入站 tunnel 在 attach/cache 前执行可配置 validator 且默认 allow-all | 无效命令流、channel 关闭、`TtpServer` lookup-only 行为保持、`TtpNode` 建链失败显式返回错误、删除 target 后 maintained set 为空、active/pending lease 阻止 idle release、maintained target 不被 non-maintained idle release 清理，`TtpServer` validator reject/error 后不得 attach/cache 且 best-effort close tunnel | unit | `p2p-frame/src/ttp/tests.rs` |
-| `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sn-control-stream-signaling.md` | 注册、查询、呼叫路由、`SnCall` 携带本次 `reverse_endpoint_array`、SN called 转发保留调用方候选并扩展单 SN 观察候选、SN 观察地址按节点自上报地址一致性标记 `Wan` 或 `ServerReflexive`、SN 低频小消息通过 control stream 的 SN purpose 交付、SN server 连接验证器默认 allow-all 且自定义 reject 能短路入站请求，且 validator 上下文只包含 `client_id` 与 `client_cert`；SN service 不再导出或构造 `SnServiceContractServer` / service receipt 装配路径，`sn/protocol` receipt wire 兼容结构保留 | 对端缺失、并发、候选去重和单 SN 边界，观察地址不一致时不得标记为 `Wan`，control stream purpose 未监听或控制通道不可用时必须显式失败且不得 fallback 到普通 stream，自定义 validator reject 后不得继续更新 peer 状态或转发 call，证书解析 id 与 cmd tunnel peer id 不一致时不得调用 validator 或更新状态；contract/receipt 清理不得删除基础 SN command 字段或在相邻模块重建兼容旁路 | unit + integration | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/client/sn_service.rs`、`p2p-frame/src/sn/service/*.rs`、`p2p-frame/src/sn/protocol/sn.rs` |
+| `sn` | 信令与对端管理 | `p2p-frame/docs/sn_design.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-nat-traversal.md`、`docs/versions/v0.1/modules/p2p-frame/testing/sn-control-stream-signaling.md` | 注册、查询、呼叫路由、`SnCall` 携带本次 `reverse_endpoint_array`、SN called 转发保留调用方候选并扩展单 SN 观察候选、SN 观察地址按节点自上报地址一致性标记 `Wan` 或 `ServerReflexive`、TCP observed source address 不作为普通候选返回但可与 `map_ports` 构造 `Mapped` 候选、SN 低频小消息通过 control stream 的 SN purpose 交付、SN server 连接验证器默认 allow-all 且自定义 reject 能短路入站请求，且 validator 上下文只包含 `client_id` 与 `client_cert`；SN service 不再导出或构造 `SnServiceContractServer` / service receipt 装配路径，`sn/protocol` receipt wire 兼容结构保留 | 对端缺失、并发、候选去重和单 SN 边界，TCP source socket address 无 `map_ports` 时不得返回且原始来源端口不得泄漏，观察地址不一致时不得标记为 `Wan`，control stream purpose 未监听或控制通道不可用时必须显式失败且不得 fallback 到普通 stream，自定义 validator reject 后不得继续更新 peer 状态或转发 call，证书解析 id 与 cmd tunnel peer id 不一致时不得调用 validator 或更新状态；contract/receipt 清理不得删除基础 SN command 字段或在相邻模块重建兼容旁路 | unit + integration | `p2p-frame/src/sn/tests.rs`、`p2p-frame/src/sn/client/sn_service.rs`、`p2p-frame/src/sn/service/*.rs`、`p2p-frame/src/sn/protocol/sn.rs` |
 | `pn` | relay tunnel 行为 | `docs/versions/v0.1/modules/p2p-frame/testing/pn-server.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-proxy-encryption.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-idle-close.md`、`docs/versions/v0.1/modules/p2p-frame/testing/pn-tunnel-control-channel.md`、`docs/versions/v0.1/modules/p2p-frame/testing/tunnel-control-stream-api.md` | PN tunnel relay、请求校验、默认 `PnConnectionValidator` 显式 allow-all、显式 validator/assigned-target policy 控制 wrong-PN 准入、响应转发、source/target 双边用户流量统计、仅 source 侧生效的 server bridge 限速、proxy stream 的 TLS-over-proxy 行为、client 级 TLS 模式配置快照、`datagram` 在 `TlsRequired` 下继续保持明文兼容、`PnTunnel` idle timeout 本地关闭、`PnTunnel` control channel ready gate、heartbeat 和远端关闭感知，以及 PN control stream API 通过 `PnControlCmd::Data` 承载内部 frame | relay 启动失败、validator 拒绝、target 打开失败、control ready 失败或超时、control 与业务 channel 混淆、control EOF/decode/write 失败未关闭 tunnel、heartbeat timeout 不收敛、remote close 后 open/accept/control stream 仍挂起、PN `Data` 超过 64KiB 未拒绝、双端 TLS 约定不一致、TLS 证书校验失败、`datagram` 错误继承 `stream` TLS 模式、client 级模式误用导致后续 tunnel 意外继承 TLS、默认构造误拒绝未配置连接、assigned-target policy 漏拒 wrong-PN 目标、idle close 误关闭 active channel、idle close 后 accept 不醒、open 继续等待 timeout、迟到 inbound open 被错误投递到 closed tunnel、统计失真、source/target 串户、target 统计错误触发限速、限速背压异常 | unit + integration | `p2p-frame/src/pn/protocol.rs`、`p2p-frame/src/pn/client/pn_tunnel.rs`、`p2p-frame/src/pn/client/pn_client.rs`、`p2p-frame/src/pn/client/pn_listener.rs`、`p2p-frame/src/pn/service/pn_server.rs` |
 | `identity_tls` | 身份、TLS、X509 辅助逻辑 | none | 证书处理和身份正确性 | 无效证书、握手不匹配、feature-gated 路径 | unit | `p2p-frame/src/x509.rs`、`p2p-frame/src/tls/**` |
 | `channel_capacity_config` | 顶层 bounded channel 容量配置 | `design.md` | `P2pConfig` 默认构造时各位置容量均为 `1024`，可只覆盖单个位置；`P2pStackConfig` 从 `P2pEnv` 继承分位置容量且可覆盖，生产路径不再存在 unbounded mpsc 类型 | 显式容量未下发、底层残留默认值、测试替身继续使用 unbounded queue | unit + integration | `p2p-frame/src/stack.rs`、`p2p-frame/src/**/*.rs` 搜索证据 |
@@ -93,6 +93,7 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | `SnCall` 本次反连候选 | `p2p-frame/src/sn/client/sn_service.rs` 与 `p2p-frame/src/sn/service/service.rs` 的 call/called 字段 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 `SnCall` 携带调用方本次传入的 `reverse_endpoint_array`，SN called 保留这些候选并扩展单 SN 观察候选 |
 | `EndpointArea::ServerReflexive` enum 与 codec | `p2p-frame/src/endpoint.rs` 的 enum、`Display`、`FromStr`、raw encode/decode 和公开方法 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 `ServerReflexive` 使用 `S` 文本标记且 raw codec 往返保持 area；旧 `D` 不再作为新语义输入；`is_sys_default()` 不再存在，`is_static_wan()` 不包含 `ServerReflexive` |
 | SN 观察地址 area 分类 | `p2p-frame/src/sn/service/service.rs` 的观察 endpoint 扩展路径 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言 SN 观察地址与节点自上报 endpoint 完全一致时标记 `Wan`，不一致时标记 `ServerReflexive`，映射端口候选仍不被混为 `ServerReflexive` |
+| SN TCP 来源地址 mapped-only | `p2p-frame/src/sn/service/service.rs` 的 observed endpoint candidate helper 与 report/query/called 候选组装路径 | targeted unit: `cargo test -p p2p-frame sn_tcp_observed_endpoint -- --nocapture`; unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试断言无 `map_ports` 时 TCP observed source endpoint 不返回；有 `map_ports` 时只返回来源 IP + 上报协议/端口构造出的 `Mapped` endpoint，且原始 TCP 来源端口不进入结果；非 TCP observed endpoint 继续作为直接候选并保持 `Wan` / `ServerReflexive` 分类 |
 | proxy 短窗口脱代理升级 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 proxy upgrade state | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言新建 proxy candidate 先进入 15s/30s/60s/120s 短窗口，再进入有上限的指数退避，且升级路径不把 proxy 视为成功 |
 | 多个已有 candidate 的非 proxy 优先复用 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 `get_tunnel()` 选择策略 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言同一远端同时存在 published 非 proxy 和更新时间更晚的 published proxy 时，默认复用路径仍返回非 proxy；只有没有可用非 proxy candidate 时才返回 proxy |
 | reverse incoming 无 waiter 关闭 | `p2p-frame/src/tunnel/tunnel_manager.rs` 的 incoming reverse 分支 | unit: `python3 ./harness/scripts/test-run.py p2p-frame unit` | unit 测试能断言无 waiter reverse tunnel 被关闭，不 register、不 publish，订阅者收不到，`get_tunnel()` 不返回；命中 waiter 时 incoming 分支只交付、不注册，waiter 接收方随后 register/publish |
@@ -122,6 +123,8 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | tunnel_control_stream_api | `design/tunnel-control-stream-api.md` | V-TUNNEL-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 control stream open/listen、purpose 过滤、64KiB 边界、底层关闭传播和 TCP/QUIC/PN `Data` 控制命令接入。 | no | |
 | sn_control_stream_signaling | `design/sn-control-stream-signaling.md` | V-SN-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 SN command service 从 SN purpose control stream 入站包装为 cmd tunnel，且 client 不 fallback 普通 stream。 | no | |
 | sn_server_connection_validator | `design.md` Directly Mapped Change Items | V-SN-SERVER-VALIDATOR-UNIT | unit | p2p-frame-unit | 覆盖 SN server 默认 allow-all、validator reject、上下文只含 `client_id`/`client_cert`，以及证书 id 不匹配时不调用 validator。 | no | |
+| sn_client_protocol_priority | `design.md` Directly Mapped Change Items | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | p2p-frame-sn-client-protocol-priority | 覆盖 SN client listener entries 按 QUIC、TCP、Ext 顺序排序。代码审查确认 ping/report loop 按同一 SN 聚合候选，QUIC `ReportSn` 成功后停止 TCP fallback，并按 `sn_peer_id` 去重 active SN。 | no | |
+| sn_tcp_source_mapped_only | `design.md` Directly Mapped Change Items | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | p2p-frame-sn-tcp-source-mapped-only | 覆盖无 `map_ports` 时 TCP observed endpoint 不返回、有 `map_ports` 时只返回 `Mapped` candidate、原始 TCP 来源端口不泄漏、非 TCP observed candidate 直接分类，以及 peer cache 不新增 raw TCP source endpoint 存储字段。 | no | |
 | remove_sn_service_contract_server | `design.md` Directly Mapped Change Items | V-SN-CONTRACT-CLEANUP-COMPILE | unit | p2p-frame-unit | 编译和搜索确认 SN service contract/receipt 生产路径与公开导出已删除，SN 基础能力和 wire 兼容结构保留。 | no | |
 | pn_multi_server_assigned_target | `design.md` + `design/pn-server.md` Directly Mapped Change Items | V-PN-SERVER-DEFAULT-VALIDATOR-TARGETED | unit | p2p-frame-pn-validator | `cargo test -p p2p-frame pn_connection_validator -- --nocapture` 覆盖默认 PN validator 显式 allow-all 和显式 reject helper；`p2p-frame-unit` / `p2p-frame-integration` 继续覆盖显式 assigned-target policy 与下游默认构造兼容。 | no | |
 | ttp_node_active_open | `design.md` Directly Mapped Change Items | V-TTP-NODE-ACTIVE-OPEN-UNIT | unit | p2p-frame-unit | 覆盖 `TtpNode` 缺失 tunnel 时主动创建/attach 后打开 stream/control stream，已有 tunnel/id-only target 复用，`open_datagram(...)` 复用 active-open helper，建链错误透传，以及 `TtpServer` lookup-only 兼容边界。 | no | |
@@ -159,6 +162,20 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | ttp_server_tunnel_accept_validator | compatibility | yes | V-TTP-SERVER-TUNNEL-VALIDATOR-COMPAT | integration | covered | |
 | ttp_server_tunnel_accept_validator | lifecycle | yes | V-TTP-SERVER-TUNNEL-VALIDATOR-UNIT | unit | covered | |
 | ttp_server_tunnel_accept_validator | cross-module | yes | V-TTP-SERVER-TUNNEL-VALIDATOR-COMPAT | integration | covered | |
+| sn_client_protocol_priority | normal | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | boundary | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | negative | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | error | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | compatibility | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | lifecycle | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | cross-module | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | normal | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | boundary | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | negative | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | error | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | compatibility | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | lifecycle | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
+| sn_tcp_source_mapped_only | cross-module | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
 
 ## Design Element Coverage
 | element_type | design_source | derived_cases | level | status | gap_manual_reason |
@@ -174,6 +191,8 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | failure-path | `design.md` TTP Server Incoming Tunnel Validator | validator reject returns no cached tunnel and no opened stream | unit | covered | |
 | error-handling | `p2p-frame/src/ttp/server.rs` validator error mapping | validator error blocks attach/cache and closes tunnel | unit | covered | |
 | invariant | approved proposal `ttp_server_tunnel_accept_validator` | `TtpServer::new(...)` remains default allow-all and lookup-only behavior remains `NotFound` without accepted tunnel | unit | covered | |
+| parameter-domain | approved proposal `sn_tcp_source_mapped_only`; `design.md` SN TCP source mapped-only candidate construction | empty `map_ports`, TCP observed endpoint, non-TCP observed endpoint, mapped TCP/QUIC ports | unit | covered | |
+| invariant | approved proposal `sn_tcp_source_mapped_only`; `design.md` Data and State | raw TCP observed socket address is transient and not a peer cache field | unit | covered | |
 
 ## Validation Rationale
 | Behavior or Risk | Validation Signal | Why This Is Sufficient | Gap / Manual Reason |
@@ -184,6 +203,8 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | TTP server 默认 allow-all 兼容 | targeted TTP unit and integration testplan step | `TtpServer::new(...)` 仍接收入站 tunnel，只有显式 `new_with_incoming_tunnel_validator(...)` 才改变准入策略；工作区入口覆盖默认构造兼容 | |
 | TTP server 自定义拒绝短路 | TTP unit `server_reject_validator_blocks_attach_and_cache` | 直接驱动 incoming tunnel callback，断言 validator 上下文、后续 lookup-only `NotFound`、无 stream open 和 `close()` 调用 | |
 | TTP server validator 错误短路 | TTP unit `server_validator_error_blocks_attach_and_cache` | 将 validator 的 `P2pError` 视为拒绝，覆盖错误路径不会 attach/cache 且 close tunnel | |
+| TCP 来源地址不直接返回 | targeted SN service unit `sn_tcp_observed_endpoint_without_map_ports_is_not_returned` | 直接执行候选构造 helper，断言仅有 TCP observed endpoint 且无 `map_ports` 时返回空候选，覆盖 report/query/called 共用的候选来源 | |
+| TCP 来源 IP + map_ports 构造 Mapped | targeted SN service unit `sn_tcp_observed_endpoint_with_map_ports_returns_only_mapped_candidates` | 断言结果端口来自 `map_ports` 而不是 raw TCP source port，且 area 为 `Mapped`，覆盖用户要求的外网地址构造边界 | |
 
 ## Unit Tests
 | Function or Unit | Branch or Condition | Covered Behavior | Test File | Status | Gap / Manual Reason |
@@ -205,6 +226,10 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 | `TtpServer::new_with_incoming_tunnel_validator(...)` | explicit accept | validator 接收完整 tunnel metadata 上下文，accept 后继续 attach/cache 并可 open stream | `p2p-frame/src/ttp/tests.rs` | covered | |
 | `TtpServer::register_accept_callback(...)` | validator returns `Reject` | reject 在 attach/cache 前短路，后续 lookup-only open 返回 `NotFound`，不打开 stream 并 best-effort close tunnel | `p2p-frame/src/ttp/tests.rs` | covered | |
 | `TtpServer::register_accept_callback(...)` | validator returns `Err` | validator 错误在 attach/cache 前短路，后续 lookup-only open 返回 `NotFound`，不打开 stream 并 best-effort close tunnel | `p2p-frame/src/ttp/tests.rs` | covered | |
+| `sort_sn_client_listener_entries(...)` | listener entries contain QUIC, TCP, and Ext protocols | SN client candidate protocol order is QUIC first, then TCP, then extension protocols | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
+| `SnService::observed_endpoint_candidates(...)` | TCP observed endpoint without `map_ports` | 不返回 raw TCP source socket address | `p2p-frame/src/sn/service/service.rs` | covered | |
+| `SnService::observed_endpoint_candidates(...)` | TCP observed endpoint with `map_ports` | 只返回来源 IP + 上报协议/端口构造出的 `Mapped` endpoint，原始 TCP source port 不泄漏 | `p2p-frame/src/sn/service/service.rs` | covered | |
+| `SnService::observed_endpoint_candidates(...)` | non-TCP observed endpoint | 继续按 reported endpoint 一致性分类为 direct candidate | `p2p-frame/src/sn/service/service.rs` | covered | |
 
 ## DV Tests
 | Workflow | Kind | Entry | Expected Result | Test File or Script | Status | Gap / Manual Reason |
@@ -236,4 +261,6 @@ approved_content_sha256: c2ebf62c7cad4dea9ca54abf1cd7c8738b24b25c394d47f85d016f1
 - [ ] `PnTunnel` idle close 的 channel lease 计数、accept 唤醒、open 立即失败、active channel 未归零不触发 idle，以及关闭后重新创建已映射到 unit 证据
 - [ ] 单 SN NAT 打洞优化的 direct/reverse 300ms 短延迟竞速、`SnCall` 本次候选、同源 UDP punch burst、proxy 短窗口脱代理、endpoint 评分隔离和无多 SN fanout 边界已映射到 unit/integration 证据
 - [ ] `ServerReflexive` endpoint area 的 enum/codec、SN 观察地址分类和下游兼容性已映射到 unit/integration 证据
+- [ ] SN client 同一 SN QUIC-first/TCP-fallback 和 active SN 去重已映射到 unit 证据
+- [ ] SN server TCP 来源地址 mapped-only 行为已映射到 targeted unit 和 p2p-frame unit 证据
 - [ ] bounded channel 分位置容量默认值、单项自定义覆盖、源码 unbounded 搜索和下游兼容性已映射到 unit/integration 证据

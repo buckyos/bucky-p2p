@@ -32,6 +32,21 @@ use std::ops::Add;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+fn sn_client_protocol_priority(protocol: Protocol) -> u8 {
+    match protocol {
+        Protocol::Quic => 0,
+        Protocol::Tcp => 1,
+        Protocol::Ext(_) => 2,
+    }
+}
+
+fn sort_sn_client_listener_entries(
+    mut listener_entries: Vec<(Protocol, Vec<crate::networks::TunnelListenerInfo>)>,
+) -> Vec<(Protocol, Vec<crate::networks::TunnelListenerInfo>)> {
+    listener_entries.sort_by_key(|(protocol, _)| sn_client_protocol_priority(*protocol));
+    listener_entries
+}
+
 #[callback_trait::callback_trait]
 pub trait SNEvent: 'static + Send + Sync {
     async fn on_called(&self, called: SnCalled) -> P2pResult<()>;
@@ -737,8 +752,12 @@ impl SNClientService {
                     continue;
                 }
             }
-            for (protocol, listeners) in self.net_manager.listener_info_entries() {
-                for sn_cert in self.sn_list.get_sn_list().iter() {
+            let listener_entries =
+                sort_sn_client_listener_entries(self.net_manager.listener_info_entries());
+            for sn_cert in self.sn_list.get_sn_list().iter() {
+                let mut sn_reported = false;
+                for (protocol, listeners) in listener_entries.iter() {
+                    let protocol = *protocol;
                     for sn_ep in sn_cert.endpoints().iter() {
                         if sn_ep.protocol() != protocol {
                             continue;
@@ -794,8 +813,22 @@ impl SNClientService {
                                 wan_ep_list: report_resp.end_point_array,
                             };
                             let mut state = self.state.write().unwrap();
-                            state.active_sn_list.push(active_sn);
+                            if !state
+                                .active_sn_list
+                                .iter()
+                                .any(|sn| sn.sn_peer_id == active_sn.sn_peer_id)
+                            {
+                                state.active_sn_list.push(active_sn);
+                            }
+                            sn_reported = true;
+                            break;
                         }
+                        if sn_reported {
+                            break;
+                        }
+                    }
+                    if sn_reported {
+                        break;
                     }
                 }
             }
@@ -1066,5 +1099,52 @@ impl SNClientService {
             return Ok(resp);
         }
         Err(p2p_err!(P2pErrorCode::ConnectFailed, "no active sn"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::networks::TunnelListenerInfo;
+
+    fn endpoint(protocol: Protocol, addr: &str) -> Endpoint {
+        Endpoint::from((protocol, addr.parse().unwrap()))
+    }
+
+    #[test]
+    fn sn_client_listener_entries_are_quic_first_then_tcp() {
+        let quic = endpoint(Protocol::Quic, "127.0.0.1:10001");
+        let tcp = endpoint(Protocol::Tcp, "127.0.0.1:10002");
+        let ext = endpoint(Protocol::Ext(7), "127.0.0.1:10003");
+
+        let ordered = sort_sn_client_listener_entries(vec![
+            (
+                Protocol::Tcp,
+                vec![TunnelListenerInfo {
+                    local: tcp,
+                    mapping_port: None,
+                }],
+            ),
+            (
+                Protocol::Ext(7),
+                vec![TunnelListenerInfo {
+                    local: ext,
+                    mapping_port: None,
+                }],
+            ),
+            (
+                Protocol::Quic,
+                vec![TunnelListenerInfo {
+                    local: quic,
+                    mapping_port: None,
+                }],
+            ),
+        ]);
+
+        let protocols: Vec<_> = ordered.into_iter().map(|(protocol, _)| protocol).collect();
+        assert_eq!(
+            protocols,
+            vec![Protocol::Quic, Protocol::Tcp, Protocol::Ext(7)]
+        );
     }
 }

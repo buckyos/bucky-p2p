@@ -361,6 +361,35 @@ impl SnService {
         map_ep
     }
 
+    fn is_direct_observed_candidate(endpoint: &Endpoint) -> bool {
+        endpoint.protocol() != Protocol::Tcp
+    }
+
+    fn observed_endpoint_candidates(
+        observed_ep: &[Endpoint],
+        map_ports: &[(Protocol, u16)],
+        reported_eps: &[Endpoint],
+    ) -> Vec<Endpoint> {
+        let mut remote_ep = observed_ep
+            .iter()
+            .copied()
+            .filter(Self::is_direct_observed_candidate)
+            .map(|remote| Self::classify_observed_endpoint(remote, reported_eps))
+            .collect::<Vec<_>>();
+        let mut map_eps = Vec::new();
+        for ep in observed_ep.iter() {
+            for (protocol, port) in map_ports.iter() {
+                let map_ep = Self::mapped_endpoint_from_observed(ep, *protocol, *port);
+                if remote_ep.contains(&map_ep) || map_eps.contains(&map_ep) {
+                    continue;
+                }
+                map_eps.push(map_ep);
+            }
+        }
+        Self::extend_unique_endpoints(&mut remote_ep, map_eps.as_slice());
+        remote_ep
+    }
+
     fn reported_endpoints_for_peer(
         peer: &crate::sn::service::peer_manager::CachedPeerInfo,
     ) -> Vec<Endpoint> {
@@ -757,14 +786,25 @@ impl SnService {
     }
 
     pub async fn get_peer_wan_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
+        self.get_peer_observed_ep(peer_id)
+            .await
+            .into_iter()
+            .filter(Self::is_direct_observed_candidate)
+            .map(|mut remote| {
+                remote.set_area(EndpointArea::Wan);
+                remote
+            })
+            .collect()
+    }
+
+    pub async fn get_peer_observed_ep(&self, peer_id: &PeerId) -> Vec<Endpoint> {
         let tunnels = self.cmd_server.get_peer_tunnels(peer_id).await;
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
-            let mut remote = tunnel.send.get().await.remote();
+            let remote = tunnel.send.get().await.remote();
             if remote.is_loopback() {
                 continue;
             }
-            remote.set_area(EndpointArea::Wan);
             if !remotes.contains(&remote) {
                 remotes.push(remote);
             }
@@ -778,19 +818,8 @@ impl SnService {
         map_ports: &[(Protocol, u16)],
         reported_eps: &[Endpoint],
     ) -> Vec<Endpoint> {
-        let mut remote_ep = self.get_peer_wan_classied_ep(peer_id, reported_eps).await;
-        let mut map_eps = Vec::new();
-        for ep in remote_ep.iter() {
-            for (protocol, port) in map_ports.iter() {
-                let map_ep = Self::mapped_endpoint_from_observed(ep, *protocol, *port);
-                if remote_ep.contains(&map_ep) || map_eps.contains(&map_ep) {
-                    continue;
-                }
-                map_eps.push(map_ep);
-            }
-        }
-        Self::extend_unique_endpoints(&mut remote_ep, map_eps.as_slice());
-        remote_ep
+        let observed_ep = self.get_peer_observed_ep(peer_id).await;
+        Self::observed_endpoint_candidates(observed_ep.as_slice(), map_ports, reported_eps)
     }
 
     async fn handle_report_sn(
@@ -2028,6 +2057,55 @@ mod tests {
         assert_eq!(mapped.protocol(), Protocol::Quic);
         assert_eq!(mapped.addr().ip(), observed.addr().ip());
         assert_eq!(mapped.addr().port(), 7000);
+    }
+
+    #[test]
+    fn sn_tcp_observed_endpoint_without_map_ports_is_not_returned() {
+        let observed_tcp =
+            Endpoint::from((Protocol::Tcp, "119.127.198.117:44325".parse().unwrap()));
+        let reported_tcp = observed_tcp;
+
+        let endpoints =
+            SnService::observed_endpoint_candidates(&[observed_tcp], &[], &[reported_tcp]);
+
+        assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn sn_tcp_observed_endpoint_with_map_ports_returns_only_mapped_candidates() {
+        let observed_tcp =
+            Endpoint::from((Protocol::Tcp, "119.127.198.117:44325".parse().unwrap()));
+
+        let endpoints = SnService::observed_endpoint_candidates(
+            &[observed_tcp],
+            &[(Protocol::Tcp, 7000), (Protocol::Quic, 7001)],
+            &[],
+        );
+
+        let mut mapped_tcp = Endpoint::from((Protocol::Tcp, "119.127.198.117:7000".parse().unwrap()));
+        mapped_tcp.set_area(EndpointArea::Mapped);
+        let mut mapped_quic =
+            Endpoint::from((Protocol::Quic, "119.127.198.117:7001".parse().unwrap()));
+        mapped_quic.set_area(EndpointArea::Mapped);
+
+        assert_eq!(endpoints, vec![mapped_tcp, mapped_quic]);
+        assert!(endpoints.iter().all(|ep| ep.get_area() == EndpointArea::Mapped));
+        assert!(endpoints.iter().all(|ep| ep.addr().port() != 44325));
+    }
+
+    #[test]
+    fn sn_non_tcp_observed_endpoint_remains_direct_candidate() {
+        let reported_quic =
+            Endpoint::from((Protocol::Quic, "119.127.198.117:44325".parse().unwrap()));
+        let observed_quic = reported_quic;
+
+        let endpoints =
+            SnService::observed_endpoint_candidates(&[observed_quic], &[], &[reported_quic]);
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].protocol(), Protocol::Quic);
+        assert_eq!(endpoints[0].addr(), observed_quic.addr());
+        assert_eq!(endpoints[0].get_area(), EndpointArea::Wan);
     }
 
     #[test]

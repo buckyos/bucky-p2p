@@ -8,7 +8,7 @@ defaults:
 levels:
   unit:
     mode: enabled
-    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、SN control stream 信令断言、SN server 连接验证器默认 allow-all 与自定义 reject 断言、SN service contract/receipt 生产路径清理断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、基于 `sfo-reuseport` 的 TCP/QUIC listener runtime 注入和 socket 适配编译边界、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、`TtpServer` 入站 tunnel validator 默认 allow-all、显式 accept/reject/error 断言、`TtpNode` 缺失 tunnel时主动创建/attach 并打开 stream/control stream/datagram 的 active-open 断言、`TtpClient` maintained target 删除和 non-maintained idle cache release 断言、bounded channel 顶层分位置容量默认值/单项覆盖、后续 stack 容量配置 API 删除和源码 unbounded mpsc 清理、`pn_server` 的默认 validator allow-all、显式 reject/assigned-target policy、source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
+    summary: 面向 transport、tunnel、protocol 和 identity 子模块的 crate 本地验证，包含 endpoint area `ServerReflexive` 编解码和 SN 观察地址分类断言、SN TCP 来源地址 mapped-only 候选构造断言、SN control stream 信令断言、SN server 连接验证器默认 allow-all 与自定义 reject 断言、SN service contract/receipt 生产路径清理断言、`TunnelManager` 的统一 publish 生命周期断言、incoming reverse 无 waiter close 断言、单 SN NAT 打洞调度、SN 存在时仅对 `ServerReflexive` QUIC candidate 开启的同源 UDP punch 断言、QUIC heartbeat timeout 断言、基于 `sfo-reuseport` 的 TCP/QUIC listener runtime 注入和 socket 适配编译边界、`TunnelNetwork::listen(...)` 回调化、`Tunnel::listen_stream(...)` / `listen_datagram(...)` 入站 channel 回调化、`Tunnel::open_control_stream(...)` / `listen_control_stream(...)` control stream API、`TtpServer` 入站 tunnel validator 默认 allow-all、显式 accept/reject/error 断言、`TtpNode` 缺失 tunnel时主动创建/attach 并打开 stream/control stream/datagram 的 active-open 断言、`TtpClient` maintained target 删除和 non-maintained idle cache release 断言、bounded channel 顶层分位置容量默认值/单项覆盖、后续 stack 容量配置 API 删除和源码 unbounded mpsc 清理、`pn_server` 的默认 validator allow-all、显式 reject/assigned-target policy、source/target 双边统计与 source 单边限速桥接断言、proxy stream 的 TLS-over-proxy 断言，以及 `PnTunnel` idle close 与 control channel 状态机断言
     test_targets:
       - p2p-frame/src/networks/**
       - p2p-frame/src/tunnel/**
@@ -33,6 +33,7 @@ levels:
         - `networks/tunnel.rs`、`networks/tcp/tunnel.rs`、`networks/quic/tunnel.rs`、`pn/client/pn_tunnel.rs`、`stream/stream_manager.rs`、`datagram/datagram_manager.rs` 和 `ttp/runtime.rs` 必须通过 unit 编译或行为测试覆盖公共 `Tunnel` trait 移除 `accept_stream()` / `accept_datagram()`，`listen_stream(...)` / `listen_datagram(...)` 注册回调后由 tunnel 内部 dispatch loop 交付入口 stream/datagram，关闭后不继续交付成功 channel，且 PN `PortNotListen` 错误可通过 callback 返回并继续监听。
         - `networks/tunnel.rs`、`networks/control_stream.rs`、`networks/tcp/tunnel.rs`、`networks/quic/tunnel.rs` 和 `pn/client/pn_tunnel.rs` 必须通过 unit 编译或行为测试覆盖 `Tunnel::open_control_stream(...)` / `listen_control_stream(...)`，确认内部 runtime/frame 类型未公开导出，TCP/QUIC/PN 只通过单一 `Data` 控制命令承载内部 frame，覆盖 purpose 过滤、重复 listen 替换、64KiB 发送切分、接收超限拒绝，底层控制通道断开后所有派生 stream、pending open 和 pending write 失败，以及 TCP/QUIC/PN tunnel 建立后的 control stream 双向收发。
         - `sn/client/sn_service.rs` 与 `sn/service/service.rs` 必须通过 unit 编译或行为测试覆盖 SN command service 为 SN purpose 注册 control stream listener，control stream 入站可包装为 cmd tunnel；代码审查必须确认 SN client 默认只调用 `open_control_stream(...)`，在控制通道不可用、远端未监听或旧版本不支持时失败且不 fallback 到普通 `open_stream(...)`，SN service 不注册普通 `listen_stream(...)` 作为 SN 命令入口。
+        - `sn/client/sn_service.rs` 必须通过 unit 行为测试覆盖 SN client 本地 listener entries 按 QUIC、TCP、Ext 协议顺序排序；代码审查必须确认 ping/report loop 按同一 SN 聚合候选，QUIC report 成功后停止 TCP fallback，QUIC 建链或 report 失败后才继续 TCP，并按 `sn_peer_id` 去重 active SN。
         - `sn/service/service.rs` 必须通过 unit 行为测试覆盖默认 `allow_all_sn_connection_validator()` 不拒绝带客户端证书的 report；自定义 validator reject 时 `handle_report_sn(...)` 返回 `PermissionDenied`，validator 上下文只能包含来自 cmd tunnel `peer_id` 的 `client_id` 和匹配该 id 的 `client_cert`，reject 后不得更新 peer manager 或继续处理该 report；证书解析 id 与 `client_id` 不一致时不得调用 validator，也不得更新 peer manager。
         - `sn/service/service.rs`、`sn/service/mod.rs` 和 `sn/client/mod.rs` 必须通过编译和源码搜索确认不再构造、导出或依赖 `SnServiceContractServer`、service receipt 模块或 client contract helper；`sn/protocol` 中既有 receipt wire 兼容结构、`contract_id` 和 `receipt` 字段可保留，不作为清理失败。
         - `stack.rs` 的 unit 测试必须覆盖 `P2pConfig` 默认用户不设置时仍存在的各队列位置 channel 容量均为 `1024`、单项容量可显式覆盖且不影响其他位置，覆盖 `P2pStackConfig` 从 `P2pEnv` 继承分位置容量且可显式覆盖；源码搜索必须确认 `p2p-frame/src` 内不再存在 `unbounded_channel`、`UnboundedSender` 或 `UnboundedReceiver`，并确认 TCP/QUIC tunnel 不再保留旧 accept queue 容量参数。
@@ -40,6 +41,7 @@ levels:
         - `sn/client/sn_service.rs` 与 `sn/service/service.rs` 的 unit 测试必须覆盖 `SnCall` 携带本次建链的 `reverse_endpoint_array`，SN called 保留调用方候选并扩展单 SN 观察候选，且不引入多 SN fanout。
         - `endpoint.rs` 的 unit 测试必须覆盖 `EndpointArea::ServerReflexive` 使用 `S` 文本标记、raw codec 往返保持 area、`D` 不再作为新语义输入、`is_static_wan()` 不包含 `ServerReflexive`，并通过编译期覆盖确认 `is_sys_default()` 已移除。
         - `sn/service/service.rs` 的 unit 测试必须覆盖 SN 观察 socket address 与节点自上报 endpoint 完全一致时标记 `Wan`，不一致时标记 `ServerReflexive`。
+        - `sn/service/service.rs` 的 unit 测试必须覆盖 TCP observed socket address 无 `map_ports` 时不作为候选返回，有 `map_ports` 时只用来源 IP 与上报协议/端口构造 `Mapped` endpoint，原始 TCP source port 不得泄漏；非 TCP observed endpoint 继续保持 direct observed candidate 分类。
         - `pn/service/pn_server.rs` 的 unit 测试必须覆盖 source/target 双边成功转发字节统计、仅 source 侧生效的用户级限速，以及 `sfo-io` 集成失败路径。
         - `pn/service/pn_server.rs` 的 unit 测试必须覆盖默认 `allow_all_pn_connection_validator()` 返回 `Accept`，显式 `reject_all_pn_connection_validator()` 返回 `Reject`，并确认 wrong-PN/assigned-target 准入只能由显式 validator 或 assigned-target policy 承担，默认 `PnServer::new(...)` 不隐式拒绝未配置连接。
         - 当前 `pn/client/pn_tunnel.rs` 的 unit 测试已直接覆盖 passive 明文兼容、`TlsRequired` 成功、TLS 身份校验失败、`datagram` 忽略 `stream` 模式，以及 `create_tunnel_with_options(...)` / client 级模式配置下 datagram 不被本地拒绝。
@@ -51,8 +53,16 @@ levels:
     steps:
       - id: p2p-frame-unit
         name: 运行 p2p-frame unit 测试集
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server", "pn_multi_server_assigned_target", "ttp_node_active_open", "ttp_client_connection_lifecycle", "ttp_server_tunnel_accept_validator"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "sn_client_protocol_priority", "sn_tcp_source_mapped_only", "remove_sn_service_contract_server", "pn_multi_server_assigned_target", "ttp_node_active_open", "ttp_client_connection_lifecycle", "ttp_server_tunnel_accept_validator"]
         run: ["cargo", "test", "-p", "p2p-frame"]
+      - id: p2p-frame-sn-client-protocol-priority
+        name: 运行 SN client protocol priority targeted 测试
+        change_ids: ["sn_client_protocol_priority"]
+        run: ["cargo", "test", "-p", "p2p-frame", "sn_client"]
+      - id: p2p-frame-sn-tcp-source-mapped-only
+        name: 运行 SN TCP source mapped-only targeted 测试
+        change_ids: ["sn_tcp_source_mapped_only"]
+        run: ["cargo", "test", "-p", "p2p-frame", "sn_tcp_observed_endpoint"]
       - id: p2p-frame-ttp-server-validator
         name: 运行 TTP server validator targeted 测试
         change_ids: ["ttp_server_tunnel_accept_validator"]
@@ -65,7 +75,7 @@ levels:
   dv:
     mode: disabled
     summary: p2p-frame 当前不定义自动 DV 入口；`cyfs-p2p-test all-in-one` 不得作为本模块或其他模块的 DV 证据。
-    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server", "pn_multi_server_assigned_target", "ttp_client_connection_lifecycle", "ttp_server_tunnel_accept_validator"]
+    change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "sn_tcp_source_mapped_only", "remove_sn_service_contract_server", "pn_multi_server_assigned_target", "ttp_client_connection_lifecycle", "ttp_server_tunnel_accept_validator"]
     reason: 当前没有满足 harness 自动完成语义的 p2p-frame DV 入口；运行时兼容性由 unit 和 integration 承担，新增 DV 必须另行 proposal/design/testing。
 
   integration:
@@ -105,5 +115,5 @@ levels:
     steps:
       - id: p2p-frame-integration
         name: 运行工作区测试套件
-        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "remove_sn_service_contract_server", "pn_multi_server_assigned_target", "ttp_client_connection_lifecycle", "ttp_server_tunnel_accept_validator"]
+        change_ids: ["endpoint_area_server_reflexive", "server_reflexive_quic_nat_keepalive", "reverse_timeout_close_late_tunnel", "networks_sfo_reuseport_tcp_listener", "networks_sfo_reuseport_quic_listener_socket", "tunnel_network_listen_callback", "bounded_channel_capacity_config", "stack_channel_capacity_config_removal", "tunnel_stream_datagram_listen_callback", "tunnel_control_stream_api", "sn_control_stream_signaling", "sn_server_connection_validator", "sn_tcp_source_mapped_only", "remove_sn_service_contract_server", "pn_multi_server_assigned_target", "ttp_client_connection_lifecycle", "ttp_server_tunnel_accept_validator"]
         run: ["cargo", "test", "--workspace"]
