@@ -2434,7 +2434,7 @@ impl TcpTunnel {
         }
     }
 
-    fn find_claimable_entry(&self) -> Option<Arc<DataConnEntry>> {
+    fn find_claimable_entry(&self, skipped_conn_ids: &[TcpConnId]) -> Option<Arc<DataConnEntry>> {
         let entries = self
             .state
             .lock()
@@ -2444,6 +2444,9 @@ impl TcpTunnel {
             .cloned()
             .collect::<Vec<_>>();
         for entry in entries {
+            if skipped_conn_ids.contains(&entry.conn_id) {
+                continue;
+            }
             let inner = entry.inner.lock().unwrap();
             match &inner.state {
                 DataConnEntryState::FirstClaimPending if entry.created_by_local => {
@@ -2766,17 +2769,25 @@ impl TcpTunnel {
         purpose: TunnelPurpose,
     ) -> P2pResult<Arc<Mutex<LeaseContext>>> {
         self.wait_until_connected().await?;
+        let mut skipped_conn_ids = Vec::new();
         for _ in 0..4 {
-            let entry = match self.find_claimable_entry() {
+            let entry = match self.find_claimable_entry(&skipped_conn_ids) {
                 Some(entry) => entry,
                 None => match self.create_data_connection(None).await {
                     Ok(entry) => entry,
                     Err(_) => self.request_remote_data_connection().await?,
                 },
             };
+            let conn_id = entry.conn_id;
             match self.claim_entry(entry, kind, purpose.clone()).await {
                 Ok(lease) => return Ok(lease),
-                Err(err) if err.code() == P2pErrorCode::Conflict => continue,
+                Err(err)
+                    if err.code() == P2pErrorCode::Conflict
+                        || err.code() == P2pErrorCode::ErrorState =>
+                {
+                    skipped_conn_ids.push(conn_id);
+                    continue;
+                }
                 Err(err) => return Err(err),
             }
         }

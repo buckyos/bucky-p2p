@@ -208,7 +208,7 @@ impl TcpTunnelListener {
         }
     }
 
-    fn validate_control_hello(&self, hello: &TcpConnectionHello) -> TcpIncomingControlDecision {
+    fn validate_control_hello(hello: &TcpConnectionHello) -> TcpIncomingControlDecision {
         if hello.role != TcpConnectionRole::Control
             || hello.conn_id.is_some()
             || hello.open_request_id.is_some()
@@ -241,7 +241,7 @@ impl TcpTunnelListener {
             candidate_id: hello.candidate_id,
         };
 
-        let decision = self.validate_control_hello(&hello);
+        let decision = Self::validate_control_hello(&hello);
 
         let accepted = TcpTunnel::accept_control_connection(
             connection,
@@ -351,82 +351,6 @@ fn resolve_tcp_bind_endpoint(local: Endpoint) -> P2pResult<Endpoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p_identity::{
-        EncodedP2pIdentityCert, P2pIdentityCert, P2pIdentityCertFactory, P2pIdentityCertRef,
-        P2pIdentitySignType, P2pSignature,
-    };
-    use crate::tls::DefaultTlsServerCertResolver;
-    use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
-    use std::sync::Arc;
-
-    struct TestCertFactory;
-
-    impl P2pIdentityCertFactory for TestCertFactory {
-        fn create(&self, cert: &EncodedP2pIdentityCert) -> P2pResult<P2pIdentityCertRef> {
-            Ok(Arc::new(TestCert {
-                id: P2pId::from(cert.clone()),
-            }))
-        }
-    }
-
-    struct TestCert {
-        id: P2pId,
-    }
-
-    impl P2pIdentityCert for TestCert {
-        fn get_id(&self) -> P2pId {
-            self.id.clone()
-        }
-
-        fn get_name(&self) -> String {
-            self.id.to_string()
-        }
-
-        fn sign_type(&self) -> P2pIdentitySignType {
-            P2pIdentitySignType::Ed25519
-        }
-
-        fn verify(&self, _message: &[u8], _sign: &P2pSignature) -> bool {
-            true
-        }
-
-        fn verify_cert(&self, _name: &str) -> bool {
-            true
-        }
-
-        fn get_encoded_cert(&self) -> P2pResult<EncodedP2pIdentityCert> {
-            Ok(self.id.as_slice().to_vec())
-        }
-
-        fn endpoints(&self) -> Vec<Endpoint> {
-            Vec::new()
-        }
-
-        fn sn_list(&self) -> Vec<crate::p2p_identity::P2pSn> {
-            Vec::new()
-        }
-
-        fn update_endpoints(&self, _eps: Vec<Endpoint>) -> P2pIdentityCertRef {
-            Arc::new(TestCert {
-                id: self.id.clone(),
-            })
-        }
-    }
-
-    fn listener() -> Arc<TcpTunnelListener> {
-        let callback: IncomingTunnelCallback = Arc::new(|_| Box::pin(async {}));
-        TcpTunnelListener::new(
-            DefaultTlsServerCertResolver::new(),
-            Arc::new(TestCertFactory),
-            TcpTunnelRegistry::new(),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-            Duration::from_secs(30),
-            ServerRuntime::start(ServerRuntimeConfig::default())
-                .expect("sfo reuseport server runtime should start"),
-            callback,
-        )
-    }
 
     fn control_hello() -> TcpConnectionHello {
         TcpConnectionHello {
@@ -441,30 +365,29 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_listener_accepts_only_control_hello_without_data_fields() {
-        let listener = listener();
         let mut hello = control_hello();
         assert_eq!(
-            listener.validate_control_hello(&hello),
+            TcpTunnelListener::validate_control_hello(&hello),
             TcpIncomingControlDecision::Accept
         );
 
         hello.role = TcpConnectionRole::Data;
         assert_eq!(
-            listener.validate_control_hello(&hello),
+            TcpTunnelListener::validate_control_hello(&hello),
             TcpIncomingControlDecision::ProtocolError
         );
 
         hello = control_hello();
         hello.conn_id = Some(TunnelId::from(12));
         assert_eq!(
-            listener.validate_control_hello(&hello),
+            TcpTunnelListener::validate_control_hello(&hello),
             TcpIncomingControlDecision::ProtocolError
         );
 
         hello = control_hello();
         hello.open_request_id = Some(TunnelId::from(13));
         assert_eq!(
-            listener.validate_control_hello(&hello),
+            TcpTunnelListener::validate_control_hello(&hello),
             TcpIncomingControlDecision::ProtocolError
         );
     }

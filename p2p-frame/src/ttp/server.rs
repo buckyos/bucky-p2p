@@ -6,10 +6,11 @@ use crate::networks::{
 };
 use crate::p2p_identity::{P2pId, P2pIdentityRef};
 use crate::types::{TunnelCandidateId, TunnelId};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::client::{TtpConnector, find_existing_tunnel_in, remember_tunnel_in};
+use super::client::{
+    TtpConnector, TtpTunnelCache, find_existing_tunnel_in_multi, remember_tunnel_in_multi,
+};
 use super::listener::{
     TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStreamCallback,
     TtpPortListener,
@@ -21,7 +22,7 @@ pub struct TtpServer {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
-    tunnels: Mutex<HashMap<P2pId, TunnelRef>>,
+    tunnels: Mutex<TtpTunnelCache>,
     incoming_tunnel_validator: TtpIncomingTunnelValidatorRef,
 }
 
@@ -79,7 +80,7 @@ impl TtpServer {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
-            tunnels: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(TtpTunnelCache::new()),
             incoming_tunnel_validator,
         });
         server.register_accept_callback()?;
@@ -188,11 +189,11 @@ impl TtpServer {
     }
 
     fn remember_tunnel(&self, tunnel: TunnelRef) {
-        remember_tunnel_in(&self.tunnels, tunnel);
+        remember_tunnel_in_multi(&self.tunnels, tunnel);
     }
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {
-        find_existing_tunnel_in(&self.tunnels, target)
+        find_existing_tunnel_in_multi(&self.tunnels, target)
     }
 
     fn get_existing_tunnel(&self, target: &TtpTarget) -> P2pResult<TunnelRef> {

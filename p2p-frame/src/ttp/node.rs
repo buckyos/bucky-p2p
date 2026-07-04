@@ -3,11 +3,12 @@ use crate::networks::{
     NetManagerRef, TunnelDatagramWrite, TunnelPurpose, TunnelRef, TunnelStreamRead,
     TunnelStreamWrite,
 };
-use crate::p2p_identity::{P2pId, P2pIdentityRef};
-use std::collections::HashMap;
+use crate::p2p_identity::P2pIdentityRef;
 use std::sync::{Arc, Mutex};
 
-use super::client::{TtpConnector, get_or_create_tunnel_for, remember_tunnel_in};
+use super::client::{
+    TtpConnector, TtpTunnelCache, get_or_create_tunnel_for_multi, remember_tunnel_in_multi,
+};
 use super::listener::{
     TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStreamCallback,
     TtpPortListener,
@@ -19,7 +20,7 @@ pub struct TtpNode {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
-    tunnels: Mutex<HashMap<P2pId, TunnelRef>>,
+    tunnels: Mutex<TtpTunnelCache>,
 }
 
 pub type TtpNodeRef = Arc<TtpNode>;
@@ -33,7 +34,7 @@ impl TtpNode {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
-            tunnels: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(TtpTunnelCache::new()),
         });
         node.register_accept_callback()?;
         Ok(node)
@@ -92,11 +93,11 @@ impl TtpNode {
     }
 
     fn remember_tunnel(&self, tunnel: TunnelRef) {
-        remember_tunnel_in(&self.tunnels, tunnel);
+        remember_tunnel_in_multi(&self.tunnels, tunnel);
     }
 
     async fn get_or_create_tunnel(&self, target: &TtpTarget) -> P2pResult<TunnelRef> {
-        get_or_create_tunnel_for(
+        get_or_create_tunnel_for_multi(
             &self.local_identity,
             &self.net_manager,
             &self.runtime,

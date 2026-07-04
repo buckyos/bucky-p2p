@@ -44,7 +44,7 @@ pub struct TtpClient {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
     runtime: Arc<TtpRuntime>,
-    tunnels: Arc<Mutex<HashMap<P2pId, TtpClientTunnelEntry>>>,
+    tunnels: Arc<Mutex<HashMap<P2pId, TtpClientTunnelEntries>>>,
     maintained_targets: Mutex<Vec<TtpTarget>>,
     maintain_started: AtomicBool,
     idle_started: AtomicBool,
@@ -62,17 +62,29 @@ struct TtpClientTunnelEntry {
     leases: usize,
 }
 
+type TtpClientTunnelEntries = HashMap<TtpClientTunnelKey, TtpClientTunnelEntry>;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TtpClientTunnelKey {
+    local_ep: Option<Endpoint>,
+    remote_ep: Option<Endpoint>,
+}
+
 type TtpClientTunnelLease = Arc<TtpClientTunnelLeaseInner>;
 
 struct TtpClientTunnelLeaseInner {
-    tunnels: Arc<Mutex<HashMap<P2pId, TtpClientTunnelEntry>>>,
+    tunnels: Arc<Mutex<HashMap<P2pId, TtpClientTunnelEntries>>>,
     remote_id: P2pId,
+    key: TtpClientTunnelKey,
 }
 
 impl Drop for TtpClientTunnelLeaseInner {
     fn drop(&mut self) {
         let mut tunnels = self.tunnels.lock().unwrap();
-        if let Some(entry) = tunnels.get_mut(&self.remote_id) {
+        if let Some(entry) = tunnels
+            .get_mut(&self.remote_id)
+            .and_then(|entries| entries.get_mut(&self.key))
+        {
             entry.leases = entry.leases.saturating_sub(1);
             entry.last_used = Instant::now();
         }
@@ -144,10 +156,10 @@ impl TtpClient {
         let maintained_targets = self.maintained_targets.lock().unwrap().clone();
         let mut tunnels = self.tunnels.lock().unwrap();
         self.release_idle_tunnels_locked(&mut tunnels, now, &maintained_targets);
-        tunnels.retain(|_, entry| is_tunnel_available(entry.tunnel.as_ref()));
         tunnels
-            .get_mut(&target.remote_id)
-            .filter(|entry| match_target(entry.tunnel.as_ref(), target))
+            .get_mut(&target.remote_id)?
+            .values_mut()
+            .find(|entry| match_target(entry.tunnel.as_ref(), target))
             .map(|entry| {
                 entry.last_used = now;
                 entry.tunnel.clone()
@@ -292,9 +304,9 @@ impl TtpClient {
             .any(|target| match_target(tunnel.as_ref(), target));
         let mut tunnels = self.tunnels.lock().unwrap();
         self.release_idle_tunnels_locked(&mut tunnels, Instant::now(), &maintained_targets);
-        tunnels.retain(|_, entry| is_tunnel_available(entry.tunnel.as_ref()));
-        tunnels.insert(
-            tunnel.remote_id(),
+        let key = TtpClientTunnelKey::from_tunnel(tunnel.as_ref());
+        tunnels.entry(tunnel.remote_id()).or_default().insert(
+            key,
             TtpClientTunnelEntry {
                 tunnel,
                 maintained,
@@ -307,40 +319,53 @@ impl TtpClient {
     fn refresh_maintained_cache_state(&self, remote_id: &P2pId) {
         let targets = self.maintained_targets.lock().unwrap().clone();
         let mut tunnels = self.tunnels.lock().unwrap();
-        if let Some(entry) = tunnels.get_mut(remote_id) {
-            entry.maintained = targets
-                .iter()
-                .any(|target| match_target(entry.tunnel.as_ref(), target));
-            entry.last_used = Instant::now();
+        if let Some(entries) = tunnels.get_mut(remote_id) {
+            for entry in entries.values_mut() {
+                entry.maintained = targets
+                    .iter()
+                    .any(|target| match_target(entry.tunnel.as_ref(), target));
+                entry.last_used = Instant::now();
+            }
         }
     }
 
-    fn acquire_lease(&self, remote_id: &P2pId) -> Option<TtpClientTunnelLease> {
+    fn acquire_lease(&self, target: &TtpTarget) -> Option<TtpClientTunnelLease> {
         let mut tunnels = self.tunnels.lock().unwrap();
-        let entry = tunnels.get_mut(remote_id)?;
-        entry.leases += 1;
-        entry.last_used = Instant::now();
+        let mut lease_key = None;
+        let entries = tunnels.get_mut(&target.remote_id)?;
+        for (key, entry) in entries.iter_mut() {
+            if match_target(entry.tunnel.as_ref(), target) {
+                entry.leases += 1;
+                entry.last_used = Instant::now();
+                lease_key = Some(key.clone());
+                break;
+            }
+        }
         Some(Arc::new(TtpClientTunnelLeaseInner {
             tunnels: self.tunnels.clone(),
-            remote_id: remote_id.clone(),
+            remote_id: target.remote_id.clone(),
+            key: lease_key?,
         }))
     }
 
     fn release_idle_tunnels_locked(
         &self,
-        tunnels: &mut HashMap<P2pId, TtpClientTunnelEntry>,
+        tunnels: &mut HashMap<P2pId, TtpClientTunnelEntries>,
         now: Instant,
         maintained_targets: &[TtpTarget],
     ) {
         let idle_timeout = self.idle_timeout;
-        tunnels.retain(|_, entry| {
-            entry.maintained = maintained_targets
-                .iter()
-                .any(|target| match_target(entry.tunnel.as_ref(), target));
-            is_tunnel_available(entry.tunnel.as_ref())
-                && (entry.maintained
-                    || entry.leases > 0
-                    || now.duration_since(entry.last_used) < idle_timeout)
+        tunnels.retain(|_, entries| {
+            entries.retain(|_, entry| {
+                entry.maintained = maintained_targets
+                    .iter()
+                    .any(|target| match_target(entry.tunnel.as_ref(), target));
+                is_tunnel_available(entry.tunnel.as_ref())
+                    && (entry.maintained
+                        || entry.leases > 0
+                        || now.duration_since(entry.last_used) < idle_timeout)
+            });
+            !entries.is_empty()
         });
     }
 
@@ -421,7 +446,7 @@ impl TtpConnector for TtpClient {
         purpose: TunnelPurpose,
     ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
         let tunnel = self.get_or_create_tunnel(target).await?;
-        let lease = self.acquire_lease(&target.remote_id).ok_or_else(|| {
+        let lease = self.acquire_lease(target).ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::ErrorState,
                 "ttp client tunnel cache missing for lease"
@@ -454,7 +479,7 @@ impl TtpConnector for TtpClient {
         purpose: TunnelPurpose,
     ) -> P2pResult<(TtpStreamMeta, TunnelStreamRead, TunnelStreamWrite)> {
         let tunnel = self.get_or_create_tunnel(target).await?;
-        let lease = self.acquire_lease(&target.remote_id).ok_or_else(|| {
+        let lease = self.acquire_lease(target).ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::ErrorState,
                 "ttp client tunnel cache missing for lease"
@@ -487,7 +512,7 @@ impl TtpConnector for TtpClient {
         purpose: TunnelPurpose,
     ) -> P2pResult<(TtpDatagramMeta, TunnelDatagramWrite)> {
         let tunnel = self.get_or_create_tunnel(target).await?;
-        let lease = self.acquire_lease(&target.remote_id).ok_or_else(|| {
+        let lease = self.acquire_lease(target).ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::ErrorState,
                 "ttp client tunnel cache missing for lease"
@@ -511,8 +536,35 @@ impl TtpConnector for TtpClient {
     }
 }
 
+impl TtpClientTunnelKey {
+    fn from_tunnel(tunnel: &dyn crate::networks::Tunnel) -> Self {
+        Self {
+            local_ep: tunnel.local_ep(),
+            remote_ep: tunnel.remote_ep(),
+        }
+    }
+}
+
 pub(crate) fn is_tunnel_available(tunnel: &dyn crate::networks::Tunnel) -> bool {
     !tunnel.is_closed() && tunnel.state() == TunnelState::Connected
+}
+
+pub(crate) type TtpTunnelCache = HashMap<P2pId, TtpTunnelCacheEntries>;
+pub(crate) type TtpTunnelCacheEntries = HashMap<TtpTunnelCacheKey, TunnelRef>;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TtpTunnelCacheKey {
+    local_ep: Option<Endpoint>,
+    remote_ep: Option<Endpoint>,
+}
+
+impl TtpTunnelCacheKey {
+    fn from_tunnel(tunnel: &dyn crate::networks::Tunnel) -> Self {
+        Self {
+            local_ep: tunnel.local_ep(),
+            remote_ep: tunnel.remote_ep(),
+        }
+    }
 }
 
 pub(crate) fn remember_tunnel_in(tunnels: &Mutex<HashMap<P2pId, TunnelRef>>, tunnel: TunnelRef) {
@@ -533,14 +585,43 @@ pub(crate) fn find_existing_tunnel_in(
         .cloned()
 }
 
-pub(crate) async fn get_or_create_tunnel_for(
+pub(crate) fn remember_tunnel_in_multi(tunnels: &Mutex<TtpTunnelCache>, tunnel: TunnelRef) {
+    let mut tunnels = tunnels.lock().unwrap();
+    tunnels.retain(|_, entries| {
+        entries.retain(|_, existing| is_tunnel_available(existing.as_ref()));
+        !entries.is_empty()
+    });
+    let key = TtpTunnelCacheKey::from_tunnel(tunnel.as_ref());
+    tunnels
+        .entry(tunnel.remote_id())
+        .or_default()
+        .insert(key, tunnel);
+}
+
+pub(crate) fn find_existing_tunnel_in_multi(
+    tunnels: &Mutex<TtpTunnelCache>,
+    target: &TtpTarget,
+) -> Option<TunnelRef> {
+    let mut tunnels = tunnels.lock().unwrap();
+    tunnels.retain(|_, entries| {
+        entries.retain(|_, tunnel| is_tunnel_available(tunnel.as_ref()));
+        !entries.is_empty()
+    });
+    tunnels
+        .get_mut(&target.remote_id)?
+        .values()
+        .find(|tunnel| match_target(tunnel.as_ref(), target))
+        .cloned()
+}
+
+pub(crate) async fn get_or_create_tunnel_for_multi(
     local_identity: &P2pIdentityRef,
     net_manager: &NetManagerRef,
     runtime: &Arc<TtpRuntime>,
-    tunnels: &Mutex<HashMap<P2pId, TunnelRef>>,
+    tunnels: &Mutex<TtpTunnelCache>,
     target: &TtpTarget,
 ) -> P2pResult<TunnelRef> {
-    if let Some(tunnel) = find_existing_tunnel_in(tunnels, target) {
+    if let Some(tunnel) = find_existing_tunnel_in_multi(tunnels, target) {
         return Ok(tunnel);
     }
 
@@ -567,7 +648,7 @@ pub(crate) async fn get_or_create_tunnel_for(
     };
 
     runtime.attach_tunnel(tunnel.clone()).await?;
-    remember_tunnel_in(tunnels, tunnel.clone());
+    remember_tunnel_in_multi(tunnels, tunnel.clone());
     Ok(tunnel)
 }
 

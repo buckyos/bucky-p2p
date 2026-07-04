@@ -62,8 +62,8 @@ levels:
       - id: workspace-harness-admission-p2p-frame
         name: 验证 p2p-frame admission
         change_ids: ["workspace_harness_direct_admission_gate"]
-        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "p2p-frame", "--change-id", "endpoint_area_server_reflexive"]
+        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "p2p-frame", "--change-id", "endpoint_area_server_reflexive", "--evidence-file", "harness/evidence/admission/20260704-test-run-p2p-frame-admission.md"]
       - id: workspace-harness-admission-cyfs-p2p
         name: 验证 cyfs-p2p admission 失败关闭或审批后通过
         change_ids: ["workspace_harness_direct_admission_gate"]
-        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "cyfs-p2p", "--change-id", "endpoint_area_server_reflexive"]
+        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "cyfs-p2p", "--change-id", "endpoint_area_server_reflexive", "--evidence-file", "harness/evidence/admission/20260704-test-run-cyfs-p2p-admission.md"]
