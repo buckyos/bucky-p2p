@@ -1,7 +1,7 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
-use crate::networks::NetManagerRef;
+use crate::networks::{NetManagerRef, TunnelListenerInfo};
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef,
     P2pSn,
@@ -41,10 +41,41 @@ fn sn_client_protocol_priority(protocol: Protocol) -> u8 {
 }
 
 fn sort_sn_client_listener_entries(
-    mut listener_entries: Vec<(Protocol, Vec<crate::networks::TunnelListenerInfo>)>,
-) -> Vec<(Protocol, Vec<crate::networks::TunnelListenerInfo>)> {
+    mut listener_entries: Vec<(Protocol, Vec<TunnelListenerInfo>)>,
+) -> Vec<(Protocol, Vec<TunnelListenerInfo>)> {
     listener_entries.sort_by_key(|(protocol, _)| sn_client_protocol_priority(*protocol));
     listener_entries
+}
+
+fn sn_client_protocol_candidates(
+    listener_entries: Vec<(Protocol, Vec<TunnelListenerInfo>)>,
+    supported_protocols: Vec<Protocol>,
+) -> Vec<(Protocol, Vec<Option<Endpoint>>)> {
+    let mut candidates = listener_entries
+        .into_iter()
+        .map(|(protocol, listeners)| {
+            let mut local_eps = listeners
+                .into_iter()
+                .map(|listener| Some(listener.local))
+                .collect::<Vec<_>>();
+            if local_eps.is_empty() {
+                local_eps.push(None);
+            }
+            (protocol, local_eps)
+        })
+        .collect::<Vec<_>>();
+
+    for protocol in supported_protocols {
+        if !candidates
+            .iter()
+            .any(|(candidate_protocol, _)| *candidate_protocol == protocol)
+        {
+            candidates.push((protocol, vec![None]));
+        }
+    }
+
+    candidates.sort_by_key(|(protocol, _)| sn_client_protocol_priority(*protocol));
+    candidates
 }
 
 #[callback_trait::callback_trait]
@@ -207,19 +238,20 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, (), SnTunnelRead, SnTunn
                 .await;
         }
 
-        let mut listener_entries = self.net_manager.listener_info_entries();
-        listener_entries
-            .sort_by_key(|(protocol, _)| if *protocol == Protocol::Quic { 0 } else { 1 });
-        for (protocol, listeners) in listener_entries {
+        let protocol_candidates = sn_client_protocol_candidates(
+            self.net_manager.listener_info_entries(),
+            self.net_manager.protocols(),
+        );
+        for (protocol, local_eps) in protocol_candidates {
             for sn_cert in self.sn_list.get_sn_list().iter() {
                 for sn_ep in sn_cert.endpoints().iter() {
                     if sn_ep.protocol() != protocol {
                         continue;
                     }
-                    for listener in listeners.iter() {
+                    for local_ep in local_eps.iter() {
                         if let Ok(tunnel) = self
                             .open_cmd_tunnel(
-                                Some(&listener.local),
+                                local_ep.as_ref(),
                                 sn_ep,
                                 &sn_cert.get_id(),
                                 sn_cert.get_name(),
@@ -752,44 +784,26 @@ impl SNClientService {
                     continue;
                 }
             }
-            let listener_entries =
-                sort_sn_client_listener_entries(self.net_manager.listener_info_entries());
+            let protocol_candidates = sn_client_protocol_candidates(
+                self.net_manager.listener_info_entries(),
+                self.net_manager.protocols(),
+            );
             for sn_cert in self.sn_list.get_sn_list().iter() {
                 let mut sn_reported = false;
-                for (protocol, listeners) in listener_entries.iter() {
+                for (protocol, local_eps) in protocol_candidates.iter() {
                     let protocol = *protocol;
                     for sn_ep in sn_cert.endpoints().iter() {
                         if sn_ep.protocol() != protocol {
                             continue;
                         }
-                        for listener in listeners.iter() {
-                            let local_ep = listener.local;
-                            let ret = if local_ep.addr().ip().is_unspecified() {
-                                self.cmd_client
-                                    .find_tunnel_id_by_classified(SnTunnelClassification::new(
-                                        None,
-                                        sn_ep.clone(),
-                                    ))
-                                    .await
-                            } else {
-                                if local_ep.protocol() == Protocol::Tcp {
-                                    let mut ep = local_ep;
-                                    ep.mut_addr().set_port(0);
-                                    self.cmd_client
-                                        .find_tunnel_id_by_classified(SnTunnelClassification::new(
-                                            Some(ep),
-                                            sn_ep.clone(),
-                                        ))
-                                        .await
-                                } else {
-                                    self.cmd_client
-                                        .find_tunnel_id_by_classified(SnTunnelClassification::new(
-                                            Some(local_ep),
-                                            sn_ep.clone(),
-                                        ))
-                                        .await
-                                }
-                            };
+                        for local_ep in local_eps.iter() {
+                            let ret = self
+                                .cmd_client
+                                .find_tunnel_id_by_classified(SnTunnelClassification::new(
+                                    *local_ep,
+                                    sn_ep.clone(),
+                                ))
+                                .await;
 
                             if ret.is_err() {
                                 continue;
@@ -1105,8 +1119,6 @@ impl SNClientService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::networks::TunnelListenerInfo;
-
     fn endpoint(protocol: Protocol, addr: &str) -> Endpoint {
         Endpoint::from((protocol, addr.parse().unwrap()))
     }
@@ -1146,5 +1158,53 @@ mod tests {
             protocols,
             vec![Protocol::Quic, Protocol::Tcp, Protocol::Ext(7)]
         );
+    }
+
+    #[test]
+    fn sn_client_protocol_candidates_include_supported_protocol_without_listener() {
+        let tcp = endpoint(Protocol::Tcp, "127.0.0.1:10002");
+
+        let candidates = sn_client_protocol_candidates(
+            vec![(
+                Protocol::Tcp,
+                vec![TunnelListenerInfo {
+                    local: tcp,
+                    mapping_port: None,
+                }],
+            )],
+            vec![Protocol::Quic, Protocol::Tcp],
+        );
+
+        assert_eq!(candidates[0], (Protocol::Quic, vec![None]));
+        assert_eq!(candidates[1], (Protocol::Tcp, vec![Some(tcp)]));
+    }
+
+    #[test]
+    fn sn_client_protocol_candidates_preserve_listener_local_ep() {
+        let quic = endpoint(Protocol::Quic, "127.0.0.1:10001");
+        let tcp = endpoint(Protocol::Tcp, "127.0.0.1:10002");
+
+        let candidates = sn_client_protocol_candidates(
+            vec![
+                (
+                    Protocol::Tcp,
+                    vec![TunnelListenerInfo {
+                        local: tcp,
+                        mapping_port: None,
+                    }],
+                ),
+                (
+                    Protocol::Quic,
+                    vec![TunnelListenerInfo {
+                        local: quic,
+                        mapping_port: None,
+                    }],
+                ),
+            ],
+            vec![Protocol::Quic, Protocol::Tcp],
+        );
+
+        assert_eq!(candidates[0], (Protocol::Quic, vec![Some(quic)]));
+        assert_eq!(candidates[1], (Protocol::Tcp, vec![Some(tcp)]));
     }
 }

@@ -3,8 +3,8 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-07-03T18:23:13+08:00
-approved_content_sha256: 0453dfef45c4bc997b90c45a53af2e722cf9540ea99e5ce290f2c01540a47a62
+approved_at: 2026-07-05T11:08:38+08:00
+approved_content_sha256: 9c642ff2b533e11e4eaf5d0a98d1372612bcc455e88b3f9ad33ebdbe42c3216d
 ---
 
 # p2p-frame 测试
@@ -123,7 +123,7 @@ approved_content_sha256: 0453dfef45c4bc997b90c45a53af2e722cf9540ea99e5ce290f2c01
 | tunnel_control_stream_api | `design/tunnel-control-stream-api.md` | V-TUNNEL-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 control stream open/listen、purpose 过滤、64KiB 边界、底层关闭传播和 TCP/QUIC/PN `Data` 控制命令接入。 | no | |
 | sn_control_stream_signaling | `design/sn-control-stream-signaling.md` | V-SN-CONTROL-STREAM-UNIT | unit | p2p-frame-unit | 覆盖 SN command service 从 SN purpose control stream 入站包装为 cmd tunnel，且 client 不 fallback 普通 stream。 | no | |
 | sn_server_connection_validator | `design.md` Directly Mapped Change Items | V-SN-SERVER-VALIDATOR-UNIT | unit | p2p-frame-unit | 覆盖 SN server 默认 allow-all、validator reject、上下文只含 `client_id`/`client_cert`，以及证书 id 不匹配时不调用 validator。 | no | |
-| sn_client_protocol_priority | `design.md` Directly Mapped Change Items | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | p2p-frame-sn-client-protocol-priority | 覆盖 SN client listener entries 按 QUIC、TCP、Ext 顺序排序。代码审查确认 ping/report loop 按同一 SN 聚合候选，QUIC `ReportSn` 成功后停止 TCP fallback，并按 `sn_peer_id` 去重 active SN。 | no | |
+| sn_client_protocol_priority | `design.md` Directly Mapped Change Items | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | p2p-frame-sn-client-protocol-priority | 覆盖 SN client 候选按 QUIC、TCP、Ext 顺序排序；支持协议但无匹配 listener 时仍生成 `local_ep = None` 出站候选；有匹配 listener 时保留 listener `local_ep`。代码审查确认 ping/report loop 按同一 SN 聚合候选，QUIC `ReportSn` 成功后停止 TCP fallback，并按 `sn_peer_id` 去重 active SN。 | no | |
 | sn_tcp_source_mapped_only | `design.md` Directly Mapped Change Items | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | p2p-frame-sn-tcp-source-mapped-only | 覆盖无 `map_ports` 时 TCP observed endpoint 不返回、有 `map_ports` 时只返回 `Mapped` candidate、原始 TCP 来源端口不泄漏、非 TCP observed candidate 直接分类，以及 peer cache 不新增 raw TCP source endpoint 存储字段。 | no | |
 | remove_sn_service_contract_server | `design.md` Directly Mapped Change Items | V-SN-CONTRACT-CLEANUP-COMPILE | unit | p2p-frame-unit | 编译和搜索确认 SN service contract/receipt 生产路径与公开导出已删除，SN 基础能力和 wire 兼容结构保留。 | no | |
 | pn_multi_server_assigned_target | `design.md` + `design/pn-server.md` Directly Mapped Change Items | V-PN-SERVER-DEFAULT-VALIDATOR-TARGETED | unit | p2p-frame-pn-validator | `cargo test -p p2p-frame pn_connection_validator -- --nocapture` 覆盖默认 PN validator 显式 allow-all 和显式 reject helper；`p2p-frame-unit` / `p2p-frame-integration` 继续覆盖显式 assigned-target policy 与下游默认构造兼容。 | no | |
@@ -227,6 +227,8 @@ approved_content_sha256: 0453dfef45c4bc997b90c45a53af2e722cf9540ea99e5ce290f2c01
 | `TtpServer::register_accept_callback(...)` | validator returns `Reject` | reject 在 attach/cache 前短路，后续 lookup-only open 返回 `NotFound`，不打开 stream 并 best-effort close tunnel | `p2p-frame/src/ttp/tests.rs` | covered | |
 | `TtpServer::register_accept_callback(...)` | validator returns `Err` | validator 错误在 attach/cache 前短路，后续 lookup-only open 返回 `NotFound`，不打开 stream 并 best-effort close tunnel | `p2p-frame/src/ttp/tests.rs` | covered | |
 | `sort_sn_client_listener_entries(...)` | listener entries contain QUIC, TCP, and Ext protocols | SN client candidate protocol order is QUIC first, then TCP, then extension protocols | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
+| `sn_client_protocol_candidates(...)` | supported QUIC network exists without matching QUIC listener, TCP listener exists | SN client still creates a QUIC candidate with `local_ep = None`, ordered before TCP fallback | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
+| `sn_client_protocol_candidates(...)` | matching QUIC/TCP listeners exist | SN client candidates preserve listener `local_ep` values instead of dropping or rewriting them | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
 | `SnService::observed_endpoint_candidates(...)` | TCP observed endpoint without `map_ports` | 不返回 raw TCP source socket address | `p2p-frame/src/sn/service/service.rs` | covered | |
 | `SnService::observed_endpoint_candidates(...)` | TCP observed endpoint with `map_ports` | 只返回来源 IP + 上报协议/端口构造出的 `Mapped` endpoint，原始 TCP source port 不泄漏 | `p2p-frame/src/sn/service/service.rs` | covered | |
 | `SnService::observed_endpoint_candidates(...)` | non-TCP observed endpoint | 继续按 reported endpoint 一致性分类为 direct candidate | `p2p-frame/src/sn/service/service.rs` | covered | |
