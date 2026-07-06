@@ -56,7 +56,7 @@ fn sn_client_protocol_candidates(
         .map(|(protocol, listeners)| {
             let mut local_eps = listeners
                 .into_iter()
-                .map(|listener| Some(listener.local))
+                .map(|listener| sn_client_local_ep_for_protocol(protocol, listener.local))
                 .collect::<Vec<_>>();
             if local_eps.is_empty() {
                 local_eps.push(None);
@@ -76,6 +76,20 @@ fn sn_client_protocol_candidates(
 
     candidates.sort_by_key(|(protocol, _)| sn_client_protocol_priority(*protocol));
     candidates
+}
+
+fn sn_client_local_ep_for_protocol(protocol: Protocol, local_ep: Endpoint) -> Option<Endpoint> {
+    if protocol != Protocol::Tcp {
+        return Some(local_ep);
+    }
+
+    if local_ep.addr().ip().is_unspecified() {
+        return None;
+    }
+
+    let mut tcp_local_ep = local_ep;
+    tcp_local_ep.mut_addr().set_port(0);
+    Some(tcp_local_ep)
 }
 
 #[callback_trait::callback_trait]
@@ -219,18 +233,6 @@ impl ClassifiedCmdTunnelFactory<SnTunnelClassification, (), SnTunnelRead, SnTunn
                 return self
                     .open_cmd_tunnel_to_sn(Some(local_ep), &classification.remote_ep)
                     .await;
-            }
-
-            for info in self
-                .net_manager
-                .get_listener_info(classification.remote_ep.protocol())
-            {
-                if let Ok(tunnel) = self
-                    .open_cmd_tunnel_to_sn(Some(&info.local), &classification.remote_ep)
-                    .await
-                {
-                    return Ok(tunnel);
-                }
             }
 
             return self
@@ -797,24 +799,40 @@ impl SNClientService {
                             continue;
                         }
                         for local_ep in local_eps.iter() {
-                            let ret = self
+                            let tunnel_id = match self
                                 .cmd_client
                                 .find_tunnel_id_by_classified(SnTunnelClassification::new(
                                     *local_ep,
                                     sn_ep.clone(),
                                 ))
-                                .await;
-
-                            if ret.is_err() {
-                                continue;
-                            }
-
-                            let tunnel_id = ret.unwrap();
+                                .await
+                            {
+                                Ok(tunnel_id) => tunnel_id,
+                                Err(e) => {
+                                    log::warn!(
+                                        "sn client candidate tunnel failed sn_id={} protocol={:?} local_ep={:?} remote_ep={} err={:?}",
+                                        sn_cert.get_id(),
+                                        protocol,
+                                        local_ep,
+                                        sn_ep,
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
 
                             let report_resp = match self.report(tunnel_id, sn_cert.get_id()).await {
                                 Ok(resp) => resp,
                                 Err(e) => {
-                                    log::error!("ping to {} failed: {:?}", sn_cert.get_id(), e);
+                                    log::warn!(
+                                        "sn client candidate report failed sn_id={} protocol={:?} local_ep={:?} remote_ep={} tunnel_id={:?} err={:?}",
+                                        sn_cert.get_id(),
+                                        protocol,
+                                        local_ep,
+                                        sn_ep,
+                                        tunnel_id,
+                                        e
+                                    );
                                     continue;
                                 }
                             };
@@ -1163,6 +1181,7 @@ mod tests {
     #[test]
     fn sn_client_protocol_candidates_include_supported_protocol_without_listener() {
         let tcp = endpoint(Protocol::Tcp, "127.0.0.1:10002");
+        let tcp_ephemeral = endpoint(Protocol::Tcp, "127.0.0.1:0");
 
         let candidates = sn_client_protocol_candidates(
             vec![(
@@ -1176,13 +1195,14 @@ mod tests {
         );
 
         assert_eq!(candidates[0], (Protocol::Quic, vec![None]));
-        assert_eq!(candidates[1], (Protocol::Tcp, vec![Some(tcp)]));
+        assert_eq!(candidates[1], (Protocol::Tcp, vec![Some(tcp_ephemeral)]));
     }
 
     #[test]
-    fn sn_client_protocol_candidates_preserve_listener_local_ep() {
+    fn sn_client_protocol_candidates_preserve_quic_listener_local_ep() {
         let quic = endpoint(Protocol::Quic, "127.0.0.1:10001");
         let tcp = endpoint(Protocol::Tcp, "127.0.0.1:10002");
+        let tcp_ephemeral = endpoint(Protocol::Tcp, "127.0.0.1:0");
 
         let candidates = sn_client_protocol_candidates(
             vec![
@@ -1205,6 +1225,24 @@ mod tests {
         );
 
         assert_eq!(candidates[0], (Protocol::Quic, vec![Some(quic)]));
-        assert_eq!(candidates[1], (Protocol::Tcp, vec![Some(tcp)]));
+        assert_eq!(candidates[1], (Protocol::Tcp, vec![Some(tcp_ephemeral)]));
+    }
+
+    #[test]
+    fn sn_client_protocol_candidates_do_not_bind_unspecified_tcp_listener_port() {
+        let tcp = endpoint(Protocol::Tcp, "0.0.0.0:10002");
+
+        let candidates = sn_client_protocol_candidates(
+            vec![(
+                Protocol::Tcp,
+                vec![TunnelListenerInfo {
+                    local: tcp,
+                    mapping_port: None,
+                }],
+            )],
+            vec![Protocol::Tcp],
+        );
+
+        assert_eq!(candidates[0], (Protocol::Tcp, vec![None]));
     }
 }

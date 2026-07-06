@@ -10,9 +10,11 @@ use crate::error::{P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactory, P2pIdentityRef, P2pSn};
 use crate::sn::protocol::v0::{SnCalled, TunnelType};
 use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
+use crate::sn::types::SnTunnelClassification;
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::TunnelId;
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
+use sfo_cmd_server::client::ClassifiedCmdClient;
 
 #[path = "../../tests/sn_command_matrix/five_by_five_command_matrix_tests.rs"]
 mod five_by_five_command_matrix_tests;
@@ -29,6 +31,13 @@ fn next_port() -> u16 {
 fn localhost_quic_endpoint(port: u16) -> Endpoint {
     Endpoint::from((
         Protocol::Quic,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+    ))
+}
+
+fn localhost_tcp_endpoint(port: u16) -> Endpoint {
+    Endpoint::from((
+        Protocol::Tcp,
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
     ))
 }
@@ -150,6 +159,63 @@ async fn setup_sn_and_one_client(
     panic!("setup sn and one client failed after retries");
 }
 
+async fn setup_tcp_sn_and_one_client(
+    name: &str,
+) -> (
+    SnServerRef,
+    P2pStackRef,
+    P2pId,
+    P2pId,
+    Endpoint,
+    Arc<X509IdentityCertFactory>,
+) {
+    for _ in 0..SETUP_MAX_RETRY {
+        let identity_factory = Arc::new(X509IdentityFactory);
+        let cert_factory = Arc::new(X509IdentityCertFactory);
+
+        let sn_identity = build_identity("sn-tcp-server", localhost_tcp_endpoint(next_port()));
+        let sn_id = sn_identity.get_id();
+        let sn_service = match start_sn_service(
+            sn_identity.clone(),
+            identity_factory.clone(),
+            cert_factory.clone(),
+        )
+        .await
+        {
+            Ok(service) => service,
+            Err(e) => {
+                if is_addr_bind_conflict(e.code()) {
+                    continue;
+                }
+                panic!("start tcp sn service failed: {:?}", e);
+            }
+        };
+
+        let client_identity = build_identity(name, localhost_tcp_endpoint(next_port()));
+        let client_id = client_identity.get_id();
+        let stack = match start_client_stack(
+            client_identity,
+            vec![build_sn_entry(&sn_identity)],
+            identity_factory,
+            cert_factory.clone(),
+        )
+        .await
+        {
+            Ok(stack) => stack,
+            Err(e) => {
+                if is_addr_bind_conflict(e.code()) {
+                    continue;
+                }
+                panic!("start tcp client stack failed: {:?}", e);
+            }
+        };
+        let sn_endpoint = *sn_identity.endpoints().first().unwrap();
+        return (sn_service, stack, sn_id, client_id, sn_endpoint, cert_factory);
+    }
+
+    panic!("setup tcp sn and one client failed after retries");
+}
+
 async fn setup_sn_and_two_clients() -> (
     SnServerRef,
     P2pStackRef,
@@ -249,6 +315,25 @@ async fn sn_client_wait_online_report_resp_ok() {
     let active_sn_list = stack.sn_client().get_active_sn_list();
     assert!(!active_sn_list.is_empty());
     assert!(active_sn_list.iter().any(|item| item.sn_peer_id == sn_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sn_client_connects_to_sn_over_tcp_tunnel() {
+    let (_sn_service, stack, _sn_id, client_id, sn_endpoint, _cert_factory) =
+        setup_tcp_sn_and_one_client("sn-tcp-client").await;
+
+    assert_eq!(sn_endpoint.protocol(), Protocol::Tcp);
+    assert!(sn_endpoint.addr().ip().is_loopback());
+    assert!(sn_endpoint.addr().port() > 0);
+
+    let tunnel_id = stack
+        .sn_client()
+        .get_cmd_client()
+        .find_tunnel_id_by_classified(SnTunnelClassification::new(None, sn_endpoint))
+        .await
+        .unwrap();
+    assert_ne!(tunnel_id.value(), 0);
+    assert_eq!(stack.local_identity().get_id(), client_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

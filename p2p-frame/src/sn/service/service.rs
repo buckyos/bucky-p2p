@@ -2082,14 +2082,19 @@ mod tests {
             &[],
         );
 
-        let mut mapped_tcp = Endpoint::from((Protocol::Tcp, "119.127.198.117:7000".parse().unwrap()));
+        let mut mapped_tcp =
+            Endpoint::from((Protocol::Tcp, "119.127.198.117:7000".parse().unwrap()));
         mapped_tcp.set_area(EndpointArea::Mapped);
         let mut mapped_quic =
             Endpoint::from((Protocol::Quic, "119.127.198.117:7001".parse().unwrap()));
         mapped_quic.set_area(EndpointArea::Mapped);
 
         assert_eq!(endpoints, vec![mapped_tcp, mapped_quic]);
-        assert!(endpoints.iter().all(|ep| ep.get_area() == EndpointArea::Mapped));
+        assert!(
+            endpoints
+                .iter()
+                .all(|ep| ep.get_area() == EndpointArea::Mapped)
+        );
         assert!(endpoints.iter().all(|ep| ep.addr().port() != 44325));
     }
 

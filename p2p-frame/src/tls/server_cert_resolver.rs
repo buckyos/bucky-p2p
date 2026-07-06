@@ -79,6 +79,7 @@ impl TlsServerCertResolver for DefaultTlsServerCertResolver {
 impl ResolvesServerCert for DefaultTlsServerCertResolver {
     fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
         if client_hello.server_name().is_none() {
+            log::warn!("resolve server failed: missing SNI");
             return None;
         }
 
@@ -91,8 +92,24 @@ impl ResolvesServerCert for DefaultTlsServerCertResolver {
         log::info!("resolve server = {}", server_name);
         let device_cache = self.device_cache.lock().unwrap();
         let device_info = match device_cache.device_cache.get(server_name) {
-            Some(device_info) => device_info,
-            None => return None,
+            Some(device_info) => {
+                log::info!(
+                    "resolve server hit server={} cert_id={} cert_name={}",
+                    server_name,
+                    device_info.get_id(),
+                    device_info.get_name()
+                );
+                device_info
+            }
+            None => {
+                let known: Vec<_> = device_cache.device_cache.keys().cloned().collect();
+                log::warn!(
+                    "resolve server miss server={} known_server_names={:?}",
+                    server_name,
+                    known
+                );
+                return None;
+            }
         };
 
         Some(Arc::new(CertifiedKey::new(

@@ -160,6 +160,13 @@ pub(crate) async fn connect_with_optional_local(
     let local = Endpoint::from((Protocol::Tcp, local_addr));
     let remote_name = remote_name.unwrap_or(remote_identity_id.to_string());
 
+    log::info!(
+        "tcp tls connect begin local={} remote={} remote_id={} remote_name={}",
+        local,
+        remote_ep,
+        remote_identity_id,
+        remote_name
+    );
     let tls_connector = TlsConnector::from(Arc::new(client_config));
     let mut tls_stream = tls_connector
         .connect(
@@ -171,11 +178,40 @@ pub(crate) async fn connect_with_optional_local(
         .await
         .map_err(into_p2p_err!(
             P2pErrorCode::ConnectFailed,
-            "tls socket to {} connect failed",
-            remote_ep
+            "tls socket to {} connect failed local={} remote_id={} remote_name={}",
+            remote_ep,
+            local,
+            remote_identity_id,
+            remote_name
         ))?;
+    log::info!(
+        "tcp tls connect ok local={} remote={} remote_id={} remote_name={}",
+        local,
+        remote_ep,
+        remote_identity_id,
+        remote_name
+    );
 
-    write_raw_frame(&mut tls_stream, hello).await?;
+    write_raw_frame(&mut tls_stream, hello)
+        .await
+        .map_err(into_p2p_err!(
+            P2pErrorCode::Failed,
+            "write tcp connection hello failed local={} remote={} remote_id={} remote_name={}",
+            local,
+            remote_ep,
+            remote_identity_id,
+            remote_name
+        ))?;
+    log::debug!(
+        "tcp connection hello sent local={} remote={} remote_id={} remote_name={} role={:?} tunnel_id={:?} candidate_id={:?}",
+        local,
+        remote_ep,
+        remote_identity_id,
+        remote_name,
+        hello.role,
+        hello.tunnel_id,
+        hello.candidate_id
+    );
 
     let (remote_identity_id, remote_name) = if remote_identity_id.is_default() {
         let (_, tls_conn) = tls_stream.get_ref();
@@ -217,11 +253,30 @@ pub(crate) async fn accept_connection(
     let remote = Endpoint::from((Protocol::Tcp, remote));
     let local = Endpoint::from((Protocol::Tcp, local));
 
-    let mut tls_stream = acceptor
-        .accept(socket)
+    log::info!("tcp tls accept begin local={} remote={}", local, remote);
+    let mut tls_stream = acceptor.accept(socket).await.map_err(into_p2p_err!(
+        P2pErrorCode::ConnectFailed,
+        "tcp tls accept failed local={} remote={}",
+        local,
+        remote
+    ))?;
+    log::info!("tcp tls accept ok local={} remote={}", local, remote);
+    let hello = read_raw_frame::<_, TcpConnectionHello>(&mut tls_stream)
         .await
-        .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed))?;
-    let hello = read_raw_frame::<_, TcpConnectionHello>(&mut tls_stream).await?;
+        .map_err(into_p2p_err!(
+            P2pErrorCode::Failed,
+            "read tcp connection hello failed local={} remote={}",
+            local,
+            remote
+        ))?;
+    log::debug!(
+        "tcp connection hello received local={} remote={} role={:?} tunnel_id={:?} candidate_id={:?}",
+        local,
+        remote,
+        hello.role,
+        hello.tunnel_id,
+        hello.candidate_id
+    );
 
     let (_, tls_conn) = tls_stream.get_ref();
     let cert = tls_conn
@@ -243,6 +298,15 @@ pub(crate) async fn accept_connection(
     let remote_device = cert_factory.create(&cert[0].as_ref().to_vec())?;
     let remote_id = remote_device.get_id();
     let remote_name = remote_device.get_name();
+    log::info!(
+        "tcp tls peer resolved local={} remote={} local_id={} local_name={} remote_id={} remote_name={}",
+        local,
+        remote,
+        local_id,
+        server_name,
+        remote_id,
+        remote_name
+    );
 
     Ok((
         TcpTlsConnection {

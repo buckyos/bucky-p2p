@@ -1,4 +1,4 @@
-# Pipeline Plan: SN Client Protocol Priority Listener Optional
+# Pipeline Plan: SN Client TCP Fallback Bind
 
 ## Trigger
 - Approved proposal: `docs/versions/v0.1/modules/p2p-frame/proposal.md`
@@ -12,7 +12,9 @@
 ## Acceptance Baseline
 - Final acceptance uses the approved `p2p-frame` proposal as authority.
 - SN client must try SN endpoints for protocols supported for outbound command tunnel creation even when no matching local listener is bound.
-- If a matching local listener exists, SN client command tunnel classification must preserve that listener `local_ep`.
+- If a matching QUIC local listener exists, SN client command tunnel classification must preserve that listener `local_ep`.
+- If a matching TCP local listener exists, SN client command tunnel classification must not reuse the listening port as the outbound socket bind address; unspecified TCP listener IP uses `local_ep = None`, and concrete TCP listener IP uses the same IP with port `0`.
+- Candidate tunnel/report failures must log enough context to diagnose silent TCP fallback failures: SN id, protocol, local endpoint, remote endpoint, and error.
 - QUIC candidates remain ordered before TCP candidates for the same SN.
 - A successful QUIC command tunnel and `ReportSn` stops TCP fallback for that SN.
 - QUIC command tunnel, control stream, or `ReportSn` failure may fall back to TCP.
@@ -21,17 +23,17 @@
 ## Stage Graph
 | task_id | stage | status | responsibility | scope | parent_task | depends_on | output | done_condition |
 |---------|-------|--------|----------------|-------|-------------|------------|--------|----------------|
-| P-SN-CLIENT-PROTOCOL-PRIORITY-1 | proposal | confirmed | Approve SN client protocol priority and listener-optional outbound connection boundary | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | root | user approval | approved proposal | proposal doc checks, schema check, approval metadata, and launch evidence recorded |
-| D-SN-CLIENT-PROTOCOL-PRIORITY-1 | design | confirmed | Define SN client supported outbound protocol gating, listener `local_ep` preservation, candidate ordering, fallback, active SN dedup, and implementation scope paths | `docs/versions/v0.1/modules/p2p-frame/design.md` | root | P-SN-CLIENT-PROTOCOL-PRIORITY-1 | approved design | design doc checks, schema checks, stage-scope checks, and auto-pipeline approval metadata recorded |
-| I-SN-CLIENT-PROTOCOL-PRIORITY-1 | implementation | complete | Implement minimal production changes for admitted SN client listener-optional protocol priority behavior | `p2p-frame/src/sn/client/sn_service.rs` plus admission evidence | root | D-SN-CLIENT-PROTOCOL-PRIORITY-1 | implementation and admission evidence | schema/admission passed; implementation scope check passed for `sn_client_protocol_priority`; relevant build/unit checks pass |
-| T-SN-CLIENT-PROTOCOL-PRIORITY-1 | testing | confirmed | Add post-implementation tests and testing metadata for supported protocol without listener, listener `local_ep` preservation, QUIC-first ordering, fallback, and active SN dedup | `docs/versions/v0.1/modules/p2p-frame/testing.md`; `docs/versions/v0.1/modules/p2p-frame/testplan.yaml`; relevant `p2p-frame/src/sn/**` tests; runner wiring if needed | I-SN-CLIENT-PROTOCOL-PRIORITY-1 | I-SN-CLIENT-PROTOCOL-PRIORITY-1 | runnable unit evidence | testing doc/coverage checks and relevant `test-run.py` levels pass; testing scope check passed or recorded with isolated diff evidence |
-| A-SN-CLIENT-PROTOCOL-PRIORITY-1 | acceptance | complete | Audit proposal/design/implementation/testing consistency and runnable evidence | `docs/versions/v0.1/reviews/` | root | T-SN-CLIENT-PROTOCOL-PRIORITY-1 | acceptance report | acceptance report check passed and conclusion is accepted |
+| P-SN-CLIENT-TCP-FALLBACK-BIND-1 | proposal | confirmed | Approve SN client TCP fallback bind conflict boundary within protocol priority | `docs/versions/v0.1/modules/p2p-frame/proposal.md` | root | user approval | approved proposal | proposal doc checks, schema check, approval metadata, and launch evidence recorded |
+| D-SN-CLIENT-TCP-FALLBACK-BIND-1 | design | confirmed | Define SN client TCP listener local_ep normalization and diagnostic logging without changing TTP target semantics | `docs/versions/v0.1/modules/p2p-frame/design.md` | root | P-SN-CLIENT-TCP-FALLBACK-BIND-1 | approved design | design doc checks, schema checks, stage-scope checks, and auto-pipeline approval metadata recorded |
+| I-SN-CLIENT-TCP-FALLBACK-BIND-1 | implementation | complete | Implement SN client TCP local_ep normalization and candidate failure logging | `p2p-frame/src/sn/client/sn_service.rs` plus admission evidence | root | D-SN-CLIENT-TCP-FALLBACK-BIND-1 | implementation and admission evidence | schema/admission passed; implementation scope check result recorded; relevant build/unit checks pass |
+| T-SN-CLIENT-TCP-FALLBACK-BIND-1 | testing | complete | Add/update focused tests for QUIC local_ep preservation, TCP listener port normalization, unspecified TCP listener fallback, and supported protocol without listener | relevant `p2p-frame/src/sn/**` tests; testing docs only if required by coverage gate | I-SN-CLIENT-TCP-FALLBACK-BIND-1 | I-SN-CLIENT-TCP-FALLBACK-BIND-1 | runnable unit evidence | relevant cargo tests pass; testing coverage checks pass; testing scope check result recorded |
+| A-SN-CLIENT-TCP-FALLBACK-BIND-1 | acceptance | complete | Audit proposal/design/implementation/testing consistency and runnable evidence | `docs/versions/v0.1/reviews/` if acceptance is run | root | T-SN-CLIENT-TCP-FALLBACK-BIND-1 | acceptance report or recorded follow-up | acceptance report check passed if full acceptance is in scope |
 
 ## Return Routing
-- Proposal issue: return to proposal only if listener-optional outbound support, listener `local_ep` preservation, protocol ordering, fallback, or non-goals must change.
-- Design issue: return to design if supported outbound protocol gating, listener `local_ep` preservation, candidate grouping, fallback, active SN dedup, or scope paths are incomplete.
-- Implementation issue: return to implementation if code still requires a matching listener to attempt a supported protocol, drops listener `local_ep` when present, violates QUIC-first/TCP-fallback, or inserts duplicate active SN entries.
-- Testing issue: return to testing if runnable evidence does not cover no-listener supported outbound protocol, listener `local_ep` preservation, QUIC success stopping TCP, QUIC failure fallback to TCP, and active SN dedup.
+- Proposal issue: return to proposal only if listener-optional outbound support, QUIC listener `local_ep` preservation, TCP listener bind normalization, protocol ordering, fallback, or non-goals must change.
+- Design issue: return to design if supported outbound protocol gating, QUIC listener `local_ep` preservation, TCP listener bind normalization, candidate grouping, fallback, active SN dedup, diagnostic logging, or scope paths are incomplete.
+- Implementation issue: return to implementation if code still requires a matching listener to attempt a supported protocol, drops QUIC listener `local_ep`, reuses TCP listening ports for outbound bind, violates QUIC-first/TCP-fallback, hides candidate failures without diagnostics, or inserts duplicate active SN entries.
+- Testing issue: return to testing if runnable evidence does not cover no-listener supported outbound protocol, QUIC listener `local_ep` preservation, TCP listener port normalization, QUIC success stopping TCP, QUIC failure fallback to TCP, and active SN dedup.
 - Acceptance issue: return to the owning stage named by the finding.
 
 ## Exit Condition
@@ -44,9 +46,24 @@
 
 ## Evidence
 - User approval and launch statement: `确认，自动处理后续步骤`
-- Proposal approval hash: `a3fe146b3f92f0345a26e786c58ef614de62488d95123414ed0d2c72294cfbb2`
-- Design approval hash: `434b780b64b00d713296031069cd20a6ae2c58b2d90535f06f63b68856fa8a4b`
+- Proposal approval hash: `dcbfa51b51f3938c41f43a25fc0a5e30f304e5855e7a30c28568045e89a696f7`
+- Design approval hash: `7621740f315dbf2b169cf2ea40dc1bd53cb477ba92517128266d2387c3125971`
+- Testing approval hash: `99af224d3b27f6d0bcf320a9c4101d5bb1e19e33b83bd2c86750ae0eeb0a28e8`
 - `uv run --active python ./harness/scripts/schema-check.py --version v0.1 --module p2p-frame` passed.
+- `uv run --active python ./harness/scripts/admission-check.py --version v0.1 --module p2p-frame --change-id sn_client_protocol_priority --evidence-file harness/evidence/admission/20260705-sn-client-tcp-fallback-bind.md` passed; stamp `harness/evidence/admission/20260705-sn-client-tcp-fallback-bind.p2p-frame.stamp.json`.
+- `cargo test -p p2p-frame sn_client_protocol_candidates -- --nocapture` passed with 3 tests.
+- `cargo test -p p2p-frame sn_client -- --nocapture` passed with 4 tests.
+- `cargo check -p p2p-frame` passed.
+- `uv run --active python ./harness/scripts/doc-structure-check.py --version v0.1 --module p2p-frame --docs testing` passed.
+- `uv run --active python ./harness/scripts/testing-coverage-check.py --version v0.1 --module p2p-frame --change-id sn_client_protocol_priority` passed.
+- `uv run --active python ./harness/scripts/test-run.py p2p-frame unit` passed; artifact `test-results/test-runs/20260705T164858Z-p2p-frame-unit.json`.
+- `uv run --active python ./harness/scripts/test-run.py p2p-frame all` passed; artifact `test-results/test-runs/20260705T165519Z-p2p-frame-all.json`.
+- `uv run --active python ./harness/scripts/test-run.py all all` passed after refreshing the workspace-harness p2p-frame fixture binding; artifact `test-results/test-runs/20260705T171138Z-all-all.json`.
+- `uv run --active python ./harness/scripts/quality-check.py` passed; no quality gates configured.
+- Acceptance report accepted: `docs/versions/v0.1/reviews/p2p-frame-sn-client-tcp-fallback-bind-acceptance-2026-07-05.md`.
+- `uv run --active python ./harness/scripts/acceptance-report-check.py docs/versions/v0.1/reviews/p2p-frame-sn-client-tcp-fallback-bind-acceptance-2026-07-05.md` passed.
+- `uv run --active python ./harness/scripts/stage-scope-check.py --stage implementation --version v0.1 --module p2p-frame --change-id sn_client_protocol_priority --ignore-untracked` was attempted and reported the expected multi-stage working-tree diff: `proposal.md`, `design.md`, and `harness/pipeline-plan.md`.
+- `uv run --active python ./harness/scripts/stage-scope-check.py --stage testing --version v0.1 --module p2p-frame --ignore-untracked` was attempted and reported the expected multi-stage working-tree diff: `proposal.md`, `design.md`, `harness/pipeline-plan.md`, and `p2p-frame/src/sn/client/sn_service.rs`.
 - `uv run --active python ./harness/scripts/admission-check.py --version v0.1 --module p2p-frame --change-id sn_client_protocol_priority --evidence-file harness/evidence/admission/20260705-sn-client-listener-optional.md` passed.
 - `uv run --active python ./harness/scripts/stage-scope-check.py --stage implementation --version v0.1 --module p2p-frame --change-id sn_client_protocol_priority --ignore-untracked` passed with proposal/design/plan temporarily hidden from git status to isolate the implementation child task.
 - `cargo test -p p2p-frame sn_client_listener_entries_are_quic_first_then_tcp -- --nocapture` passed.
