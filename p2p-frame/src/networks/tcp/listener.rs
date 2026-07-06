@@ -162,9 +162,23 @@ impl TcpTunnelListener {
             reuse_address,
             ..SocketOptions::default()
         });
+        log::info!(
+            "tcp listener serve begin local={} bind_local={} out={:?} mapping_port={:?}",
+            local,
+            bind_local,
+            out,
+            mapping_port
+        );
         let server = TcpServer::serve(&self.server_runtime, config, move |stream| {
             let listener = listener.clone();
             async move {
+                let local = stream.local_addr().ok();
+                let remote = stream.peer_addr().ok();
+                log::info!(
+                    "tcp listener raw stream accepted local={:?} remote={:?}",
+                    local,
+                    remote
+                );
                 listener.handle_accepted_stream(stream).await;
                 Ok(())
             }
@@ -180,6 +194,13 @@ impl TcpTunnelListener {
         state.mapping_port = mapping_port;
         state.bound_local = Some(bind_local);
         state.server = Some(server);
+        log::info!(
+            "tcp listener serve success local={} bind_local={} out={:?} mapping_port={:?}",
+            local,
+            bind_local,
+            out,
+            mapping_port
+        );
         Ok(())
     }
 

@@ -210,7 +210,14 @@ async fn setup_tcp_sn_and_one_client(
             }
         };
         let sn_endpoint = *sn_identity.endpoints().first().unwrap();
-        return (sn_service, stack, sn_id, client_id, sn_endpoint, cert_factory);
+        return (
+            sn_service,
+            stack,
+            sn_id,
+            client_id,
+            sn_endpoint,
+            cert_factory,
+        );
     }
 
     panic!("setup tcp sn and one client failed after retries");
