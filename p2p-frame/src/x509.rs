@@ -29,7 +29,7 @@ pub fn generate_rsa_x509_identity(name: Option<String>) -> P2pResult<X509Identit
     generate_x509_identity_with_key_pair(name, key_pair)
 }
 
-fn generate_x509_identity_with_key_pair(
+pub fn generate_x509_identity_with_key_pair(
     name: Option<String>,
     key_pair: KeyPair,
 ) -> P2pResult<X509Identity> {
