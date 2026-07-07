@@ -656,8 +656,8 @@ async fn all_in_one() {
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
-    )
-    .set_server_runtime(server_runtime);
+        server_runtime,
+    );
     let sn_service = create_sn_service(sn_service).await.unwrap();
     let _pn_server = PnServer::new(sn_service.ttp_server());
     _pn_server.start().await.unwrap();

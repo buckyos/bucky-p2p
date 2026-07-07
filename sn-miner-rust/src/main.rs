@@ -242,8 +242,15 @@ async fn run_serving_role(config: SnMinerConfig) -> std::result::Result<(), Stri
         config.online_heartbeat_interval,
         config.route_publish_interval
     );
-    let service_config = SnServiceConfig::new(local_identity, identity_factory, cert_factory)
-        .set_owner_client_membership(membership);
+    let server_runtime =
+        ServerRuntime::start(ServerRuntimeConfig::default()).map_err(|err| format!("{:?}", err))?;
+    let service_config = SnServiceConfig::new(
+        local_identity,
+        identity_factory,
+        cert_factory,
+        server_runtime,
+    )
+    .set_owner_client_membership(membership);
     start_serving_service(service_config).await
 }
 
@@ -260,7 +267,14 @@ async fn run_legacy_serving(
         );
     }
     let (local_identity, identity_factory, cert_factory) = load_identity(desc_path)?;
-    let mut service_config = SnServiceConfig::new(local_identity, identity_factory, cert_factory);
+    let server_runtime =
+        ServerRuntime::start(ServerRuntimeConfig::default()).map_err(|err| format!("{:?}", err))?;
+    let mut service_config = SnServiceConfig::new(
+        local_identity,
+        identity_factory,
+        cert_factory,
+        server_runtime,
+    );
     if let Some(owner_members) = owner_members {
         let membership = parse_owner_membership(owner_members)
             .map_err(|err| format!("invalid --owner-members: {}", err))?;
@@ -270,9 +284,7 @@ async fn run_legacy_serving(
 }
 
 async fn start_serving_service(config: SnServiceConfig) -> std::result::Result<(), String> {
-    let server_runtime =
-        ServerRuntime::start(ServerRuntimeConfig::default()).map_err(|err| format!("{:?}", err))?;
-    let service = create_sn_service(config.set_server_runtime(server_runtime))
+    let service = create_sn_service(config)
         .await
         .map_err(|err| format!("{:?}", err))?;
     let pn_server = PnServer::new(service.ttp_server());

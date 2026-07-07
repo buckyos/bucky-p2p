@@ -1305,7 +1305,7 @@ pub struct SnServiceConfig {
     owner_client_override: Option<OwnerDirectoryClientRef>,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
-    server_runtime: Option<ServerRuntime>,
+    server_runtime: ServerRuntime,
 }
 
 impl SnServiceConfig {
@@ -1313,6 +1313,7 @@ impl SnServiceConfig {
         local_identity: P2pIdentityRef,
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
+        server_runtime: ServerRuntime,
     ) -> Self {
         Self {
             local_identity,
@@ -1324,7 +1325,7 @@ impl SnServiceConfig {
             owner_client_override: None,
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
-            server_runtime: None,
+            server_runtime,
         }
     }
 
@@ -1366,18 +1367,12 @@ impl SnServiceConfig {
     }
 
     pub fn set_server_runtime(mut self, server_runtime: ServerRuntime) -> Self {
-        self.server_runtime = Some(server_runtime);
+        self.server_runtime = server_runtime;
         self
     }
 }
 
 pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef> {
-    let server_runtime = config.server_runtime.ok_or_else(|| {
-        p2p_err!(
-            P2pErrorCode::InvalidParam,
-            "SnServiceConfig requires an external ServerRuntime"
-        )
-    })?;
     let service = SnServer::new(
         config.local_identity,
         config.identity_factory,
@@ -1388,7 +1383,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef
         config.owner_client_override,
         config.quic_congestion_algorithm,
         config.reuse_address,
-        server_runtime,
+        config.server_runtime,
     )
     .await;
     Ok(service)
@@ -2137,25 +2132,6 @@ mod tests {
         let classified = SnService::classify_observed_endpoint(observed, &[reported]);
 
         assert_eq!(classified.get_area(), EndpointArea::ServerReflexive);
-    }
-
-    #[tokio::test]
-    async fn create_sn_service_requires_external_server_runtime() {
-        let config = SnServiceConfig::new(
-            test_identity(Endpoint::from((
-                Protocol::Quic,
-                "127.0.0.1:1".parse().unwrap(),
-            ))),
-            Arc::new(TestIdentityFactory),
-            Arc::new(TestIdentityCertFactory),
-        );
-
-        let result = create_sn_service(config).await;
-
-        match result {
-            Ok(_) => panic!("create_sn_service unexpectedly started without ServerRuntime"),
-            Err(err) => assert_eq!(err.code(), P2pErrorCode::InvalidParam),
-        }
     }
 
     #[tokio::test]
