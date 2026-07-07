@@ -1008,6 +1008,7 @@ dependencies = [
  "p2p-frame",
  "serde",
  "sfo-log",
+ "sfo-reuseport",
  "tokio",
  "toml 0.8.23",
 ]
@@ -3564,6 +3565,7 @@ dependencies = [
  "log",
  "sfo-log",
  "sfo-result",
+ "sfo-reuseport",
  "tokio",
 ]
 

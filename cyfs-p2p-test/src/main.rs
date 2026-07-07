@@ -22,6 +22,7 @@ use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
 use p2p_frame::sn::client::{SNClientServiceRef, SnLocalIpProvider, SnLocalIpProviderRef};
 use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef, PnServerAddress};
 use serde::{Deserialize, Serialize};
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -650,12 +651,14 @@ async fn all_in_one() {
     .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))
     .unwrap();
 
+    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
     let sn_service = SnServiceConfig::new(
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
-    );
-    let sn_service = create_sn_service(sn_service).await;
+    )
+    .set_server_runtime(server_runtime);
+    let sn_service = create_sn_service(sn_service).await.unwrap();
     let _pn_server = PnServer::new(sn_service.ttp_server());
     _pn_server.start().await.unwrap();
     sn_service.start().await.unwrap();

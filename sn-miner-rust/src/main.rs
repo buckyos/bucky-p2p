@@ -17,6 +17,7 @@ use cyfs_p2p::pn::PnServer;
 use cyfs_p2p::sn::directory::{OwnerDirectoryServer, OwnerMember, OwnerMembership};
 use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
 pub(crate) use sfo_result::into_err as into_miner_err;
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MinerErrorCode {
@@ -269,7 +270,11 @@ async fn run_legacy_serving(
 }
 
 async fn start_serving_service(config: SnServiceConfig) -> std::result::Result<(), String> {
-    let service = create_sn_service(config).await;
+    let server_runtime =
+        ServerRuntime::start(ServerRuntimeConfig::default()).map_err(|err| format!("{:?}", err))?;
+    let service = create_sn_service(config.set_server_runtime(server_runtime))
+        .await
+        .map_err(|err| format!("{:?}", err))?;
     let pn_server = PnServer::new(service.ttp_server());
     pn_server
         .start()

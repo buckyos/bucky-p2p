@@ -22,6 +22,7 @@ use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::TunnelId;
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 
 const MATRIX_ONLINE_TIMEOUT: Duration = Duration::from_secs(90);
 const MATRIX_ROUNDS: usize = 3;
@@ -55,6 +56,10 @@ fn build_sn_entry(sn_identity: &P2pIdentityRef) -> P2pSn {
     P2pSn::new(sn_cert.get_id(), sn_cert.get_name(), sn_cert.endpoints())
 }
 
+fn test_server_runtime() -> ServerRuntime {
+    ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap()
+}
+
 fn is_addr_bind_conflict(code: P2pErrorCode) -> bool {
     code == P2pErrorCode::AddrInUse
         || code == P2pErrorCode::AddrNotAvailable
@@ -70,9 +75,10 @@ async fn start_sn_service_with_owner_client(
     let owner_client = StaticOwnerDirectoryClient::new(owner_membership, None);
     let service = create_sn_service(
         SnServiceConfig::new(sn_identity, identity_factory, cert_factory)
-            .set_owner_client_for_tests(owner_client),
+            .set_owner_client_for_tests(owner_client)
+            .set_server_runtime(test_server_runtime()),
     )
-    .await;
+    .await?;
     service.start().await?;
     Ok(service)
 }

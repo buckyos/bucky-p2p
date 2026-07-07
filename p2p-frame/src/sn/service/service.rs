@@ -31,7 +31,7 @@ use log::*;
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
 use sfo_cmd_server::server::{CmdServer, CmdTunnelService, DefaultCmdServerService};
 use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
-use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
+use sfo_reuseport::ServerRuntime;
 use std::{
     sync::{
         Arc, Mutex,
@@ -1371,10 +1371,13 @@ impl SnServiceConfig {
     }
 }
 
-pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
-    let server_runtime = config
-        .server_runtime
-        .unwrap_or_else(|| ServerRuntime::start(ServerRuntimeConfig::default()).unwrap());
+pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef> {
+    let server_runtime = config.server_runtime.ok_or_else(|| {
+        p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "SnServiceConfig requires an external ServerRuntime"
+        )
+    })?;
     let service = SnServer::new(
         config.local_identity,
         config.identity_factory,
@@ -1388,7 +1391,7 @@ pub async fn create_sn_service(config: SnServiceConfig) -> SnServerRef {
         server_runtime,
     )
     .await;
-    service
+    Ok(service)
 }
 
 #[cfg(test)]
@@ -1402,7 +1405,8 @@ mod tests {
     };
     use crate::p2p_identity::{
         EncodedP2pIdentity, EncodedP2pIdentityCert, P2pIdentity, P2pIdentityCert,
-        P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pSignature, P2pSn,
+        P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityFactory, P2pIdentityRef,
+        P2pSignature, P2pSn,
     };
     use crate::sn::directory::server::OwnerServingEndpoint;
     use crate::sn::directory::{
@@ -1513,6 +1517,18 @@ mod tests {
             Ok(Arc::new(TestIdentityCert {
                 id: P2pId::from(cert.clone()),
                 encoded: cert.clone(),
+            }))
+        }
+    }
+
+    struct TestIdentityFactory;
+
+    impl P2pIdentityFactory for TestIdentityFactory {
+        fn create(&self, id: &EncodedP2pIdentity) -> P2pResult<P2pIdentityRef> {
+            Ok(Arc::new(DummyIdentity {
+                id: P2pId::from(id.clone()),
+                name: "test-identity".to_owned(),
+                endpoints: vec![],
             }))
         }
     }
@@ -2121,6 +2137,25 @@ mod tests {
         let classified = SnService::classify_observed_endpoint(observed, &[reported]);
 
         assert_eq!(classified.get_area(), EndpointArea::ServerReflexive);
+    }
+
+    #[tokio::test]
+    async fn create_sn_service_requires_external_server_runtime() {
+        let config = SnServiceConfig::new(
+            test_identity(Endpoint::from((
+                Protocol::Quic,
+                "127.0.0.1:1".parse().unwrap(),
+            ))),
+            Arc::new(TestIdentityFactory),
+            Arc::new(TestIdentityCertFactory),
+        );
+
+        let result = create_sn_service(config).await;
+
+        match result {
+            Ok(_) => panic!("create_sn_service unexpectedly started without ServerRuntime"),
+            Err(err) => assert_eq!(err.code(), P2pErrorCode::InvalidParam),
+        }
     }
 
     #[tokio::test]

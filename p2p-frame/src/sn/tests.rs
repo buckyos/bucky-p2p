@@ -15,6 +15,7 @@ use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, creat
 use crate::types::TunnelId;
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
 use sfo_cmd_server::client::ClassifiedCmdClient;
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 
 #[path = "../../tests/sn_command_matrix/five_by_five_command_matrix_tests.rs"]
 mod five_by_five_command_matrix_tests;
@@ -53,6 +54,10 @@ fn build_sn_entry(sn_identity: &P2pIdentityRef) -> P2pSn {
     P2pSn::new(sn_cert.get_id(), sn_cert.get_name(), sn_cert.endpoints())
 }
 
+fn test_server_runtime() -> ServerRuntime {
+    ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap()
+}
+
 fn is_addr_bind_conflict(code: P2pErrorCode) -> bool {
     code == P2pErrorCode::AddrInUse || code == P2pErrorCode::AddrNotAvailable
 }
@@ -62,14 +67,32 @@ async fn start_sn_service(
     identity_factory: Arc<X509IdentityFactory>,
     cert_factory: Arc<X509IdentityCertFactory>,
 ) -> P2pResult<SnServerRef> {
-    let service = create_sn_service(SnServiceConfig::new(
+    let service = create_sn_service(
+        SnServiceConfig::new(sn_identity, identity_factory, cert_factory)
+            .set_server_runtime(test_server_runtime()),
+    )
+    .await?;
+    service.start().await?;
+    Ok(service)
+}
+
+#[tokio::test]
+async fn create_sn_service_requires_external_server_runtime() {
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let sn_identity = build_identity("sn-server", localhost_quic_endpoint(next_port()));
+
+    let result = create_sn_service(SnServiceConfig::new(
         sn_identity,
         identity_factory,
         cert_factory,
     ))
     .await;
-    service.start().await?;
-    Ok(service)
+
+    match result {
+        Ok(_) => panic!("create_sn_service unexpectedly started without ServerRuntime"),
+        Err(err) => assert_eq!(err.code(), P2pErrorCode::InvalidParam),
+    }
 }
 
 async fn start_client_stack(
