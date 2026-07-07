@@ -3,8 +3,8 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-29
-approved_content_sha256: b67dbdf8e9320518ecba6a656ad437e2df44fe6dca7ef317aa81ed665f659fac
+approved_at: 2026-07-07T15:57:16+08:00
+approved_content_sha256: bdfdbc94c63e22182e5b8cca823b46515e62f1dabbd19cf8dd9e9ee92af008c3
 ---
 
 # sfo-reuseport listener 重构设计
@@ -12,24 +12,24 @@ approved_content_sha256: b67dbdf8e9320518ecba6a656ad437e2df44fe6dca7ef317aa81ed6
 ## 目标
 - `networks/tcp` 的 listener 使用 `sfo_reuseport::TcpServer` 接收入站 TCP stream。
 - `networks/quic` 的 listener 使用 `sfo_reuseport::QuicServer::serve_socket(...)` 接收每个 worker 的 UDP socket，并通过 Quinn `AsyncUdpSocket` 适配器为每个 worker socket 创建一个 `quinn::Endpoint`。
-- `ServerRuntime` 可由外部显式设置；未设置时 `p2p-frame` 创建默认 runtime。
+- `ServerRuntime` 必须由外部显式传入；未设置时 `p2p-frame` 不创建默认 runtime。
 - `TunnelNetwork::listen(...)` 改为接收入站 tunnel 回调并返回 `P2pResult<()>`；`TunnelNetwork` 不再导出 listener 对象或提供 `listeners()` 查询。
 - 不新增 `NetworkServerRuntime`、socket factory trait 或 NAT 专用公共 `TunnelNetwork` 参数。
 
 ## 子模块职责
 | 子模块 | 职责 | 新增责任 | 依赖 |
 |--------|------|----------|------|
-| `stack_runtime` | `P2pStackConfig` 和默认 stack 装配 | 持有可选 `sfo_reuseport::ServerRuntime`；构建默认 TCP/QUIC network 时传入 runtime | `sfo-reuseport` |
+| `stack_runtime` | `P2pStackConfig` 和默认 stack 装配 | 持有必填 `sfo_reuseport::ServerRuntime`；构建默认 TCP/QUIC network 时传入 runtime | `sfo-reuseport` |
 | `networks/tcp` | TCP listener、TLS accept、control/data 分流 | `TcpTunnelListener::bind` 注册 `TcpServer`；handler 把 `sfo_reuseport::TcpStream` 交给现有 accept 分流；内部 accept loop 调用入站 tunnel 回调 | `sfo_reuseport::TcpServer` |
 | `networks/quic` | QUIC listener、Quinn endpoint、UDP punch | `QuicTunnelListener::bind` 注册 `QuicServer::serve_socket`；内部适配器实现 Quinn `AsyncUdpSocket`；每个 worker socket 对应一个 Quinn endpoint；endpoint accept loop 调用入站 tunnel 回调 | `sfo_reuseport::QuicServer`、`sfo_reuseport::UdpSocket`、`sfo_reuseport::QuicCidGenerator`、`quinn` |
 
 ## ServerRuntime 装配
-- `P2pStackConfig` 增加 `server_runtime: Option<sfo_reuseport::ServerRuntime>`。
-- 对外提供 `set_server_runtime(runtime)` 和只读访问入口。
+- `P2pConfig` / stack 装配持有外部传入的 `server_runtime: sfo_reuseport::ServerRuntime`。
+- 对外提供必填构造参数、`set_server_runtime(runtime)` 覆盖 helper 和只读访问入口。
 - `open_p2p_stack` 组装默认 `TcpTunnelNetwork` / `QuicTunnelNetwork` 时：
-  - 若配置提供 runtime，clone 该 runtime。
-  - 若未提供 runtime，调用 `ServerRuntime::start(ServerRuntimeConfig::new())` 创建默认 runtime，并把同一个 runtime 传给 TCP 与 QUIC network。
-- `ServerRuntime` 生命周期由持有它的 network/listener 保持；外部 runtime 的 shutdown 由外部 owner 决定。
+  - 只 clone 外部传入的 runtime；
+  - 若未提供 runtime，按 stack runtime 设计通过必填构造参数或配置/API 错误阻止继续装配，不调用 `ServerRuntime::start(...)` 创建默认 runtime。
+- `ServerRuntime` 生命周期由外部 owner 决定；network/listener 只持有 clone 并在关闭时停止自身 server handle。
 
 ## TCP listener flow
 1. `TcpTunnelNetwork::listen(local, out, mapping_port, on_incoming_tunnel)` 创建 `TcpTunnelListener`，传入 `ServerRuntime` 和入站 tunnel 回调。

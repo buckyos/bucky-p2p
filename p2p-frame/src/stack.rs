@@ -22,12 +22,12 @@ use crate::tls::{
 use crate::ttp::{TtpClient, TtpClientRef, TtpTarget};
 use crate::tunnel::{DefaultP2pConnectionInfoCache, P2pConnectionInfoCacheRef};
 use crate::types::{SequenceGenerator, TunnelIdGenerator};
-use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
 pub use crate::networks::{DeviceFinder, DeviceFinderRef};
 pub use crate::pn::{PnProxyRouteResolver, PnProxyRouteResolverRef};
+pub use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 
 #[derive(Clone)]
 pub struct P2pPn {
@@ -128,7 +128,7 @@ pub struct P2pConfig {
     quic_idle_time: Duration,
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
-    server_runtime: Option<ServerRuntime>,
+    server_runtime: ServerRuntime,
 }
 
 impl P2pConfig {
@@ -136,6 +136,7 @@ impl P2pConfig {
         identity_factory: P2pIdentityFactoryRef,
         cert_factory: P2pIdentityCertFactoryRef,
         endpoints: Vec<Endpoint>,
+        server_runtime: ServerRuntime,
     ) -> Self {
         Self {
             identity_factory,
@@ -159,7 +160,7 @@ impl P2pConfig {
             quic_idle_time: Duration::from_secs(60),
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
-            server_runtime: None,
+            server_runtime,
         }
     }
 
@@ -310,12 +311,12 @@ impl P2pConfig {
         self
     }
 
-    pub fn server_runtime(&self) -> Option<&ServerRuntime> {
-        self.server_runtime.as_ref()
+    pub fn server_runtime(&self) -> &ServerRuntime {
+        &self.server_runtime
     }
 
     pub fn set_server_runtime(mut self, server_runtime: ServerRuntime) -> Self {
-        self.server_runtime = Some(server_runtime);
+        self.server_runtime = server_runtime;
         self
     }
 }
@@ -328,15 +329,7 @@ pub async fn create_p2p_env(config: P2pConfig) -> P2pResult<P2pEnvRef> {
 
     let tsl_server_cert_resolver = config.sever_cert_resolver();
     let mut tunnel_networks = config.extra_networks().clone();
-    let server_runtime = match config.server_runtime() {
-        Some(runtime) => runtime.clone(),
-        None => ServerRuntime::start(ServerRuntimeConfig::default()).map_err(
-            crate::error::into_p2p_err!(
-                P2pErrorCode::ExecuteError,
-                "start sfo reuseport server runtime failed"
-            ),
-        )?,
-    };
+    let server_runtime = config.server_runtime().clone();
     let tcp_network = Arc::new(TcpTunnelNetwork::new(
         tsl_server_cert_resolver.clone(),
         cert_factory.clone(),

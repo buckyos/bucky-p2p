@@ -67,17 +67,19 @@ async fn start_sn_service(
     identity_factory: Arc<X509IdentityFactory>,
     cert_factory: Arc<X509IdentityCertFactory>,
 ) -> P2pResult<SnServerRef> {
-    let service = create_sn_service(
-        SnServiceConfig::new(sn_identity, identity_factory, cert_factory)
-            .set_server_runtime(test_server_runtime()),
-    )
+    let service = create_sn_service(SnServiceConfig::new(
+        sn_identity,
+        identity_factory,
+        cert_factory,
+        test_server_runtime(),
+    ))
     .await?;
     service.start().await?;
     Ok(service)
 }
 
 #[tokio::test]
-async fn create_sn_service_requires_external_server_runtime() {
+async fn create_sn_service_accepts_external_server_runtime() {
     let identity_factory = Arc::new(X509IdentityFactory);
     let cert_factory = Arc::new(X509IdentityCertFactory);
     let sn_identity = build_identity("sn-server", localhost_quic_endpoint(next_port()));
@@ -86,13 +88,11 @@ async fn create_sn_service_requires_external_server_runtime() {
         sn_identity,
         identity_factory,
         cert_factory,
+        test_server_runtime(),
     ))
     .await;
 
-    match result {
-        Ok(_) => panic!("create_sn_service unexpectedly started without ServerRuntime"),
-        Err(err) => assert_eq!(err.code(), P2pErrorCode::InvalidParam),
-    }
+    assert!(result.is_ok());
 }
 
 async fn start_client_stack(
@@ -103,11 +103,16 @@ async fn start_client_stack(
 ) -> P2pResult<P2pStackRef> {
     let endpoint = *client_identity.endpoints().first().unwrap();
     let env = create_p2p_env(
-        P2pConfig::new(identity_factory, cert_factory, vec![endpoint])
-            .set_tcp_accept_timout(Duration::from_secs(3))
-            .set_tcp_connect_timout(Duration::from_secs(3))
-            .set_quic_connect_timeout(Duration::from_secs(3))
-            .set_quic_idle_time(Duration::from_secs(10)),
+        P2pConfig::new(
+            identity_factory,
+            cert_factory,
+            vec![endpoint],
+            test_server_runtime(),
+        )
+        .set_tcp_accept_timout(Duration::from_secs(3))
+        .set_tcp_connect_timout(Duration::from_secs(3))
+        .set_quic_connect_timeout(Duration::from_secs(3))
+        .set_quic_idle_time(Duration::from_secs(10)),
     )
     .await?;
 

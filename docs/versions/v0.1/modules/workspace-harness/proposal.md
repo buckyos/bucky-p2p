@@ -2,60 +2,139 @@
 module: workspace-harness
 version: v0.1
 status: approved
-approved_by: user
-approved_at: 2026-05-13
-approved_content_sha256: 48357c3fa2cee60e1f698f376a9d669d21372216569a1c1ea8a98963a65a737f
+approved_by: auto-pipeline
+approved_at: 2026-07-07T16:58:00+08:00
+approved_content_sha256: 762b1aa3a4fccf170e9cc01ad65390ca5d6fe0b60eb61d1609f2d7350982650c
 ---
 
-# workspace-harness 提案
+# workspace-harness Proposal
 
-## 背景与目标
-- 当前工作树包含 `harness/rules/**`、`harness/scripts/**` 和 `harness/pipeline-plan.md` 的治理层变更。
-- 这些变更影响 implementation admission、acceptance review、trigger 判断和工作区结构检查，不属于 `p2p-frame`、`cyfs-p2p` 或其他业务模块的代码实现范围。
-- 本提案目标是为工作区 Harness 治理变更建立独立的 proposal-first 准入范围，避免治理规则改动绕过自身审计。
+## Background and Goal
+- The workspace harness owns `harness/rules/**`, `harness/scripts/**`, and `harness/pipeline-plan.md`.
+- `harness/scripts/test-run.py all all` currently executes repeated commands because direct `TEST_COMMANDS` entries and module `testplan.yaml` steps are both appended, and because several module integration levels register the same `cargo test --workspace` command.
+- The goal is to keep the canonical unified test entrypoint and machine-written run artifacts while reducing unnecessary repeated command execution.
+- Existing workspace-harness governance coverage for admission, acceptance, and pipeline plan remains part of this packet.
 
-## 范围
-### 范围内
-- acceptance review 对完整工作树 diff、未跟踪文件和跨模块准入的审计规则。
-- direct change mapping、schema validation、module doc exception 和 task entry gate 等准入规则。
-- `schema-check.py`、`admission-check.py` 和 `verify-workspace-harness.py` 等治理脚本。
-- `harness/pipeline-plan.md` 对当前自动流水线计划的描述和退回路径。
+## Scope
+### In scope
+- Acceptance review rules for full worktree diff, untracked files, cross-module admission, and direct change mapping.
+- Direct change mapping, schema validation, module document exceptions, task entry gate, and related admission scripts.
+- `schema-check.py`, `admission-check.py`, `verify-workspace-harness.py`, and other governance scripts under `harness/scripts/**`.
+- `harness/pipeline-plan.md` as the current auto-pipeline execution graph and return routing record.
+- `test-run.py` command scheduling optimization that avoids repeated execution of identical commands inside one run while preserving module/level coverage evidence in the run artifact.
+- `test-run.py` command source precedence so module `testplan.yaml` entries do not duplicate fallback registry entries for the same module and level.
 
-### 范围外
-- 修改 `p2p-frame`、`cyfs-p2p`、`sn-miner` 或其他业务模块的协议、运行时或测试实现。
-- 通过治理规则变更追认未审批的业务实现改动。
-- 将本模块作为用户自动审批的替代品；后续 design/testing 仍需独立审批。
+### Out of scope
+- Changing `p2p-frame`, `cyfs-p2p`, `sn-miner`, `desc-tool`, or other business module protocols, runtime behavior, or tests.
+- Weakening `test-run.py all all`; it must still reach all registered project tests in deterministic order.
+- Dropping machine-readable run artifact evidence or making acceptance rely on pasted terminal output.
+- Silently bypassing failing tests, quality gates, schema checks, admission checks, or acceptance checks.
+- Treating this governance change as approval for unrelated business module implementation changes.
 
-### 与相邻模块的边界
-- `p2p-frame` 等业务模块负责自身 proposal/design/testing/implementation 证据链。
-- `workspace-harness` 只负责工作区门禁、触发规则、结构检查、准入检查和验收规则。
-- 任何治理规则导致业务模块准入失败时，业务变更必须回到对应业务模块的数据包，而不是在治理模块中直接放行。
+### Boundary with neighboring modules
+- Business modules own their own proposal/design/testing/implementation evidence chains and test content.
+- `workspace-harness` owns the unified invocation surface, command discovery, dedupe policy, run artifact shape, and governance checkers.
+- If runner optimization exposes stale or duplicate module testplan entries, the harness may report them or dedupe execution, but business module test semantics remain owned by the affected module packet.
 
-## 约束
-- 治理规则必须 fail closed：缺失模块、缺失映射、缺失审批或结构错误不得被静默放行。
-- 新增规则必须有脚本或结构检查路径，不能只增加建议性 prose。
-- 工作区结构检查必须确认新增规则文件路径真实存在。
-- 自动流水线规则保持默认不进入；只有用户显式启动时才可作为后续阶段前置条件。
+## Assumptions and Ambiguities
+- Assumptions:
+  - Re-running the exact same command argv in the same `test-run.py` invocation is redundant when the command, working directory, and environment are identical.
+  - The run artifact can represent reused command results without losing coverage traceability if each module/level step records the command status and whether it was executed or reused.
+  - Deterministic command order remains required for `all all`.
+- Open ambiguities:
+  - Some repeated commands may be intentionally repeated to expose flaky behavior; this should remain possible through an explicit override.
+- Decision needed before approval:
+  - Approve adding deterministic in-run command deduplication with an opt-out such as `--no-dedupe`.
 
-## 高层结果
-- 治理层变更拥有独立可审计范围。
-- acceptance 可以把 harness 规则和脚本 diff 归因到 `workspace-harness`，而不是误归入业务模块。
-- 后续 implementation admission 和 acceptance review 的失败原因更明确。
+## Constraints
+- Allowed libraries/components:
+  - Python standard library only for `harness/scripts/test-run.py` changes.
+  - Existing `test-results/test-runs/*.json` artifact directory and schema version unless design decides a compatible extension is required.
+- Disallowed approaches:
+  - Do not remove module/level coverage records from artifacts just because a command result is reused.
+  - Do not make `all all` skip a registered module, level, or enabled testplan step.
+  - Do not make dedupe depend on command string parsing that changes argv semantics.
+- System constraints:
+  - `test-run.py all all`, `<module> all`, and `<module> <level>` remain canonical supported entrypoints.
+  - Acceptance checks must still be able to verify fresh passing whole-project artifacts.
+
+## Requirement Challenge
+| question | evaluation | risk_or_tradeoff | decision |
+|----------|------------|------------------|----------|
+| Is the stated requirement reasonable for the user's goal? | Yes. Dry-run evidence shows exact repeated commands such as duplicate `cargo test -p cyfs-p2p` and multiple `cargo test --workspace` executions in one `all all` run. | Optimizing execution must not hide module coverage or test failures. | revise: dedupe execution while preserving per-module evidence. |
+| Is there a simpler or safer approach? | Removing fallback `TEST_COMMANDS` entries would reduce some duplicates, but not repeated workspace integration commands across modules. | Command removal alone risks losing coverage when a module lacks or breaks `testplan.yaml`. | choose command-result reuse with testplan precedence and fallback behavior. |
+| Is scope ambiguous? | The optimization target is the unified runner, not business test content. | If treated as business testing work, module ownership and admission would be unclear. | proceed in workspace-harness with explicit boundary. |
+
+## Large Module Submodule Decision
+| Submodule | New or Existing | Responsibility | Proposal Packet | Reason |
+|-----------|-----------------|----------------|-----------------|--------|
+| unified-test-entry | existing | Unified harness test invocation, command discovery, execution scheduling, and run artifacts. | `not-applicable: retained in workspace-harness proposal.md` | The feature changes one existing harness script responsibility and does not need an independent submodule packet. |
+
+## Trigger Matrix
+| trigger_category | applies | evidence | required_checks | deferred_checks_and_reason |
+|------------------|---------|----------|-----------------|----------------------------|
+| contract/protocol | yes | `test-run.py` artifact semantics are consumed by acceptance-report checks. | design must define compatible artifact evidence for executed and reused commands; acceptance report check must still pass. | none |
+| data/schema | yes | Run artifact step records may need a compatible field for deduped/reused commands. | schema/design review of artifact JSON shape; direct artifact inspection after runner tests. | none |
+| security/privacy/permission | no | Runner executes local test commands and does not alter permission or secret handling. | none | none |
+| runtime/integration | yes | `test-run.py all all` executes workspace, module, integration, and DV commands. | dry-run comparison, module all run, project all run, and root shortcut run. | none |
+| build/dependency/config/deployment | yes | Runner invokes `cargo`, Python harness checks, and root shortcut wrappers. | `test-run.py --dry-run`, `test-run.py workspace-harness all`, `test-run.py all all`, and `./test-run.sh all all`. | none |
+| ui/datamodel/workflow | no | No UI or application data model is affected. | none | none |
+| harness/process | yes | This is a governance runner optimization under `harness/scripts/test-run.py`. | schema/admission checks, stage-scope checks, acceptance-report checks, and pipeline-plan checks as applicable. | none |
+
+## High-Level Outcomes
+- `test-run.py all all` avoids executing identical commands repeatedly within the same invocation.
+- Run artifacts remain suitable acceptance evidence and show which module/level entries were covered by executed or reused command results.
+- Module `testplan.yaml` entries take precedence over static fallback registry entries for the same module/level to avoid double registration.
+- A debug opt-out exists for strict reruns or flaky investigation.
+- Existing `test-run.py` entrypoint names and root shortcut behavior remain stable.
 
 ## Proposal Items
-| proposal_id | change_id | Outcome | Constraints / Non-goals | Success Evidence |
-|-------------|-----------|---------|--------------------------|------------------|
-| P-HARNESS-REVIEW-1 | workspace_harness_acceptance_review_gate | acceptance 规则要求审计完整工作树 diff、未跟踪文件、跨模块准入和直接 change mapping。 | 不替代业务模块审批；不让测试通过本身构成 acceptance passed。 | design/testing 需覆盖 acceptance rule、trigger rule、schema/admission checker 和 workspace harness verifier。 |
-| P-HARNESS-ADMISSION-1 | workspace_harness_direct_admission_gate | task entry、schema-check 和 admission-check 形成直接 change_id 准入门禁，缺失 proposal/design/testing/testplan 映射时失败关闭。 | 不为默认模块提供隐式豁免；仅允许规则文件中显式登记的模块豁免。 | schema/admission/check-implementation 入口能对默认模块和豁免模块给出一致结果。 |
-| P-HARNESS-PIPELINE-1 | workspace_harness_pipeline_plan_current_change | `harness/pipeline-plan.md` 记录当前 change_id 的阶段图、依赖、退回路径和退出条件。 | 不自动进入 pipeline；不把 pipeline 计划当作审批本身。 | pipeline plan 与 approved proposal、design/testing 状态和 acceptance 退回路径一致。 |
+| proposal_id | change_id | Outcome | Scope Boundary | Success Evidence | Explicit Non-Goal |
+|-------------|-----------|---------|----------------|------------------|-------------------|
+| P-HARNESS-REVIEW-1 | workspace_harness_acceptance_review_gate | acceptance rules require review of full worktree diff, untracked files, cross-module admission, and direct change mapping. | Governance review rules only; no business module approval bypass. | design/testing cover acceptance rule, trigger rule, schema/admission checker, and workspace harness verifier. | Do not let passing tests alone mean acceptance passed. |
+| P-HARNESS-ADMISSION-1 | workspace_harness_direct_admission_gate | task entry, schema-check, and admission-check form direct change_id admission gates that fail closed on missing mapping. | Admission and schema governance only; explicit module exceptions remain narrow. | schema/admission/check-implementation entries give consistent results for default and exempt modules. | Do not add implicit exemptions for default modules. |
+| P-HARNESS-PIPELINE-1 | workspace_harness_pipeline_plan_current_change | `harness/pipeline-plan.md` records current change stage graph, dependencies, return routing, and exit conditions. | Current pipeline planning only; launch remains explicit. | pipeline plan matches approved proposal, design/testing state, and acceptance return routing. | Do not treat pipeline plan as approval by itself. |
+| P-HARNESS-TEST-RUN-1 | workspace_harness_test_run_dedupe | `test-run.py` avoids duplicate command execution within one run while preserving module/level coverage evidence and deterministic ordering. | `harness/scripts/test-run.py`, related unified-test-entry rules if needed, and workspace-harness test metadata. | dry-run shows repeated commands collapsed or marked reused; module all and all all artifacts pass and include reuse evidence; root shortcut still passes. | Do not skip registered coverage, remove artifact evidence, or change business module test commands. |
 
-## 风险
-- 治理规则过宽会让未准入实现通过验收。
-- 治理规则过窄会阻塞已有合法豁免或 legacy 数据包。
-- 脚本与规则 prose 不一致会导致人工评审和机器检查结果分叉。
-- 将治理变更与业务实现混在同一 acceptance 中，会使责任阶段不清晰。
+## Success Criteria
+- Concrete user-visible or system-visible result:
+  - `uv run --active python ./harness/scripts/test-run.py all all --dry-run` shows no repeated execution of identical argv unless dedupe is explicitly disabled.
+  - `test-run.py all all` writes an artifact where reused command results remain traceable to the requesting module/level.
+- Required evidence:
+  - `doc-structure-check.py --docs proposal` passes before proposal handoff.
+  - After downstream implementation, `test-run.py workspace-harness all`, `test-run.py p2p-frame all`, `test-run.py all all`, and `./test-run.sh all all` pass.
+  - Acceptance report check still accepts fresh passing whole-project artifacts.
+- Explicit non-goals:
+  - No change to business module protocols, runtime semantics, or test assertions.
+  - No acceptance bypass and no deletion of required harness checks.
+
+## Risks
+- Over-aggressive dedupe could hide flaky tests or commands whose environment changes between module contexts.
+- Artifact changes could break acceptance-report checks or downstream tooling that reads step records.
+- Dedupe could make debugging harder if users expect every module/level command to execute physically.
+- Keeping both fallback registry and testplan discovery without clear precedence can reintroduce duplicate execution.
+
+## Downstream Follow-Up
+| follow_up_id | Owning Stage | Reason | Triggering Proposal Item | Blocking |
+|--------------|--------------|--------|--------------------------|----------|
+| FU-HARNESS-TEST-RUN-DESIGN | design | Define command identity, testplan precedence, artifact representation for reused results, and `--no-dedupe` behavior. | P-HARNESS-TEST-RUN-1 | yes |
+| FU-HARNESS-TEST-RUN-IMPLEMENTATION | implementation | Update `harness/scripts/test-run.py` only after approved design and admission. | P-HARNESS-TEST-RUN-1 | yes |
+| FU-HARNESS-TEST-RUN-TESTING | testing | Add or update runnable evidence for dry-run, module all, project all, and root shortcut behavior. | P-HARNESS-TEST-RUN-1 | yes |
+| FU-HARNESS-TEST-RUN-ACCEPTANCE | acceptance | Audit that dedupe preserves registered coverage and fresh artifact evidence. | P-HARNESS-TEST-RUN-1 | yes |
+
+## Proposal Guardrails
+- Proposal-stage tasks modify only `proposal.md` unless the user explicitly requests a multi-stage update.
+- If this proposal change requires design, implementation, testing, or acceptance updates, record the needed follow-up instead of editing downstream artifacts by default.
+- If this is a large module with many independent submodules, classify whether the requested feature is a new direct submodule before design or testing starts.
+- Put the split submodule's proposal and design files in a submodule directory under this module packet; optional post-implementation testing artifacts may live there when generated. Do not use `design/<submodule>/` or `testing/<submodule>/` for independent submodule docs.
+- Keep human-authored proposal docs under 1000 lines where practical; if a doc would exceed 1000 lines, split it and update the relevant document index.
+- If the request has multiple plausible meanings, record the ambiguity instead of silently choosing one.
+- Proposal approval should not depend on chat-only context; task-critical assumptions belong in this file.
+- Keep implementation strategy out of proposal except where a constraint is part of the requirement.
+- Every implementation-ready requirement must have a stable `change_id`.
+- A broad module-level statement is not enough for implementation admission; the relevant `change_id` must name the concrete behavior, contract, or implementation unit being admitted.
 
 ## Approval Record
-- approver: user
-- approval_date: 2026-06-11
-- user_statement: 将已有文档都迁移到新的要求吧
+- approver: auto-pipeline
+- approval_date: 2026-07-07T16:58:00+08:00
+- user_statement: "确认，自动处理后续步骤"

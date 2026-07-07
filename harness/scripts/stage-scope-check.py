@@ -302,10 +302,15 @@ def allowed_for_stage(path: str, stage: str, version: str | None, module: str | 
             return False
         if path == "AGENTS.md":
             return False
-        # Implementation may write only its own admission evidence inside harness/;
-        # rules, scripts, checkers, hooks, trigger rules, and pipeline plans are
-        # governance surfaces that implementation tasks must not modify.
-        if path.startswith("harness/") and not path.startswith("harness/evidence/"):
+        # Implementation may write only its own admission evidence inside
+        # harness/. The workspace-harness module is the narrow exception: it
+        # owns governance scripts, and admitted Scope Paths still bind exactly
+        # which harness files may change.
+        if (
+            path.startswith("harness/")
+            and not path.startswith("harness/evidence/")
+            and module != "workspace-harness"
+        ):
             return False
         return True
 

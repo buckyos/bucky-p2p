@@ -124,12 +124,12 @@ def known_modules(root: Path) -> list[str]:
 
 
 def commands_for(root: Path, module: str, level: str) -> list[list[str]]:
-    commands: list[list[str]] = []
-    commands.extend(TEST_COMMANDS.get(module, {}).get(level, []))
     plan = discover_testplans(root).get(module)
     if plan:
-        commands.extend(commands_from_testplan(plan, level))
-    return commands
+        commands = commands_from_testplan(plan, level)
+        if commands:
+            return commands
+    return list(TEST_COMMANDS.get(module, {}).get(level, []))
 
 
 def run_command(command: list[str], root: Path, dry_run: bool) -> int:
@@ -194,6 +194,11 @@ def main() -> int:
     parser.add_argument("--root", default=".")
     parser.add_argument("--list", action="store_true", help="list known modules and exit")
     parser.add_argument("--dry-run", action="store_true", help="print commands without running them")
+    parser.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="execute repeated identical commands instead of reusing results within this run",
+    )
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -210,6 +215,7 @@ def main() -> int:
 
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     steps: list[dict[str, object]] = []
+    command_results: dict[tuple[str, tuple[str, ...]], tuple[int, int]] = {}
     exit_code = 0
     ran = 0
     for module in selected_modules:
@@ -221,17 +227,40 @@ def main() -> int:
                 print(f"test-run: no {level} tests for {module}")
                 continue
             for command in commands:
-                step_start = time.monotonic()
-                code = run_command(command, root, args.dry_run)
-                steps.append(
-                    {
-                        "module": module,
-                        "level": level,
-                        "command": command,
-                        "exit_code": code,
-                        "duration_s": round(time.monotonic() - step_start, 3),
-                    }
-                )
+                command_key = (root.resolve().as_posix(), tuple(command))
+                if not args.no_dedupe and command_key in command_results:
+                    code, reused_from_step = command_results[command_key]
+                    print(
+                        "+ "
+                        + " ".join(command)
+                        + f" # reused from step {reused_from_step}"
+                    )
+                    steps.append(
+                        {
+                            "module": module,
+                            "level": level,
+                            "command": command,
+                            "exit_code": code,
+                            "duration_s": 0.0,
+                            "deduped": True,
+                            "reused_from_step": reused_from_step,
+                        }
+                    )
+                else:
+                    step_start = time.monotonic()
+                    code = run_command(command, root, args.dry_run)
+                    step_index = len(steps)
+                    steps.append(
+                        {
+                            "module": module,
+                            "level": level,
+                            "command": command,
+                            "exit_code": code,
+                            "duration_s": round(time.monotonic() - step_start, 3),
+                            "deduped": False,
+                        }
+                    )
+                    command_results[command_key] = (code, step_index)
                 ran += 1
                 if code != 0:
                     exit_code = code

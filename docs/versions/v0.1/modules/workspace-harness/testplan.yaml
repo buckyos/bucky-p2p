@@ -25,6 +25,10 @@ levels:
         name: 验证工作区 Harness 结构
         change_ids: ["workspace_harness_acceptance_review_gate", "workspace_harness_pipeline_plan_current_change"]
         run: ["python3", "./harness/scripts/verify-workspace-harness.py", "v0.1"]
+      - id: workspace-harness-test-run-py-compile
+        name: 验证 test-run.py 语法
+        change_ids: ["workspace_harness_test_run_dedupe"]
+        run: ["python3", "-m", "py_compile", "harness/scripts/test-run.py"]
 
   dv:
     mode: enabled
@@ -43,6 +47,14 @@ levels:
         name: 验证 p2p-frame schema
         change_ids: ["workspace_harness_direct_admission_gate"]
         run: ["python3", "./harness/scripts/schema-check.py", "--version", "v0.1", "--module", "p2p-frame"]
+      - id: workspace-harness-test-run-dedupe-dry-run
+        name: 验证 all/all 默认调度复用重复命令
+        change_ids: ["workspace_harness_test_run_dedupe"]
+        run: ["python3", "./harness/scripts/test-run.py", "all", "all", "--dry-run"]
+      - id: workspace-harness-test-run-no-dedupe-dry-run
+        name: 验证 all/all no-dedupe 调度保留重复命令
+        change_ids: ["workspace_harness_test_run_dedupe"]
+        run: ["python3", "./harness/scripts/test-run.py", "all", "all", "--dry-run", "--no-dedupe"]
 
   integration:
     mode: enabled
@@ -67,3 +79,7 @@ levels:
         name: 验证 cyfs-p2p admission 失败关闭或审批后通过
         change_ids: ["workspace_harness_direct_admission_gate"]
         run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "cyfs-p2p", "--change-id", "endpoint_area_server_reflexive", "--evidence-file", "harness/evidence/admission/20260704-test-run-cyfs-p2p-admission.md"]
+      - id: workspace-harness-test-run-all-all-dry-run
+        name: 验证 all/all 跨模块调度入口可用
+        change_ids: ["workspace_harness_test_run_dedupe"]
+        run: ["python3", "./harness/scripts/test-run.py", "all", "all", "--dry-run"]

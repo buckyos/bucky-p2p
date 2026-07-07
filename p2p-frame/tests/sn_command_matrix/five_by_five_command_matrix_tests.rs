@@ -74,9 +74,13 @@ async fn start_sn_service_with_owner_client(
 ) -> P2pResult<SnServerRef> {
     let owner_client = StaticOwnerDirectoryClient::new(owner_membership, None);
     let service = create_sn_service(
-        SnServiceConfig::new(sn_identity, identity_factory, cert_factory)
-            .set_owner_client_for_tests(owner_client)
-            .set_server_runtime(test_server_runtime()),
+        SnServiceConfig::new(
+            sn_identity,
+            identity_factory,
+            cert_factory,
+            test_server_runtime(),
+        )
+        .set_owner_client_for_tests(owner_client),
     )
     .await?;
     service.start().await?;
@@ -91,11 +95,16 @@ async fn start_client_stack(
 ) -> P2pResult<P2pStackRef> {
     let endpoint = *client_identity.endpoints().first().unwrap();
     let env = create_p2p_env(
-        P2pConfig::new(identity_factory, cert_factory, vec![endpoint])
-            .set_tcp_accept_timout(Duration::from_secs(3))
-            .set_tcp_connect_timout(Duration::from_secs(3))
-            .set_quic_connect_timeout(Duration::from_secs(3))
-            .set_quic_idle_time(Duration::from_secs(10)),
+        P2pConfig::new(
+            identity_factory,
+            cert_factory,
+            vec![endpoint],
+            test_server_runtime(),
+        )
+        .set_tcp_accept_timout(Duration::from_secs(3))
+        .set_tcp_connect_timout(Duration::from_secs(3))
+        .set_quic_connect_timeout(Duration::from_secs(3))
+        .set_quic_idle_time(Duration::from_secs(10)),
     )
     .await?;
 
