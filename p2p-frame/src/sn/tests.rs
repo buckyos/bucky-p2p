@@ -1,20 +1,24 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use bucky_raw_codec::{RawConvertTo, RawFrom};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactory, P2pIdentityRef, P2pSn};
-use crate::sn::protocol::v0::{SnCalled, TunnelType};
+use crate::sn::protocol::v0::{SnCallResp, SnCalled, TunnelType};
+use crate::sn::protocol::{PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
 use crate::sn::types::SnTunnelClassification;
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
-use crate::types::TunnelId;
+use crate::types::{Sequence, TunnelId};
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
-use sfo_cmd_server::client::ClassifiedCmdClient;
+use sfo_cmd_server::client::{ClassifiedCmdClient, CmdClient};
+use sfo_cmd_server::server::CmdServer;
+use sfo_cmd_server::CmdBody;
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 
 #[path = "../../tests/sn_command_matrix/five_by_five_command_matrix_tests.rs"]
@@ -95,6 +99,32 @@ async fn create_sn_service_accepts_external_server_runtime() {
     assert!(result.is_ok());
 }
 
+#[tokio::test]
+async fn external_server_runtime_can_be_shared_by_sn_and_stack() {
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let server_runtime = test_server_runtime();
+    let sn_identity = build_identity("shared-runtime-sn", localhost_quic_endpoint(next_port()));
+
+    let sn_service = create_sn_service(SnServiceConfig::new(
+        sn_identity,
+        identity_factory.clone(),
+        cert_factory.clone(),
+        server_runtime.clone(),
+    ))
+    .await;
+    assert!(sn_service.is_ok());
+
+    let stack_env = create_p2p_env(P2pConfig::new(
+        identity_factory,
+        cert_factory,
+        vec![localhost_quic_endpoint(next_port())],
+        server_runtime,
+    ))
+    .await;
+    assert!(stack_env.is_ok());
+}
+
 async fn start_client_stack(
     client_identity: P2pIdentityRef,
     sn_list: Vec<P2pSn>,
@@ -122,6 +152,40 @@ async fn start_client_stack(
             .set_conn_timeout(Duration::from_secs(3))
             .set_sn_ping_interval(Duration::from_millis(200))
             .set_sn_call_timeout(Duration::from_secs(3))
+            .set_sn_query_interval(Duration::from_secs(1))
+            .set_sn_tunnel_count(2),
+    )
+    .await
+}
+
+async fn start_client_stack_with_endpoints(
+    client_identity: P2pIdentityRef,
+    sn_list: Vec<P2pSn>,
+    identity_factory: Arc<X509IdentityFactory>,
+    cert_factory: Arc<X509IdentityCertFactory>,
+    endpoints: Vec<Endpoint>,
+    call_timeout: Duration,
+) -> P2pResult<P2pStackRef> {
+    let env = create_p2p_env(
+        P2pConfig::new(
+            identity_factory,
+            cert_factory,
+            endpoints,
+            test_server_runtime(),
+        )
+        .set_tcp_accept_timout(Duration::from_secs(3))
+        .set_tcp_connect_timout(Duration::from_secs(3))
+        .set_quic_connect_timeout(Duration::from_secs(3))
+        .set_quic_idle_time(Duration::from_secs(10)),
+    )
+    .await?;
+
+    create_p2p_stack(
+        P2pStackConfig::new(env, client_identity)
+            .add_sn_list(sn_list)
+            .set_conn_timeout(Duration::from_secs(3))
+            .set_sn_ping_interval(Duration::from_millis(50))
+            .set_sn_call_timeout(call_timeout)
             .set_sn_query_interval(Duration::from_secs(1))
             .set_sn_tunnel_count(2),
     )
@@ -650,4 +714,341 @@ async fn sn_client_server_connection_covers_report_query_call_and_called_respons
         .unwrap();
     assert_eq!(unknown_call_resp.result, P2pErrorCode::NotFound.as_u8());
     assert!(unknown_call_resp.to_peer_info.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sn_report_late_response_does_not_complete_next_tunnel_report() {
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let sn_endpoints = vec![
+        localhost_quic_endpoint(next_port()),
+        localhost_tcp_endpoint(next_port()),
+    ];
+    let sn_identity = build_identity("sn-late-report", sn_endpoints[0])
+        .update_endpoints(sn_endpoints.clone());
+    let sn_id = sn_identity.get_id();
+    let sn_service = create_sn_service(SnServiceConfig::new(
+        sn_identity.clone(),
+        identity_factory.clone(),
+        cert_factory.clone(),
+        test_server_runtime(),
+    ))
+    .await
+    .unwrap();
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let late_endpoint = localhost_quic_endpoint(next_port());
+    let current_endpoint = localhost_quic_endpoint(next_port());
+    let handler_attempts = attempts.clone();
+    let handler_sn_id = sn_id.clone();
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::ReportSn as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| {
+            let attempts = handler_attempts.clone();
+            let sn_id = handler_sn_id.clone();
+            async move {
+                let report =
+                    ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let (delay, endpoint) = if attempt == 0 {
+                    (Duration::from_millis(2200), late_endpoint)
+                } else {
+                    (Duration::from_millis(600), current_endpoint)
+                };
+                tokio::time::sleep(delay).await;
+                let resp = ReportSnResp {
+                    seq: report.seq,
+                    sn_peer_id: sn_id,
+                    result: P2pErrorCode::Ok.as_u8(),
+                    peer_info: None,
+                    end_point_array: vec![endpoint],
+                    receipt: None,
+                };
+                Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+            }
+        },
+    );
+    sn_service.start().await.unwrap();
+
+    let client_endpoints = vec![
+        localhost_quic_endpoint(next_port()),
+        localhost_tcp_endpoint(next_port()),
+    ];
+    let client_identity = build_identity("client-late-report", client_endpoints[0])
+        .update_endpoints(client_endpoints.clone());
+    let stack = start_client_stack_with_endpoints(
+        client_identity,
+        vec![build_sn_entry(&sn_identity)],
+        identity_factory,
+        cert_factory,
+        client_endpoints,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+
+    stack.wait_online(Some(Duration::from_secs(10))).await.unwrap();
+    assert!(attempts.load(Ordering::SeqCst) >= 2);
+    let active = stack.sn_client().get_active_sn_list();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].sn_peer_id, sn_id);
+    assert_eq!(active[0].wan_ep_list, vec![current_endpoint]);
+    assert!(!active[0].wan_ep_list.contains(&late_endpoint));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sn_report_rejects_wrong_business_seq_and_sn_identity() {
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let sn_endpoints = vec![
+        localhost_quic_endpoint(next_port()),
+        localhost_tcp_endpoint(next_port()),
+    ];
+    let sn_identity = build_identity("sn-wrong-report-body", sn_endpoints[0])
+        .update_endpoints(sn_endpoints.clone());
+    let sn_id = sn_identity.get_id();
+    let sn_service = create_sn_service(SnServiceConfig::new(
+        sn_identity.clone(),
+        identity_factory.clone(),
+        cert_factory.clone(),
+        test_server_runtime(),
+    ))
+    .await
+    .unwrap();
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let handler_attempts = attempts.clone();
+    let handler_sn_id = sn_id.clone();
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::ReportSn as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| {
+            let attempts = handler_attempts.clone();
+            let sn_id = handler_sn_id.clone();
+            async move {
+                let report =
+                    ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 2 {
+                    return Ok(Some(CmdBody::from(vec![0xFF])));
+                }
+                let (seq, response_sn_id) = if attempt == 0 {
+                    (
+                        Sequence::from(report.seq.value().wrapping_add(1)),
+                        sn_id,
+                    )
+                } else {
+                    (report.seq, P2pId::from(vec![0xA5; 32]))
+                };
+                let resp = ReportSnResp {
+                    seq,
+                    sn_peer_id: response_sn_id,
+                    result: P2pErrorCode::Ok.as_u8(),
+                    peer_info: None,
+                    end_point_array: vec![localhost_quic_endpoint(next_port())],
+                    receipt: None,
+                };
+                Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+            }
+        },
+    );
+    sn_service.start().await.unwrap();
+
+    let client_endpoints = vec![
+        localhost_quic_endpoint(next_port()),
+        localhost_tcp_endpoint(next_port()),
+    ];
+    let client_identity = build_identity("client-wrong-report-body", client_endpoints[0])
+        .update_endpoints(client_endpoints.clone());
+    let stack = start_client_stack_with_endpoints(
+        client_identity,
+        vec![build_sn_entry(&sn_identity)],
+        identity_factory,
+        cert_factory,
+        client_endpoints,
+        Duration::from_millis(300),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while attempts.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(attempts.load(Ordering::SeqCst) >= 3);
+    assert!(stack.sn_client().get_active_sn_list().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sn_call_and_query_reject_mismatched_qa_response_bodies() {
+    let (sn_service, stack, sn_id, client_id, _cert_factory) =
+        setup_sn_and_one_client("sn-call-query-mismatch").await;
+    let wrong_sn_id = P2pId::from(vec![0x5A; 32]);
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::SnCall as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| {
+            let wrong_sn_id = wrong_sn_id.clone();
+            async move {
+                let call = SnCall::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                let resp = SnCallResp {
+                    seq: call.seq,
+                    sn_peer_id: wrong_sn_id,
+                    result: P2pErrorCode::Ok.as_u8(),
+                    to_peer_info: None,
+                };
+                Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+            }
+        },
+    );
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::SnQuery as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| async move {
+            let query = SnQuery::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+            let resp = SnQueryResp {
+                seq: Sequence::from(query.seq.value().wrapping_add(1)),
+                peer_info: None,
+                end_point_array: vec![],
+            };
+            Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+        },
+    );
+
+    let call_err = stack
+        .sn_client()
+        .call(
+            0x3001u32.into(),
+            None,
+            &client_id,
+            TunnelType::Stream,
+            b"mismatched-call-response".to_vec(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(call_err.code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(stack.sn_client().get_active_sn_list()[0].sn_peer_id, sn_id);
+
+    let query_err = stack.sn_client().query(&client_id).await.unwrap_err();
+    assert_eq!(query_err.code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(stack.sn_client().get_active_sn_list()[0].sn_peer_id, sn_id);
+
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::SnCall as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, _body: CmdBody| async move {
+            Ok(Some(CmdBody::from(vec![0xFF])))
+        },
+    );
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::SnQuery as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, _body: CmdBody| async move {
+            Ok(Some(CmdBody::from(vec![0xFF])))
+        },
+    );
+
+    let malformed_call_err = stack
+        .sn_client()
+        .call(
+            0x3002u32.into(),
+            None,
+            &client_id,
+            TunnelType::Datagram,
+            b"malformed-call-response".to_vec(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(malformed_call_err.code(), P2pErrorCode::ConnectFailed);
+    let malformed_query_err = stack.sn_client().query(&client_id).await.unwrap_err();
+    assert_eq!(malformed_query_err.code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(stack.sn_client().get_active_sn_list()[0].sn_peer_id, sn_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sn_call_and_query_timeouts_preserve_healthy_active_sn() {
+    let (sn_service, caller, caller_id, query_client, query_id, sn_id, _cert_factory) =
+        setup_sn_and_two_clients().await;
+    let call_sn_id = sn_id.clone();
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::SnCall as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| {
+            let sn_id = call_sn_id.clone();
+            async move {
+                let call = SnCall::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                let resp = SnCallResp {
+                    seq: call.seq,
+                    sn_peer_id: sn_id,
+                    result: P2pErrorCode::Ok.as_u8(),
+                    to_peer_info: None,
+                };
+                Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+            }
+        },
+    );
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::SnQuery as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| async move {
+            let query = SnQuery::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let resp = SnQueryResp {
+                seq: query.seq,
+                peer_info: None,
+                end_point_array: vec![],
+            };
+            Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+        },
+    );
+
+    let call = caller.sn_client().call(
+        0x3003u32.into(),
+        None,
+        &query_id,
+        TunnelType::Stream,
+        b"timeout-call".to_vec(),
+    );
+    let query = query_client.sn_client().query(&caller_id);
+    let (call_result, query_result) = tokio::join!(call, query);
+
+    assert_eq!(call_result.unwrap_err().code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(query_result.unwrap_err().code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(caller.sn_client().get_active_sn_list()[0].sn_peer_id, sn_id);
+    assert_eq!(
+        query_client.sn_client().get_active_sn_list()[0].sn_peer_id,
+        sn_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sn_call_and_query_closed_tunnels_remove_stale_active_sn() {
+    let (_sn_service, caller, _caller_id, query_client, query_id, _sn_id, _cert_factory) =
+        setup_sn_and_two_clients().await;
+
+    caller
+        .sn_client()
+        .get_cmd_client()
+        .clear_all_tunnel()
+        .await;
+    query_client
+        .sn_client()
+        .get_cmd_client()
+        .clear_all_tunnel()
+        .await;
+
+    let call_err = caller
+        .sn_client()
+        .call(
+            0x3004u32.into(),
+            None,
+            &query_id,
+            TunnelType::Stream,
+            b"closed-call-tunnel".to_vec(),
+        )
+        .await
+        .unwrap_err();
+    let query_err = query_client.sn_client().query(&query_id).await.unwrap_err();
+
+    assert_eq!(call_err.code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(query_err.code(), P2pErrorCode::ConnectFailed);
+    assert!(caller.sn_client().get_active_sn_list().is_empty());
+    assert!(query_client.sn_client().get_active_sn_list().is_empty());
 }

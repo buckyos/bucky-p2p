@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-19T04:26:24+00:00",
+  "evidence_file": "harness/evidence/admission/20260618-owner-directory-peer-transport.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "sn-distributed-directory",
+  "change_ids": [
+    "sn_owner_directory_peer_transport"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md": "44b62063d7c6b01fd8bc7857a580717f37598174004b1e1a6514aae9916ae496",
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md": "355e4d1dbbf59006338215dd5d070a18afd668be8a3cd37fccf6479dad67f874"
+  },
+  "scope_paths": [
+    "Cargo.lock",
+    "p2p-frame/Cargo.toml",
+    "p2p-frame/src/sn/directory/**",
+    "p2p-frame/src/sn/inter_sn/**",
+    "p2p-frame/src/ttp/node.rs",
+    "p2p-frame/src/sn/mod.rs",
+    "sn-miner-rust/**"
+  ]
+}

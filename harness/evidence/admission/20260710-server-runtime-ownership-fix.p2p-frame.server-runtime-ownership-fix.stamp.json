@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-10T07:34:16+00:00",
+  "evidence_file": "harness/evidence/admission/20260710-server-runtime-ownership-fix.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "server-runtime-ownership-fix",
+  "change_ids": [
+    "process_runtime_single_owner",
+    "cyfs_config_runtime_injection",
+    "sn_miner_role_readiness_evidence"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/server-runtime-ownership-fix/proposal.md": "341f095f7678a62014baebdbe4e898344878b759c225bf844131964122901cc7",
+    "docs/versions/v0.1/modules/p2p-frame/server-runtime-ownership-fix/design.md": "b4e72a040dd6486b49b0c078ce8a2cd01def0cc76d980c7388679e4e1d5e7ca3"
+  },
+  "scope_paths": [
+    "cyfs-p2p-test/src/main.rs",
+    "p2p-frame/src/sn/tests.rs",
+    "cyfs-p2p/src/stack_builder.rs",
+    "cyfs-p2p/examples/cyfs_perf.rs",
+    "sn-miner-rust/src/main.rs",
+    "sn-miner-rust/tests/real_process.rs"
+  ]
+}

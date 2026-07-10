@@ -4,6 +4,7 @@ use bucky_objects::{
 };
 use bucky_raw_codec::{FileDecoder, FileEncoder};
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -28,6 +29,13 @@ pub type MinerResult<T> = sfo_result::Result<T, MinerErrorCode>;
 pub type MinerError = sfo_result::Error<MinerErrorCode>;
 
 const APP_NAME: &str = "sn-miner";
+
+fn announce_ready(role: &str) -> std::result::Result<(), String> {
+    println!("SN_MINER_READY role={}", role);
+    std::io::stdout()
+        .flush()
+        .map_err(|err| format!("flush {} readiness marker failed: {}", role, err))
+}
 
 #[tokio::main]
 async fn main() {
@@ -225,6 +233,7 @@ async fn run_owner_role(config: SnMinerConfig) -> std::result::Result<(), String
         .start()
         .await
         .map_err(|err| format!("start owner directory server failed: {:?}", err))?;
+    announce_ready("owner")?;
     std::future::pending::<()>().await;
     Ok(())
 }
@@ -293,6 +302,7 @@ async fn start_serving_service(config: SnServiceConfig) -> std::result::Result<(
         .await
         .map_err(|err| format!("{:?}", err))?;
     service.start().await.map_err(|err| format!("{:?}", err))?;
+    announce_ready("serving")?;
     std::future::pending::<()>().await;
     Ok(())
 }

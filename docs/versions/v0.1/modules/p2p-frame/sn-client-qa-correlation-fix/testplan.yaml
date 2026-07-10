@@ -1,0 +1,84 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+submodule: sn-client-qa-correlation-fix
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: callback lifecycle and SN business-body rejection branches
+    test_targets:
+      - third-party/callback-result/tests/drop_cleanup.rs
+      - p2p-frame/src/sn/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Callback allocation accounting must run with one test thread.
+        - SN tests require the x509 feature and create loopback QUIC/TCP listeners.
+    steps:
+      - id: qa-callback-drop-cleanup
+        name: verify callback completion timeout cancellation and bounded retention
+        change_ids: ["sn_client_qa_pending_cleanup"]
+        run: ["cargo", "test", "-p", "callback-result", "--test", "drop_cleanup", "--", "--test-threads=1", "--nocapture"]
+      - id: qa-body-mismatch
+        name: reject mismatched Report Call and Query QA bodies
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_pending_cleanup", "sn_client_qa_migration_boundary"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "mismatched_qa_response_bodies", "--", "--nocapture"]
+      - id: qa-report-body-mismatch
+        name: reject wrong report business sequence and SN identity
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_pending_cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn_report_rejects_wrong_business_seq_and_sn_identity", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: single-module QA workflow timeout ordering and protocol fallback
+    test_targets:
+      - p2p-frame/src/sn/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Tests use dynamically allocated loopback ports and controlled malicious/delayed command handlers.
+    steps:
+      - id: qa-report-late-correlation
+        name: prove late Report A cannot complete pending Report B
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_pending_cleanup", "sn_client_qa_migration_boundary"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn_report_late_response_does_not_complete_next_tunnel_report", "--", "--nocapture"]
+      - id: qa-call-query-timeout
+        name: verify Call and Query timeout cleanup preserves healthy active SN state
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_pending_cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn_call_and_query_timeouts_preserve_healthy_active_sn", "--", "--nocapture"]
+      - id: qa-call-query-closed-tunnel
+        name: verify closed command tunnels fail and remove stale active SN state
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_pending_cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn_call_and_query_closed_tunnels_remove_stale_active_sn", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: new client new SN QA framing plus dependency and public API compilation
+    test_targets:
+      - p2p-frame/src/sn/tests.rs
+      - p2p-frame/src/sn/client/sn_service.rs
+      - p2p-frame/src/sn/service/service.rs
+      - third-party/callback-result/src/lib.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Old/new and new/old process combinations are intentionally unsupported and have no repository fixture.
+    steps:
+      - id: qa-new-new-e2e
+        name: run new client new SN Report Query Call and SnCalled workflow
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_migration_boundary"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn_client_server_connection_covers_report_query_call_and_called_response", "--", "--nocapture"]
+      - id: qa-workspace-compile
+        name: compile p2p-frame tests and patched command dependency
+        change_ids: ["sn_client_qa_transactions", "sn_client_qa_pending_cleanup", "sn_client_qa_migration_boundary"]
+        run: ["cargo", "check", "-p", "p2p-frame", "--all-targets", "--features", "x509"]

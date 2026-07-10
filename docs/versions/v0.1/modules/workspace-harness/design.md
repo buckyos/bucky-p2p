@@ -4,7 +4,7 @@ version: v0.1
 status: approved
 approved_by: auto-pipeline
 approved_at: 2026-07-07T17:15:00+08:00
-approved_content_sha256: 795f6459810e5110267bd17f2a7b609ab8c9a3b56ecf63ed398d6d5381b36a7d
+approved_content_sha256: c5dde33f6c2c2e99ed371c0cd0658f7f273c8b57867ca0dc2894842e31154d18
 ---
 
 # workspace-harness Design
@@ -98,8 +98,8 @@ approved_content_sha256: 795f6459810e5110267bd17f2a7b609ab8c9a3b56ecf63ed398d6d5
 | contract/protocol | yes | JSON run artifacts are consumed by acceptance. | Overall Approach; Key Call Flows; Interfaces and Dependencies | artifact inspection and acceptance-report-check | none |
 | data/schema | yes | Step records gain optional `deduped` and `reused_from_step` fields. | Overall Approach; Data and State | inspect generated JSON artifact | none |
 | security/privacy/permission | no | Runner remains local command execution and no permission model changes. | Invariants to Preserve | none | none |
-| runtime/integration | yes | Runner executes module and workspace tests. | Key Call Flows; Testability | dry-run, workspace-harness all, p2p-frame all, all all, root shortcut | none |
-| build/dependency/config/deployment | yes | Runner invokes cargo and Python harness commands. | Implementation Order; Risks and Rollback | module/all and all/all commands | none |
+| runtime/integration | yes | Runner executes module and workspace tests. | Key Call Flows; Testability | dry-run, lightweight workspace-harness all, and one root shortcut all/all physical run | none |
+| build/dependency/config/deployment | yes | Runner invokes cargo and Python harness commands. | Implementation Order; Risks and Rollback | module/all focused checks and one root shortcut all/all command | none |
 | ui/datamodel/workflow | no | No UI or product workflow. | Non-goals | none | none |
 | harness/process | yes | This is a harness process optimization. | Directly Mapped Change Items | schema/admission/scope/pipeline/acceptance checks | none |
 
@@ -137,7 +137,7 @@ approved_content_sha256: 795f6459810e5110267bd17f2a7b609ab8c9a3b56ecf63ed398d6d5
 ## Testability
 - Isolation seams per submodule: `--dry-run` exposes command scheduling without executing tests; generated JSON artifacts expose executed vs reused steps.
 - Replaceable external boundaries: subprocess execution remains isolated in `run_command(...)`; dedupe can be disabled with `--no-dedupe`.
-- How error/boundary cases will be triggered: compare dry-run command counts with and without `--no-dedupe`; inspect artifact for reused `cargo test --workspace`; run module/all and all/all.
+- How error/boundary cases will be triggered: use targeted dry-runs for default reuse and `--no-dedupe` scheduling; inspect the single root-shortcut all/all artifact for reused `cargo test --workspace`; run lightweight module/all focused checks plus one physical root all/all.
 - Untriggerable failure paths and their alternative verification: flaky rerun behavior is covered by `--no-dedupe` scheduling evidence rather than inducing flaky tests.
 
 ## Interfaces and Dependencies

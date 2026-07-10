@@ -157,11 +157,15 @@ impl SnService {
                     let local_id = P2pId::from(local_id.as_slice());
                     let call_req = SnCall::clone_from_slice(cmd_body.read_all().await?.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    service
+                    let call_resp = service
                         .handle_call(call_req, &local_id, &peer_id, tunnel_id, bucky_time_now())
                         .await
                         .map_err(into_cmd_err!(CmdErrorCode::Failed, "handle sn call failed"))?;
-                    Ok(None)
+                    Ok(Some(CmdBody::from(
+                        call_resp
+                            .to_vec()
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?,
+                    )))
                 }
             },
         );
@@ -199,14 +203,18 @@ impl SnService {
                     let report_sn =
                         ReportSn::clone_from_slice(cmd_body.read_all().await?.as_slice())
                             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    service
+                    let report_resp = service
                         .handle_report_sn(&local_id, &peer_id, tunnel_id, report_sn)
                         .await
                         .map_err(into_cmd_err!(
                             CmdErrorCode::Failed,
                             "handle report sn failed"
                         ))?;
-                    Ok(None)
+                    Ok(Some(CmdBody::from(
+                        report_resp
+                            .to_vec()
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?,
+                    )))
                 }
             },
         );
@@ -224,10 +232,18 @@ impl SnService {
                     let local_id = P2pId::from(local_id.as_slice());
                     let query = SnQuery::clone_from_slice(cmd_body.read_all().await?.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    service
+                    let query_resp = service
                         .handle_query_sn(&local_id, &peer_id, tunnel_id, query)
-                        .await;
-                    Ok(None)
+                        .await
+                        .map_err(into_cmd_err!(
+                            CmdErrorCode::Failed,
+                            "handle sn query failed"
+                        ))?;
+                    Ok(Some(CmdBody::from(
+                        query_resp
+                            .to_vec()
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?,
+                    )))
                 }
             },
         );
@@ -589,9 +605,9 @@ impl SnService {
         mut call_req: SnCall,
         local_id: &P2pId,
         peer_id: &PeerId,
-        tunnel_id: CmdTunnelId,
+        _tunnel_id: CmdTunnelId,
         _send_time: Timestamp,
-    ) -> P2pResult<()> {
+    ) -> P2pResult<SnCallResp> {
         let client_id = P2pId::from(peer_id.as_slice());
         let client_cert =
             self.client_cert_from_request_or_cache(&client_id, call_req.peer_info.clone())?;
@@ -739,20 +755,7 @@ impl SnService {
                 }
             };
 
-        self.cmd_server
-            .send_by_specify_tunnel(
-                peer_id,
-                tunnel_id,
-                PackageCmdCode::SnCallResp as u8,
-                self.cmd_version,
-                call_resp
-                    .to_vec()
-                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                    .as_slice(),
-            )
-            .await
-            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-        Ok(())
+        Ok(call_resp)
     }
 
     async fn handle_called_resp(&self, called_resp: SnCalledResp) {
@@ -826,9 +829,9 @@ impl SnService {
         &self,
         local_id: &P2pId,
         peer_id: &PeerId,
-        tunnel_id: CmdTunnelId,
+        _tunnel_id: CmdTunnelId,
         report_sn: ReportSn,
-    ) -> P2pResult<()> {
+    ) -> P2pResult<ReportSnResp> {
         self.validate_connection(self.validate_context_from_cert(
             peer_id,
             report_sn.peer_info.clone().ok_or_else(|| {
@@ -865,43 +868,23 @@ impl SnService {
                 &report_sn.local_eps,
             );
         }
-        if let Err(e) = self
-            .cmd_server
-            .send_by_specify_tunnel(
-                peer_id,
-                tunnel_id,
-                PackageCmdCode::ReportSnResp as u8,
-                self.cmd_version,
-                ReportSnResp {
-                    seq: report_sn.seq,
-                    sn_peer_id: local_id.clone(),
-                    result: P2pErrorCode::Ok.into_u8(),
-                    peer_info: None,
-                    end_point_array: remote_ep,
-                    receipt: None,
-                }
-                .to_vec()
-                .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                .as_slice(),
-            )
-            .await
-        {
-            log::error!(
-                "send report-sn-resp failed, peer_id: {:?}, error: {:?}",
-                peer_id,
-                e
-            );
-        }
-        Ok(())
+        Ok(ReportSnResp {
+            seq: report_sn.seq,
+            sn_peer_id: local_id.clone(),
+            result: P2pErrorCode::Ok.into_u8(),
+            peer_info: None,
+            end_point_array: remote_ep,
+            receipt: None,
+        })
     }
 
     async fn handle_query_sn(
         &self,
         local_id: &P2pId,
-        peer_id: &PeerId,
-        tunnel_id: CmdTunnelId,
+        _peer_id: &PeerId,
+        _tunnel_id: CmdTunnelId,
         query: SnQuery,
-    ) -> P2pResult<()> {
+    ) -> P2pResult<SnQueryResp> {
         let requester_sn_id = self.effective_local_sn_id(local_id);
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let mut remote_details = self
@@ -944,19 +927,7 @@ impl SnService {
             }
         };
 
-        self.cmd_server
-            .send_by_specify_tunnel(
-                peer_id,
-                tunnel_id,
-                PackageCmdCode::SnQueryResp as u8,
-                self.cmd_version,
-                resp.to_vec()
-                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                    .as_slice(),
-            )
-            .await
-            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-        Ok(())
+        Ok(resp)
     }
 }
 

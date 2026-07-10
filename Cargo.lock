@@ -651,8 +651,6 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "callback-result"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e248182ca4a4de072af91eeda23764d1c78f095c57f1138020292aab258a3367"
 dependencies = [
  "notify-future 0.2.5",
  "tokio",
@@ -3353,9 +3351,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90b17c74d32590eea7e934ba97d14c3c93b2a83dadb16d6be02a6b0b842d8d71"
+checksum = "a55452c3e03a5e6f3389de60f32ddbee3c8c7626f4c18a159656c345cccf5d0a"
 dependencies = [
  "as-any",
  "async-named-locker",
@@ -3366,7 +3364,6 @@ dependencies = [
  "callback-result",
  "callback-trait",
  "futures-lite",
- "hex",
  "log",
  "num",
  "pin-project-lite",
@@ -3409,9 +3406,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-pool"
-version = "0.2.7"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6829959086638ec628671eb1a6b12da8b873e4697c04cdf6448606a03fe73f29"
+checksum = "7255fc7cd89802da74e4320ca5116bc401160a16c08a56608ff39fae8c131774"
 dependencies = [
  "async-trait",
  "notify-future 0.2.5",

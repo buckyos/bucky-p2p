@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-18T04:16:41+00:00",
+  "evidence_file": "harness/evidence/admission/20260618-owner-directory-server-service-split.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "sn-distributed-directory",
+  "change_ids": [
+    "sn_directory_client_server_boundary"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md": "fceaffe056acabc64ba2c1a3faad3bf1044f0e4a5cc32b20539971021cce90d4",
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md": "dc8d2a408cc3d41468d49860bacd66903d971a5db44274cb5194b4a97f3f41f9"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/directory/**",
+    "p2p-frame/src/sn/service/service.rs",
+    "p2p-frame/src/sn/mod.rs",
+    "sn-miner-rust/**"
+  ]
+}

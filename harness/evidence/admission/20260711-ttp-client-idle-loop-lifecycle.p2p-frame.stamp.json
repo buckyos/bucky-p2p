@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-10T23:34:25+00:00",
+  "evidence_file": "harness/evidence/admission/20260711-ttp-client-idle-loop-lifecycle.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "ttp_client_connection_lifecycle"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "99703f9bd69b266f2680a6d70cebd9f3dd5ad624801fede3fc056f3204c93f7a",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "f93dbdd755bb3b5249322ed507886b9dc9bf84b8f66ab52e1c6ec9bdfc364723"
+  },
+  "scope_paths": [
+    "p2p-frame/src/ttp/client.rs",
+    "p2p-frame/src/ttp/tests.rs"
+  ]
+}

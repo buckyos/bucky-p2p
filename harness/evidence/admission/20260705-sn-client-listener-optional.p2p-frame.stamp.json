@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-05T03:01:34+00:00",
+  "evidence_file": "harness/evidence/admission/20260705-sn-client-listener-optional.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "sn_client_protocol_priority"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "2ec0750cb0aa0613be87482aa0b9e255ab3617993684fe050c87eef90658cf78",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "cab128711e1d2fd2f02d78d7b89e1ea9ee8316be454d9d124e01fd577fe0d6a1"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/client/sn_service.rs",
+    "p2p-frame/src/sn/**"
+  ]
+}

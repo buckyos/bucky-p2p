@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-25T04:08:23+00:00",
+  "evidence_file": "harness/evidence/admission/20260625-ttp-client-connection-lifecycle.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "ttp_client_connection_lifecycle"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "f255d5c9a21d3f46ab6a6ad9cbb8f887d45a9ab1ef93162d529ef8b8c6df3179",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "8430b94da6133ed951d91c49fb5efdeedd6b9e3c3c745279e9692675f6fbcc8d"
+  },
+  "scope_paths": [
+    "p2p-frame/src/ttp/client.rs",
+    "p2p-frame/src/ttp/tests.rs"
+  ]
+}

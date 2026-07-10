@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-30T09:13:36+00:00",
+  "evidence_file": "harness/evidence/admission/20260630-ttp-server-tunnel-validator.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "ttp_server_tunnel_accept_validator"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "c56df04302fdc11af92098efd9aa22fd1eac7de14e9cc58e79cda472cc836ce0",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "a5c656df8ff446cc3c8d89d4a5be9fa941e3de722f3033f02d51ed10f9e9cb82"
+  },
+  "scope_paths": [
+    "p2p-frame/src/ttp/server.rs",
+    "p2p-frame/src/ttp/mod.rs"
+  ]
+}

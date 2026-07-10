@@ -1,4 +1,4 @@
-use super::listener::{QuicTunnelListener, udp_punch_burst_window};
+use super::listener::{QuicTunnelListener, connect_with_ep, udp_punch_burst_window};
 use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
@@ -22,6 +22,7 @@ const UDP_PUNCH_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct QuicTunnelNetwork {
     listeners: Mutex<Vec<Arc<QuicTunnelListener>>>,
+    client_endpoints: Mutex<QuicClientEndpoints>,
     cert_resolver: ServerCertResolverRef,
     cert_factory: P2pIdentityCertFactoryRef,
     cert_cache: P2pIdentityCertCacheRef,
@@ -31,6 +32,12 @@ pub struct QuicTunnelNetwork {
     tunnel_id_gen: Mutex<TunnelIdGenerator>,
     reuse_address: AtomicBool,
     server_runtime: ServerRuntime,
+}
+
+#[derive(Default)]
+struct QuicClientEndpoints {
+    ipv4: Option<quinn::Endpoint>,
+    ipv6: Option<quinn::Endpoint>,
 }
 
 fn connect_timeout_for_intent(base_timeout: Duration, intent: TunnelConnectIntent) -> Duration {
@@ -68,6 +75,7 @@ impl QuicTunnelNetwork {
     ) -> Self {
         Self {
             listeners: Mutex::new(Vec::new()),
+            client_endpoints: Mutex::new(QuicClientEndpoints::default()),
             cert_resolver,
             cert_factory,
             cert_cache,
@@ -121,6 +129,131 @@ impl QuicTunnelNetwork {
             let _ = remote_name;
             Ok(remote_id.clone())
         }
+    }
+
+    fn client_endpoint(&self, remote: &Endpoint) -> P2pResult<quinn::Endpoint> {
+        let mut client_endpoints = self.client_endpoints.lock().unwrap();
+        let endpoint = if remote.addr().is_ipv4() {
+            &mut client_endpoints.ipv4
+        } else {
+            &mut client_endpoints.ipv6
+        };
+        if let Some(endpoint) = endpoint.as_ref() {
+            return Ok(endpoint.clone());
+        }
+
+        let local = Endpoint::default_udp(remote);
+        let created = quinn::Endpoint::client(*local.addr()).map_err(|err| {
+            p2p_err!(
+                P2pErrorCode::ConnectFailed,
+                "create quic client endpoint {} failed: {}",
+                local,
+                err
+            )
+        })?;
+        log::info!(
+            "quic client endpoint created local={} remote_ip_version={}",
+            Endpoint::from((Protocol::Quic, created.local_addr().unwrap_or(*local.addr()))),
+            if remote.addr().is_ipv4() { "ipv4" } else { "ipv6" }
+        );
+        *endpoint = Some(created.clone());
+        Ok(created)
+    }
+
+    async fn finish_connect(
+        &self,
+        socket: quinn::Connection,
+        local_identity: &P2pIdentityRef,
+        local_ep: Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        intent: TunnelConnectIntent,
+    ) -> P2pResult<TunnelRef> {
+        let remote_ep = Endpoint::from((Protocol::Quic, socket.remote_address()));
+        let resolved_remote_id = self
+            .resolve_remote_identity(&socket, remote_id, remote_name)
+            .await?;
+
+        let tunnel_id = if intent.tunnel_id == TunnelId::default() {
+            self.next_tunnel_id(&local_identity.get_id(), &resolved_remote_id)
+        } else {
+            intent.tunnel_id
+        };
+        let candidate_id = if intent.candidate_id == TunnelCandidateId::default() {
+            TunnelCandidateId::from(tunnel_id.value())
+        } else {
+            intent.candidate_id
+        };
+        Ok(QuicTunnel::connect(
+            socket,
+            tunnel_id,
+            candidate_id,
+            intent.is_reverse,
+            local_identity.get_id(),
+            resolved_remote_id,
+            local_ep,
+            remote_ep,
+        )
+        .await?)
+    }
+
+    async fn open_with_client_endpoint(
+        &self,
+        local_identity: &P2pIdentityRef,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        intent: TunnelConnectIntent,
+    ) -> P2pResult<TunnelRef> {
+        let endpoint = self.client_endpoint(remote)?;
+        let local_ep = Endpoint::from((
+            Protocol::Quic,
+            endpoint.local_addr().map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::IoError,
+                    "get quic client endpoint local address failed: {}",
+                    err
+                )
+            })?,
+        ));
+        let socket = connect_with_ep(
+            endpoint,
+            local_identity.clone(),
+            self.cert_factory.clone(),
+            remote_id.clone(),
+            remote_name.clone(),
+            *remote,
+            self.congestion_algorithm,
+            connect_timeout_for_intent(self.timeout, intent),
+            self.idle_timeout,
+        )
+        .await
+        .map_err(|err| {
+            log::error!(
+                "quic client endpoint connect failed local_id={} local_ep={} remote={} remote_id={} remote_name={:?} code={:?} msg={}",
+                local_identity.get_id(),
+                local_ep,
+                remote,
+                remote_id,
+                remote_name,
+                err.code(),
+                err
+            );
+            err
+        })?;
+        let mut local_ep = local_ep;
+        if let Some(local_ip) = socket.local_ip() {
+            local_ep.mut_addr().set_ip(local_ip);
+        }
+        self.finish_connect(
+            socket,
+            local_identity,
+            local_ep,
+            remote_id,
+            remote_name,
+            intent,
+        )
+        .await
     }
 
     async fn open_or_connect(
@@ -200,33 +333,15 @@ impl QuicTunnelNetwork {
                 }
             }
         };
-        let local_ep = listener.bound_local();
-        let remote_ep = Endpoint::from((Protocol::Quic, socket.remote_address()));
-        let resolved_remote_id = self
-            .resolve_remote_identity(&socket, remote_id, remote_name)
-            .await?;
-
-        let tunnel_id = if intent.tunnel_id == TunnelId::default() {
-            self.next_tunnel_id(&local_identity.get_id(), &resolved_remote_id)
-        } else {
-            intent.tunnel_id
-        };
-        let candidate_id = if intent.candidate_id == TunnelCandidateId::default() {
-            TunnelCandidateId::from(tunnel_id.value())
-        } else {
-            intent.candidate_id
-        };
-        Ok(QuicTunnel::connect(
+        self.finish_connect(
             socket,
-            tunnel_id,
-            candidate_id,
-            intent.is_reverse,
-            local_identity.get_id(),
-            resolved_remote_id,
-            local_ep,
-            remote_ep,
+            local_identity,
+            listener.bound_local(),
+            remote_id,
+            remote_name,
+            intent,
         )
-        .await?)
+        .await
     }
 }
 
@@ -329,11 +444,14 @@ impl TunnelNetwork for QuicTunnelNetwork {
         if let Some(err) = last_err {
             Err(err)
         } else {
-            Err(p2p_err!(
-                P2pErrorCode::NotFound,
-                "no listener found for remote: {}",
-                remote
-            ))
+            self.open_with_client_endpoint(
+                local_identity,
+                remote,
+                remote_id,
+                remote_name,
+                intent,
+            )
+            .await
         }
     }
 
@@ -766,6 +884,7 @@ mod tests {
             .await
             .unwrap();
 
+        let client_ep = client_network.listener_infos()[0].local;
         let server_ep = server_network.listener_infos()[0].local;
 
         let opened = client_network
@@ -781,6 +900,7 @@ mod tests {
 
         assert_eq!(opened.local_id(), client_identity.get_id());
         assert_eq!(opened.remote_id(), server_identity.get_id());
+        assert_eq!(opened.local_ep(), Some(client_ep));
         assert_eq!(accepted.local_id(), server_identity.get_id());
         assert_eq!(accepted.remote_id(), client_identity.get_id());
 
@@ -1164,11 +1284,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quic_tunnel_create_tunnel_no_listener_returns_not_found() {
+    async fn quic_tunnel_create_tunnel_no_listener_uses_client_endpoint() {
+        init_tls_once();
+
+        let (client_network, _client_resolver) = new_network();
+        let (server_network, server_resolver) = new_network();
+        let local_identity = new_identity("quic-no-listener-client");
+        let server_identity = new_identity("quic-no-listener-server");
+        register_listener_identity(&server_resolver, server_identity.clone()).await;
+
+        let (server_callback, mut server_incoming) = incoming_channel();
+        server_network
+            .listen(&loopback_quic_ep(), None, None, server_callback)
+            .await
+            .unwrap();
+        let server_ep = server_network.listener_infos()[0].local;
+        let server_id = server_identity.get_id();
+        let server_name = server_identity.get_name();
+
+        assert!(client_network.listener_infos().is_empty());
+
+        let first = client_network.create_tunnel(
+            &local_identity,
+            &server_ep,
+            &server_id,
+            Some(server_name.clone()),
+        );
+        let second = client_network.create_tunnel(
+            &local_identity,
+            &server_ep,
+            &server_id,
+            Some(server_name.clone()),
+        );
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        let first_accepted = accept_incoming_rx(&mut server_incoming).await;
+        let second_accepted = accept_incoming_rx(&mut server_incoming).await;
+
+        let client_local_ep = first.local_ep().unwrap();
+        assert_ne!(client_local_ep.addr().port(), 0);
+        assert_eq!(second.local_ep(), Some(client_local_ep));
+        assert!(client_network.listener_infos().is_empty());
+
+        client_network.close_all_listener().await.unwrap();
+        let third = client_network
+            .create_tunnel(
+                &local_identity,
+                &server_ep,
+                &server_id,
+                Some(server_name),
+            )
+            .await
+            .unwrap();
+        let third_accepted = accept_incoming_rx(&mut server_incoming).await;
+
+        assert_eq!(third.local_ep(), Some(client_local_ep));
+        assert!(client_network.listener_infos().is_empty());
+
+        first.close().unwrap();
+        second.close().unwrap();
+        third.close().unwrap();
+        first_accepted.close().unwrap();
+        second_accepted.close().unwrap();
+        third_accepted.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn quic_tunnel_create_tunnel_no_listener_unreachable_returns_connect_error() {
         init_tls_once();
 
         let (network, _resolver) = new_network();
-        let local_identity = new_identity("quic-no-listener-client");
+        let local_identity = new_identity("quic-no-listener-unreachable-client");
 
         let ret = network
             .create_tunnel(
@@ -1180,7 +1367,7 @@ mod tests {
             .await;
 
         assert!(ret.is_err());
-        assert_eq!(ret.err().unwrap().code(), P2pErrorCode::NotFound);
+        assert_eq!(ret.err().unwrap().code(), P2pErrorCode::ConnectFailed);
     }
 
     #[tokio::test]

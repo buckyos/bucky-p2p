@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-10T07:34:16+00:00",
+  "evidence_file": "harness/evidence/admission/20260710-sn-miner-readiness.md",
+  "version": "v0.1",
+  "module": "sn-miner",
+  "submodule": null,
+  "change_ids": [
+    "sn_miner_owner_role_startup",
+    "sn_miner_serving_role_startup"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/sn-miner/proposal.md": "17227d3aa5146f0f16ecfdfd213ebf5207af4d2ce21a16723f6e571852f3557b",
+    "docs/versions/v0.1/modules/sn-miner/design.md": "384817722f91d3ddc1a89f644778228e01fda78a01e76622e6b2e80bb9917e81"
+  },
+  "scope_paths": [
+    "sn-miner-rust/src/**",
+    "sn-miner-rust/config/**"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-23T04:08:19+00:00",
+  "evidence_file": "harness/evidence/admission/20260623-peer-observed-wan-endpoint.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "endpoint_area_server_reflexive"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "ebe923b709bebfae339b628b13b25a1d65af80248c1ff4f1267345afff162e07",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "dbd5ad41d051033040b185bbbe17852437a65167b7fc4313033d2dd8bcfc301c"
+  },
+  "scope_paths": [
+    "p2p-frame/src/endpoint.rs",
+    "p2p-frame/src/sn/service/service.rs",
+    "p2p-frame/src/sn/**",
+    "p2p-frame/src/tunnel/**",
+    "docs/versions/v0.1/modules/p2p-frame/design/tunnel-nat-traversal.md"
+  ]
+}

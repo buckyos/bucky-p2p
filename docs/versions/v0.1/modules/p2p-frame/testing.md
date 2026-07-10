@@ -3,8 +3,8 @@ module: p2p-frame
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-07-07T16:12:35+08:00
-approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0c20a90339
+approved_at: 2026-07-11T00:34:59+08:00
+approved_content_sha256: 86c176c61e27fe3ee6c0d0331c9d66d5744315be4b6f7b91e5e1375e07e44822
 ---
 
 # p2p-frame 测试
@@ -129,7 +129,7 @@ approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0
 | sn_server_connection_validator | `design.md` Directly Mapped Change Items | V-SN-SERVER-VALIDATOR-UNIT | unit | p2p-frame-unit | 覆盖 SN server 默认 allow-all、validator reject、上下文只含 `client_id`/`client_cert`，以及证书 id 不匹配时不调用 validator。 | no | |
 | sn_service_runtime_external_injection | `design.md` Directly Mapped Change Items | V-SN-SERVICE-RUNTIME-EXTERNAL-UNIT | unit | p2p-frame-unit | 覆盖 `SnServiceConfig::new(...)` 必须接收 `ServerRuntime`，显式 runtime 注入路径通过 compile/unit 维持可用，并通过源码搜索确认 `sn/service/service.rs` 不再包含 `ServerRuntime::start(...)` 兜底。 | no | |
 | stack_server_runtime_external_required | `design.md` Directly Mapped Change Items; `design/sfo-reuseport-listeners.md` | V-STACK-RUNTIME-EXTERNAL-COMPILE | unit | p2p-frame-unit | 编译覆盖 `P2pConfig::new(...)` 必须接收 `ServerRuntime`，`create_p2p_env(...)` 只克隆已传入 runtime；`cyfs-p2p` 和 `cyfs-p2p-test` 编译覆盖下游调用方迁移；源码搜索确认 `p2p-frame/src/stack.rs` 无 `ServerRuntime::start(...)` fallback。 | no | |
-| sn_client_protocol_priority | `design.md` Directly Mapped Change Items | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | p2p-frame-sn-client-protocol-priority | 覆盖 SN client 候选按 QUIC、TCP、Ext 顺序排序；支持协议但无匹配 listener 时仍生成 `local_ep = None` 出站候选；有匹配 QUIC listener 时保留 listener `local_ep`；有匹配 TCP listener 时 unspecified IP 转成 `None`，具体 IP 的 port 转成 `0`，不复用监听端口。代码审查确认候选失败日志包含 SN id、protocol、local_ep、remote endpoint 和错误，ping/report loop 按同一 SN 聚合候选，QUIC `ReportSn` 成功后停止 TCP fallback，并按 `sn_peer_id` 去重 active SN。 | no | |
+| sn_client_protocol_priority | `design.md` Directly Mapped Change Items | V-SN-LISTENERLESS-QUIC-UNIT | unit | p2p-frame-quic-listenerless-client | 既有候选 helper 用例继续覆盖 QUIC-first/TCP-fallback、listener `local_ep` 保留与 TCP ephemeral bind；新的真实 QUIC 用例从无 client listener 状态并发首次建立两条 tunnel，断言共享非零 ephemeral port、`listener_infos()` 仍为空，`close_all_listener()` 后第三条 tunnel 仍成功且复用该 port；不可达远端返回 `ConnectFailed` 而非 listener `NotFound`。Pre-fix red artifact: `test-results/test-runs/20260710T160009Z-p2p-frame+listenerless-quic-client-endpoint-red-unit.json`。 | no | |
 | sn_tcp_source_mapped_only | `design.md` Directly Mapped Change Items | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | p2p-frame-sn-tcp-source-mapped-only | 覆盖无 `map_ports` 时 TCP observed endpoint 不返回、有 `map_ports` 时只返回 `Mapped` candidate、原始 TCP 来源端口不泄漏、非 TCP observed candidate 直接分类，以及 peer cache 不新增 raw TCP source endpoint 存储字段。 | no | |
 | remove_sn_service_contract_server | `design.md` Directly Mapped Change Items | V-SN-CONTRACT-CLEANUP-COMPILE | unit | p2p-frame-unit | 编译和搜索确认 SN service contract/receipt 生产路径与公开导出已删除，SN 基础能力和 wire 兼容结构保留。 | no | |
 | pn_multi_server_assigned_target | `design.md` + `design/pn-server.md` Directly Mapped Change Items | V-PN-SERVER-DEFAULT-VALIDATOR-TARGETED | unit | p2p-frame-pn-validator | `cargo test -p p2p-frame pn_connection_validator -- --nocapture` 覆盖默认 PN validator 显式 allow-all 和显式 reject helper；`p2p-frame-unit` / `p2p-frame-integration` 继续覆盖显式 assigned-target policy 与下游默认构造兼容。 | no | |
@@ -168,13 +168,13 @@ approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0
 | ttp_server_tunnel_accept_validator | compatibility | yes | V-TTP-SERVER-TUNNEL-VALIDATOR-COMPAT | integration | covered | |
 | ttp_server_tunnel_accept_validator | lifecycle | yes | V-TTP-SERVER-TUNNEL-VALIDATOR-UNIT | unit | covered | |
 | ttp_server_tunnel_accept_validator | cross-module | yes | V-TTP-SERVER-TUNNEL-VALIDATOR-COMPAT | integration | covered | |
-| sn_client_protocol_priority | normal | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
-| sn_client_protocol_priority | boundary | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | normal | yes | V-SN-LISTENERLESS-QUIC-UNIT | unit | covered | |
+| sn_client_protocol_priority | boundary | yes | V-SN-LISTENERLESS-QUIC-UNIT | unit | covered | |
 | sn_client_protocol_priority | negative | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
-| sn_client_protocol_priority | error | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | error | yes | V-SN-LISTENERLESS-QUIC-UNIT | unit | covered | |
 | sn_client_protocol_priority | compatibility | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
-| sn_client_protocol_priority | lifecycle | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
-| sn_client_protocol_priority | cross-module | yes | V-SN-CLIENT-PROTOCOL-PRIORITY-UNIT | unit | covered | |
+| sn_client_protocol_priority | lifecycle | yes | V-SN-LISTENERLESS-QUIC-UNIT | unit | covered | |
+| sn_client_protocol_priority | cross-module | yes | V-SN-LISTENERLESS-QUIC-UNIT | unit | covered | |
 | sn_tcp_source_mapped_only | normal | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
 | sn_tcp_source_mapped_only | boundary | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
 | sn_tcp_source_mapped_only | negative | yes | V-SN-TCP-SOURCE-MAPPED-ONLY-UNIT | unit | covered | |
@@ -206,6 +206,12 @@ approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0
 | error-handling | `p2p-frame/src/pn/service/pn_server.rs` validator result mapping | reject helper and service reject tests | unit | covered | |
 | invariant | approved proposal `pn_multi_server_assigned_target`; `design/pn-server.md` Downstream Compatibility | default `PnServer::new(...)` remains allow-all | unit | covered | |
 | concurrency | `design/pn-server.md` Relay Session State | relay session registry guards follow-up channels without rechecking assigned target | unit | covered | |
+| parameter-domain | `design.md` Interfaces and Dependencies: QUIC `create_tunnel(...)` | listener present, listener absent IPv4, unreachable IPv4; IPv6 is recorded separately as an environment gap | unit | covered | |
+| state-transition | `design.md` Data and State: QUIC client endpoints | absent -> lazy create -> cached/reused -> retained across `close_all_listener()` | unit | covered | |
+| failure-path | `design.md` Listenerless QUIC active open | pre-fix listener `NotFound`; post-fix unreachable remote `ConnectFailed` | unit | covered | |
+| error-handling | `design.md` Listenerless QUIC active open | concrete connect error propagates to the caller instead of a local-listener lookup error | unit | covered | |
+| invariant | `design.md` Invariants to Preserve | client endpoint remains absent from `listener_infos()` and listener-backed tests remain unchanged | unit | covered | |
+| concurrency | `design.md` QUIC client endpoint ownership | two concurrent first connects share one OS-assigned client endpoint port | unit | covered | |
 | parameter-domain | approved proposal `ttp_server_tunnel_accept_validator`; `design.md` TTP Server Incoming Tunnel Validator | default allow-all, explicit accept, explicit reject, validator error | unit | covered | |
 | state-transition | `design.md` TTP Server Incoming Tunnel Validator | validate before attach/cache, accept continues, reject/error close and stop | unit | covered | |
 | failure-path | `design.md` TTP Server Incoming Tunnel Validator | validator reject returns no cached tunnel and no opened stream | unit | covered | |
@@ -261,6 +267,13 @@ approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0
 | `sn_client_protocol_candidates(...)` | matching QUIC listener exists | SN client preserves the QUIC listener `local_ep` so same-origin UDP semantics remain intact | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
 | `sn_client_protocol_candidates(...)` | matching TCP listener uses a concrete local IP | SN client keeps the local IP but rewrites the TCP local port to `0`, so outbound bind uses an ephemeral port instead of the listening port | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
 | `sn_client_protocol_candidates(...)` | matching TCP listener uses an unspecified local IP | SN client emits `local_ep = None`, so outbound TCP fallback does not bind to the listening port | `p2p-frame/src/sn/client/sn_service.rs` | covered | |
+| `QuicTunnelNetwork::client_endpoint(...)` | IPv4 cache miss followed by concurrent/cache hits | 首次绑定 wildcard port 0，并发和后续连接复用同一非零本地端口 | `p2p-frame/src/networks/quic/network.rs` | covered | |
+| `QuicTunnelNetwork::client_endpoint(...)` | IPv6 endpoint selection | 按 IPv6 远端选择 `[::]:0` 缓存分支 | `p2p-frame/src/networks/quic/network.rs` | gap | CI/host 未承诺 IPv6 loopback 可用；风险为 IPv6-only 环境回归，owner 为 `networks/quic`，acceptance 以代码分支审查与 IPv4 同构性作替代证据。 |
+| `QuicTunnelNetwork::client_endpoint(...)` | endpoint bind/create failure | 失败不写入缓存并返回 `ConnectFailed` | `p2p-frame/src/networks/quic/network.rs` | gap | Quinn `Endpoint::client` 没有可注入 socket factory，无法在不引入设计禁止抽象的前提下稳定构造 bind 失败；owner 为 `networks/quic`，风险是稀有本地 socket 资源失败，acceptance 以显式 `map_err` 代码审查为替代证据。 |
+| `QuicTunnelNetwork::open_with_client_endpoint(...)` | Quinn client `local_ip()` is `None` | tunnel metadata 保留 client endpoint 的 wildcard bound address 和 OS-assigned port | `p2p-frame/src/networks/quic/network.rs` | covered | |
+| `QuicTunnelNetwork::open_with_client_endpoint(...)` | Quinn reports a concrete local IP | 仅 listenerless client endpoint 的 tunnel metadata 用选路后 local IP 替换 wildcard IP；listener-backed 路径始终保留 `listener.bound_local()` | `p2p-frame/src/networks/quic/network.rs` | gap | Quinn 0.11 文档说明 client 通常返回 `None`，当前默认 UDP runtime 不能稳定触发 Some；owner 为 `networks/quic`，风险仅限 listenerless metadata IP 精度，acceptance 以分支代码审查和 listener-backed `local_ep` 断言作替代证据。 |
+| `QuicTunnelNetwork::open_with_client_endpoint(...)` | remote reachable / unreachable | 可达 server 完成 TLS/QUIC tunnel；不可达 server 返回 `ConnectFailed` | `p2p-frame/src/networks/quic/network.rs` | covered | |
+| `QuicTunnelNetwork::create_tunnel_with_intent(...)` | matching listener exists / no matching listener | 匹配 listener 仍走旧路径并断言 tunnel `local_ep == listener.bound_local()`；无 listener 才走 client endpoint | `p2p-frame/src/networks/quic/network.rs` | covered | |
 | `SnService::observed_endpoint_candidates(...)` | TCP observed endpoint without `map_ports` | 不返回 raw TCP source socket address | `p2p-frame/src/sn/service/service.rs` | covered | |
 | `SnService::observed_endpoint_candidates(...)` | TCP observed endpoint with `map_ports` | 只返回来源 IP + 上报协议/端口构造出的 `Mapped` endpoint，原始 TCP source port 不泄漏 | `p2p-frame/src/sn/service/service.rs` | covered | |
 | `SnService::observed_endpoint_candidates(...)` | non-TCP observed endpoint | 继续按 reported endpoint 一致性分类为 direct candidate | `p2p-frame/src/sn/service/service.rs` | covered | |
@@ -279,6 +292,7 @@ approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0
 | TTP server default constructor compatibility | `p2p-frame`, `cyfs-p2p-test`, `sn-miner-rust` | 默认 `TtpServer::new(...)` 调用方无需显式 validator，仍接受入站 tunnel | 显式 validator reject/error 才能拒绝入站 tunnel | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | covered | |
 | SN service runtime startup caller compatibility | `p2p-frame`, `cyfs-p2p-test`, `sn-miner-rust` | workspace 内直接 `SnServiceConfig::new(...)` 调用方显式创建并传入进程级 `ServerRuntime`，不再依赖 SN service fallback | 未迁移调用方由编译失败暴露；源码搜索确认 service 生产路径无 fallback | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | covered | |
 | stack runtime startup caller compatibility | `p2p-frame`, `cyfs-p2p`, `cyfs-p2p-test` | workspace 内 `P2pConfig::new(...)` 调用方显式创建或接收 `ServerRuntime` 后传入 stack | `p2p-frame/src/stack.rs` 若恢复 default runtime fallback 由源码搜索暴露；未迁移调用方由编译失败暴露 | `docs/versions/v0.1/modules/p2p-frame/testplan.yaml` | covered | |
+| Listenerless QUIC active open | `sn/client` -> `TtpClient` -> `TunnelNetwork` -> `networks/quic` | `local_ep=None` 最终以网络所有 client endpoint 建立真实 QUIC tunnel | 远端不可达时 `ConnectFailed` 透传给 SN 候选循环进入 TCP fallback | `p2p-frame/src/networks/quic/network.rs` | covered | |
 
 ## Definition of Done
 - [ ] 直接子模块至少映射到一个验证面
@@ -298,5 +312,6 @@ approved_content_sha256: 8caf55e8f5454637a40bee228f027150c3053d8de5c220a036acac0
 - [ ] 单 SN NAT 打洞优化的 direct/reverse 300ms 短延迟竞速、`SnCall` 本次候选、同源 UDP punch burst、proxy 短窗口脱代理、endpoint 评分隔离和无多 SN fanout 边界已映射到 unit/integration 证据
 - [ ] `ServerReflexive` endpoint area 的 enum/codec、SN 观察地址分类和下游兼容性已映射到 unit/integration 证据
 - [ ] SN client 同一 SN QUIC-first/TCP-fallback 和 active SN 去重已映射到 unit 证据
+- [ ] 无本地 QUIC listener 时的真实 client endpoint 建链、并发复用、listener 隔离、`close_all_listener()` 生命周期与不可达错误已映射到 targeted unit 证据
 - [ ] SN server TCP 来源地址 mapped-only 行为已映射到 targeted unit 和 p2p-frame unit 证据
 - [ ] bounded channel 分位置容量默认值、单项自定义覆盖、源码 unbounded 搜索和下游兼容性已映射到 unit/integration 证据

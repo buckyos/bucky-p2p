@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-03T08:57:04+00:00",
+  "evidence_file": "harness/evidence/admission/20260703-sn-client-protocol-priority.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "sn_client_protocol_priority"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "f81178b9e6d09bb6f87408a084f95670083f336b7dd6e672effec5c506906421",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "e268025eba90a72f73abef80b9f4345cb6fbc41a9fe7585b65c91b62dcb194a4"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/client/sn_service.rs",
+    "p2p-frame/src/sn/**"
+  ]
+}

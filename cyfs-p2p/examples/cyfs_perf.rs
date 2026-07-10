@@ -10,6 +10,7 @@ use cyfs_p2p::{create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p
 use p2p_frame::endpoint::{Endpoint as P2pEndpoint, Protocol as P2pProtocol};
 use p2p_frame::networks::TunnelPurpose;
 use p2p_frame::p2p_identity::P2pId;
+use p2p_frame::stack::{ServerRuntime, ServerRuntimeConfig};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -391,7 +392,12 @@ async fn create_stack(
     protocol: TransportProtocol,
 ) -> AppResult<P2pStackRef> {
     let local_ep = new_endpoint(protocol, bind_addr);
-    let config = create_cyfs_p2p_config(vec![cyfs_to_p2p_endpoint(&local_ep)]);
+    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default())
+        .map_err(|error| format!("start server runtime failed: {error}"))?;
+    let config = create_cyfs_p2p_config(
+        vec![cyfs_to_p2p_endpoint(&local_ep)],
+        server_runtime,
+    );
     let env = create_p2p_env(config).await.map_err(|e| {
         format!(
             "create p2p env failed, code={:?}, msg={}",

@@ -19,14 +19,12 @@ use crate::types::{Sequence, SequenceGenerator, TunnelId, TunnelIdGenerator};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use chrono::Utc;
-use notify_future::Notify;
 use sfo_cmd_server::client::{
     ClassifiedCmdClient, ClassifiedCmdSend, ClassifiedCmdTunnel, ClassifiedCmdTunnelFactory,
     CmdClient, DefaultClassifiedCmdClient,
 };
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::ops::Add;
 use std::sync::{Arc, Mutex, RwLock};
@@ -98,17 +96,11 @@ pub trait SNEvent: 'static + Send + Sync {
 }
 pub type SNEventRef = Arc<dyn SNEvent>;
 
-pub enum SnResp {
-    SnCallResp(SnCallResp),
-    SnQueryResp(SnQueryResp),
-}
-
 #[derive(Clone)]
 pub struct ActiveSN {
     pub sn_peer_id: P2pId,
     pub latest_time: u64,
     pub conn_id: CmdTunnelId,
-    pub recv_future: Arc<Mutex<HashMap<Sequence, Notify<SnResp>>>>,
     pub wan_ep_list: Vec<Endpoint>,
 }
 
@@ -116,7 +108,6 @@ pub struct SNServiceState {
     pub pinging_handle: Option<SpawnHandle<()>>,
     pub active_sn_list: Vec<ActiveSN>,
     pub latest_sn_interval: u64,
-    pub cur_report_future: Option<Notify<ReportSnResp>>,
 }
 
 pub struct SnList {
@@ -413,7 +404,6 @@ impl SNClientService {
                 pinging_handle: None,
                 active_sn_list: vec![],
                 latest_sn_interval: 0,
-                cur_report_future: None,
             }),
             listener: Mutex::new(None),
             cert_factory,
@@ -474,52 +464,6 @@ impl SNClientService {
     fn register_cmd_handler(self: &Arc<Self>) {
         let this = self.clone();
         self.cmd_client.register_cmd_handler(
-            PackageCmdCode::SnCallResp as u8,
-            move |_local_id: PeerId,
-                  _peer_id: PeerId,
-                  tunnel_id: CmdTunnelId,
-                  _header: SnCmdHeader,
-                  mut body: CmdBody| {
-                let this = this.clone();
-                async move {
-                    let resp = SnCallResp::clone_from_slice(body.read_all().await?.as_slice())
-                        .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    this.sn_call_resp_handle(tunnel_id, resp)
-                        .await
-                        .map_err(into_cmd_err!(
-                            CmdErrorCode::Failed,
-                            "sn call resp handle failed"
-                        ))?;
-                    Ok(None)
-                }
-            },
-        );
-
-        let this = self.clone();
-        self.cmd_client.register_cmd_handler(
-            PackageCmdCode::SnQueryResp as u8,
-            move |_local_id: PeerId,
-                  _peer_id: PeerId,
-                  tunnel_id: CmdTunnelId,
-                  _header: SnCmdHeader,
-                  mut body: CmdBody| {
-                let this = this.clone();
-                async move {
-                    let resp = SnQueryResp::clone_from_slice(body.read_all().await?.as_slice())
-                        .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    this.sn_query_resp_handle(tunnel_id, resp)
-                        .await
-                        .map_err(into_cmd_err!(
-                            CmdErrorCode::Failed,
-                            "sn query resp handle failed"
-                        ))?;
-                    Ok(None)
-                }
-            },
-        );
-
-        let this = self.clone();
-        self.cmd_client.register_cmd_handler(
             PackageCmdCode::SnCalled as u8,
             move |_local_id: PeerId,
                   _peer_id: PeerId,
@@ -541,71 +485,6 @@ impl SNClientService {
             },
         );
 
-        let this = self.clone();
-        self.cmd_client.register_cmd_handler(
-            PackageCmdCode::ReportSnResp as u8,
-            move |_local_id: PeerId,
-                  _peer_id: PeerId,
-                  tunnel_id: CmdTunnelId,
-                  _header: SnCmdHeader,
-                  mut body: CmdBody| {
-                let this = this.clone();
-                async move {
-                    let resp = ReportSnResp::clone_from_slice(body.read_all().await?.as_slice())
-                        .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    this.report_sn_resp_handle(tunnel_id, resp)
-                        .await
-                        .map_err(into_cmd_err!(
-                            CmdErrorCode::Failed,
-                            "report sn resp handle failed"
-                        ))?;
-                    Ok(None)
-                }
-            },
-        );
-    }
-
-    async fn sn_call_resp_handle(&self, conn_id: CmdTunnelId, resp: SnCallResp) -> P2pResult<()> {
-        let mut state = self.state.write().unwrap();
-        for active_sn in state.active_sn_list.iter_mut() {
-            if active_sn.conn_id == conn_id {
-                let mut recv_futures = active_sn.recv_future.lock().unwrap();
-                if let Some(recv_future) = recv_futures.remove(&resp.seq) {
-                    recv_future.notify(SnResp::SnCallResp(resp));
-                }
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn sn_query_resp_handle(&self, conn_id: CmdTunnelId, resp: SnQueryResp) -> P2pResult<()> {
-        let mut state = self.state.write().unwrap();
-        for active_sn in state.active_sn_list.iter_mut() {
-            if active_sn.conn_id == conn_id {
-                let mut recv_futures = active_sn.recv_future.lock().unwrap();
-                if let Some(recv_future) = recv_futures.remove(&resp.seq) {
-                    recv_future.notify(SnResp::SnQueryResp(resp));
-                }
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn report_sn_resp_handle(
-        &self,
-        tunnel_id: CmdTunnelId,
-        resp: ReportSnResp,
-    ) -> P2pResult<()> {
-        log::info!("report sn resp: {:?}", resp);
-        if let Some(cur_report_future) = {
-            let mut state = self.state.write().unwrap();
-            state.cur_report_future.take()
-        } {
-            cur_report_future.notify(resp);
-        }
-        Ok(())
     }
 
     async fn on_called(&self, conn_id: CmdTunnelId, sn_called: SnCalled) -> P2pResult<()> {
@@ -841,7 +720,6 @@ impl SNClientService {
                                 sn_peer_id: sn_cert.get_id(),
                                 latest_time: bucky_time_now(),
                                 conn_id: tunnel_id,
-                                recv_future: Arc::new(Mutex::new(HashMap::new())),
                                 wan_ep_list: report_resp.end_point_array,
                             };
                             let mut state = self.state.write().unwrap();
@@ -929,7 +807,7 @@ impl SNClientService {
             protocol_version: 0,
             stack_version: 0,
             seq,
-            sn_peer_id,
+            sn_peer_id: sn_peer_id.clone(),
             from_peer_id: Some(self.local_identity.get_id()),
             peer_info: Some(
                 self.local_identity
@@ -942,37 +820,57 @@ impl SNClientService {
             map_ports,
             local_eps,
         };
-        let (notify, waiter) = Notify::<ReportSnResp>::new();
-        {
-            let mut state = self.state.write().unwrap();
-            state.cur_report_future = Some(notify);
-        }
-        match self
+        let report_body = report
+            .to_vec()
+            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        let mut resp_body = match self
             .cmd_client
-            .send_by_specify_tunnel(
+            .send_by_specify_tunnel_with_resp(
                 tunnel_id,
                 PackageCmdCode::ReportSn as u8,
                 self.cmd_version,
-                report
-                    .to_vec()
-                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                    .as_slice(),
+                report_body.as_slice(),
+                self.call_timeout,
             )
             .await
         {
-            Ok(_) => {}
+            Ok(resp_body) => resp_body,
             Err(e) => {
-                self.remove_sn_conn(tunnel_id);
-                return Err(p2p_err!(P2pErrorCode::IoError));
+                if e.code() != CmdErrorCode::Timeout {
+                    self.remove_sn_conn(tunnel_id);
+                }
+                return Err(p2p_err!(
+                    P2pErrorCode::ConnectFailed,
+                    "report qa failed sn={} tunnel_id={:?} err={:?}",
+                    sn_peer_id,
+                    tunnel_id,
+                    e
+                ));
             }
+        };
+        let resp = ReportSnResp::clone_from_slice(
+            resp_body
+                .read_all()
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::IoError, "read report qa response"))?
+                .as_slice(),
+        )
+        .map_err(into_p2p_err!(
+            P2pErrorCode::RawCodecError,
+            "decode report qa response"
+        ))?;
+        if resp.seq != seq || resp.sn_peer_id != sn_peer_id {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "report qa response mismatch tunnel_id={:?} expected_seq={} actual_seq={} expected_sn={} actual_sn={}",
+                tunnel_id,
+                seq.value(),
+                resp.seq.value(),
+                sn_peer_id,
+                resp.sn_peer_id
+            ));
         }
-        let resp = runtime::timeout(self.call_timeout, waiter)
-            .await
-            .map_err(into_p2p_err!(P2pErrorCode::ConnectFailed, "report timeout"))?;
-        {
-            let mut state = self.state.write().unwrap();
-            state.cur_report_future = None;
-        }
+        log::info!("report sn resp: {:?}", resp);
         Ok(resp)
     }
 
@@ -1020,59 +918,68 @@ impl SNClientService {
                 call.call_type
             );
 
-            let (notify, waiter) = Notify::<SnResp>::new();
-            {
-                let mut recv_future = active.recv_future.lock().unwrap();
-                recv_future.insert(seq, notify);
-            }
-            if let Err(e) = self
+            let call_body = call
+                .to_vec()
+                .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+            let mut resp_body = match self
                 .cmd_client
-                .send_by_specify_tunnel(
+                .send_by_specify_tunnel_with_resp(
                     active.conn_id,
                     PackageCmdCode::SnCall as u8,
                     self.cmd_version,
-                    call.to_vec()
-                        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                        .as_slice(),
+                    call_body.as_slice(),
+                    self.call_timeout,
                 )
                 .await
             {
-                log::error!("send call to {} failed: {:?}", active.sn_peer_id, e);
-                self.remove_sn_conn(active.conn_id);
-                continue;
-            }
-
-            let resp = match runtime::timeout(self.call_timeout, waiter).await {
-                Ok(resp) => match resp {
-                    SnResp::SnCallResp(resp) => {
-                        log::debug!(
-                            "sn call resp sn={} conn_id={:?} seq={} result={}",
-                            active.sn_peer_id,
-                            active.conn_id,
-                            resp.seq.value(),
-                            resp.result
-                        );
-                        resp
+                Ok(resp_body) => resp_body,
+                Err(e) => {
+                    if e.code() != CmdErrorCode::Timeout {
+                        self.remove_sn_conn(active.conn_id);
                     }
-                    SnResp::SnQueryResp(_) => {
-                        log::error!("unexpect resp");
-                        continue;
-                    }
-                },
-                Err(_) => {
-                    let mut recv_future = active.recv_future.lock().unwrap();
-                    recv_future.remove(&seq);
                     log::warn!(
-                        "sn call timeout sn={} conn_id={:?} seq={} remote={} timeout_ms={}",
+                        "sn call qa failed sn={} conn_id={:?} seq={} remote={} timeout_ms={} err={:?}",
                         active.sn_peer_id,
                         active.conn_id,
                         seq.value(),
                         remote,
-                        self.call_timeout.as_millis()
+                        self.call_timeout.as_millis(),
+                        e
                     );
                     continue;
                 }
             };
+            let resp = match resp_body.read_all().await {
+                Ok(body) => match SnCallResp::clone_from_slice(body.as_slice()) {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        log::error!("decode sn call qa response failed: {:?}", e);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    log::error!("read sn call qa response failed: {:?}", e);
+                    continue;
+                }
+            };
+            if resp.seq != seq || resp.sn_peer_id != active.sn_peer_id {
+                log::error!(
+                    "sn call qa response mismatch conn_id={:?} expected_seq={} actual_seq={} expected_sn={} actual_sn={}",
+                    active.conn_id,
+                    seq.value(),
+                    resp.seq.value(),
+                    active.sn_peer_id,
+                    resp.sn_peer_id
+                );
+                continue;
+            }
+            log::debug!(
+                "sn call resp sn={} conn_id={:?} seq={} result={}",
+                active.sn_peer_id,
+                active.conn_id,
+                resp.seq.value(),
+                resp.result
+            );
 
             return Ok(resp);
         }
@@ -1089,44 +996,51 @@ impl SNClientService {
                 seq,
                 query_id: device_id.clone(),
             };
-            let (notify, waiter) = Notify::<SnResp>::new();
-            {
-                let mut recv_future = active.recv_future.lock().unwrap();
-                recv_future.insert(seq, notify);
-            }
-            if let Err(e) = self
+            let query_body = query
+                .to_vec()
+                .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+            let mut resp_body = match self
                 .cmd_client
-                .send_by_specify_tunnel(
+                .send_by_specify_tunnel_with_resp(
                     active.conn_id,
                     PackageCmdCode::SnQuery as u8,
                     self.cmd_version,
-                    query
-                        .to_vec()
-                        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?
-                        .as_slice(),
+                    query_body.as_slice(),
+                    self.call_timeout,
                 )
                 .await
             {
-                log::error!("send call to {} failed: {:?}", active.sn_peer_id, e);
-                self.remove_sn_conn(active.conn_id);
-                continue;
-            }
-
-            let resp = match runtime::timeout(self.call_timeout, waiter).await {
-                Ok(resp) => match resp {
-                    SnResp::SnQueryResp(resp) => resp,
-                    SnResp::SnCallResp(_) => {
-                        log::error!("unexpect resp");
-                        continue;
+                Ok(resp_body) => resp_body,
+                Err(e) => {
+                    if e.code() != CmdErrorCode::Timeout {
+                        self.remove_sn_conn(active.conn_id);
                     }
-                },
-                Err(_) => {
-                    let mut recv_future = active.recv_future.lock().unwrap();
-                    recv_future.remove(&seq);
-                    log::error!("call to {} timeout", active.sn_peer_id);
+                    log::error!("query qa to {} failed: {:?}", active.sn_peer_id, e);
                     continue;
                 }
             };
+            let resp = match resp_body.read_all().await {
+                Ok(body) => match SnQueryResp::clone_from_slice(body.as_slice()) {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        log::error!("decode sn query qa response failed: {:?}", e);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    log::error!("read sn query qa response failed: {:?}", e);
+                    continue;
+                }
+            };
+            if resp.seq != seq {
+                log::error!(
+                    "sn query qa response mismatch conn_id={:?} expected_seq={} actual_seq={}",
+                    active.conn_id,
+                    seq.value(),
+                    resp.seq.value()
+                );
+                continue;
+            }
 
             return Ok(resp);
         }

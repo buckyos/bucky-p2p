@@ -35,6 +35,7 @@ levels:
         - `networks/tunnel.rs`、`networks/control_stream.rs`、`networks/tcp/tunnel.rs`、`networks/quic/tunnel.rs` 和 `pn/client/pn_tunnel.rs` 必须通过 unit 编译或行为测试覆盖 `Tunnel::open_control_stream(...)` / `listen_control_stream(...)`，确认内部 runtime/frame 类型未公开导出，TCP/QUIC/PN 只通过单一 `Data` 控制命令承载内部 frame，覆盖 purpose 过滤、重复 listen 替换、64KiB 发送切分、接收超限拒绝，底层控制通道断开后所有派生 stream、pending open 和 pending write 失败，以及 TCP/QUIC/PN tunnel 建立后的 control stream 双向收发。
         - `sn/client/sn_service.rs` 与 `sn/service/service.rs` 必须通过 unit 编译或行为测试覆盖 SN command service 为 SN purpose 注册 control stream listener，control stream 入站可包装为 cmd tunnel；代码审查必须确认 SN client 默认只调用 `open_control_stream(...)`，在控制通道不可用、远端未监听或旧版本不支持时失败且不 fallback 到普通 `open_stream(...)`，SN service 不注册普通 `listen_stream(...)` 作为 SN 命令入口。
         - `sn/client/sn_service.rs` 必须通过 unit 行为测试覆盖 SN client 候选按 QUIC、TCP、Ext 协议顺序排序，支持协议但无匹配 listener 时仍生成 `local_ep = None` 出站候选，有匹配 QUIC listener 时保留 listener `local_ep`，有匹配 TCP listener 时 unspecified IP 转成 `None`、具体 IP 的 port 转成 `0`，不得复用监听端口进行 outbound bind；代码审查必须确认候选失败日志包含 SN id、protocol、local_ep、remote endpoint 和错误，ping/report loop 按同一 SN 聚合候选，QUIC report 成功后停止 TCP fallback，QUIC 建链或 report 失败后才继续 TCP，并按 `sn_peer_id` 去重 active SN。
+        - `networks/quic/network.rs` 必须通过 `quic_tunnel_create_tunnel_no_listener_*` targeted unit 覆盖 client 没有 listener 而 server 有 listener 时仍完成真实 QUIC tunnel；并发首次建链只复用一个非零 ephemeral port，client `listener_infos()` 始终为空，`close_all_listener()` 后再建链仍复用该 endpoint，不可达远端返回 `ConnectFailed` 而不是 listener `NotFound`。
         - `sn/service/service.rs` 必须通过 unit 行为测试覆盖默认 `allow_all_sn_connection_validator()` 不拒绝带客户端证书的 report；自定义 validator reject 时 `handle_report_sn(...)` 返回 `PermissionDenied`，validator 上下文只能包含来自 cmd tunnel `peer_id` 的 `client_id` 和匹配该 id 的 `client_cert`，reject 后不得更新 peer manager 或继续处理该 report；证书解析 id 与 `client_id` 不一致时不得调用 validator，也不得更新 peer manager。
         - `sn/service/service.rs` 必须通过 unit 编译或行为测试覆盖 `SnServiceConfig::new(...)` 必须接收外部 `ServerRuntime`，显式 runtime 注入路径继续可编译，并通过源码搜索确认 SN service 生产路径不再自行调用 `ServerRuntime::start(...)`。
         - `sn/service/service.rs`、`sn/service/mod.rs` 和 `sn/client/mod.rs` 必须通过编译和源码搜索确认不再构造、导出或依赖 `SnServiceContractServer`、service receipt 模块或 client contract helper；`sn/protocol` 中既有 receipt wire 兼容结构、`contract_id` 和 `receipt` 字段可保留，不作为清理失败。
@@ -61,6 +62,10 @@ levels:
         name: 运行 SN client protocol priority targeted 测试
         change_ids: ["sn_client_protocol_priority"]
         run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "sn_client"]
+      - id: p2p-frame-quic-listenerless-client
+        name: 运行无 listener QUIC client endpoint targeted 测试
+        change_ids: ["sn_client_protocol_priority"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "quic_tunnel_create_tunnel_no_listener", "--", "--nocapture"]
       - id: p2p-frame-sn-tcp-source-mapped-only
         name: 运行 SN TCP source mapped-only targeted 测试
         change_ids: ["sn_tcp_source_mapped_only"]

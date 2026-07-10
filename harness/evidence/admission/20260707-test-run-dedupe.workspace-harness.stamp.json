@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-07T09:55:41+00:00",
+  "evidence_file": "harness/evidence/admission/20260707-test-run-dedupe.md",
+  "version": "v0.1",
+  "module": "workspace-harness",
+  "submodule": null,
+  "change_ids": [
+    "workspace_harness_test_run_dedupe"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/workspace-harness/proposal.md": "ee4f992e66a67049b507e8eff1a2c12fa9f53a2640dcded8e232abd07ec3c248",
+    "docs/versions/v0.1/modules/workspace-harness/design.md": "6a7f488b0fef7c8ef28e1d52bfc68d953184550d76a824d3b98c99ddc7ed256b"
+  },
+  "scope_paths": [
+    "harness/scripts/test-run.py",
+    "harness/scripts/stage-scope-check.py",
+    "docs/versions/v0.1/modules/workspace-harness/testing.md",
+    "docs/versions/v0.1/modules/workspace-harness/testplan.yaml"
+  ]
+}

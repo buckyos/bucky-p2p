@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-22T13:40:08+00:00",
+  "evidence_file": "harness/evidence/admission/20260622-sn-miner-real-process.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "sn-distributed-directory",
+  "change_ids": [
+    "sn_directory_no_registry_fallback",
+    "sn_serving_online_route_independent_loops",
+    "sn_real_process_owner_serving_dv"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md": "81c581a51230151d554da820006fdd08f1710a49eeb17990364bda59dc515d11",
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md": "a793c946805488aa0bc4401a4485c886b48614d13c0b7712c70359550773ab83"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/directory/**",
+    "p2p-frame/src/sn/inter_sn/**",
+    "p2p-frame/src/sn/service/**",
+    "p2p-frame/src/sn/mod.rs",
+    "sn-miner-rust/**",
+    "p2p-frame/src/sn/**"
+  ]
+}

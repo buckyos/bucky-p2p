@@ -4,7 +4,7 @@ version: v0.1
 status: approved
 approved_by: auto-pipeline
 approved_at: 2026-07-07T16:58:00+08:00
-approved_content_sha256: 762b1aa3a4fccf170e9cc01ad65390ca5d6fe0b60eb61d1609f2d7350982650c
+approved_content_sha256: 0664def7647d2e078612ad86da30a878bc41a09553d7ad80c4bd78792c95cbed
 ---
 
 # workspace-harness Proposal
@@ -76,8 +76,8 @@ approved_content_sha256: 762b1aa3a4fccf170e9cc01ad65390ca5d6fe0b60eb61d1609f2d73
 | contract/protocol | yes | `test-run.py` artifact semantics are consumed by acceptance-report checks. | design must define compatible artifact evidence for executed and reused commands; acceptance report check must still pass. | none |
 | data/schema | yes | Run artifact step records may need a compatible field for deduped/reused commands. | schema/design review of artifact JSON shape; direct artifact inspection after runner tests. | none |
 | security/privacy/permission | no | Runner executes local test commands and does not alter permission or secret handling. | none | none |
-| runtime/integration | yes | `test-run.py all all` executes workspace, module, integration, and DV commands. | dry-run comparison, module all run, project all run, and root shortcut run. | none |
-| build/dependency/config/deployment | yes | Runner invokes `cargo`, Python harness checks, and root shortcut wrappers. | `test-run.py --dry-run`, `test-run.py workspace-harness all`, `test-run.py all all`, and `./test-run.sh all all`. | none |
+| runtime/integration | yes | `test-run.py all all` executes workspace, module, integration, and DV commands. | dry-run comparison, lightweight module all run, and one authoritative physical project run through the root shortcut. | none |
+| build/dependency/config/deployment | yes | Runner invokes `cargo`, Python harness checks, and root shortcut wrappers. | `test-run.py --dry-run`, `test-run.py workspace-harness all`, and one `./test-run.sh all all` physical full run. Direct `test-run.py all all` is reserved for wrapper debugging. | none |
 | ui/datamodel/workflow | no | No UI or application data model is affected. | none | none |
 | harness/process | yes | This is a governance runner optimization under `harness/scripts/test-run.py`. | schema/admission checks, stage-scope checks, acceptance-report checks, and pipeline-plan checks as applicable. | none |
 
@@ -94,15 +94,15 @@ approved_content_sha256: 762b1aa3a4fccf170e9cc01ad65390ca5d6fe0b60eb61d1609f2d73
 | P-HARNESS-REVIEW-1 | workspace_harness_acceptance_review_gate | acceptance rules require review of full worktree diff, untracked files, cross-module admission, and direct change mapping. | Governance review rules only; no business module approval bypass. | design/testing cover acceptance rule, trigger rule, schema/admission checker, and workspace harness verifier. | Do not let passing tests alone mean acceptance passed. |
 | P-HARNESS-ADMISSION-1 | workspace_harness_direct_admission_gate | task entry, schema-check, and admission-check form direct change_id admission gates that fail closed on missing mapping. | Admission and schema governance only; explicit module exceptions remain narrow. | schema/admission/check-implementation entries give consistent results for default and exempt modules. | Do not add implicit exemptions for default modules. |
 | P-HARNESS-PIPELINE-1 | workspace_harness_pipeline_plan_current_change | `harness/pipeline-plan.md` records current change stage graph, dependencies, return routing, and exit conditions. | Current pipeline planning only; launch remains explicit. | pipeline plan matches approved proposal, design/testing state, and acceptance return routing. | Do not treat pipeline plan as approval by itself. |
-| P-HARNESS-TEST-RUN-1 | workspace_harness_test_run_dedupe | `test-run.py` avoids duplicate command execution within one run while preserving module/level coverage evidence and deterministic ordering. | `harness/scripts/test-run.py`, related unified-test-entry rules if needed, and workspace-harness test metadata. | dry-run shows repeated commands collapsed or marked reused; module all and all all artifacts pass and include reuse evidence; root shortcut still passes. | Do not skip registered coverage, remove artifact evidence, or change business module test commands. |
+| P-HARNESS-TEST-RUN-1 | workspace_harness_test_run_dedupe | `test-run.py` avoids duplicate command execution within one run while preserving module/level coverage evidence and deterministic ordering. | `harness/scripts/test-run.py`, related unified-test-entry rules if needed, and workspace-harness test metadata. | dry-run shows repeated commands collapsed or marked reused; lightweight module all passes; one root shortcut all/all artifact passes and includes reuse evidence. | Do not skip registered coverage, remove artifact evidence, change business module test commands, or require duplicate physical all/all runs by default. |
 
 ## Success Criteria
 - Concrete user-visible or system-visible result:
-  - `uv run --active python ./harness/scripts/test-run.py all all --dry-run` shows no repeated execution of identical argv unless dedupe is explicitly disabled.
-  - `test-run.py all all` writes an artifact where reused command results remain traceable to the requesting module/level.
+  - Targeted dry-runs show repeated command reuse by default and repeated scheduling when dedupe is explicitly disabled.
+  - The single required physical all/all run writes an artifact where reused command results remain traceable to the requesting module/level.
 - Required evidence:
   - `doc-structure-check.py --docs proposal` passes before proposal handoff.
-  - After downstream implementation, `test-run.py workspace-harness all`, `test-run.py p2p-frame all`, `test-run.py all all`, and `./test-run.sh all all` pass.
+  - After downstream implementation, `test-run.py workspace-harness all` passes as focused harness coverage, and `./test-run.sh all all` passes as the single authoritative physical project-wide run.
   - Acceptance report check still accepts fresh passing whole-project artifacts.
 - Explicit non-goals:
   - No change to business module protocols, runtime semantics, or test assertions.
@@ -119,7 +119,7 @@ approved_content_sha256: 762b1aa3a4fccf170e9cc01ad65390ca5d6fe0b60eb61d1609f2d73
 |--------------|--------------|--------|--------------------------|----------|
 | FU-HARNESS-TEST-RUN-DESIGN | design | Define command identity, testplan precedence, artifact representation for reused results, and `--no-dedupe` behavior. | P-HARNESS-TEST-RUN-1 | yes |
 | FU-HARNESS-TEST-RUN-IMPLEMENTATION | implementation | Update `harness/scripts/test-run.py` only after approved design and admission. | P-HARNESS-TEST-RUN-1 | yes |
-| FU-HARNESS-TEST-RUN-TESTING | testing | Add or update runnable evidence for dry-run, module all, project all, and root shortcut behavior. | P-HARNESS-TEST-RUN-1 | yes |
+| FU-HARNESS-TEST-RUN-TESTING | testing | Add or update runnable evidence for dry-run, lightweight module all, and a single root shortcut project all run. | P-HARNESS-TEST-RUN-1 | yes |
 | FU-HARNESS-TEST-RUN-ACCEPTANCE | acceptance | Audit that dedupe preserves registered coverage and fresh artifact evidence. | P-HARNESS-TEST-RUN-1 | yes |
 
 ## Proposal Guardrails

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "created_at": "2026-07-03T10:25:46+00:00",
+  "evidence_file": "harness/evidence/admission/20260703-sn-tcp-source-mapped-only.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": null,
+  "change_ids": [
+    "sn_tcp_source_mapped_only"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/proposal.md": "7673cdcd425fa6f4f8b67bba71ead6843ee0cc598da475f5c78fcdfe97a7d097",
+    "docs/versions/v0.1/modules/p2p-frame/design.md": "cb2a0a01fc60c51362c130be732a838f1f6e14b63b88a18840d83b03b0b6dbf9"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/service/service.rs",
+    "p2p-frame/src/sn/service/**"
+  ]
+}

@@ -234,11 +234,13 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         local_eps.push(ep);
         (local_eps, None)
     };
+    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
     let mut p2p_config = create_cyfs_p2p_config(
         local_eps
             .iter()
             .map(|v| cyfs_to_p2p_endpoint(v))
             .collect::<Vec<_>>(),
+        server_runtime,
     );
     if let Some(map_port_list) = map_port_list {
         for (ep, port) in map_port_list.iter() {
@@ -315,11 +317,13 @@ async fn server_instance(data_folder: &Path) {
         local_eps.push(ep);
         (local_eps, None)
     };
+    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
     let mut p2p_config = create_cyfs_p2p_config(
         local_eps
             .iter()
             .map(|v| cyfs_to_p2p_endpoint(v))
             .collect::<Vec<_>>(),
+        server_runtime,
     );
     if let Some(map_port_list) = map_port_lsit {
         for (ep, port) in map_port_list.iter() {
@@ -656,7 +660,7 @@ async fn all_in_one() {
         Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
         Arc::new(CyfsIdentityFactory),
         Arc::new(CyfsIdentityCertFactory),
-        server_runtime,
+        server_runtime.clone(),
     );
     let sn_service = create_sn_service(sn_service).await.unwrap();
     let _pn_server = PnServer::new(sn_service.ttp_server());
@@ -693,6 +697,7 @@ async fn all_in_one() {
             .iter()
             .map(|v| cyfs_to_p2p_endpoint(v))
             .collect::<Vec<_>>(),
+        server_runtime,
     );
     p2p_config = p2p_config
         .set_tcp_accept_timout(std::time::Duration::from_secs(5))

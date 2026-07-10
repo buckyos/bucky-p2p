@@ -1,0 +1,63 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+submodule: server-runtime-ownership-fix
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: feature-enabled required/shared ServerRuntime regression coverage
+    test_targets:
+      - p2p-frame/src/sn/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The x509 feature is mandatory because the SN integration-style unit module is feature-gated.
+        - A successful command with zero matching tests is not acceptance evidence.
+    steps:
+      - id: runtime-shared-x509
+        name: run feature-enabled external and shared runtime tests
+        change_ids: ["server_runtime_required_api_alignment", "process_runtime_single_owner", "runtime_x509_test_registration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "external_server_runtime", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: real sn-miner owner and serving lifecycle readiness
+    test_targets:
+      - sn-miner-rust/tests/real_process.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Tests allocate loopback TCP ports, require post-start role markers, probe listeners, and reap children.
+    steps:
+      - id: sn-miner-role-readiness
+        name: run real-process owner and serving readiness tests
+        change_ids: ["sn_miner_role_readiness_evidence"]
+        run: ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: compile the migrated public helper and every direct workspace caller
+    test_targets:
+      - cyfs-p2p/src/stack_builder.rs
+      - cyfs-p2p-test/src/main.rs
+      - cyfs-p2p/examples/cyfs_perf.rs
+      - sn-miner-rust/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Runtime startup failure injection is not deterministic; integration verifies caller ownership and error mapping by compilation and source audit.
+    steps:
+      - id: runtime-caller-compile
+        name: compile required runtime API and direct callers
+        change_ids: ["server_runtime_required_api_alignment", "process_runtime_single_owner", "cyfs_config_runtime_injection", "runtime_x509_test_registration", "sn_miner_role_readiness_evidence"]
+        run: ["cargo", "check", "-p", "p2p-frame", "-p", "cyfs-p2p", "-p", "cyfs-p2p-test", "-p", "sn-miner", "--all-targets"]

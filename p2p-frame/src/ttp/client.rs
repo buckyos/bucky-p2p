@@ -47,7 +47,7 @@ pub struct TtpClient {
     tunnels: Arc<Mutex<HashMap<P2pId, TtpClientTunnelEntries>>>,
     maintained_targets: Mutex<Vec<TtpTarget>>,
     maintain_started: AtomicBool,
-    idle_started: AtomicBool,
+    idle_task: Mutex<Option<runtime::task::JoinHandle<()>>>,
     idle_timeout: Duration,
 }
 
@@ -139,16 +139,18 @@ impl TtpClient {
         net_manager: NetManagerRef,
         idle_timeout: Duration,
     ) -> TtpClientRef {
-        Arc::new(Self {
+        let client = Arc::new(Self {
             local_identity,
             net_manager,
             runtime: TtpRuntime::new(),
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             maintained_targets: Mutex::new(Vec::new()),
             maintain_started: AtomicBool::new(false),
-            idle_started: AtomicBool::new(false),
+            idle_task: Mutex::new(None),
             idle_timeout,
-        })
+        });
+        client.start_idle_loop();
+        client
     }
 
     fn find_existing_tunnel(&self, target: &TtpTarget) -> Option<TunnelRef> {
@@ -240,7 +242,6 @@ impl TtpClient {
         if !self.maintain_started.swap(true, Ordering::SeqCst) {
             self.start_maintain_loop();
         }
-        self.start_idle_loop();
 
         Ok(())
     }
@@ -370,13 +371,9 @@ impl TtpClient {
     }
 
     fn start_idle_loop(self: &TtpClientRef) {
-        if self.idle_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
         let client = Arc::downgrade(self);
         let interval = self.idle_timeout.min(Duration::from_secs(60));
-        runtime::task::spawn(async move {
+        let task = runtime::task::spawn(async move {
             loop {
                 runtime::sleep(interval).await;
 
@@ -393,6 +390,15 @@ impl TtpClient {
                 );
             }
         });
+        *self.idle_task.lock().unwrap() = Some(task);
+    }
+}
+
+impl Drop for TtpClient {
+    fn drop(&mut self) {
+        if let Some(task) = self.idle_task.lock().unwrap().take() {
+            task.abort();
+        }
     }
 }
 

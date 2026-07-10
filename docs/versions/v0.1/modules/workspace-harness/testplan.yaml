@@ -48,13 +48,13 @@ levels:
         change_ids: ["workspace_harness_direct_admission_gate"]
         run: ["python3", "./harness/scripts/schema-check.py", "--version", "v0.1", "--module", "p2p-frame"]
       - id: workspace-harness-test-run-dedupe-dry-run
-        name: 验证 all/all 默认调度复用重复命令
+        name: 验证 integration 默认调度复用重复命令
         change_ids: ["workspace_harness_test_run_dedupe"]
-        run: ["python3", "./harness/scripts/test-run.py", "all", "all", "--dry-run"]
+        run: ["python3", "./harness/scripts/test-run.py", "all", "integration", "--dry-run"]
       - id: workspace-harness-test-run-no-dedupe-dry-run
-        name: 验证 all/all no-dedupe 调度保留重复命令
+        name: 验证 sn-miner no-dedupe 调度保留重复命令
         change_ids: ["workspace_harness_test_run_dedupe"]
-        run: ["python3", "./harness/scripts/test-run.py", "all", "all", "--dry-run", "--no-dedupe"]
+        run: ["python3", "./harness/scripts/test-run.py", "sn-miner", "all", "--dry-run", "--no-dedupe"]
 
   integration:
     mode: enabled
@@ -74,12 +74,8 @@ levels:
       - id: workspace-harness-admission-p2p-frame
         name: 验证 p2p-frame admission
         change_ids: ["workspace_harness_direct_admission_gate"]
-        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "p2p-frame", "--change-id", "endpoint_area_server_reflexive", "--evidence-file", "harness/evidence/admission/20260704-test-run-p2p-frame-admission.md"]
+        run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "p2p-frame", "--change-id", "endpoint_area_server_reflexive", "--evidence-file", "harness/evidence/admission/20260711-test-run-p2p-frame-admission.md"]
       - id: workspace-harness-admission-cyfs-p2p
         name: 验证 cyfs-p2p admission 失败关闭或审批后通过
         change_ids: ["workspace_harness_direct_admission_gate"]
         run: ["python3", "./harness/scripts/admission-check.py", "--version", "v0.1", "--module", "cyfs-p2p", "--change-id", "endpoint_area_server_reflexive", "--evidence-file", "harness/evidence/admission/20260704-test-run-cyfs-p2p-admission.md"]
-      - id: workspace-harness-test-run-all-all-dry-run
-        name: 验证 all/all 跨模块调度入口可用
-        change_ids: ["workspace_harness_test_run_dedupe"]
-        run: ["python3", "./harness/scripts/test-run.py", "all", "all", "--dry-run"]

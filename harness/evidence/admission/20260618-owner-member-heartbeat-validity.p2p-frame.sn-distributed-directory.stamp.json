@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "created_at": "2026-06-18T07:00:41+00:00",
+  "evidence_file": "harness/evidence/admission/20260618-owner-member-heartbeat-validity.md",
+  "version": "v0.1",
+  "module": "p2p-frame",
+  "submodule": "sn-distributed-directory",
+  "change_ids": [
+    "sn_owner_member_heartbeat_validity"
+  ],
+  "doc_hashes": {
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/proposal.md": "1a1cd5c741e3c99bf987552f9ceb57fc9573ed3240d7dc6bd83acfbfc226a211",
+    "docs/versions/v0.1/modules/p2p-frame/sn-distributed-directory/design.md": "af0e5bc8c73ddf23b7e6b806acb579abbcd3b2927eba83d0ce7060ff9a98cfba"
+  },
+  "scope_paths": [
+    "p2p-frame/src/sn/directory/**",
+    "p2p-frame/src/sn/inter_sn/**",
+    "sn-miner-rust/**"
+  ]
+}

@@ -14,7 +14,7 @@ use p2p_frame::p2p_identity::{
 };
 use p2p_frame::stack::{
     create_p2p_env, create_p2p_stack, P2pConfig, P2pEnvRef, P2pStackConfig, P2pStackRef,
-    ServerRuntime, ServerRuntimeConfig,
+    ServerRuntime,
 };
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -265,13 +265,13 @@ pub fn cyfs_to_p2p_endpoint(ep: &Endpoint) -> p2p_frame::endpoint::Endpoint {
     }
 }
 
-pub fn create_cyfs_p2p_config(ep: Vec<p2p_frame::endpoint::Endpoint>) -> P2pConfig {
+pub fn create_cyfs_p2p_config(
+    ep: Vec<p2p_frame::endpoint::Endpoint>,
+    server_runtime: ServerRuntime,
+) -> P2pConfig {
     let identity_factory = Arc::new(CyfsIdentityFactory);
     let cert_factory = Arc::new(CyfsIdentityCertFactory);
-    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default())
-        .expect("start sfo reuseport server runtime for cyfs-p2p config failed");
-    let config = P2pConfig::new(identity_factory, cert_factory, ep, server_runtime);
-    config
+    P2pConfig::new(identity_factory, cert_factory, ep, server_runtime)
 }
 
 pub fn create_cyfs_p2p_stack_config(
