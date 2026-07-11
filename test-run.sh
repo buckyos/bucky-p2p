@@ -15,8 +15,10 @@ VENV_PYTHON=".venv/bin/python"
 
 if [ ! -x "$VENV_PYTHON" ]; then
   echo "Creating local Python virtual environment in .venv"
-  uv venv --allow-existing .venv
+  uv venv .venv
 fi
+
+. ".venv/bin/activate"
 
 if [ -f "pyproject.toml" ]; then
   echo "Syncing Python environment with uv"
@@ -30,4 +32,4 @@ if [ "$#" -eq 0 ]; then
   set -- all all
 fi
 
-exec "$VENV_PYTHON" "harness/scripts/test-run.py" "$@"
+exec uv run --active python "harness/scripts/test-run.py" "$@"

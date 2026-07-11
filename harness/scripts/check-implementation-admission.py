@@ -13,6 +13,7 @@ def main() -> int:
         print(
             "usage: python3 ./harness/scripts/check-implementation-admission.py "
             "<version> <module> [--submodule <submodule>] "
+            "[--target-module <project>] "
             "--evidence-file <path> <change_id> [<change_id>...]",
             file=sys.stderr,
         )
@@ -26,19 +27,23 @@ def main() -> int:
 
     version, module, *rest = sys.argv[1:]
     submodule = None
-    if rest[:1] == ["--submodule"]:
-        if len(rest) < 3:
-            print("--submodule requires a value and at least one change_id", file=sys.stderr)
-            return 2
-        submodule = rest[1]
-        rest = rest[2:]
+    target_module = None
     evidence_file = None
-    if rest[:1] == ["--evidence-file"]:
-        if len(rest) < 3:
-            print("--evidence-file requires a path and at least one change_id", file=sys.stderr)
+    while rest[:1] and rest[0].startswith("--"):
+        option = rest.pop(0)
+        if option not in {"--submodule", "--target-module", "--evidence-file"}:
+            print(f"unknown option: {option}", file=sys.stderr)
             return 2
-        evidence_file = rest[1]
-        rest = rest[2:]
+        if not rest:
+            print(f"{option} requires a value", file=sys.stderr)
+            return 2
+        value = rest.pop(0)
+        if option == "--submodule":
+            submodule = value
+        elif option == "--target-module":
+            target_module = value
+        else:
+            evidence_file = value
     if evidence_file is None:
         print("--evidence-file is required by the current admission gate", file=sys.stderr)
         return 2
@@ -69,6 +74,8 @@ def main() -> int:
     ]
     if submodule:
         admission_cmd.extend(["--submodule", submodule])
+    if target_module:
+        admission_cmd.extend(["--target-module", target_module])
     for change_id in change_ids:
         admission_cmd.extend(["--change-id", change_id])
     admission_cmd.extend(["--evidence-file", evidence_file])

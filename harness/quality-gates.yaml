@@ -1,17 +1,19 @@
 # Mechanical quality gates for this repository.
 #
 # harness/scripts/quality-check.py runs every gate below and fails when any
-# gate fails. Acceptance requires a fresh passing quality run artifact under
-# the git-ignored test-results/quality-runs/ directory whenever this file
-# declares at least one gate.
+# gate fails. When runnable gates are declared, acceptance always requires a
+# passing quality run artifact under the git-ignored
+# test-results/quality-runs/ directory; report wording cannot mark them
+# irrelevant. Only an explicit gates: [] declaration makes them not relevant.
 #
 # Declare the repository's build/lint/typecheck commands here. Gates must be
 # non-interactive, deterministic, and return a meaningful exit code.
 #
-# An explicitly empty list is a versioned, reviewable decision; record the
-# reason as a comment next to it. A missing file fails closed.
+# An explicitly empty list is a versioned, reviewable decision and requires a
+# concrete non-placeholder empty_reason. A missing file or reason fails closed.
 schema_version: 1
 gates: []
+empty_reason: Harness 刷新阶段只校验治理脚手架；Rust 构建与测试由统一测试入口按任务和模块范围执行。
 # Example (Rust):
 # gates:
 #   - id: build

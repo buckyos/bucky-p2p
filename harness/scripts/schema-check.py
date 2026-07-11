@@ -12,13 +12,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
 
 
-REQUIRED_FRONT_MATTER = ("module", "version", "status", "approved_by", "approved_at")
-APPROVAL_FRONT_MATTER_FIELDS = ("status", "approved_by", "approved_at", "approved_content_sha256")
+REQUIRED_FRONT_MATTER = (
+    "module",
+    "version",
+    "status",
+    "approved_by",
+    "approved_at",
+    "approved_content_sha256",
+)
 ALLOWED_LEVELS = {"unit", "dv", "integration"}
 ALLOWED_MODES = {"enabled", "manual", "disabled"}
 PIPELINE_APPROVER = "auto-pipeline"
@@ -27,7 +34,14 @@ FORBIDDEN_APPROVERS = {
     "claude", "codex", "copilot", "cursor", "gemini", "gpt",
 }
 APPROVAL_RECORD_FIELDS = ("approver", "approval_date", "user_statement")
+APPROVAL_HASH_EXCLUDED_FIELDS = {
+    "status",
+    "approved_by",
+    "approved_at",
+    "approved_content_sha256",
+}
 PLACEHOLDER_VALUES = {"", "-", "n/a", "na", "none", "tbd", "todo", "pending", '""', "''"}
+TASK_NAME_RE = re.compile(r"^\d{3,}-[a-z0-9][a-z0-9_.-]*$")
 
 
 def fail(message: str) -> None:
@@ -56,8 +70,45 @@ def front_matter(text: str, path: Path) -> dict[str, str]:
     return data
 
 
+def approval_hash_content(text: str, path: Path) -> str:
+    """Return canonical document content excluding mutable approval metadata."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.startswith("---\n"):
+        fail(f"missing front matter: {path}")
+    front_end = normalized.find("\n---", 4)
+    if front_end == -1:
+        fail(f"unterminated front matter: {path}")
+
+    kept_front_matter: list[str] = []
+    for line in normalized[4:front_end].splitlines():
+        key = line.split(":", 1)[0].strip() if ":" in line else ""
+        if key not in APPROVAL_HASH_EXCLUDED_FIELDS:
+            kept_front_matter.append(line)
+
+    body = normalized[front_end + 4 :]
+    approval = re.search(r"(?m)^##\s+Approval Record\s*$", body)
+    if approval:
+        next_heading = re.search(r"(?m)^##\s+", body[approval.end() :])
+        section_end = approval.end() + next_heading.start() if next_heading else len(body)
+        body = body[: approval.start()] + body[section_end:]
+
+    return "---\n" + "\n".join(kept_front_matter) + "\n---" + body
+
+
+def approval_hash(text: str, path: Path) -> str:
+    return hashlib.sha256(approval_hash_content(text, path).encode("utf-8")).hexdigest()
+
+
 def has_value(value: str) -> bool:
     return value.strip().strip('"').strip("'").lower() not in PLACEHOLDER_VALUES
+
+
+def validate_task_name(value: str, label: str) -> None:
+    if not TASK_NAME_RE.fullmatch(value):
+        fail(
+            f"{label} must match <task-seq>-<task-slug> with a 3+ digit version-local "
+            f"sequence prefix, for example 001-example-task: {value}"
+        )
 
 
 def approval_record_fields(text: str, path: Path) -> dict[str, str]:
@@ -75,63 +126,70 @@ def approval_record_fields(text: str, path: Path) -> dict[str, str]:
     return fields
 
 
-def validate_pipeline_launch_evidence(root: Path, path: Path) -> None:
-    plan = root / "harness" / "pipeline-plan.md"
+def pipeline_trigger_value(text: str, label: str) -> str | None:
+    match = re.search(rf"(?mi)^\s*-\s*{re.escape(label)}:\s*(.+)$", text)
+    return match.group(1).strip() if match else None
+
+
+def pipeline_no_stage_docs(
+    root: Path, version: str, module: str, task_name: str | None
+) -> bool:
+    if not task_name:
+        return False
+    plan = root / "docs" / "versions" / version / "modules" / module / task_name / "pipeline" / "plan.md"
+    if not plan.exists():
+        return False
+    text = plan.read_text(encoding="utf-8")
+    launch = (pipeline_trigger_value(text, "User launch confirmed") or "").lower()
+    launch_statement = pipeline_trigger_value(text, "User launch statement") or ""
+    policy = (pipeline_trigger_value(text, "Auto-pipeline document policy") or "").lower()
+    return (
+        launch in {"yes", "true", "confirmed"}
+        and len(launch_statement.strip()) >= 8
+        and pipeline_trigger_value(text, "Version") == version
+        and pipeline_trigger_value(text, "Packet module") == module
+        and pipeline_trigger_value(text, "Task name") == task_name
+        and (pipeline_trigger_value(text, "Proposal") or "").strip("`")
+        == f"docs/versions/{version}/modules/{module}/{task_name}/proposal.md"
+        and "no design/testing markdown docs" in policy
+        and "testplan.yaml required" in policy
+    )
+
+
+def validate_pipeline_launch_evidence(
+    root: Path, path: Path, module: str, version: str, task_name: str | None
+) -> None:
+    if not task_name:
+        fail(f"{path} auto-pipeline approval requires a task-bound packet")
+    plan = root / "docs" / "versions" / version / "modules" / module / task_name / "pipeline" / "plan.md"
     if not plan.exists():
         fail(
             f"{path} is approved by {PIPELINE_APPROVER} but {plan} is missing; "
             "auto-pipeline approval requires recorded launch evidence"
         )
-    text = plan.read_text(encoding="utf-8")
-    launch = re.search(r"(?mi)^\s*-\s*User launch confirmed:\s*(.+)$", text)
-    if not launch or not has_value(launch.group(1)):
+    if not pipeline_no_stage_docs(root, version, module, task_name):
         fail(
-            f"{path} is approved by {PIPELINE_APPROVER} but {plan} does not record "
-            "a non-empty 'User launch confirmed:' value under ## Trigger"
+            f"{path} is approved by {PIPELINE_APPROVER} but {plan} is not explicitly "
+            f"bound to version={version}, packet_module={module}, task_name={task_name}"
         )
 
 
-def approval_content_sha256(text: str) -> str:
-    """Hash the approvable document content, excluding the approval fields themselves.
-
-    LF-normalize, drop the approval-related front matter lines, drop the
-    `## Approval Record` section, and hash the rest. Applying an approval does
-    not change this hash, but any later content edit does, so a stale approval
-    fails closed until the document is re-approved.
-    """
-    text = text.replace("\r\n", "\n")
-    if text.startswith("---\n"):
-        end = text.find("\n---", 4)
-        if end != -1:
-            kept = [
-                line
-                for line in text[4:end].splitlines()
-                if line.split(":", 1)[0].strip() not in APPROVAL_FRONT_MATTER_FIELDS
-            ]
-            text = "---\n" + "\n".join(kept) + text[end:]
-    match = re.search(r"(?m)^##\s+Approval Record\s*$", text)
-    if match:
-        next_heading = re.search(r"(?m)^##\s+", text[match.end() :])
-        section_end = match.end() + next_heading.start() if next_heading else len(text)
-        text = text[: match.start()] + text[section_end:]
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def validate_approval_content_hash(path: Path, text: str, data: dict[str, str]) -> None:
-    recorded = data.get("approved_content_sha256", "").strip().lower()
-    if not has_value(recorded):
-        fail(
-            f"{path} is approved but front matter is missing approved_content_sha256; "
-            "generate it via schema-check.py --print-approval-hash and record it in the "
-            "same edit that applies the approval"
-        )
-    actual = approval_content_sha256(text)
-    if recorded != actual:
-        fail(
-            f"{path} approved_content_sha256 does not match the current document content: "
-            f"the document changed after approval, so the approval is stale; "
-            f"re-approve the document (current hash {actual})"
-        )
+def validate_pipeline_state_link(packet: Path) -> None:
+    plan = packet / "pipeline" / "plan.md"
+    state_path = packet / "pipeline" / "state.json"
+    if not state_path.is_file():
+        fail(f"auto-pipeline requires sibling execution state: {state_path}")
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"invalid pipeline state {state_path}: {error}")
+    if not isinstance(state, dict) or state.get("schema_version") != 1:
+        fail(f"{state_path} schema_version must be 1")
+    expected_hash = hashlib.sha256(
+        plan.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+    ).hexdigest()
+    if state.get("plan_sha256") != expected_hash:
+        fail(f"{state_path} plan_sha256 does not match sibling plan.md")
 
 
 def validate_approval_provenance(root: Path, path: Path, text: str, data: dict[str, str]) -> None:
@@ -141,10 +199,20 @@ def validate_approval_provenance(root: Path, path: Path, text: str, data: dict[s
     approved_at = data.get("approved_at", "").strip()
     if not has_value(approved_by) or not has_value(approved_at):
         fail(f"{path} is approved but approved_by/approved_at are empty")
-    validate_approval_content_hash(path, text, data)
+    recorded_hash = data.get("approved_content_sha256", "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", recorded_hash):
+        fail(f"{path} is approved but approved_content_sha256 is missing or invalid")
+    expected_hash = approval_hash(text, path)
+    if recorded_hash != expected_hash:
+        fail(
+            f"{path} approved_content_sha256 does not match approved content; "
+            "approved documents are immutable and require a sibling amendment/fix task"
+        )
 
     if approved_by == PIPELINE_APPROVER:
-        validate_pipeline_launch_evidence(root, path)
+        validate_pipeline_launch_evidence(
+            root, path, data.get("module", ""), data.get("version", ""), data.get("task_name")
+        )
         return
 
     if approved_by.lower() in FORBIDDEN_APPROVERS:
@@ -174,6 +242,10 @@ def validate_doc(root: Path, path: Path, module: str, version: str, submodule: s
         fail(f"{path} module mismatch: expected {module}, got {data['module']}")
     if data["version"] != version:
         fail(f"{path} version mismatch: expected {version}, got {data['version']}")
+    if submodule:
+        validate_task_name(submodule, "--submodule")
+        if data.get("task_name") != submodule:
+            fail(f"{path} task_name mismatch: expected {submodule}, got {data.get('task_name', '<missing>')}")
     if submodule and data.get("submodule") not in {None, "", submodule}:
         fail(f"{path} submodule mismatch: expected {submodule}, got {data['submodule']}")
     validate_approval_provenance(root, path, text, data)
@@ -198,6 +270,15 @@ def validate_testplan(path: Path, module: str, version: str, submodule: str | No
     for key, value in (("schema_version", "1"), ("version", version), ("module", module)):
         if not re.search(rf"(?m)^{re.escape(key)}:\s*{re.escape(value)}\s*$", text):
             fail(f"{path} missing or mismatched {key}: {value}")
+    task_name_match = re.search(r"(?m)^task_name:\s*(\S+)\s*$", text)
+    if not task_name_match:
+        fail(f"{path} missing task_name")
+    task_name = task_name_match.group(1)
+    validate_task_name(task_name, f"{path} task_name")
+    if submodule:
+        validate_task_name(submodule, "--submodule")
+        if task_name != submodule:
+            fail(f"{path} task_name mismatch: expected {submodule}, got {task_name}")
     if submodule and re.search(r"(?m)^submodule:\s*\S+", text):
         if not re.search(rf"(?m)^submodule:\s*{re.escape(submodule)}\s*$", text):
             fail(f"{path} submodule mismatch: expected {submodule}")
@@ -246,31 +327,56 @@ def main() -> int:
     parser.add_argument("--submodule")
     parser.add_argument(
         "--print-approval-hash",
-        metavar="DOC",
-        help="print the approved_content_sha256 value for one document and exit",
+        metavar="DOCUMENT",
+        help="print the approval hash for a stage document and exit",
     )
     args = parser.parse_args()
 
+    root = Path(args.root)
     if args.print_approval_hash:
-        doc = Path(args.print_approval_hash)
-        print(approval_content_sha256(read_text(doc)))
+        path = Path(args.print_approval_hash)
+        if not path.is_absolute():
+            path = root / path
+        text = read_text(path)
+        print(approval_hash(text, path))
         return 0
 
     if not (args.version and args.module):
         fail("--version and --module are required")
+    if args.submodule:
+        validate_task_name(args.submodule, "--submodule")
 
-    root = Path(args.root)
+    task_index = root / "docs" / "versions" / args.version / "modules" / "tasks.md"
+    if not task_index.exists():
+        fail(f"missing hard-gate unfinished-task index: docs/versions/{args.version}/modules/tasks.md")
     packet = root / "docs" / "versions" / args.version / "modules" / args.module
     if args.submodule:
         packet = packet / args.submodule
-    for name in ("proposal.md", "design.md"):
+    no_stage_docs = pipeline_no_stage_docs(root, args.version, args.module, args.submodule)
+    required_docs = ["proposal.md"] if no_stage_docs else ["proposal.md", "design.md"]
+    for name in required_docs:
         validate_doc(root, packet / name, args.module, args.version, args.submodule)
-    optional_testing = packet / "testing.md"
-    if optional_testing.exists():
-        validate_doc(root, optional_testing, args.module, args.version, args.submodule)
-    optional_testplan = packet / "testplan.yaml"
-    if optional_testplan.exists():
-        validate_testplan(optional_testplan, args.module, args.version, args.submodule)
+    if no_stage_docs:
+        validate_pipeline_state_link(packet)
+        forbidden = ["design.md", "testing.md"]
+        present = [name for name in forbidden if (packet / name).exists()]
+        if present:
+            fail(
+                "auto-pipeline document policy forbids generated stage docs in this packet: "
+                + ", ".join(str(packet / name) for name in present)
+            )
+        if (packet / "design").exists() or (packet / "testing").exists():
+            fail("auto-pipeline document policy forbids task-local design/ or testing/ directories")
+        optional_testplan = packet / "testplan.yaml"
+        if optional_testplan.exists():
+            validate_testplan(optional_testplan, args.module, args.version, args.submodule)
+    else:
+        optional_testing = packet / "testing.md"
+        if optional_testing.exists():
+            validate_doc(root, optional_testing, args.module, args.version, args.submodule)
+        optional_testplan = packet / "testplan.yaml"
+        if optional_testplan.exists():
+            validate_testplan(optional_testplan, args.module, args.version, args.submodule)
     print("schema-check: passed")
     return 0
 

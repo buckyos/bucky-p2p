@@ -6,14 +6,16 @@
 - Responsibility:
 - Version:
 - Module:
-- Submodule:
+- Submodule / Task Directory:
+- Packet Module:
+- Target Module:
 - change_id:
 - Parent Task:
 - Depends On:
 - Owner:
 
 ## Goal
-- Complete the named stage for this direct submodule only.
+- Complete the named stage for this task packet or direct submodule only.
 
 ## Scope Boundary
 - In scope:
@@ -28,27 +30,32 @@
 
 ## Admission Checks
 - [ ] Required upstream artifacts exist
-- [ ] Required upstream approvals exist
+- [ ] The launch-confirmed proposal and required upstream pipeline-plan mappings exist; auto-pipeline does not require approved `design.md` or `testing.md`
 - [ ] If per-stage user confirmation is skipped, the pipeline plan records explicit user auto-pipeline authorization
-- [ ] The pipeline plan task status was updated to `confirmed` or `complete` before dependent tasks continue
-- [ ] If this task produces a stage document and auto-confirmation is enabled, the document front matter was updated to `status: approved`, `approved_by: auto-pipeline`, `approved_at`, and `approved_content_sha256`
-- [ ] Scope stays inside this direct submodule
+- [ ] Task-local `pipeline/state.json` status was updated to `confirmed` or `complete` before dependent tasks continue
+- [ ] If a repository-local extension produces a stage document, its auto-confirmation metadata is complete; normal auto-pipeline design/testing tasks produce no stage Markdown document
+- [ ] Scope stays inside this task packet or direct submodule
 - [ ] Scope stays inside the named stage unless the user explicitly requested cross-stage synchronization
-- [ ] For single-stage tasks, `stage-scope-check.py --stage <stage>` passed for the current diff (implementation runs add `--change-id <change_id>` per admitted id so the diff is bound to the design Scope Paths)
-- [ ] For implementation: proposal and design inputs for this submodule are approved
-- [ ] For implementation: active `version`, `module`, submodule, and `change_id` are explicit
+- [ ] For design: this submodule's same-level structure and child mappings are recorded in `pipeline/plan.md`, without generating `design.md` or task-local `design/`
+- [ ] For design: file-level modules owned by this submodule are recorded in the pipeline-plan implementation sequence in dependency order before implementation starts
+- [ ] For single-stage tasks, `stage-scope-check.py --stage <stage> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` passed for this task's recorded changed paths (implementation runs add `--target-module <project> --change-id <change_id>` so paths bind to the correct target's Scope Paths)
+- [ ] For implementation: the proposal is confirmed by an explicit current user launch recorded verbatim as `User launch statement`, and dependency/interface/state/failure/alternative design inputs for this submodule are validated
+- [ ] For implementation: active `version`, packet `module`, `target_module`, submodule, and `change_id` are explicit
 - [ ] For implementation: `schema-check.py --submodule <submodule>` passed for the submodule packet
-- [ ] For implementation: `harness/evidence/admission/<task-id>.md` contains required admission evidence
-- [ ] For implementation: `admission-check.py --submodule <submodule> --evidence-file harness/evidence/admission/<task-id>.md` passed for every admitted `change_id`
-- [ ] For implementation: the approved submodule doc inspection and coverage judgment are recorded in the admission evidence file
+- [ ] For implementation: `docs/versions/<version>/evidence/admission/<task-id>.md` contains required admission evidence
+- [ ] For implementation: `admission-check.py --submodule <submodule> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md` passed for every admitted `change_id`
+- [ ] For implementation: inspection of the launch-confirmed proposal and task-relevant pipeline-plan mapping is recorded in the admission evidence file
+- [ ] For implementation: this child task implements the next ready file-level module in the validated pipeline-plan dependency sequence
+- [ ] For implementation: context is limited to the task-relevant pipeline-plan mapping, `change_id`, `Scope Paths`, interfaces, and source files for this file-level module
 
 ## Implementation Admission Evidence
 | evidence_item | source | status | notes |
 |---------------|--------|--------|-------|
-| proposal_read | `<submodule>/proposal.md` section/table | pass/fail | cite admitted `change_id` and relevant proposal coverage |
-| design_read | `<submodule>/design.md` section/table | pass/fail | cite admitted `change_id` and relevant design coverage |
-| change_scope_matches_request | user request + proposal/design mapping | pass/fail | explain why the admitted scope covers this submodule task |
+| proposal_read | bound task packet `proposal.md` section/table | pass/fail | cite admitted `change_id` and relevant proposal coverage |
+| design_read | `pipeline/plan.md` dependency/interface/scope mappings | pass/fail | cite admitted `change_id`, `target_module`, and relevant design coverage |
+| change_scope_matches_request | user request + launch-confirmed proposal + pipeline-plan mapping | pass/fail | explain why the admitted scope covers this submodule task |
 | active_module_resolved | submodule packet path | pass/fail | version/module/submodule |
+| same_module_task_selection | `docs/versions/<version>/modules/tasks.md` and module Current/Active Task | pass/fail | reused tasks are same-module only, or different-module unfinished tasks were excluded and a new packet was created |
 | no_chat_only_evidence | versioned docs and inspected code | pass/fail | confirm no oral/chat-only requirement is used as admission evidence |
 
 ## Required Outputs
@@ -60,10 +67,9 @@
 - Must not modify:
 
 Stage-task defaults:
-- Proposal can modify: `<submodule>/proposal.md` only
-- Design can modify: `<submodule>/design.md` and required long-lived boundary sync only
-- Implementation can modify: production code, required non-test runtime/build resources, and task admission evidence under `harness/evidence/admission/` only
-- Testing can modify: test code, test fixtures, test runners, unified test entrypoint wiring, and optional `<submodule>/testing.md` / `<submodule>/testplan.yaml` only
+- Design can modify: this submodule's mappings and implementation sequence in `pipeline/plan.md`, plus required long-lived boundary sync only; it MUST NOT generate `design.md` or task-local `design/`
+- Implementation can modify: production code, required non-test runtime/build resources, and task admission evidence under `docs/versions/<version>/evidence/admission/` only
+- Testing can modify: test code, test fixtures, test runners, unified test entrypoint wiring, the bound task packet `testplan.yaml`, pipeline-plan testing evidence, and run artifacts only; it MUST NOT generate `testing.md` or task-local `testing/`
 - Acceptance can modify: review reports and generated acceptance rules/expected-result evidence only
 - Cross-stage edits require explicit user instruction naming the extra stage(s) or asking for cross-stage synchronization
 

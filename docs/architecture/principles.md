@@ -13,8 +13,8 @@
 - 阶段责任必须机械化划分：
   - proposal 负责意图
   - design 负责方案形态
-  - testing 负责验证设计
-  - implementation 负责代码与测试
+  - implementation 负责生产代码
+  - testing 在 implementation 后基于 proposal、design 与已交付代码设计并实现验证
   - acceptance 负责审计结果
 - 除非版本化规则发布了更窄的例外，否则始终执行硬性的 implementation admission。
 - 若版本化规则为某个模块发布了更窄的文档豁免，则该豁免只能缩窄该模块自身的数据包要求，不能替代受影响相邻模块的数据包与验证责任。
@@ -32,11 +32,11 @@
 - `cyfs-p2p-test`、`sn-miner-rust` 以及生成的 desc/sec/device 制品中由 CLI/配置驱动的运行时行为。
 
 ## 必需证据链
-- `proposal.md`
-- `design.md` 以及任何 `design/` 补充说明
-- `testing.md` 以及任何 `testing/` 补充说明
-- `testplan.yaml`
-- `acceptance.md`
+- 手工流的 `proposal.md`、`design.md` 以及任何 `design/` 补充说明；显式启动 auto-pipeline 时使用启动确认的 proposal 与任务本地 pipeline plan 映射
+- production implementation
+- post-implementation 测试实现与完成 testing 所必需的 `testplan.yaml`
+- 可选的 `testing.md`、`testing/` 与 `acceptance.md`
+- 任务 packet 内独立的 `acceptance-report.md`
 - `docs/modules/` 下的长期模块文档
 - 实现代码与测试
 - 实际测试结果
@@ -44,4 +44,4 @@
 ## 改造策略
 - 不要把现有协议说明或源码布局重写成 harness 启动工作的一部分。
 - 先在代码库外围补治理，再谈别的。
-- 先把 `p2p-frame` 变成第一个完整的版本化数据包，因为它风险最高、依赖最多。
+- 现有模块级 packet 作为历史基线保留；所有新任务使用 `<task-seq>-<task-slug>` sibling packet，并登记在版本级 `modules/tasks.md`。

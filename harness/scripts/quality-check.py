@@ -2,15 +2,15 @@
 """Run the repository's declared mechanical quality gates (build, lint, ...).
 
 Gates are declared in harness/quality-gates.yaml. This checker fails closed:
-- a missing config file fails (declare your gates, or declare `gates: []`
-  explicitly as a versioned, reviewable decision)
+- a missing config file fails
+- `gates: []` fails unless `empty_reason` records a concrete versioned decision
 - any failing gate command fails the run
 
 Every real run writes a machine-readable artifact to
-test-results/quality-runs/<timestamp>.json recording each gate's exit code.
-test-results/ is generated output and must be listed in .gitignore. Acceptance
-cites that artifact, and acceptance-report-check.py re-verifies it, so
-quality-gate evidence cannot be claimed without a run.
+test-results/quality-runs/<timestamp>.json recording each gate's exit code and
+repository_state_sha256. test-results/ is generated output and must be listed
+in .gitignore. Acceptance rejects repository-state mismatches, so a quality
+result created before later repository changes cannot be reused.
 """
 
 from __future__ import annotations
@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime
+import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -28,11 +30,85 @@ from pathlib import Path
 
 CONFIG_RELATIVE_PATH = "harness/quality-gates.yaml"
 RUN_ARTIFACT_SCHEMA = 1
+STATE_EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "test-results"}
 
 
 def fail(message: str) -> None:
     print(f"quality-check: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def state_path_excluded(path: Path) -> bool:
+    if any(part in STATE_EXCLUDED_DIRS for part in path.parts):
+        return True
+    leaf = path.name.lower()
+    return (
+        leaf == "acceptance-report.md"
+        or leaf.endswith("-acceptance-report.md")
+        or (leaf == "state.json" and path.parent.name == "pipeline")
+    )
+
+
+def update_state_hash(hasher: "hashlib._Hash", root: Path, relative: Path) -> None:
+    if state_path_excluded(relative):
+        return
+    path = root / relative
+    hasher.update(relative.as_posix().encode("utf-8", errors="surrogateescape") + b"\0")
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError:
+        hasher.update(b"deleted\0")
+        return
+    hasher.update(f"{stat_result.st_mode:o}".encode("ascii") + b"\0")
+    if path.is_symlink():
+        hasher.update(b"symlink\0" + os.readlink(path).encode("utf-8", errors="surrogateescape") + b"\0")
+    elif path.is_file():
+        hasher.update(b"file\0" + path.read_bytes() + b"\0")
+    else:
+        hasher.update(b"directory\0")
+
+
+def repository_state_sha256(root: Path) -> str:
+    root = root.resolve()
+    hasher = hashlib.sha256(b"harness-repository-state-v1\0")
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
+        )
+        tracked = subprocess.run(
+            ["git", "diff", "--name-only", "-z", "HEAD", "--"],
+            cwd=root, capture_output=True, text=False
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root, capture_output=True, text=False
+        )
+    except OSError:
+        head = tracked = untracked = None
+    if (
+        head is not None
+        and tracked is not None
+        and untracked is not None
+        and head.returncode == tracked.returncode == untracked.returncode == 0
+    ):
+        hasher.update(b"git\0" + head.stdout.strip().encode("utf-8") + b"\0")
+        paths = sorted(
+            {
+                Path(raw.decode("utf-8", errors="surrogateescape"))
+                for raw in (tracked.stdout + untracked.stdout).split(b"\0")
+                if raw
+            },
+            key=lambda path: path.as_posix(),
+        )
+    else:
+        hasher.update(b"filesystem\0")
+        paths = sorted(
+            (path.relative_to(root) for path in root.rglob("*") if not path.is_dir()),
+            key=lambda path: path.as_posix(),
+        )
+    for relative in paths:
+        update_state_hash(hasher, root, relative)
+    return hasher.hexdigest()
 
 
 def parse_run_list(value: str, gate_id: str) -> list[str]:
@@ -53,6 +129,17 @@ def parse_gates(path: Path) -> list[dict[str, object]]:
     if not gates_line:
         fail(f"{path} missing required top-level key: gates")
     if gates_line.group(1):
+        reason_match = re.search(r"(?m)^empty_reason:\s*(.+)\s*$", text)
+        reason = reason_match.group(1).strip().strip('"').strip("'") if reason_match else ""
+        if (
+            not reason
+            or len(reason) < 12
+            or re.search(r"<[^>]+>|\b(tbd|todo|pending|n/a|none)\b", reason, re.IGNORECASE)
+        ):
+            fail(
+                f"{path} declares gates: [] but empty_reason is missing, placeholder-only, "
+                "or too short; record the concrete reason no mechanical quality gate applies"
+            )
         return []
 
     gates: list[dict[str, object]] = []
@@ -95,6 +182,7 @@ def write_run_artifact(root: Path, steps: list[dict[str, object]], exit_code: in
             "schema": RUN_ARTIFACT_SCHEMA,
             "started_at": started_at,
             "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "repository_state_sha256": repository_state_sha256(root),
             "gates": steps,
             "exit_code": exit_code,
         }
@@ -115,8 +203,8 @@ def main() -> int:
     if not config.exists():
         fail(
             f"missing {config}: declare the repository's quality gates (build, lint, "
-            "typecheck, ...) there, or declare an explicitly empty `gates: []` list "
-            "with a reason comment as a versioned decision"
+            "typecheck, ...) there, or declare `gates: []` with a concrete "
+            "empty_reason as a versioned decision"
         )
 
     gates = parse_gates(config)

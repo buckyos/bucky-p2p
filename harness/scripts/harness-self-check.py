@@ -24,7 +24,6 @@ REQUIRED_RULES = (
     "unified-test-entry-rules.md",
     "acceptance-task-rules.md",
     "acceptance-review-rules.md",
-    "trigger-rules.md",
     "quality-gate-rules.md",
     "auto-pipeline-rules.md",
 )
@@ -32,15 +31,16 @@ REQUIRED_RULES = (
 REQUIRED_SCRIPTS = (
     "test-run.py",
     "schema-check.py",
+    "task-seq.py",
     "admission-check.py",
     "stage-scope-check.py",
     "harness-self-check.py",
     "doc-structure-check.py",
+    "architecture-doc-check.py",
     "testing-coverage-check.py",
     "acceptance-report-check.py",
     "pipeline-plan-check.py",
     "check-all.py",
-    "edit-guard.py",
     "quality-check.py",
 )
 
@@ -102,12 +102,24 @@ def check_root(root: Path) -> None:
     require_path(root / "harness" / "custom-rules", directory=True)
     require_path(root / "harness" / "scripts", directory=True)
     require_path(root / "harness" / "process_rules", directory=True)
-    require_path(root / "harness" / "hooks" / "pre-commit", directory=False)
-    require_path(root / "harness" / "ci" / "harness-checks.yml", directory=False)
     require_path(root / "harness" / "quality-gates.yaml", directory=False)
-    require_path(root / "harness" / "evidence" / "admission", directory=True)
+    check_version_evidence_dirs(root)
     check_test_results_ignored(root)
 
+
+def check_version_evidence_dirs(root: Path) -> None:
+    versions_dir = root / "docs" / "versions"
+    version_dirs = [path for path in versions_dir.iterdir() if path.is_dir()]
+    if not version_dirs:
+        fail("docs/versions must contain at least one version directory")
+    for version_dir in version_dirs:
+        require_path(version_dir / "modules" / "tasks.md", directory=False)
+        require_path(version_dir / "evidence" / "admission", directory=True)
+        require_path(version_dir / "evidence" / "stage-scope", directory=True)
+        require_path(
+            version_dir / "evidence" / "stage-scope-manifest-meta.template.json",
+            directory=False,
+        )
 
 def check_test_results_ignored(root: Path) -> None:
     """test-results/ holds generated run artifacts and must stay untracked."""

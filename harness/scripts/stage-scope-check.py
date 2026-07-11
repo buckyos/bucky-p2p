@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
-"""Validate that the current diff stays inside one Harness stage scope.
+"""Validate that a task's recorded changed paths stay inside one stage scope.
 
 This checker is intentionally conservative and dependency-free. It is meant to
 catch accidental cross-stage edits such as a proposal task also changing
 design.md, testing.md, testplan.yaml, or acceptance artifacts.
 
 For the implementation stage, passing --version/--module/--change-id binds the
-diff to the admitted design Scope Paths: every changed production path must
-match one of the `Scope Paths` entries recorded for the admitted change_id
-rows in design.md `## Directly Mapped Change Items`. This turns change-level
-traceability from a review-time prose rule into a mechanical gate.
+task's recorded paths to the admitted design Scope Paths: every changed
+production path must match one of the `Scope Paths` entries recorded for the
+admitted change_id rows in design.md `## Directly Mapped Change Items`. This
+turns change-level traceability from a review-time prose rule into a mechanical
+gate.
+
+The primary input is an explicit current-task path list, supplied with
+--changed-paths-file and/or repeated --changed-path values. That list is the
+authoritative boundary for this check: unrelated changes elsewhere in a dirty
+worktree are intentionally ignored. Whole-worktree git discovery remains
+available only through --from-git for local diagnosis and MUST NOT be used as
+single-task completion evidence.
 """
 
 from __future__ import annotations
 
 import argparse
-import fnmatch
+import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 STAGES = {"proposal", "design", "testing", "implementation", "acceptance"}
-MODULE_DOCS = {"proposal.md", "design.md", "testing.md", "testplan.yaml", "acceptance.md"}
+MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+MODULE_DOCS = {"proposal.md", "design.md", "testing.md", "testplan.yaml", "acceptance.md", "acceptance-report.md"}
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+MANIFEST_KEYS = ("changed_paths", "touched_paths", "paths")
 
 
 def fail(message: str) -> None:
@@ -51,7 +61,24 @@ def git(args: list[str], root: Path) -> str:
 
 
 def normalize(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/").lstrip("\ufeff")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    candidate = PurePosixPath(normalized)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        fail(f"path must stay inside the repository and must not contain '..': {path}")
+    return candidate.as_posix()
+
+
+def canonical_repo_path(root: Path, path: str) -> str:
+    """Resolve a path against the repository and reject root/symlink escapes."""
+    normalized = normalize(path)
+    root_resolved = root.resolve()
+    candidate = (root_resolved / normalized).resolve(strict=False)
+    try:
+        return candidate.relative_to(root_resolved).as_posix()
+    except ValueError:
+        fail(f"path resolves outside the repository: {path}")
 
 
 def parse_status_z(output: str) -> list[str]:
@@ -98,7 +125,7 @@ def parse_diff_name_status_z(output: str) -> list[str]:
     return changed
 
 
-def changed_paths(root: Path, base: str | None, include_untracked: bool) -> list[str]:
+def changed_paths_from_git(root: Path, base: str | None, include_untracked: bool) -> list[str]:
     if base:
         output = git(["diff", "--name-status", "-z", f"{base}...HEAD"], root)
         return sorted(set(parse_diff_name_status_z(output)))
@@ -110,6 +137,73 @@ def changed_paths(root: Path, base: str | None, include_untracked: bool) -> list
         args.append("--untracked-files=no")
     output = git(args, root)
     return sorted(set(parse_status_z(output)))
+
+
+def path_from_status_like_line(line: str) -> list[str]:
+    """Accept either plain paths or simple name-status style lines."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return []
+    if stripped.startswith("- "):
+        stripped = stripped[2:].strip()
+    tab_parts = [part.strip() for part in stripped.split("\t") if part.strip()]
+    if len(tab_parts) >= 2 and re.fullmatch(r"[A-Z?][A-Z0-9?]*", tab_parts[0]):
+        return [normalize(part) for part in tab_parts[1:]]
+    space_status = re.match(r"^[A-Z?][A-Z0-9?]*\s+(.+)$", stripped)
+    if space_status:
+        return [normalize(space_status.group(1))]
+    return [normalize(stripped)]
+
+
+def changed_paths_from_file(path: Path) -> list[str]:
+    if not path.exists():
+        fail(f"changed paths file does not exist: {path}")
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    paths: list[str] = []
+    if stripped.startswith("[") or stripped.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as error:
+            fail(f"invalid JSON changed paths file {path}: {error}")
+        if isinstance(data, list):
+            values = data
+        elif isinstance(data, dict):
+            values = None
+            for key in MANIFEST_KEYS:
+                if key in data:
+                    values = data[key]
+                    break
+            if values is None:
+                fail(f"JSON changed paths file {path} must contain one of: {', '.join(MANIFEST_KEYS)}")
+        else:
+            fail(f"JSON changed paths file {path} must be an array or object")
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            fail(f"JSON changed paths in {path} must be a list of strings")
+        paths = [normalize(item) for item in values]
+    else:
+        for line in text.splitlines():
+            paths.extend(path_from_status_like_line(line))
+    return sorted({path for path in paths if path})
+
+
+def explicit_changed_paths(args: argparse.Namespace, root: Path) -> list[str]:
+    paths: list[str] = []
+    for raw in args.changed_paths or []:
+        paths.append(normalize(raw))
+    for raw_file in args.changed_paths_files or []:
+        file_path = Path(raw_file)
+        if not file_path.is_absolute():
+            file_path = root / file_path
+        paths.extend(changed_paths_from_file(file_path))
+    if args.from_git:
+        paths.extend(changed_paths_from_git(root, args.base, include_untracked=not args.ignore_untracked))
+    if not paths:
+        fail(
+            "no task changed paths supplied; pass --changed-paths-file "
+            "docs/versions/<version>/evidence/stage-scope/<task-id>.paths or repeated --changed-path values"
+        )
+    return sorted({canonical_repo_path(root, path) for path in paths if path})
 
 
 def packet_parts(path: str) -> tuple[str, str, str] | None:
@@ -133,9 +227,18 @@ def active_packet(path: str, version: str | None, module: str | None, submodule:
         return None
     if module and packet_module != module:
         return None
-    if submodule and relative != submodule and not relative.startswith(f"{submodule}/"):
-        return None
+    if submodule:
+        if relative == submodule:
+            relative = ""
+        elif relative.startswith(f"{submodule}/"):
+            relative = relative[len(submodule) + 1 :]
+        else:
+            return None
     return packet_version, packet_module, relative
+
+
+def is_architecture_doc(path: str) -> bool:
+    return path.startswith("docs/architecture/") and (path.endswith(".md") or path.endswith(".yaml") or path.endswith(".yml"))
 
 
 def is_module_boundary_sync(path: str, module: str | None) -> bool:
@@ -147,6 +250,14 @@ def is_module_boundary_sync(path: str, module: str | None) -> bool:
 
 
 def is_review_report(path: str) -> bool:
+    packet = packet_parts(path)
+    if packet is None:
+        return False
+    leaf = packet[2].rsplit("/", 1)[-1]
+    return leaf == "acceptance-report.md" or leaf.endswith("-acceptance-report.md")
+
+
+def is_legacy_review_area(path: str) -> bool:
     if path.startswith("docs/reviews/") and path.endswith(".md"):
         return True
     parts = path.split("/")
@@ -159,16 +270,117 @@ def is_review_report(path: str) -> bool:
     )
 
 
+def is_version_evidence(path: str, version: str | None = None) -> bool:
+    parts = path.split("/")
+    if len(parts) < 5:
+        return False
+    if parts[0] != "docs" or parts[1] != "versions" or parts[3] != "evidence":
+        return False
+    if version and parts[2] != version:
+        return False
+    return parts[4] in {"admission", "stage-scope"}
+
+
+def is_stage_scope_evidence(path: str, version: str | None = None) -> bool:
+    parts = path.split("/")
+    return (
+        is_version_evidence(path, version)
+        and len(parts) >= 5
+        and parts[4] == "stage-scope"
+        and (path.endswith(".paths") or path.endswith(".json") or path.endswith(".txt"))
+    )
+
+
+def is_task_index(path: str, version: str | None = None) -> bool:
+    if path == "docs/modules/tasks.md":
+        return True
+    parts = path.split("/")
+    return (
+        len(parts) == 5
+        and parts[0] == "docs"
+        and parts[1] == "versions"
+        and (version is None or parts[2] == version)
+        and parts[3] == "modules"
+        and parts[4] == "tasks.md"
+    )
+
+
+def pipeline_artifact_path(
+    path: str, leaf: str, version: str | None, module: str | None, submodule: str | None
+) -> bool:
+    if not version or not module or not submodule:
+        return False
+    return path == f"docs/versions/{version}/modules/{module}/{submodule}/pipeline/{leaf}"
+
+
+def is_any_pipeline_artifact(path: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"docs/versions/[^/]+/modules/[^/]+/.+/pipeline/(?:plan\.md|state\.json)",
+            path,
+        )
+    )
+
+
+def has_value(value: str) -> bool:
+    return value.strip().strip('"').strip("'").lower() not in {"", "-", "n/a", "na", "none", "tbd", "todo", "pending"}
+
+
+def pipeline_trigger_value(text: str, label: str) -> str | None:
+    match = re.search(rf"(?mi)^\s*-\s*{re.escape(label)}:\s*(.+)$", text)
+    return match.group(1).strip() if match else None
+
+
+def pipeline_no_stage_docs(
+    root: Path, version: str, module: str, task_name: str | None
+) -> bool:
+    if not task_name:
+        return False
+    plan = root / "docs" / "versions" / version / "modules" / module / task_name / "pipeline" / "plan.md"
+    if not plan.exists():
+        return False
+    text = plan.read_text(encoding="utf-8")
+    launch = (pipeline_trigger_value(text, "User launch confirmed") or "").lower()
+    launch_statement = pipeline_trigger_value(text, "User launch statement") or ""
+    policy = (pipeline_trigger_value(text, "Auto-pipeline document policy") or "").lower()
+    return (
+        launch in {"yes", "true", "confirmed"}
+        and len(launch_statement.strip()) >= 8
+        and pipeline_trigger_value(text, "Version") == version
+        and pipeline_trigger_value(text, "Packet module") == module
+        and pipeline_trigger_value(text, "Task name") == task_name
+        and (pipeline_trigger_value(text, "Proposal") or "").strip("`")
+        == f"docs/versions/{version}/modules/{module}/{task_name}/proposal.md"
+        and "no design/testing markdown docs" in policy
+        and "testplan.yaml required" in policy
+    )
+
+
+def is_unified_test_entrypoint(path: str) -> bool:
+    return path == "harness/scripts/test-run.py"
+
+
+def is_test_run_artifact(path: str) -> bool:
+    parts = path.split("/")
+    return (
+        len(parts) == 3
+        and parts[0] == "test-results"
+        and parts[1] == "test-runs"
+        and parts[2].endswith(".json")
+    )
+
+
 def is_stage_doc_path(path: str) -> bool:
     packet = packet_parts(path)
     if packet is None:
         return False
     relative = packet[2]
+    relative_parts = relative.split("/")
     leaf = relative.rsplit("/", 1)[-1]
     return (
         leaf in MODULE_DOCS
-        or relative.startswith("design/")
-        or relative.startswith("testing/")
+        or "design" in relative_parts
+        or "testing" in relative_parts
     )
 
 
@@ -208,24 +420,41 @@ def parse_scope_paths(cell: str) -> list[str]:
         entries = cell.split(",")
     normalized: list[str] = []
     for entry in entries:
-        cleaned = entry.strip().replace("\\", "/").strip("/")
+        cleaned = normalize(entry.strip().strip("`"))
+        if any(token in cleaned for token in ("*", "?", "[", "]")):
+            fail(f"Scope Paths must name concrete repository paths, not globs: {entry}")
         if cleaned and cleaned not in normalized:
             normalized.append(cleaned)
     return normalized
 
 
-def design_scope_paths(root: Path, version: str, module: str, submodule: str | None, change_ids: list[str]) -> list[str]:
-    design = root / "docs" / "versions" / version / "modules" / module
-    if submodule:
-        design = design / submodule
-    design = design / "design.md"
-    if not design.exists():
-        fail(f"missing design document for scope binding: {design}")
-    text = design.read_text(encoding="utf-8")
+def design_scope_paths(
+    root: Path,
+    version: str,
+    module: str,
+    submodule: str | None,
+    target_module: str,
+    change_ids: list[str],
+) -> list[str]:
+    if pipeline_no_stage_docs(root, version, module, submodule):
+        design = root / "docs" / "versions" / version / "modules" / module / str(submodule) / "pipeline" / "plan.md"
+        if not design.exists():
+            fail(f"missing task-local pipeline plan for auto-pipeline scope binding: {design}")
+        text = design.read_text(encoding="utf-8")
+        section = "Implementation Scope Bindings"
+    else:
+        design = root / "docs" / "versions" / version / "modules" / module
+        if submodule:
+            design = design / submodule
+        design = design / "design.md"
+        if not design.exists():
+            fail(f"missing design document for scope binding: {design}")
+        text = design.read_text(encoding="utf-8")
+        section = "Directly Mapped Change Items"
 
-    heading = re.search(r"(?m)^##\s+Directly Mapped Change Items\s*$", text)
+    heading = re.search(rf"(?m)^##\s+{re.escape(section)}\s*$", text)
     if not heading:
-        fail(f"{design} missing required section: ## Directly Mapped Change Items")
+        fail(f"{design} missing required section: ## {section}")
     lines = text[heading.end() :].splitlines()
     table_start = None
     for index, line in enumerate(lines):
@@ -235,7 +464,7 @@ def design_scope_paths(root: Path, version: str, module: str, submodule: str | N
             table_start = index
             break
     if table_start is None:
-        fail(f"{design} ## Directly Mapped Change Items missing required table")
+        fail(f"{design} ## {section} missing required table")
 
     headers = [normalize_column(cell) for cell in split_table_row(lines[table_start])]
     rows: list[dict[str, str]] = []
@@ -247,13 +476,27 @@ def design_scope_paths(root: Path, version: str, module: str, submodule: str | N
 
     scope_paths: list[str] = []
     for change_id in change_ids:
-        matches = [row for row in rows if row.get("change_id") == change_id]
+        matches = [
+            row
+            for row in rows
+            if row.get("change_id") == change_id
+            and row.get("target_module") == target_module
+        ]
         if not matches:
-            fail(f"change_id {change_id} missing from {design} ## Directly Mapped Change Items")
+            fail(
+                f"change_id {change_id} for target_module {target_module} "
+                f"missing from {design} ## {section}"
+            )
+        if len(matches) > 1:
+            fail(
+                f"change_id {change_id} for target_module {target_module} "
+                f"appears multiple times in {design} ## {section}"
+            )
         entries = parse_scope_paths(matches[0].get("scope_paths", ""))
         if not entries:
-            fail(f"change_id {change_id} has no parsable Scope Paths entries in {design}")
+            fail(f"change_id {change_id} has no parsable Scope Paths entries in {design} ## {section}")
         for entry in entries:
+            entry = canonical_repo_path(root, entry)
             if entry not in scope_paths:
                 scope_paths.append(entry)
     return scope_paths
@@ -263,23 +506,29 @@ def in_scope_paths(path: str, scope_paths: list[str]) -> bool:
     for entry in scope_paths:
         if path == entry or path.startswith(entry + "/"):
             return True
-        if fnmatch.fnmatch(path, entry):
-            return True
     return False
 
 
 def allowed_for_stage(path: str, stage: str, version: str | None, module: str | None, submodule: str | None = None) -> bool:
+    if is_stage_scope_evidence(path, version):
+        return True
+
     packet = active_packet(path, version, module, submodule)
     relative = packet[2] if packet is not None else ""
     leaf = relative.rsplit("/", 1)[-1]
 
     if stage == "proposal":
-        return packet is not None and leaf == "proposal.md"
+        return (packet is not None and leaf == "proposal.md") or is_task_index(path, version)
 
     if stage == "design":
         if packet is not None and (leaf == "design.md" or relative.startswith("design/")):
             return True
-        return is_module_boundary_sync(path, module)
+        return (
+            is_module_boundary_sync(path, module)
+            or is_architecture_doc(path)
+            or pipeline_artifact_path(path, "plan.md", version, module, submodule)
+            or pipeline_artifact_path(path, "state.json", version, module, submodule)
+        )
 
     if stage == "testing":
         if packet is not None and (
@@ -288,29 +537,32 @@ def allowed_for_stage(path: str, stage: str, version: str | None, module: str | 
             or relative.startswith("testing/")
         ):
             return True
-        return is_test_artifact(path)
+        return (
+            is_test_artifact(path)
+            or is_unified_test_entrypoint(path)
+            or is_test_run_artifact(path)
+            or pipeline_artifact_path(path, "state.json", version, module, submodule)
+        )
 
     if stage == "acceptance":
-        if packet is not None and leaf == "acceptance.md":
+        if packet is not None and leaf in {"acceptance.md", "acceptance-report.md"}:
             return True
-        return is_review_report(path)
+        return is_review_report(path) or pipeline_artifact_path(path, "state.json", version, module, submodule)
 
     if stage == "implementation":
-        if is_stage_doc_path(path) or is_review_report(path) or is_module_boundary_sync(path, module):
+        if pipeline_artifact_path(path, "state.json", version, module, submodule):
+            return True
+        if is_any_pipeline_artifact(path):
+            return False
+        if is_stage_doc_path(path) or is_review_report(path) or is_legacy_review_area(path) or is_module_boundary_sync(path, module) or is_architecture_doc(path):
             return False
         if is_test_artifact(path):
             return False
         if path == "AGENTS.md":
             return False
-        # Implementation may write only its own admission evidence inside
-        # harness/. The workspace-harness module is the narrow exception: it
-        # owns governance scripts, and admitted Scope Paths still bind exactly
-        # which harness files may change.
-        if (
-            path.startswith("harness/")
-            and not path.startswith("harness/evidence/")
-            and module != "workspace-harness"
-        ):
+        # Rules, scripts, checkers, and pipeline plans are
+        # governance surfaces that implementation tasks must not modify.
+        if path.startswith("harness/"):
             return False
         return True
 
@@ -324,15 +576,39 @@ def main() -> int:
     parser.add_argument("--version")
     parser.add_argument("--module")
     parser.add_argument("--submodule")
+    parser.add_argument("--target-module")
+    parser.add_argument(
+        "--changed-path",
+        action="append",
+        dest="changed_paths",
+        help="repo-relative path changed by this task; repeat for multiple paths",
+    )
+    parser.add_argument(
+        "--changed-paths-file",
+        action="append",
+        dest="changed_paths_files",
+        help=(
+            "per-task changed path manifest; line-based paths or JSON with "
+            "changed_paths/touched_paths/paths"
+        ),
+    )
+    parser.add_argument(
+        "--from-git",
+        action="store_true",
+        help="discover paths from git status/diff for diagnosis; not recommended as the task boundary",
+    )
     parser.add_argument(
         "--change-id",
         action="append",
         dest="change_ids",
-        help="implementation stage: bind the diff to these admitted change_id Scope Paths from design.md",
+        help="implementation stage: bind task paths to admitted change_id Scope Paths from design.md or no-doc auto-pipeline plan",
     )
     parser.add_argument("--base", help="compare committed changes from <base>...HEAD instead of the working tree")
     parser.add_argument("--ignore-untracked", action="store_true")
     args = parser.parse_args()
+
+    if (args.base or args.ignore_untracked) and not args.from_git:
+        fail("--base and --ignore-untracked apply only with --from-git")
 
     if args.stage in {"proposal", "design", "testing"} and not (args.version and args.module):
         fail(
@@ -344,19 +620,36 @@ def main() -> int:
     if args.stage == "implementation" and not args.change_ids:
         fail(
             "--version, --module, and --change-id are required for the implementation stage; "
-            "without them the diff cannot be bound to the admitted design Scope Paths"
+            "without them task paths cannot be bound to the admitted design Scope Paths"
         )
     if args.stage == "implementation" and not (args.version and args.module):
         fail("--version and --module are required for the implementation stage")
+    if args.stage == "implementation" and args.module == "globals":
+        if not args.target_module or args.target_module == "globals":
+            fail("--module globals requires a concrete --target-module")
+    elif args.stage == "implementation" and args.target_module and args.target_module != args.module:
+        fail("--target-module may differ from --module only when --module globals")
+    target_module = args.target_module or args.module
+    if args.stage == "implementation" and (
+        not target_module or not MODULE_NAME_RE.fullmatch(target_module)
+    ):
+        fail(f"invalid --target-module: {target_module}")
 
     root = Path(args.root)
     scope_paths: list[str] = []
     if args.stage == "implementation":
-        scope_paths = design_scope_paths(root, args.version, args.module, args.submodule, args.change_ids)
+        scope_paths = design_scope_paths(
+            root,
+            args.version,
+            args.module,
+            args.submodule,
+            target_module,
+            args.change_ids,
+        )
 
-    paths = changed_paths(root, args.base, include_untracked=not args.ignore_untracked)
+    paths = explicit_changed_paths(args, root)
     if not paths:
-        print("stage-scope-check: no changed files")
+        print("stage-scope-check: no task changed paths")
         return 0
 
     violations: list[str] = []
@@ -367,7 +660,8 @@ def main() -> int:
             continue
         if (
             args.stage == "implementation"
-            and not path.startswith("harness/evidence/")
+            and not is_version_evidence(path, args.version)
+            and not pipeline_artifact_path(path, "state.json", args.version, args.module, args.submodule)
             and not in_scope_paths(path, scope_paths)
         ):
             out_of_scope.append(path)
@@ -378,7 +672,7 @@ def main() -> int:
                 print(f"  - {path}", file=sys.stderr)
         if out_of_scope:
             print(
-                "stage-scope-check: changed paths outside the admitted design Scope Paths "
+                "stage-scope-check: task paths outside the admitted design Scope Paths "
                 f"({', '.join(scope_paths)}); extend design coverage or split the task",
                 file=sys.stderr,
             )
@@ -386,7 +680,7 @@ def main() -> int:
                 print(f"  - {path}", file=sys.stderr)
         raise SystemExit(1)
 
-    print(f"stage-scope-check: passed ({args.stage}, {len(paths)} changed path(s))")
+    print(f"stage-scope-check: passed ({args.stage}, {len(paths)} task path(s))")
     return 0
 
 

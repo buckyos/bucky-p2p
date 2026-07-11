@@ -1,6 +1,7 @@
 ---
 module: example-module
-submodule:
+task_name: 001-example-task
+submodule: 001-example-task
 version: v0.1
 status: draft
 approved_by:
@@ -17,15 +18,14 @@ approved_content_sha256:
 |----------|-------|-------|
 | none | no split testing docs yet | full module |
 
-<!-- If proposal/design splits a large module into direct submodules, mirror that split with submodule packets under this module directory, for example `<submodule>/testing.md` and `<submodule>/testplan.yaml`. Do not put independent submodule testing docs under `testing/<submodule>/`. Keep each human-authored testing doc under 1000 lines; split oversized docs and update this index. -->
+<!-- Keep testing artifacts in this task packet. If a task spans multiple project-level modules, use the globals task packet. Do not put a new task's testing docs under an older task's testing/<task-seq>-<task-slug>/ directory. Keep each human-authored testing doc under 1000 lines; split oversized docs and update this index. -->
 
 ## Unified Test Entry
-- Machine-readable plan: `docs/versions/<version>/modules/<module>/testplan.yaml`
-- Unit: `uv run --active python ./harness/scripts/test-run.py <module> unit`
-- DV: `uv run --active python ./harness/scripts/test-run.py <module> dv`
-- Integration: `uv run --active python ./harness/scripts/test-run.py <module> integration`
-- Module all: `uv run --active python ./harness/scripts/test-run.py <module> all`
-- Project all: `uv run --active python ./harness/scripts/test-run.py all all`
+- Machine-readable task plan: `docs/versions/<version>/modules/<module>/<task-name>/testplan.yaml`
+- Task all: `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
+- Canonical module level: `uv run --active python ./harness/scripts/test-run.py <module> unit|dv|integration`
+- Canonical module regression: `uv run --active python ./harness/scripts/test-run.py <module> all`
+- Canonical project regression: `uv run --active python ./harness/scripts/test-run.py all all`
 - Registration: every generated or changed automated test is reachable through the unified entrypoint.
 
 ## Submodule Tests
@@ -63,8 +63,8 @@ approved_content_sha256:
 <!-- Derive cases mechanically from design artifacts per `harness/rules/test-design-rules.md`. Every element_type row is required; use `not-applicable` only with a concrete reason naming the design evidence. -->
 | element_type | design_source | derived_cases | level | status | gap_manual_reason |
 |--------------|---------------|---------------|-------|--------|-------------------|
-| parameter-domain | design `## Interfaces and Dependencies` section / doc path | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
-| state-transition | design `## Data and State` state transitions | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
+| parameter-domain | design `## File-Level Interfaces` section / doc path | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
+| state-transition | design `## State and Ownership` state transitions | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
 | failure-path | design `## Key Call Flows` failure handling | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
 | error-handling | error categories in changed code | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
 | invariant | design `## Invariants to Preserve` | case ids or test names | unit / dv / integration | covered / gap / manual / disabled / not-applicable | reason if not covered |
@@ -103,8 +103,10 @@ approved_content_sha256:
 - [ ] `testplan.yaml` matches the declared test entrypoints
 - [ ] `testplan.yaml` exists for completed testing work, unless a repo-local versioned exception explicitly permits missing machine-readable test metadata and records reason, owner, risk, and acceptance impact
 - [ ] Generated tests are registered with `harness/scripts/test-run.py`
-- [ ] `uv run --active python ./harness/scripts/test-run.py <module> all` reaches this module's automated tests
-- [ ] `uv run --active python ./harness/scripts/test-run.py all all` reaches all project tests registered with the harness
+- [ ] New unit tests live in dedicated test files, test directories, or test-only crates/packages; no new inline test bodies were added to production source files
+- [ ] `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all` reaches only this task's plan
+- [ ] `uv run --active python ./harness/scripts/test-run.py <module> all` runs only this module's canonical `all` suite
+- [ ] `uv run --active python ./harness/scripts/test-run.py all all` runs each module's canonical `all` suite once without appending task plans
 - [ ] Module-level tests cover key boundary behavior and failure paths
 - [ ] External interfaces have contract-focused tests
 - [ ] Unit tests execute every conditional branch of changed code, or each uncovered branch has a per-branch gap reason
@@ -119,7 +121,7 @@ approved_content_sha256:
 - [ ] Relevant automated tests pass
 
 ## Approval Record
-<!-- Fill only when the user explicitly approves this document. Agents MUST NOT fill this section or set `status: approved` on their own initiative. `approver` must match front matter `approved_by`; `user_statement` must quote the user's approval instruction verbatim. The same edit must record front matter `approved_content_sha256` (generate via `schema-check.py --print-approval-hash <this-file>`); any later content edit invalidates the approval until re-approved. Auto-pipeline approvals use front matter plus `harness/pipeline-plan.md` launch evidence instead of this section. -->
+<!-- Fill only when the user explicitly approves this document. Agents MUST NOT fill this section or set `status: approved` on their own initiative. `approver` must match front matter `approved_by`; `user_statement` must quote the user's approval instruction verbatim. The same edit must record front matter `approved_content_sha256` (generate via `schema-check.py --print-approval-hash <this-file>`); any later content edit invalidates approved evidence and MUST NOT be repaired by refreshing the hash. Use a sibling amendment/fix task for approved-document corrections. Auto-pipeline approvals use front matter plus `pipeline/plan.md` launch evidence instead of this section. -->
 - approver:
 - approval_date:
 - user_statement: ""

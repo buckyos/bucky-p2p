@@ -9,7 +9,7 @@
   - 可选 `acceptance.md`
   - `docs/versions/<version>/reviews/` 下的验收报告
 - 机器可读：
-  - 可选 `testplan.yaml`
+  - 完成 testing 时必需的 `testplan.yaml`（除非版本化本地规则记录完整例外）
   - `python3 ./harness/scripts/test-run.py <module> <level>`
   - `python3 ./harness/scripts/test-run.py <module> all`
   - `python3 ./harness/scripts/test-run.py all all`
@@ -24,7 +24,7 @@
 ## 一致性规则
 - 当 `testing.md` 与 `testplan.yaml` 存在时，二者必须解释同一组验证面。
 - Acceptance 必须把实现与结果回溯到已批准的 proposal。
-- 任何必需文件缺失，或缺少必需元数据，模块数据包都视为不完整。
+- 任何必需文件缺失，或缺少必需元数据，当前任务数据包都视为不完整；旧模块级 packet 仅作为历史基线。
 
 ## 阶段门禁
 - 在 implementation 之前：

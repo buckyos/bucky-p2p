@@ -2,6 +2,7 @@ schema_version: 1
 # Optional post-implementation test metadata. Generate after production code exists.
 version: v0.1
 module: example-module
+task_name: 001-example-task
 submodule:
 defaults:
   workdir: .

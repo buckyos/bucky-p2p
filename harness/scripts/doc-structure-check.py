@@ -17,37 +17,25 @@ REQUIRED_SECTIONS = {
     "proposal.md": (
         "Background and Goal",
         "Scope",
-        "Assumptions and Ambiguities",
-        "Constraints",
-        "Requirement Challenge",
-        "Large Module Submodule Decision",
-        "Trigger Matrix",
-        "High-Level Outcomes",
+        "Requirement Review",
         "Proposal Items",
         "Success Criteria",
         "Risks",
-        "Downstream Follow-Up",
+        "Approval Record",
     ),
     "design.md": (
         "Design Scope",
+        "Useful Context",
         "Overall Approach",
-        "Simplicity Check",
-        "Current Structure",
-        "Invariants to Preserve",
-        "Submodules",
-        "Boundary Rationale",
-        "Boundary Decision Matrix",
-        "Dependency Graph",
-        "Key Call Flows",
-        "Large Module Submodule Decision",
-        "Trigger Matrix",
+        "Layered Design Document Index",
+        "Module Relationship UML",
+        "File-Level Interfaces",
+        "Key Flows",
+        "State and Ownership",
         "Directly Mapped Change Items",
         "Implementation Order",
-        "Key Decisions",
-        "Data and State",
-        "Testability",
-        "Interfaces and Dependencies",
-        "Document Index",
+        "File-Level Implementation Sequence",
+        "Design Notes",
         "Risks and Rollback",
     ),
     "testing.md": (
@@ -68,63 +56,38 @@ REQUIRED_SECTIONS = {
 }
 
 REQUIRED_TABLE_COLUMNS = {
-    ("proposal.md", "Proposal Items"): ("proposal_id", "change_id", "outcome", "success_evidence"),
-    ("proposal.md", "Requirement Challenge"): (
-        "question",
-        "evaluation",
-        "risk_or_tradeoff",
-        "decision",
-    ),
-    ("proposal.md", "Large Module Submodule Decision"): (
-        "submodule",
-        "new_or_existing",
-        "responsibility",
-        "proposal_packet",
-        "reason",
-    ),
-    ("proposal.md", "Trigger Matrix"): (
-        "trigger_category",
-        "applies",
-        "evidence",
-        "required_checks",
-        "deferred_checks_and_reason",
-    ),
-    ("design.md", "Submodules"): ("submodule", "type", "responsibility", "depends_on"),
-    ("design.md", "Boundary Decision Matrix"): (
+    ("proposal.md", "Proposal Items"): (
+        "proposal_id",
+        "change_id",
+        "requirement",
         "boundary",
-        "classification",
-        "business_responsibility",
-        "shared_logic_or_technical_area",
-        "decision",
-    ),
-    ("design.md", "Dependency Graph"): ("source", "depends_on", "reason", "cycle_check"),
-    ("design.md", "Key Call Flows"): (
-        "flow",
-        "caller",
-        "callee_submodule_path",
-        "purpose",
-        "failure_handling",
-    ),
-    ("design.md", "Large Module Submodule Decision"): (
-        "submodule",
-        "source_proposal",
-        "decision",
-        "design_packet",
-        "reason",
-    ),
-    ("design.md", "Trigger Matrix"): (
-        "trigger_category",
-        "applies",
-        "evidence",
-        "design_coverage",
-        "required_checks",
-        "deferred_checks_and_reason",
+        "tradeoff",
+        "success_evidence",
+        "non_goal",
     ),
     ("design.md", "Directly Mapped Change Items"): (
         "change_id",
+        "target_module",
         "proposal_id",
         "design_coverage",
         "scope_paths",
+    ),
+    ("design.md", "Implementation Order"): ("phase", "goal", "depends_on", "output"),
+    ("design.md", "Layered Design Document Index"): (
+        "level",
+        "parent_document",
+        "unit",
+        "design_document",
+        "responsibility",
+    ),
+    ("design.md", "File-Level Implementation Sequence"): (
+        "sequence",
+        "file_level_module",
+        "action",
+        "depends_on",
+        "change_id",
+        "scope_path",
+        "implementation_task",
     ),
     ("testing.md", "Direct Change Coverage"): (
         "change_id",
@@ -180,15 +143,6 @@ REQUIRED_TABLE_COLUMNS = {
     ),
 }
 
-TRIGGER_CATEGORIES = {
-    "contract/protocol",
-    "data/schema",
-    "security/privacy/permission",
-    "runtime/integration",
-    "build/dependency/config/deployment",
-    "ui/datamodel/workflow",
-    "harness/process",
-}
 CASE_TYPES = {"normal", "boundary", "negative", "error", "compatibility", "lifecycle", "cross-module"}
 TEST_LEVELS = {"unit", "dv", "integration"}
 DESIGN_ELEMENT_TYPES = {
@@ -206,7 +160,10 @@ SUBMODULE_TYPES = {"business", "shared", "technical", "assembly"}
 GRAB_BAG_SHARED_NAMES = {"common", "utils", "util", "misc", "helpers", "helper"}
 COMPATIBILITY_VALUES = {"new", "backward-compatible", "migration-required", "breaking"}
 NOT_APPLICABLE_RE = re.compile(r"(?i)^not-applicable\s*:\s*\S.*$")
-
+MERMAID_BLOCK_RE = re.compile(r"```mermaid\s+([\s\S]*?)```", re.IGNORECASE)
+CODE_BLOCK_RE = re.compile(r"```([A-Za-z0-9_+-]+)\s+([\s\S]*?)```", re.IGNORECASE)
+UML_EDGE_RE = re.compile(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s+[-.o*<|]+[-.]+[>.o*|]*\s+([A-Za-z_][A-Za-z0-9_.-]*)")
+HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
 
 def fail(message: str) -> None:
     print(f"doc-structure-check: {message}", file=sys.stderr)
@@ -240,6 +197,15 @@ def section_body(text: str, heading: str, path: Path) -> str:
     next_heading = re.search(r"(?m)^##\s+", text[match.end() :])
     end = match.end() + next_heading.start() if next_heading else len(text)
     return text[match.end() : end]
+
+
+
+def visible_section_body(text: str, heading: str, path: Path) -> str:
+    return HTML_COMMENT_RE.sub("", section_body(text, heading, path))
+
+
+def section_declares_not_applicable(body: str) -> bool:
+    return re.search(r"(?im)^\s*(?:[-*]\s*)?not-applicable\s*:\s*\S", body) is not None
 
 
 def table_after_heading(text: str, heading: str, path: Path) -> list[dict[str, str]]:
@@ -316,26 +282,77 @@ def check_tables(path: Path, text: str) -> None:
                     fail(f"{path} ## {heading} row {index} column {column} is empty placeholder content")
 
 
-def split_dependencies(value: str) -> list[str]:
-    if not non_empty(value):
-        return []
-    if value.strip().lower() in {"none", "no", "n/a", "na"}:
-        return []
-    parts = re.split(r"[,;/]+|\band\b", value)
-    return [part.strip().strip("`") for part in parts if non_empty(part)]
+def mermaid_blocks_for_section(text: str, heading: str, path: Path) -> list[str]:
+    body = section_body(text, heading, path)
+    return MERMAID_BLOCK_RE.findall(body)
 
 
-def check_dependency_graph(path: Path, text: str) -> None:
-    rows = table_after_heading(text, "Dependency Graph", path)
+FORBIDDEN_DESIGN_TEST_HEADINGS = {
+    "test cases",
+    "test plan",
+    "testing strategy",
+    "validation rationale",
+    "unit tests",
+    "dv tests",
+    "integration tests",
+    "test implementation",
+}
+FORBIDDEN_DESIGN_TEST_TERMS_RE = re.compile(r"(?i)\\b(testability seams?|validation ids?|test fixtures?|expected test results?)\\b")
+
+
+def check_design_has_no_test_design(path: Path, text: str) -> None:
+    for heading in re.findall(r"(?m)^##+\\s+(.+?)\\s*$", text):
+        normalized = heading.strip().lower()
+        if normalized in FORBIDDEN_DESIGN_TEST_HEADINGS:
+            fail(f"{path} design-stage documents must not define testing section: {heading}")
+    match = FORBIDDEN_DESIGN_TEST_TERMS_RE.search(HTML_COMMENT_RE.sub("", text))
+    if match:
+        fail(f"{path} design-stage documents must not define testing details: {match.group(1)}")
+
+
+def check_design_uml(path: Path, text: str) -> None:
+    body = visible_section_body(text, "Module Relationship UML", path)
+    if section_declares_not_applicable(body):
+        return
+    blocks = MERMAID_BLOCK_RE.findall(body)
+    if not blocks:
+        fail(f"{path} ## Module Relationship UML must include a Mermaid UML diagram or not-applicable reason")
+    if not any(re.search(r"(?m)^\s*classDiagram\b", block) for block in blocks):
+        fail(f"{path} ## Module Relationship UML must use a Mermaid classDiagram for module relationships")
+    check_uml_dependency_cycles(path, blocks)
+
+
+def check_key_flow_diagrams(path: Path, text: str) -> None:
+    body = visible_section_body(text, "Key Flows", path)
+    if section_declares_not_applicable(body):
+        return
+    blocks = MERMAID_BLOCK_RE.findall(body)
+    if not blocks:
+        fail(f"{path} ## Key Flows must include a sequenceDiagram for cross-boundary flows or not-applicable reason")
+    if not any(re.search(r"(?m)^\s*sequenceDiagram\b", block) for block in blocks):
+        fail(f"{path} ## Key Flows must use Mermaid sequenceDiagram when flows are described")
+
+
+def check_state_ownership(path: Path, text: str) -> None:
+    body = visible_section_body(text, "State and Ownership", path)
+    if section_declares_not_applicable(body):
+        return
+    if not re.search(r"(?im)^\s*-\s*Owner\s*:\s*\S", body):
+        fail(f"{path} ## State and Ownership must name the single owner or record not-applicable")
+    if re.search(r"(?i)state|lifecycle|transition", body):
+        blocks = MERMAID_BLOCK_RE.findall(body)
+        if blocks and not any(re.search(r"(?m)^\s*stateDiagram(?:-v2)?\b", block) for block in blocks):
+            fail(f"{path} ## State and Ownership lifecycle diagrams must use Mermaid stateDiagram-v2")
+
+
+def check_uml_dependency_cycles(path: Path, blocks: list[str]) -> None:
     graph: dict[str, set[str]] = {}
-    for row in rows:
-        source = row.get("source", "").strip().strip("`")
-        if not non_empty(source):
+    for block in blocks:
+        if not re.search(r"(?m)^\s*classDiagram\b", block):
             continue
-        graph.setdefault(source, set())
-        for dependency in split_dependencies(row.get("depends_on", "")):
-            graph[source].add(dependency)
-            graph.setdefault(dependency, set())
+        for source, target in UML_EDGE_RE.findall(block):
+            graph.setdefault(source, set()).add(target)
+            graph.setdefault(target, set())
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -346,7 +363,7 @@ def check_dependency_graph(path: Path, text: str) -> None:
             return
         if node in visiting:
             cycle = " -> ".join([*stack, node])
-            fail(f"{path} dependency graph contains a cycle: {cycle}")
+            fail(f"{path} ## Module Relationship UML contains a dependency cycle: {cycle}")
         visiting.add(node)
         stack.append(node)
         for dependency in sorted(graph.get(node, ())):
@@ -359,6 +376,24 @@ def check_dependency_graph(path: Path, text: str) -> None:
         visit(node)
 
 
+def check_file_level_interfaces(path: Path, text: str) -> None:
+    body = visible_section_body(text, "File-Level Interfaces", path)
+    if section_declares_not_applicable(body):
+        return
+    blocks = CODE_BLOCK_RE.findall(body)
+    source_blocks = [lang.lower() for lang, code in blocks if lang.lower() not in {"mermaid", "text", "txt", "plain", "markdown", "md"} and non_empty(code)]
+    if not source_blocks:
+        fail(f"{path} ## File-Level Interfaces must use fenced code blocks with the project language, or record not-applicable")
+    if not re.search(r"(?im)^\s*-\s*Consumer\s*:\s*\S", body):
+        fail(f"{path} ## File-Level Interfaces must name the consumer module or change_id")
+    compatibility = re.search(r"(?im)^\s*-\s*Compatibility\s*:\s*([^\n]+)", body)
+    if not compatibility:
+        fail(f"{path} ## File-Level Interfaces must record compatibility")
+    values = {part.strip().lower() for part in re.split(r"[/,]", compatibility.group(1))}
+    if not values & COMPATIBILITY_VALUES:
+        fail(f"{path} ## File-Level Interfaces compatibility must include one of: {', '.join(sorted(COMPATIBILITY_VALUES))}")
+
+
 def is_not_applicable(value: str) -> bool:
     return value.strip().lower().startswith("not-applicable")
 
@@ -368,162 +403,43 @@ def require_not_applicable_reason(path: Path, context: str, value: str) -> None:
         fail(f"{path} {context}: not-applicable entries need a concrete reason: `not-applicable: <reason>`")
 
 
-def check_submodule_layering(path: Path, text: str) -> None:
-    """Enforce submodule type vocabulary and dependency direction.
-
-    Dependencies flow business -> shared/technical; nothing depends on
-    assembly; a shared submodule needs >= 2 consumers in the graph.
-    """
-    types: dict[str, str] = {}
-    for index, row in enumerate(table_after_heading(text, "Submodules", path), start=1):
-        name = row.get("submodule", "").strip().strip("`")
-        if not non_empty(name):
-            continue
-        if is_not_applicable(name):
-            require_not_applicable_reason(path, f"## Submodules row {index}", name)
-            continue
-        type_value = row.get("type", "").strip().lower()
-        if type_value not in SUBMODULE_TYPES:
-            fail(
-                f"{path} ## Submodules row {index} type must be one of "
-                f"business/shared/technical/assembly: {type_value or '<empty>'}"
-            )
-        if type_value == "shared" and name.lower() in GRAB_BAG_SHARED_NAMES:
-            fail(
-                f"{path} ## Submodules row {index} shared submodule '{name}' is a grab-bag name; "
-                "name the single responsibility it owns"
-            )
-        types[name.lower()] = type_value
-
-    edges: list[tuple[str, str]] = []
-    for row in table_after_heading(text, "Dependency Graph", path):
-        source = row.get("source", "").strip().strip("`")
-        if not non_empty(source):
-            continue
-        for dependency in split_dependencies(row.get("depends_on", "")):
-            edges.append((source.lower(), dependency.lower()))
-
-    for source, target in edges:
-        source_type = types.get(source)
-        target_type = types.get(target)
-        if source_type in {"shared", "technical"} and target_type == "business":
-            fail(
-                f"{path} dependency direction violation: {source_type} submodule '{source}' depends on "
-                f"business submodule '{target}'; dependencies flow business -> shared/technical"
-            )
-        if target_type == "assembly":
-            fail(
-                f"{path} dependency direction violation: '{source}' depends on assembly submodule "
-                f"'{target}'; assembly is the composition root and nothing may depend on it"
-            )
-
-    consumers: dict[str, set[str]] = {}
-    for source, target in edges:
-        consumers.setdefault(target, set()).add(source)
-    for name, type_value in types.items():
-        if type_value != "shared":
-            continue
-        count = len(consumers.get(name, set()))
-        if count < 2:
-            fail(
-                f"{path} shared submodule '{name}' has {count} consumer(s) in the dependency graph; "
-                "a shared submodule needs >= 2 consumers (record external module consumers as edges) "
-                "or its logic belongs inside its single consumer"
-            )
-
-
-def check_exported_interfaces(path: Path, text: str) -> None:
-    rows = table_after_heading(text, "Interfaces and Dependencies", path)
-    required = ("interface", "consumer", "compatibility")
-    missing = [column for column in required if column not in set(rows[0])]
-    if missing:
-        fail(f"{path} exported-interface table missing columns: {', '.join(missing)}")
+def check_layered_design_index(path: Path, text: str) -> None:
+    rows = table_after_heading(text, "Layered Design Document Index", path)
     for index, row in enumerate(rows, start=1):
-        interface = row.get("interface", "").strip()
-        if is_not_applicable(interface):
-            require_not_applicable_reason(path, f"exported-interface row {index}", interface)
+        document = row.get("design_document", "").strip().strip("`")
+        level = row.get("level", "").strip()
+        if is_not_applicable(level):
+            require_not_applicable_reason(path, f"## Layered Design Document Index row {index}", level)
             continue
-        for column in required:
+        unit = row.get("unit", "").strip()
+        if is_not_applicable(document):
+            require_not_applicable_reason(path, f"## Layered Design Document Index row {index}", document)
+            continue
+        if document == "design.md":
+            continue
+        if not document.startswith("design/") or not document.endswith(".md"):
+            fail(f"{path} ## Layered Design Document Index row {index} must use design/<submodule>.md style path")
+        if not unit or unit.lower() in EMPTY_VALUES:
+            fail(f"{path} ## Layered Design Document Index row {index} must name the submodule or nested submodule")
+        child = path.parent / document
+        if not child.exists():
+            fail(f"{path} indexed child design document does not exist: {child}")
+
+
+def check_file_level_implementation_sequence(path: Path, text: str) -> None:
+    rows = table_after_heading(text, "File-Level Implementation Sequence", path)
+    for index, row in enumerate(rows, start=1):
+        module = row.get("file_level_module", "").strip()
+        sequence = row.get("sequence", "").strip()
+        if is_not_applicable(sequence):
+            require_not_applicable_reason(path, f"## File-Level Implementation Sequence row {index}", sequence)
+            continue
+        if is_not_applicable(module):
+            require_not_applicable_reason(path, f"## File-Level Implementation Sequence row {index}", module)
+            continue
+        for column in ("sequence", "file_level_module", "action", "change_id", "scope_path", "implementation_task"):
             if not non_empty(row.get(column, "")):
-                fail(f"{path} exported-interface row {index} column {column} is empty placeholder content")
-        compatibility = row.get("compatibility", "").strip().lower()
-        if compatibility not in COMPATIBILITY_VALUES:
-            fail(
-                f"{path} exported-interface row {index} compatibility must be one of: "
-                f"{', '.join(sorted(COMPATIBILITY_VALUES))}"
-            )
-        if compatibility in {"breaking", "migration-required"} and not non_empty(row.get("notes", "")):
-            fail(
-                f"{path} exported-interface row {index} {compatibility} change must list affected "
-                "callers and migration path in notes"
-            )
-
-
-def check_data_ownership(path: Path, text: str) -> None:
-    rows = table_after_heading(text, "Data and State", path)
-    required = ("data_or_state", "owner_submodule", "access_for_others", "state_transitions")
-    missing = [column for column in required if column not in set(rows[0])]
-    if missing:
-        fail(f"{path} ## Data and State missing columns: {', '.join(missing)}")
-    seen: dict[str, int] = {}
-    for index, row in enumerate(rows, start=1):
-        data = row.get("data_or_state", "").strip()
-        if is_not_applicable(data):
-            require_not_applicable_reason(path, f"## Data and State row {index}", data)
-            continue
-        for column in required:
-            if not non_empty(row.get(column, "")):
-                fail(f"{path} ## Data and State row {index} column {column} is empty placeholder content")
-        key = data.lower()
-        if key in seen:
-            fail(
-                f"{path} ## Data and State rows {seen[key]} and {index} both declare '{data}'; "
-                "every datum has exactly one owning submodule"
-            )
-        seen[key] = index
-
-
-def check_key_decisions(path: Path, text: str) -> None:
-    rows = table_after_heading(text, "Key Decisions", path)
-    required = ("decision", "chosen", "alternatives_considered", "rejection_reason")
-    missing = [column for column in required if column not in set(rows[0])]
-    if missing:
-        fail(f"{path} ## Key Decisions missing columns: {', '.join(missing)}")
-    for index, row in enumerate(rows, start=1):
-        for column in ("decision", "chosen", "alternatives_considered"):
-            if not non_empty(row.get(column, "")):
-                fail(f"{path} ## Key Decisions row {index} column {column} is empty placeholder content")
-        alternatives = row.get("alternatives_considered", "").strip()
-        if is_not_applicable(alternatives):
-            require_not_applicable_reason(path, f"## Key Decisions row {index}", alternatives)
-            continue
-        if not non_empty(row.get("rejection_reason", "")):
-            fail(f"{path} ## Key Decisions row {index} column rejection_reason is empty placeholder content")
-
-
-def check_trigger_matrix(path: Path, text: str) -> None:
-    if path.name not in {"proposal.md", "design.md"}:
-        return
-    rows = table_after_heading(text, "Trigger Matrix", path)
-    seen: set[str] = set()
-    for index, row in enumerate(rows, start=1):
-        category = row.get("trigger_category", "").strip().lower()
-        applies = row.get("applies", "").strip().lower()
-        seen.add(category)
-        if category not in TRIGGER_CATEGORIES:
-            fail(f"{path} ## Trigger Matrix row {index} has unknown trigger category: {category}")
-        if applies not in {"yes", "no"}:
-            fail(f"{path} ## Trigger Matrix row {index} Applies must be yes or no")
-        if not non_empty(row.get("evidence", "")):
-            fail(f"{path} ## Trigger Matrix row {index} must include evidence")
-        if applies == "yes" and not non_empty(row.get("required_checks", "")):
-            fail(f"{path} ## Trigger Matrix row {index} applies=yes requires checks")
-        deferred = row.get("deferred_checks_and_reason", "")
-        if non_empty(deferred) and not re.search(r"(?i)\b(owner|risk|acceptance)\b", deferred):
-            fail(f"{path} ## Trigger Matrix row {index} deferred checks must include owner, risk, or acceptance impact")
-    missing = sorted(TRIGGER_CATEGORIES - seen)
-    if missing:
-        fail(f"{path} ## Trigger Matrix missing categories: {', '.join(missing)}")
+                fail(f"{path} ## File-Level Implementation Sequence row {index} column {column} is empty placeholder content")
 
 
 def check_case_type_coverage(path: Path, text: str) -> None:
@@ -643,12 +559,13 @@ def check_doc(path: Path, max_lines: int) -> None:
     check_sections(path, text)
     check_tables(path, text)
     if path.name == "design.md":
-        check_dependency_graph(path, text)
-        check_submodule_layering(path, text)
-        check_exported_interfaces(path, text)
-        check_data_ownership(path, text)
-        check_key_decisions(path, text)
-    check_trigger_matrix(path, text)
+        check_design_uml(path, text)
+        check_file_level_interfaces(path, text)
+        check_key_flow_diagrams(path, text)
+        check_state_ownership(path, text)
+        check_design_has_no_test_design(path, text)
+        check_layered_design_index(path, text)
+        check_file_level_implementation_sequence(path, text)
     check_case_type_coverage(path, text)
     check_design_element_coverage(path, text)
     check_level_tables(path, text)
