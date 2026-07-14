@@ -1,4 +1,4 @@
-use crate::error::{P2pErrorCode, P2pResult};
+use crate::error::{P2pError, P2pErrorCode, P2pResult};
 use crate::networks::{Tunnel, TunnelPurpose, TunnelRef, TunnelStreamRead, TunnelStreamWrite};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -150,7 +150,7 @@ impl TtpRuntime {
                     tunnel.candidate_id()
                 );
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(Self::close_failed_attach(&tunnel, err)),
         }
 
         let control_stream_tunnel = tunnel.clone();
@@ -222,7 +222,7 @@ impl TtpRuntime {
                     tunnel.candidate_id()
                 );
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(Self::close_failed_attach(&tunnel, err)),
         }
 
         let datagram_tunnel = tunnel.clone();
@@ -293,7 +293,7 @@ impl TtpRuntime {
                     tunnel.candidate_id()
                 );
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(Self::close_failed_attach(&tunnel, err)),
         }
         log::debug!(
             "ttp attach tunnel completed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
@@ -304,6 +304,22 @@ impl TtpRuntime {
             tunnel.candidate_id()
         );
         Ok(())
+    }
+
+    fn close_failed_attach(tunnel: &TunnelRef, attach_err: P2pError) -> P2pError {
+        if let Err(close_err) = tunnel.close() {
+            log::warn!(
+                "ttp close attach-failed tunnel failed local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} attach_err={:?} close_err={:?}",
+                tunnel.local_id(),
+                tunnel.remote_id(),
+                tunnel.protocol(),
+                tunnel.tunnel_id(),
+                tunnel.candidate_id(),
+                attach_err,
+                close_err
+            );
+        }
+        attach_err
     }
 
     fn try_mark_attached(&self, tunnel: &TunnelRef) -> bool {

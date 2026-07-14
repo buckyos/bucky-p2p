@@ -2563,12 +2563,16 @@ mod tests {
             PnShared::new_local(local_identity),
             PnProxyStreamSecurityMode::Disabled,
         );
-        let remote = PnTunnel::new_active(
-            TunnelId::from(79),
-            TunnelCandidateId::from(79),
-            remote_id,
-            local_id,
-            PnShared::new_local(remote_identity),
+        let remote = PnTunnel::new_passive_control(
+            remote_id.clone(),
+            ProxyControlOpenReq {
+                tunnel_id: TunnelId::from(79),
+                from: local_id,
+                to: remote_id,
+            },
+            Some(PnShared::new_local(remote_identity)),
+            None,
+            None,
             PnProxyStreamSecurityMode::Disabled,
         );
         attach_control_pair(&local, &remote).await;

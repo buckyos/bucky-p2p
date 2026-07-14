@@ -265,6 +265,7 @@ impl QuicTunnelNetwork {
         remote_name: Option<String>,
         intent: TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
+        let bound_local = listener.bound_local()?;
         let connect_timeout = connect_timeout_for_intent(self.timeout, intent);
         if intent.udp_punch_enabled {
             listener.start_udp_punch_burst(*remote, intent, connect_timeout);
@@ -309,7 +310,7 @@ impl QuicTunnelNetwork {
                         log::trace!(
                             "quic tunnel connect early failure during udp punch window local_id={} local_ep={} remote={} remote_id={} retry_delay_ms={} code={:?} msg={}",
                             local_identity.get_id(),
-                            listener.bound_local(),
+                            bound_local,
                             remote,
                             remote_id,
                             delay.as_millis(),
@@ -322,7 +323,7 @@ impl QuicTunnelNetwork {
                     log::error!(
                         "quic tunnel connect failed local_id={} local_ep={} remote={} remote_id={} remote_name={:?} code={:?} msg={}",
                         local_identity.get_id(),
-                        listener.bound_local(),
+                        bound_local,
                         remote,
                         remote_id,
                         remote_name,
@@ -336,7 +337,7 @@ impl QuicTunnelNetwork {
         self.finish_connect(
             socket,
             local_identity,
-            listener.bound_local(),
+            bound_local,
             remote_id,
             remote_name,
             intent,
@@ -405,9 +406,15 @@ impl TunnelNetwork for QuicTunnelNetwork {
             .lock()
             .unwrap()
             .iter()
-            .map(|listener| TunnelListenerInfo {
-                local: listener.bound_local(),
-                mapping_port: listener.mapping_port(),
+            .filter_map(|listener| match listener.bound_local() {
+                Ok(local) => Some(TunnelListenerInfo {
+                    local,
+                    mapping_port: listener.mapping_port(),
+                }),
+                Err(err) => {
+                    log::debug!("skip unavailable quic listener info: {}", err);
+                    None
+                }
             })
             .collect()
     }
@@ -466,10 +473,15 @@ impl TunnelNetwork for QuicTunnelNetwork {
     ) -> P2pResult<TunnelRef> {
         let listeners = { self.listeners.lock().unwrap().clone() };
         for listener in listeners.iter() {
-            if (&listener.local() != local_ep && &listener.bound_local() != local_ep)
-                || !listener.local().is_same_ip_version(remote)
-            {
+            let configured_local = listener.local();
+            if !configured_local.is_same_ip_version(remote) {
                 continue;
+            }
+            if &configured_local != local_ep {
+                let bound_local = listener.bound_local()?;
+                if &bound_local != local_ep {
+                    continue;
+                }
             }
             return self
                 .open_or_connect(

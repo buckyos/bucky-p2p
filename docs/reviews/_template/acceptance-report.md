@@ -103,18 +103,20 @@
 - Implementation task paths bound to design Scope Paths (`stage-scope-check.py --stage implementation --change-id ... --changed-paths-file ...`):
 - Bugfix red-green regression evidence, when the reviewed work contains a bugfix:
 
-## Required Command Evidence
-- `uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`:
-- `uv run --active python ./harness/scripts/admission-check.py --verify-only --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md`:
-- `uv run --active python ./harness/scripts/stage-scope-check.py --stage <stage> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths`:
-- Relevant automated test command(s) through `harness/scripts/test-run.py`:
-- Task-relevant test run artifact(s) (cite `test-results/test-runs/<artifact>.json` paths written by those runs):
-- Whole-project command through `harness/scripts/test-run.py all all`, only when relevant:
-- Root shortcut command (`test-run.bat` or `./test-run.sh`), only when relevant:
-- Quality gates `uv run --active python ./harness/scripts/quality-check.py` (required when `harness/quality-gates.yaml` declares runnable gates; write `not relevant` only when it declares `gates: []` with a concrete `empty_reason`):
-- Quality run artifact (required when runnable quality gates are configured; cite `test-results/quality-runs/<artifact>.json`):
+## Validation Evidence
+- Existing schema result (cite the owning-stage result; do not rerun unchanged input):
+- Existing admission stamp (cite the stamp; do not run `--verify-only` during acceptance unless an admission-owned input changed):
+- Existing stage-scope result (cite the owning-stage result; do not rerun an unchanged manifest/scope):
+- Existing pipeline-plan result, when applicable (cite the latest result for current plan/state inputs):
+- Task-relevant test run artifact(s) (reuse when implementation/tests/testplan/registration are unchanged):
+- Commands rerun because checker-owned inputs changed after their previous pass (or `none` with evidence):
+- Direct package/module runtime suites, whole-project suites, and root shortcuts: not run; risk-triggered compile-only consumer closure appears only inside the task artifact
+- Risk-triggered task-local contract kinds and assertions, when applicable:
+- Scoped evidence input hash current, when risk-triggered:
+- Quality gates: not run automatically; cite only when explicitly requested by the user
+- Explicitly requested quality run artifact, if any:
 - Architecture doc check, only when `docs/architecture/` evidence is relevant:
-- Acceptance report check `uv run --active python ./harness/scripts/acceptance-report-check.py <report>`:
+- Acceptance report check after this report was created or modified:
 - Targeted migration search, only when applicable to the reviewed task:
 
 ## Automated Test Exception

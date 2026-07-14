@@ -4,7 +4,7 @@
 - 定义实现准入开放后，默认采用的开发者迭代循环。
 
 ## 前置条件
-- `python3 ./harness/scripts/check-implementation-admission.py <version> <packet-module> --submodule <task-name> --target-module <module> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md <change_id>` 校验通过
+- `python3 ./harness/scripts/check-implementation-admission.py <version> <packet-module> --submodule <task-name> --target-module <module> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md <change_id>` 校验通过；未改变其绑定输入时复用已有 admission stamp
 - 当前改动已经能映射到 proposal 与 design 中的直接条目
 - implementation 与 post-implementation testing 默认分阶段；只有用户显式授权跨阶段同步时才可在同一任务中处理两类制品，并记录该授权。
 

@@ -66,7 +66,7 @@ These rules apply to proposal, design, testing, implementation, and acceptance t
 ### Test Harness, Admission, or Process Rule Changes
 - Trigger when a change affects `harness/rules/`, `harness/custom-rules/`, `harness/process_rules/`, `harness/scripts/`, module templates, `AGENTS.md`, `testplan.yaml` schema, CI entrypoints, or acceptance report formats.
 - Required coverage: design MUST state the process behavior being changed; post-implementation testing MUST include at least one generated-scaffold or checker validation path.
-- Additional checks: run the affected checker or document why it cannot run, inspect generated path references, verify that new rules fail closed, and verify `harness/scripts/test-run.py all all` can still invoke all registered tests.
+- Additional checks: run each affected checker only when its owned inputs changed (or document why it cannot run), inspect generated path references, and verify that new rules fail closed. Do not trigger package/module tests, `all all`, root shortcuts, or quality gates merely because `harness/**` or `docs/**` changed.
 - Reviewer focus: contradictions between templates and rules, missing generated files, bypassable wording, and checks that pass without validating the intended condition.
 
 ## Stage Gates

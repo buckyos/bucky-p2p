@@ -18,6 +18,11 @@ authoritative boundary for this check: unrelated changes elsewhere in a dirty
 worktree are intentionally ignored. Whole-worktree git discovery remains
 available only through --from-git for local diagnosis and MUST NOT be used as
 single-task completion evidence.
+
+Rust source files at production paths receive one narrow testing-stage
+exception: a Git baseline comparison must prove that every change is confined
+to an exact #[cfg(test)] item that already existed in the baseline. The normal
+path policy remains fail-closed for every other production-path source file.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 MODULE_DOCS = {"proposal.md", "design.md", "testing.md", "testplan.yaml", "acceptance.md", "acceptance-report.md"}
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 MANIFEST_KEYS = ("changed_paths", "touched_paths", "paths")
+RUST_CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 
 
 def fail(message: str) -> None:
@@ -57,6 +63,24 @@ def git(args: list[str], root: Path) -> str:
     except subprocess.CalledProcessError as error:
         stderr = error.stderr.decode("utf-8", errors="replace").strip()
         fail(stderr or f"git {' '.join(args)} failed")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def git_optional(args: list[str], root: Path) -> str | None:
+    """Run a read-only git query and return None when the requested object is absent."""
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
     return result.stdout.decode("utf-8", errors="replace")
 
 
@@ -401,6 +425,163 @@ def is_test_artifact(path: str) -> bool:
     )
 
 
+def rust_lexical_mask(source: str) -> str:
+    """Mask Rust comments and literals while preserving character positions and braces."""
+    chars = list(source)
+    masked = list(source)
+
+    def blank(index: int) -> None:
+        if masked[index] not in {"\n", "\r"}:
+            masked[index] = " "
+
+    index = 0
+    block_depth = 0
+    while index < len(chars):
+        if block_depth:
+            if source.startswith("/*", index):
+                blank(index)
+                blank(index + 1)
+                block_depth += 1
+                index += 2
+            elif source.startswith("*/", index):
+                blank(index)
+                blank(index + 1)
+                block_depth -= 1
+                index += 2
+            else:
+                blank(index)
+                index += 1
+            continue
+
+        if source.startswith("//", index):
+            while index < len(chars) and chars[index] not in {"\n", "\r"}:
+                blank(index)
+                index += 1
+            continue
+        if source.startswith("/*", index):
+            blank(index)
+            blank(index + 1)
+            block_depth = 1
+            index += 2
+            continue
+
+        raw = re.match(r'(?:br|cr|r)(?P<hashes>#{0,255})"', source[index:])
+        if raw:
+            terminator = '"' + raw.group("hashes")
+            end = source.find(terminator, index + raw.end())
+            end = len(chars) if end < 0 else end + len(terminator)
+            while index < end:
+                blank(index)
+                index += 1
+            continue
+
+        prefix_length = (
+            2
+            if source.startswith(('b"', 'c"'), index)
+            else 1
+            if chars[index] == '"'
+            else 0
+        )
+        if prefix_length:
+            end = index + prefix_length
+            escaped = False
+            while end < len(chars):
+                char = chars[end]
+                end += 1
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    break
+            while index < end:
+                blank(index)
+                index += 1
+            continue
+
+        # Rust character/byte literals. Lifetimes such as 'a are deliberately
+        # left visible because they cannot contain structural braces.
+        char_match = re.match(r"(?:b)?'(?:\\.|[^'\\\r\n])'", source[index:])
+        if char_match:
+            end = index + char_match.end()
+            while index < end:
+                blank(index)
+                index += 1
+            continue
+        index += 1
+
+    return "".join(masked)
+
+
+def cfg_test_item_spans(source: str) -> list[tuple[int, int]]:
+    """Return outermost exact #[cfg(test)] item spans in Rust source."""
+    masked = rust_lexical_mask(source)
+    spans: list[tuple[int, int]] = []
+    for match in RUST_CFG_TEST_RE.finditer(masked):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        cursor = match.end()
+        opening = -1
+        while cursor < len(masked):
+            if masked[cursor] == "{":
+                opening = cursor
+                break
+            if masked[cursor] == ";":
+                opening = cursor
+                break
+            cursor += 1
+        if opening < 0:
+            continue
+        if masked[opening] == ";":
+            spans.append((match.start(), opening + 1))
+            continue
+        depth = 1
+        cursor = opening + 1
+        while cursor < len(masked) and depth:
+            if masked[cursor] == "{":
+                depth += 1
+            elif masked[cursor] == "}":
+                depth -= 1
+            cursor += 1
+        if depth == 0:
+            spans.append((match.start(), cursor))
+    return spans
+
+
+def rust_production_projection(source: str) -> tuple[str, int]:
+    """Replace each cfg(test) item with a stable marker for content comparison."""
+    spans = cfg_test_item_spans(source)
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(source[cursor:start])
+        pieces.append("#[cfg(test)]<existing-test-item>")
+        cursor = end
+    pieces.append(source[cursor:])
+    return "".join(pieces), len(spans)
+
+
+def rust_inline_test_only_change(root: Path, path: str, base: str | None) -> bool:
+    """Prove that a mixed Rust file changed only inside pre-existing cfg(test) items."""
+    if not path.endswith(".rs"):
+        return False
+    current_path = root / path
+    if not current_path.is_file():
+        return False
+    baseline = git_optional(["show", f"{base or 'HEAD'}:{path}"], root)
+    if baseline is None:
+        return False
+    current = current_path.read_text(encoding="utf-8")
+    if current == baseline:
+        # A manifest claims this path changed, so equality means HEAD was used
+        # after the task was committed. Refuse the self-comparison and require
+        # the task's recorded starting revision via --base.
+        return False
+    before_projection, before_count = rust_production_projection(baseline)
+    after_projection, after_count = rust_production_projection(current)
+    return before_count > 0 and before_count == after_count and before_projection == after_projection
+
+
 def normalize_column(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
@@ -603,12 +784,18 @@ def main() -> int:
         dest="change_ids",
         help="implementation stage: bind task paths to admitted change_id Scope Paths from design.md or no-doc auto-pipeline plan",
     )
-    parser.add_argument("--base", help="compare committed changes from <base>...HEAD instead of the working tree")
+    parser.add_argument(
+        "--base",
+        help=(
+            "git revision used as the testing-stage baseline for mixed Rust files; "
+            "with --from-git, also discover committed paths from <base>...HEAD"
+        ),
+    )
     parser.add_argument("--ignore-untracked", action="store_true")
     args = parser.parse_args()
 
-    if (args.base or args.ignore_untracked) and not args.from_git:
-        fail("--base and --ignore-untracked apply only with --from-git")
+    if args.ignore_untracked and not args.from_git:
+        fail("--ignore-untracked applies only with --from-git")
 
     if args.stage in {"proposal", "design", "testing"} and not (args.version and args.module):
         fail(
@@ -655,7 +842,14 @@ def main() -> int:
     violations: list[str] = []
     out_of_scope: list[str] = []
     for path in paths:
-        if not allowed_for_stage(path, args.stage, args.version, args.module, args.submodule):
+        path_allowed = allowed_for_stage(path, args.stage, args.version, args.module, args.submodule)
+        if (
+            not path_allowed
+            and args.stage == "testing"
+            and rust_inline_test_only_change(root, path, args.base)
+        ):
+            path_allowed = True
+        if not path_allowed:
             violations.append(path)
             continue
         if (

@@ -60,6 +60,18 @@ class ExampleStore:
 - Compatibility: new / backward-compatible / migration-required / breaking
 - Migration path when required:
 
+## API and Build Surface Impact
+- Public API impact: none / backward-compatible / migration-required / breaking
+- Crate-root export change: no
+- Build-surface change: no
+- Documentation examples affected: no
+
+## Consumer Migration Closure
+<!-- Required for breaking or migration-required APIs, crate-root export changes, and build-surface changes. Use one concrete repository-relative file per consumer row. `verified-none` is allowed only with a removed-symbol-scan contract check. Negative compile fixtures use `allowed-negative-fixture`; migration-required compatibility shims use `allowed-compatibility-shim`; breaking changes forbid compatibility shims; every other old-symbol consumer must be `migrated`. -->
+| Old Symbol | New Path | change_id | Consumer Path | Consumer Kind | Migration Status |
+|------------|----------|-----------|---------------|---------------|------------------|
+| `crate::OldType` | `crate::new::NewType` | CHG-example | `tests/api.rs` | test | migrated |
+
 ## Key Flows
 <!-- Use sequence diagrams for cross-module or cross-submodule runtime flows. Include failure, timeout, retry, idempotency, and partial-completion behavior only when those behaviors affect this change. For no cross-boundary flow, record `not-applicable: <reason>`. -->
 
@@ -129,6 +141,7 @@ stateDiagram-v2
 - Split by business responsibility first; shared or technical submodules exist only when they have a nameable responsibility and visible consumers.
 - File-level module interfaces must be shown as source-language signatures in fenced code blocks, not prose-only descriptions or generic tables.
 - Every exported interface must name a real consumer or mapped `change_id`, and must record compatibility as `new`, `backward-compatible`, `migration-required`, or `breaking`.
+- Breaking/migration-required APIs and crate-root/build-surface changes must record structured impact flags plus a file-level consumer migration closure. Directory-only, glob-only, or `all callers` entries are not consumer evidence.
 - Every persistent datum or shared state has exactly one owner; other modules access it through the owner's interface.
 - Include failure behavior only where it affects a boundary, state transition, compatibility promise, or acceptance risk.
 - Keep only useful design content. Remove placeholder sections, speculative extension points, idealized architecture, repeated proposal text, test planning, and low-level implementation detail that does not affect contracts, dependencies, state ownership, admission, or acceptance.

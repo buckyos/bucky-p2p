@@ -1,6 +1,6 @@
 {
   "//": "Example Claude Code hook wiring for a generated harness repository.",
-  "//install": "Merge the hooks block into the project's .claude/settings.json. The PreToolUse guard blocks production-code edits until admission-check.py has written a valid today-dated admission stamp under harness/evidence/admission/, and rejects edits outside the stamped design Scope Paths.",
+  "//install": "Merge the hooks block into the project's .claude/settings.json. The PreToolUse guard blocks production-code edits until admission-check.py has written a valid today-dated admission stamp under docs/versions/<version>/evidence/admission/, and rejects edits outside the stamped design Scope Paths.",
   "hooks": {
     "PreToolUse": [
       {

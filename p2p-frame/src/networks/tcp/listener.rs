@@ -6,7 +6,10 @@ use super::tunnel::{TcpIncomingControlDecision, TcpTunnel, TcpTunnelConnector};
 use crate::endpoint::Endpoint;
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
-use crate::networks::{IncomingTunnelCallback, Tunnel, TunnelForm, TunnelRef};
+use crate::networks::{
+    IncomingTunnelAcceptance, IncomingTunnelAcceptanceCallback, IncomingTunnelCallback, Tunnel,
+    TunnelForm, TunnelRef,
+};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef};
 use crate::runtime;
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
@@ -108,7 +111,7 @@ pub(crate) struct TcpTunnelListener {
     cert_factory: P2pIdentityCertFactoryRef,
     acceptor: crate::runtime::TlsAcceptor,
     state: Mutex<TcpTunnelListenerState>,
-    on_incoming_tunnel: IncomingTunnelCallback,
+    on_incoming_tunnel: IncomingTunnelAcceptanceCallback,
     closed: AtomicBool,
     registry: Arc<TcpTunnelRegistry>,
     timeout: Duration,
@@ -127,6 +130,35 @@ impl TcpTunnelListener {
         heartbeat_timeout: Duration,
         server_runtime: ServerRuntime,
         on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> Arc<Self> {
+        let callback: IncomingTunnelAcceptanceCallback = Arc::new(move |result| {
+            let on_incoming_tunnel = on_incoming_tunnel.clone();
+            Box::pin(async move {
+                on_incoming_tunnel(result).await;
+                IncomingTunnelAcceptance::Accepted
+            })
+        });
+        Self::new_with_acceptance(
+            cert_resolver,
+            cert_factory,
+            registry,
+            timeout,
+            heartbeat_interval,
+            heartbeat_timeout,
+            server_runtime,
+            callback,
+        )
+    }
+
+    pub(crate) fn new_with_acceptance(
+        cert_resolver: ServerCertResolverRef,
+        cert_factory: P2pIdentityCertFactoryRef,
+        registry: Arc<TcpTunnelRegistry>,
+        timeout: Duration,
+        heartbeat_interval: Duration,
+        heartbeat_timeout: Duration,
+        server_runtime: ServerRuntime,
+        on_incoming_tunnel: IncomingTunnelAcceptanceCallback,
     ) -> Arc<Self> {
         Arc::new(Self {
             acceptor: build_acceptor(cert_resolver.clone(), cert_factory.clone()),
@@ -244,7 +276,7 @@ impl TcpTunnelListener {
         &self,
         hello: TcpConnectionHello,
         connection: TcpTlsConnection,
-    ) -> P2pResult<Option<TunnelRef>> {
+    ) -> P2pResult<Option<Arc<TcpTunnel>>> {
         let local_identity = self
             .cert_resolver
             .get_server_identity(connection.local_name.as_str())
@@ -276,11 +308,7 @@ impl TcpTunnelListener {
         )
         .await?;
 
-        if let Some(tunnel) = &accepted {
-            self.registry
-                .register(tunnel.clone(), hello.tunnel_id, hello.candidate_id);
-        }
-        Ok(accepted.map(|t| t as TunnelRef))
+        Ok(accepted)
     }
 
     async fn on_data_connection(
@@ -308,14 +336,14 @@ impl TcpTunnelListener {
         tunnel.on_incoming_data_connection(hello, connection).await
     }
 
-    async fn deliver_incoming(&self, result: P2pResult<TunnelRef>) {
+    async fn deliver_incoming(&self, result: P2pResult<TunnelRef>) -> IncomingTunnelAcceptance {
         if self.closed.load(Ordering::SeqCst) {
             if let Ok(tunnel) = result {
                 let _ = tunnel.close();
             }
-            return;
+            return IncomingTunnelAcceptance::Rejected;
         }
-        (self.on_incoming_tunnel)(result).await;
+        (self.on_incoming_tunnel)(result).await
     }
 
     async fn handle_accepted_stream(self: Arc<Self>, stream: crate::runtime::TcpStream) {
@@ -329,13 +357,22 @@ impl TcpTunnelListener {
         {
             Ok((connection, hello)) => match hello.role {
                 TcpConnectionRole::Control => {
+                    let tunnel_id = hello.tunnel_id;
+                    let candidate_id = hello.candidate_id;
                     match self.on_control_connection(hello, connection).await {
                         Ok(Some(tunnel)) => {
-                            self.deliver_incoming(Ok(tunnel)).await;
+                            let accepted =
+                                self.deliver_incoming(Ok(tunnel.clone() as TunnelRef)).await;
+                            if accepted == IncomingTunnelAcceptance::Accepted
+                                && !self.closed.load(Ordering::SeqCst)
+                                && !tunnel.is_closed()
+                            {
+                                self.registry.register(tunnel, tunnel_id, candidate_id);
+                            }
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            self.deliver_incoming(Err(err)).await;
+                            let _ = self.deliver_incoming(Err(err)).await;
                         }
                     }
                 }

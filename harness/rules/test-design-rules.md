@@ -14,6 +14,7 @@
 ### Unit
 - Object: changed functions, methods, and branches; external dependencies are stubbed or mocked.
 - Placement: code inside an existing Rust `#[cfg(test)]` item is test code, but every newly created unit test MUST be implemented in a dedicated test file, test directory, or test-only crate/package rather than as a new inline test body in a production source file.
+- Mechanical scope: when testing changes an existing inline Rust test item, `stage-scope-check.py` compares the mixed file to `HEAD` or explicit `--base` and passes it only if all changes are confined to pre-existing exact `#[cfg(test)]` items. It fails closed for a missing baseline, a newly added inline item, or any production-content change.
 - MUST cover every public function touched by implemented `change_id` values and every conditional branch in changed code: if/else arms, match/switch arms, early returns, error returns, loop zero/one/many iterations, and boundary comparisons.
 - Uncovered branches MUST be recorded per branch with a concrete reason in `## Unit Tests`.
 - Not responsible for cross-module behavior, real external I/O, or full workflows.
@@ -30,6 +31,13 @@
 - MUST cover every consumed exported interface with at least one success case and one failure-semantics case, plus cross-module data flow and side-effect ordering for boundary-crossing key call flows.
 - Not responsible for re-proving logic already covered at unit or DV level.
 - Done when every consumed exported interface has success and failure coverage or recorded gaps.
+
+### API and Repository Consumer Contracts
+- These contract checks complement, and do not replace, unit/DV/integration levels.
+- Breaking public APIs require: new-path external compilation succeeds; old-path external compilation is rejected for the expected removed symbol; the repository scan has no unallowlisted old-symbol references; and all affected repository consumers compile.
+- Repository consumers include production references, tests, examples, benches, doctests, README/documentation compile fixtures, and downstream workspace packages identified by design.
+- A text scan is discovery/absence evidence, not a substitute for compiler closure. Aliases, re-exports, macros, feature combinations, and generated targets require compiler-backed checks where applicable.
+- The canonical removed-symbol absence check is `harness/scripts/consumer-closure-check.py`; ad hoc `rg`, shell-negated searches, or pasted search output are not acceptance evidence.
 
 ## Lowest-Level Placement
 - Verify behavior at the lowest level that can expose its failure: pure logic at `unit`, single-module runtime behavior at `dv`, cross-module contracts at `integration`.

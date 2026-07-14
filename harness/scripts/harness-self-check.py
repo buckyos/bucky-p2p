@@ -8,6 +8,7 @@ that the bootstrap kit expects every generated repository to contain.
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 from pathlib import Path
@@ -38,6 +39,7 @@ REQUIRED_SCRIPTS = (
     "doc-structure-check.py",
     "architecture-doc-check.py",
     "testing-coverage-check.py",
+    "consumer-closure-check.py",
     "acceptance-report-check.py",
     "pipeline-plan-check.py",
     "check-all.py",
@@ -87,6 +89,42 @@ def require_any(path: Path, patterns: tuple[str, ...], description: str) -> None
     text = read_text(path)
     if not any(pattern in text for pattern in patterns):
         fail(f"{path} missing required reference: {description}")
+
+
+def configured_module_suites(path: Path) -> dict[object, object]:
+    """Read the literal MODULE_SUITES registration without executing the runner."""
+    try:
+        tree = ast.parse(read_text(path), filename=str(path))
+    except SyntaxError as error:
+        fail(f"{path} is not valid Python: {error}")
+    for node in tree.body:
+        target = node.target if isinstance(node, ast.AnnAssign) else None
+        if isinstance(target, ast.Name) and target.id == "MODULE_SUITES":
+            try:
+                suites = ast.literal_eval(node.value)
+            except (ValueError, TypeError) as error:
+                fail(f"{path} MODULE_SUITES must be a literal mapping: {error}")
+            if not isinstance(suites, dict):
+                fail(f"{path} MODULE_SUITES must be a mapping")
+            return suites
+    fail(f"{path} does not define MODULE_SUITES")
+
+
+def require_configured_module_suites(path: Path) -> None:
+    suites = configured_module_suites(path)
+    if not suites:
+        fail(
+            f"{path} has no canonical MODULE_SUITES; adapt the template to "
+            "register each project module's explicit all suite"
+        )
+    for module, suite in suites.items():
+        if not isinstance(module, str) or not module:
+            fail(f"{path} has an invalid canonical module name: {module!r}")
+        if not isinstance(suite, dict):
+            fail(f"{path} module {module} suite must be a mapping")
+        all_commands = suite.get("all")
+        if not isinstance(all_commands, list) or not all_commands:
+            fail(f"{path} module {module} must define a non-empty canonical all suite")
 
 
 def check_root(root: Path) -> None:
@@ -163,6 +201,11 @@ def check_scripts(root: Path) -> None:
     require_contains(
         root / "test-run.sh",
         ("uv", ".venv", "uv run", "--active", "python", "harness/scripts/test-run.py"),
+    )
+    require_configured_module_suites(scripts_dir / "test-run.py")
+    require_contains(
+        scripts_dir / "test-run.py",
+        ("contract_steps_from_testplan", "contract_kind", "evidence_input_sha256"),
     )
 
 

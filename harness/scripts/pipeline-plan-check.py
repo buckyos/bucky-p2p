@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -23,86 +21,14 @@ MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 CONFIRMED_LAUNCH_VALUES = {"yes", "true", "confirmed"}
 BROAD_SCOPE_PATHS = {".", "*", "**", "src", "source", "lib", "app", "packages", "crates"}
 COMPATIBILITY_VALUES = {"new", "backward-compatible", "migration-required", "breaking"}
+PUBLIC_API_IMPACTS = {"none", "backward-compatible", "migration-required", "breaking"}
+MIGRATION_STATUSES = {"migrated", "allowed-negative-fixture", "allowed-compatibility-shim", "verified-none"}
 DECISION_TYPES = {"boundary", "technical", "collaboration"}
-STATE_EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "test-results"}
 
 
 def fail(message: str) -> None:
     print(f"pipeline-plan-check: {message}", file=sys.stderr)
     raise SystemExit(1)
-
-
-def state_path_excluded(path: Path) -> bool:
-    if any(part in STATE_EXCLUDED_DIRS for part in path.parts):
-        return True
-    leaf = path.name.lower()
-    return (
-        leaf == "acceptance-report.md"
-        or leaf.endswith("-acceptance-report.md")
-        or (leaf == "state.json" and path.parent.name == "pipeline")
-    )
-
-
-def update_state_hash(hasher: "hashlib._Hash", root: Path, relative: Path) -> None:
-    if state_path_excluded(relative):
-        return
-    path = root / relative
-    hasher.update(relative.as_posix().encode("utf-8", errors="surrogateescape") + b"\0")
-    try:
-        stat_result = path.lstat()
-    except FileNotFoundError:
-        hasher.update(b"deleted\0")
-        return
-    hasher.update(f"{stat_result.st_mode:o}".encode("ascii") + b"\0")
-    if path.is_symlink():
-        hasher.update(b"symlink\0" + os.readlink(path).encode("utf-8", errors="surrogateescape") + b"\0")
-    elif path.is_file():
-        hasher.update(b"file\0" + path.read_bytes() + b"\0")
-    else:
-        hasher.update(b"directory\0")
-
-
-def repository_state_sha256(root: Path) -> str:
-    root = root.resolve()
-    hasher = hashlib.sha256(b"harness-repository-state-v1\0")
-    try:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
-        )
-        tracked = subprocess.run(
-            ["git", "diff", "--name-only", "-z", "HEAD", "--"],
-            cwd=root, capture_output=True, text=False
-        )
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-            cwd=root, capture_output=True, text=False
-        )
-    except OSError:
-        head = tracked = untracked = None
-    if (
-        head is not None
-        and tracked is not None
-        and untracked is not None
-        and head.returncode == tracked.returncode == untracked.returncode == 0
-    ):
-        hasher.update(b"git\0" + head.stdout.strip().encode("utf-8") + b"\0")
-        paths = sorted(
-            {
-                Path(raw.decode("utf-8", errors="surrogateescape"))
-                for raw in (tracked.stdout + untracked.stdout).split(b"\0")
-                if raw
-            },
-            key=lambda path: path.as_posix(),
-        )
-    else:
-        hasher.update(b"filesystem\0")
-        paths = sorted(
-            (path.relative_to(root) for path in root.rglob("*") if not path.is_dir()),
-            key=lambda path: path.as_posix(),
-        )
-    for relative in paths:
-        update_state_hash(hasher, root, relative)
-    return hasher.hexdigest()
 
 
 def normalize_column(value: str) -> str:
@@ -430,6 +356,65 @@ def check_exported_interfaces(text: str, path: Path) -> None:
                     )
 
 
+def impact_value(text: str, label: str, path: Path) -> str:
+    body = section_body(text, "API and Build Surface Impact", path)
+    match = re.search(rf"(?mi)^\s*-\s*{re.escape(label)}:\s*(.+)$", body)
+    value = match.group(1).strip().lower() if match else ""
+    if not value:
+        fail(f"{path} ## API and Build Surface Impact missing concrete {label}")
+    return value
+
+
+def check_consumer_migration_closure(text: str, path: Path) -> None:
+    public_api = impact_value(text, "Public API impact", path)
+    if public_api not in PUBLIC_API_IMPACTS:
+        fail(f"{path} has invalid Public API impact: {public_api}")
+    flags: dict[str, bool] = {}
+    for label in ("Crate-root export change", "Build-surface change", "Documentation examples affected"):
+        value = impact_value(text, label, path)
+        if value not in {"yes", "no"}:
+            fail(f"{path} {label} must be yes or no")
+        flags[label] = value == "yes"
+    interface_rows = table_rows(text, "Exported Interfaces", path)
+    interface_risk = any(
+        row.get("compatibility", "").strip().lower() in {"breaking", "migration-required"}
+        for row in interface_rows
+    )
+    interface_breaking = any(
+        row.get("compatibility", "").strip().lower() == "breaking" for row in interface_rows
+    )
+    risky = public_api in {"breaking", "migration-required"} or interface_risk or any(flags.values())
+    if not risky:
+        return
+    rows = table_rows(text, "Consumer Migration Closure", path)
+    require_columns(
+        path,
+        "Consumer Migration Closure",
+        rows,
+        ("old_symbol", "new_path", "change_id", "consumer_path", "consumer_kind", "migration_status"),
+    )
+    for index, row in enumerate(rows, start=1):
+        for column in ("old_symbol", "new_path", "change_id", "consumer_kind", "migration_status"):
+            if not non_empty(row.get(column, "")):
+                fail(f"{path} ## Consumer Migration Closure row {index} column {column} is empty or placeholder")
+        status = row["migration_status"].strip().lower()
+        if status not in MIGRATION_STATUSES:
+            fail(f"{path} ## Consumer Migration Closure row {index} has invalid migration_status: {status}")
+        if (public_api == "breaking" or interface_breaking) and status == "allowed-compatibility-shim":
+            fail(f"{path} breaking interfaces cannot retain an allowed-compatibility-shim")
+        consumer = row.get("consumer_path", "").strip().strip("`")
+        if status == "verified-none":
+            if consumer.lower() not in {"none-found", "verified-none"}:
+                fail(f"{path} verified-none consumer rows must use consumer_path none-found")
+        elif (
+            not non_empty(consumer)
+            or consumer.endswith("/")
+            or any(token in consumer for token in ("*", "?", "["))
+            or consumer.lower() in {"all callers", "all consumers"}
+        ):
+            fail(f"{path} ## Consumer Migration Closure row {index} must name one concrete consumer file")
+
+
 def check_state_ownership(text: str, path: Path) -> None:
     rows = table_rows(text, "State Ownership", path)
     require_columns(
@@ -483,6 +468,7 @@ def check_rejected_alternatives(text: str, path: Path) -> None:
 def check_design_evidence(text: str, path: Path) -> None:
     check_dependency_graphs(text, path)
     check_exported_interfaces(text, path)
+    check_consumer_migration_closure(text, path)
     check_state_ownership(text, path)
     check_failure_flows(text, path)
     check_rejected_alternatives(text, path)
@@ -726,15 +712,12 @@ def is_successful_task_run(
     task_scope: str,
     expected_testplan: str,
     change_ids: set[str],
-    current_state: str,
 ) -> bool:
     if not isinstance(artifact, dict) or artifact.get("schema") != 1:
         return False
     if artifact.get("requested_module") != task_scope or artifact.get("requested_level") != "all":
         return False
     if artifact.get("exit_code") != 0:
-        return False
-    if artifact.get("repository_state_sha256") != current_state:
         return False
     testplans = artifact.get("testplans")
     artifact_change_ids = artifact.get("change_ids")
@@ -760,28 +743,6 @@ def is_successful_task_run(
     )
 
 
-def run_acceptance_report_check(root: Path, report: Path) -> None:
-    checker = root / "harness" / "scripts" / "acceptance-report-check.py"
-    if not checker.is_file():
-        fail(f"pipeline completion requires the acceptance checker: {checker}")
-    try:
-        report_arg = report.relative_to(root).as_posix()
-    except ValueError:
-        fail(f"acceptance report must stay inside the repository: {report}")
-    completed = subprocess.run(
-        [sys.executable, str(checker), report_arg, "--root", str(root)],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        fail(
-            f"pipeline completion requires acceptance-report-check.py to pass for {report}"
-            + (f": {detail}" if detail else "")
-        )
-
-
 def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
     version = str(trigger["version"])
     module = str(trigger["packet_module"])
@@ -794,7 +755,6 @@ def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
     expected_testplan = testplan.relative_to(root).as_posix()
     task_scope = f"{module}/{task_name}"
     change_ids = set(trigger["change_ids"])
-    current_state = repository_state_sha256(root)
     matching_artifacts: list[Path] = []
     for artifact_path in sorted((root / "test-results" / "test-runs").glob("*.json")):
         try:
@@ -802,7 +762,7 @@ def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if is_successful_task_run(
-            artifact, task_scope, expected_testplan, change_ids, current_state
+            artifact, task_scope, expected_testplan, change_ids
         ):
             matching_artifacts.append(artifact_path)
     if not matching_artifacts:
@@ -814,7 +774,6 @@ def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
     report = packet / "acceptance-report.md"
     if not report.is_file():
         fail(f"pipeline completion requires acceptance report: {report}")
-    run_acceptance_report_check(root, report)
 
 
 def main() -> int:

@@ -11,9 +11,14 @@
 - Acceptance 是对完整证据链的独立审计，与 implementation 分离。
 - Auto-pipeline 规则已安装但默认不启用；只有用户显式要求启动、进入或运行自动流水线时，启动语句才确认其绑定的 proposal，并授权后续 planning、design、implementation、post-implementation testing 和 acceptance。该模式不要求 proposal 审批元数据，且以任务本地 `pipeline/plan.md` / `pipeline/state.json` 代替持久化 `design.md` / `testing.md`。
 
+## Harness 规则启用
+- 所有 Harness 规则默认生效。
+- 只有当前用户显式要求“跳过全部 Harness 规则”时，才对用户指定的范围停用全部 Harness 规则；未指定范围时仅适用于当前任务。该 opt-out 在其他 Harness 规则之前判断，不得从紧急程度、一般性的继续执行请求或用户沉默中推断。
+- 该 opt-out 不覆盖 system/developer 指令、安全要求、用户仍然保留的范围约束或 Harness 之外的仓库约束。
+
 ## 规则优先级
 当规则冲突时按以下顺序处理（数字越小优先级越高）：
-1. 当前任务中的用户显式指令。用户可以选择阶段、模式和范围，但不能跳过机械门禁、审批来源、实现准入、阶段范围检查、验证或验收审计。
+1. 当前任务中的用户显式指令，包括上述明确的全部 Harness 规则 opt-out；未触发 opt-out 时，用户可以选择阶段、模式和范围，但不能以一般性指令隐式跳过机械门禁、审批来源、实现准入、阶段范围检查、验证或验收审计。
 2. 仅在用户显式启动 auto-pipeline 时，`harness/rules/auto-pipeline-rules.md` 对“不生成 `design.md` / `testing.md`”以及以已验证 pipeline plan 设计映射替代 `design.md` 准入证据拥有优先权；该窄例外不放松其他门禁。
 3. `harness/rules/task-entry-gate-rules.md`。
 4. 当前阶段对应的 `harness/rules/` 规则文件。
@@ -36,7 +41,7 @@
 | design | 手工流的 `design.md`、`design/`、必要边界同步；auto-pipeline 的任务本地 plan 映射 | 手工流运行 `doc-structure-check.py --docs design`；auto-pipeline 运行 `pipeline-plan-check.py`；再运行 design scope check |
 | implementation | 生产代码、必要非测试运行时/构建资源、版本级 admission evidence | 先运行 `schema-check.py` 与带 `--evidence-file` 的 `admission-check.py`；完成后运行带 `--target-module`、`--change-id` 和 manifest 的 implementation scope check |
 | testing | 测试代码、夹具、runner、统一入口 wiring、`testplan.yaml` 与 testing artifacts | `testing-coverage-check.py`；`test-run.py <module>/<task-name> all`；testing scope check；auto-pipeline 不生成 testing Markdown |
-| acceptance | 评审报告与可选 packet `acceptance.md` | 按 `acceptance-review-rules.md` 运行验收审计、`quality-check.py`，并用 `acceptance-report-check.py <report>` 校验报告 |
+| acceptance | 评审报告与可选 packet `acceptance.md` | 复用仍然有效的任务级证据，按 `acceptance-review-rules.md` 运行验收审计，并用 `acceptance-report-check.py <report>` 校验报告；不自动运行质量门禁或宽范围测试 |
 
 ## 任务读取顺序
 1. 先读本文件。
@@ -97,18 +102,19 @@
 - 结构准入检查：`python3 ./harness/scripts/schema-check.py --version v0.1 --module <module>`
 - 下一个任务序号：`python3 ./harness/scripts/task-seq.py next --version v0.1 --slug <task-slug>`
 - 准入文档哈希：`python3 ./harness/scripts/admission-check.py --version v0.1 --module <module> --print-doc-hashes`
-- 改动准入检查：`python3 ./harness/scripts/admission-check.py --version v0.1 --module <packet-module> --submodule <task-name> --target-module <module> --change-id <change_id> --evidence-file docs/versions/v0.1/evidence/admission/<task-id>.md`
-- 兼容准入入口：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <packet-module> --submodule <task-name> --target-module <module> --evidence-file docs/versions/v0.1/evidence/admission/<task-id>.md <change_id>`
+- 改动准入检查：`python3 ./harness/scripts/admission-check.py --version v0.1 --module <packet-module> --submodule <task-name> --target-module <module> --change-id <change_id> --evidence-file docs/versions/v0.1/evidence/admission/<evidence-id>.md`
+- 兼容准入入口：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <packet-module> --submodule <task-name> --target-module <module> --evidence-file docs/versions/v0.1/evidence/admission/<evidence-id>.md <change_id>`
 - 阶段范围检查：`python3 ./harness/scripts/stage-scope-check.py --stage <stage> --version v0.1 --module <packet-module> --changed-paths-file docs/versions/v0.1/evidence/stage-scope/<task-id>.paths`
 - Harness 自检：`python3 ./harness/scripts/harness-self-check.py`
 - 架构文档检查：`python3 ./harness/scripts/architecture-doc-check.py`
 - 文档结构检查：`python3 ./harness/scripts/doc-structure-check.py --version v0.1 --module <module> --docs <all|mandatory|proposal|design|testing>`
 - 测试覆盖检查：`python3 ./harness/scripts/testing-coverage-check.py --version v0.1 --module <module> [--change-id <id>]`
-- 质量门禁：`python3 ./harness/scripts/quality-check.py`
+- 消费者闭包检查：`python3 ./harness/scripts/consumer-closure-check.py --version v0.1 --module <module> --task-name <task-name>`
+- 质量门禁（仅用户显式要求时）：`python3 ./harness/scripts/quality-check.py`
 - 验收报告检查：`python3 ./harness/scripts/acceptance-report-check.py <report>`
 - 自动流水线计划检查：`python3 ./harness/scripts/pipeline-plan-check.py docs/versions/v0.1/modules/<project>/<task-name>/pipeline/plan.md`
 - 全量 harness 检查：`python3 ./harness/scripts/check-all.py`
-- 全量验证入口：`./test-run.sh all all` 或 `test-run.bat all all`
+- 全量验证入口（仅显式维护操作）：`./test-run.sh all all` 或 `test-run.bat all all`
 - 审批状态报告：`python3 ./harness/scripts/report-approval-status.py v0.1`
 
 ## 治理索引

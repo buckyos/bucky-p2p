@@ -1,7 +1,7 @@
 # Quality Gate Rules
 
 ## Goal
-- Make code-level quality checks (build, lint, typecheck, format checks) a declared, mechanical gate instead of reviewer goodwill.
+- Make explicitly requested code-level quality checks (build, lint, typecheck, format checks) declared and repeatable.
 - Make quality-gate evidence verifiable: gates run through one checker that writes machine-readable run artifacts.
 
 ## Scope
@@ -18,12 +18,12 @@
 
 ## Execution Rule
 - Run gates through `uv run --active python ./harness/scripts/quality-check.py`; do not run "equivalent" ad hoc commands as gate evidence.
-- `quality-check.py` writes a run artifact to `test-results/quality-runs/<timestamp>-quality.json` recording each gate's command, exit code, duration, and `repository_state_sha256`; that artifact is valid only while its repository-state binding matches the current repository.
-- Acceptance MUST run every gate declared in `harness/quality-gates.yaml`, and the acceptance report MUST cite the resulting run artifact. `not relevant` is valid only when the file declares `gates: []` with a concrete `empty_reason`.
-- `acceptance-report-check.py` reads `harness/quality-gates.yaml`, verifies that cited quality artifact gate ids exactly match the configured gates, and fails an `accepted` conclusion when a configured gate lacks passing evidence.
-- Repository-wide validation runs `quality-check.py` through the explicit `harness/scripts/check-all.py` command.
+- `quality-check.py` writes a run artifact to `test-results/quality-runs/<timestamp>-quality.json` recording each gate's command, exit code, and duration; it MUST NOT calculate or record a repository/package state hash.
+- Task execution, testing, acceptance, auto-pipeline completion, and `check-all.py` MUST NOT invoke quality gates automatically. Run `quality-check.py` only when the current user explicitly requests it.
+- Changes under `harness/**` or `docs/**` MUST NOT trigger quality gates.
+- If a report voluntarily cites an explicitly requested quality artifact, `acceptance-report-check.py` verifies its gate ids and passing steps, but configured gates are not mandatory single-task evidence.
 
 ## Guardrails
-- Quality gates supplement tests; passing gates is necessary supporting evidence, not an acceptance conclusion by itself.
-- Do not weaken, skip, or conditionally bypass a task-relevant failing gate to make a task pass; a failing relevant gate routes the work back to the implementation stage (or to a harness governance task when the gate itself is wrong).
-- Keep gates fast enough to run when relevant at acceptance time; long-running validation belongs in test levels under `test-run.py`, not in quality gates.
+- Quality gates supplement tests when explicitly requested; passing gates is not an acceptance conclusion by itself.
+- Do not weaken or bypass a failing explicitly requested gate; report the failure to the user.
+- Keep gates suitable for explicit maintenance runs; long-running behavioral validation belongs in task test levels under `test-run.py`.

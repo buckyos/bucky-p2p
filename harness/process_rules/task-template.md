@@ -39,13 +39,13 @@
 - [ ] Required upstream approvals exist
 - [ ] This task is operating inside its stage boundary
 - [ ] If this task modifies multiple stage artifact groups, the user explicitly requested those stages or cross-stage synchronization
-- [ ] For single-stage tasks, `stage-scope-check.py --stage <stage> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` passed for this task's recorded changed paths
+- [ ] For single-stage tasks, a current `stage-scope-check.py` result exists for this task's recorded changed paths; unchanged inputs were not replayed
 - [ ] If this is an implementation or bugfix task, active `version`, packet `module`, `target_module`, and `change_id` are explicit
 - [ ] If packet module is `globals`, admission and implementation scope checks use `--target-module <project>` independently for each affected project
 - [ ] If this targets a direct submodule packet, active `submodule` is explicit
-- [ ] If this is an implementation or bugfix task, `schema-check.py` passed for the active module packet
-- [ ] If this is an implementation or bugfix task, `docs/versions/<version>/evidence/admission/<task-id>.md` contains required admission evidence
-- [ ] If this is an implementation or bugfix task, `admission-check.py --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md` passed for every admitted `change_id`
+- [ ] If this is an implementation or bugfix task, a current schema result exists for the active packet; unchanged schema inputs were not rechecked
+- [ ] If this is an implementation or bugfix task, `docs/versions/<version>/evidence/admission/<evidence-id>.md` contains required admission evidence
+- [ ] If this is an implementation or bugfix task, a current admission stamp exists for every admitted `change_id`; unchanged admission inputs were not replayed
 - [ ] If this is an implementation or bugfix task in a direct submodule packet, both checks passed with `--submodule <submodule>`
 - [ ] If this is an implementation or bugfix task, the approved-doc inspection and task coverage judgment are recorded in the admission evidence file
 - [ ] If this is a cross-module implementation or bugfix task, every affected module passed admission independently
@@ -93,7 +93,7 @@
 ## Done Criteria
 - [ ] Goal is met
 - [ ] If this is a testing task, generated or changed tests are reachable through `harness/scripts/test-run.py`
-- [ ] Required validation ran
+- [ ] Required validation has a current passing result; unchanged inputs were not rerun
 - [ ] Stage scope check passed when applicable
 - [ ] Residual risks are recorded
 

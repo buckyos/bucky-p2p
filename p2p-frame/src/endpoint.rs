@@ -255,61 +255,47 @@ impl std::fmt::Display for Endpoint {
 impl FromStr for Endpoint {
     type Err = P2pError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let area = {
-            match &s[0..1] {
-                "W" => Ok(EndpointArea::Wan),
-                "M" => Ok(EndpointArea::Mapped),
-                "L" => Ok(EndpointArea::Lan),
-                "S" => Ok(EndpointArea::ServerReflexive),
-                _ => Err(P2pError::new(
-                    P2pErrorCode::InvalidInput,
-                    format!("invalid endpoint string {}", s),
-                )),
-            }
-        }?;
-        let version_str = &s[1..2];
+        let invalid_input = || {
+            P2pError::new(
+                P2pErrorCode::InvalidInput,
+                format!("invalid endpoint string {}", s),
+            )
+        };
+        let prefix = s
+            .as_bytes()
+            .get(..5)
+            .filter(|prefix| prefix.is_ascii())
+            .ok_or_else(&invalid_input)?;
 
-        let protocol = {
-            let protocol_str = &s[2..5];
-            if protocol_str == "tcp" {
-                Ok(Protocol::Tcp)
-            } else if protocol_str == "udp" {
-                Ok(Protocol::Quic)
-            } else if protocol_str == "qic" {
-                Ok(Protocol::Quic)
-            } else if protocol_str.starts_with("e") {
-                let n = u8::from_str(&protocol_str[1..]).map_err(|_| {
-                    P2pError::new(
-                        P2pErrorCode::InvalidInput,
-                        format!("invalid endpoint string {}", s),
-                    )
-                })?;
+        let area = match prefix[0] {
+            b'W' => EndpointArea::Wan,
+            b'M' => EndpointArea::Mapped,
+            b'L' => EndpointArea::Lan,
+            b'S' => EndpointArea::ServerReflexive,
+            _ => return Err(invalid_input()),
+        };
+        let version = prefix[1];
+
+        let protocol = match (prefix[2], prefix[3], prefix[4]) {
+            (b't', b'c', b'p') => Protocol::Tcp,
+            (b'u', b'd', b'p') | (b'q', b'i', b'c') => Protocol::Quic,
+            (b'e', tens @ b'0'..=b'9', ones @ b'0'..=b'9') => {
+                let n = (tens - b'0') * 10 + (ones - b'0');
                 if n < 8 || n >= 16 {
                     return Err(P2pError::new(
                         P2pErrorCode::InvalidInput,
                         "extend protocol must >= 8 and < 16".to_string(),
                     ));
                 }
-                Ok(Protocol::Ext(n))
-            } else {
-                Err(P2pError::new(
-                    P2pErrorCode::InvalidInput,
-                    format!("invalid endpoint string {}", s),
-                ))
+                Protocol::Ext(n)
             }
-        }?;
+            _ => return Err(invalid_input()),
+        };
 
-        let addr = SocketAddr::from_str(&s[5..]).map_err(|_| {
-            P2pError::new(
-                P2pErrorCode::InvalidInput,
-                format!("invalid endpoint string {}", s),
-            )
-        })?;
-        if !(addr.is_ipv4() && version_str.eq("4") || addr.is_ipv6() && version_str.eq("6")) {
-            return Err(P2pError::new(
-                P2pErrorCode::InvalidInput,
-                format!("invalid endpoint string {}", s),
-            ));
+        let addr = SocketAddr::from_str(s.get(5..).ok_or_else(&invalid_input)?)
+            .map_err(|_| invalid_input())?;
+        if !(addr.is_ipv4() && version == b'4' || addr.is_ipv6() && version == b'6') {
+            return Err(invalid_input());
         }
         Ok(Endpoint {
             area,

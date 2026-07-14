@@ -58,6 +58,18 @@ impl TunnelConnectIntent {
 pub type IncomingTunnelCallback =
     Arc<dyn Fn(P2pResult<TunnelRef>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IncomingTunnelAcceptance {
+    Accepted,
+    Rejected,
+}
+
+pub type IncomingTunnelAcceptanceCallback = Arc<
+    dyn Fn(P2pResult<TunnelRef>) -> Pin<Box<dyn Future<Output = IncomingTunnelAcceptance> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[async_trait::async_trait]
 pub trait TunnelNetwork: Send + Sync + 'static {
     fn protocol(&self) -> Protocol;
@@ -71,6 +83,22 @@ pub trait TunnelNetwork: Send + Sync + 'static {
         mapping_port: Option<u16>,
         on_incoming_tunnel: IncomingTunnelCallback,
     ) -> P2pResult<()>;
+
+    async fn listen_with_acceptance(
+        &self,
+        local: &Endpoint,
+        out: Option<Endpoint>,
+        mapping_port: Option<u16>,
+        on_incoming_tunnel: IncomingTunnelAcceptanceCallback,
+    ) -> P2pResult<()> {
+        let callback: IncomingTunnelCallback = Arc::new(move |result| {
+            let on_incoming_tunnel = on_incoming_tunnel.clone();
+            Box::pin(async move {
+                let _ = on_incoming_tunnel(result).await;
+            })
+        });
+        self.listen(local, out, mapping_port, callback).await
+    }
 
     async fn close_all_listener(&self) -> P2pResult<()>;
     fn listener_infos(&self) -> Vec<TunnelListenerInfo>;

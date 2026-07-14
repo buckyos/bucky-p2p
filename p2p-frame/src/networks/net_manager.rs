@@ -9,20 +9,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::{
-    IncomingTunnelCallback, IncomingTunnelValidateContext, IncomingTunnelValidatorRef,
-    TunnelListenerInfo, TunnelNetworkRef, ValidateResult, allow_all_incoming_tunnel_validator,
+    IncomingTunnelAcceptance, IncomingTunnelAcceptanceCallback, IncomingTunnelCallback,
+    IncomingTunnelValidateContext, IncomingTunnelValidatorRef, TunnelListenerInfo,
+    TunnelNetworkRef, ValidateResult, allow_all_incoming_tunnel_validator,
 };
 
 pub type IncomingTunnelSubscriber = Arc<
     dyn Fn(P2pResult<super::TunnelRef>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
 >;
 
+pub type IncomingTunnelAcceptanceSubscriber = Arc<
+    dyn Fn(
+            P2pResult<super::TunnelRef>,
+        ) -> Pin<Box<dyn Future<Output = IncomingTunnelAcceptance> + Send>>
+        + Send
+        + Sync,
+>;
+
+enum IncomingTunnelSubscription {
+    Legacy(IncomingTunnelSubscriber),
+    Acceptance(IncomingTunnelAcceptanceSubscriber),
+}
+
 pub struct NetManager {
     cert_resolver: ServerCertResolverRef,
     incoming_tunnel_validator: IncomingTunnelValidatorRef,
     tunnel_networks: HashMap<Protocol, TunnelNetworkRef>,
     listener_meta: Mutex<HashMap<Protocol, Vec<TunnelListenerInfo>>>,
-    subscriptions: RwLock<HashMap<P2pId, IncomingTunnelSubscriber>>,
+    subscriptions: RwLock<HashMap<P2pId, IncomingTunnelSubscription>>,
     is_listening: AtomicBool,
 }
 
@@ -114,9 +128,9 @@ impl NetManager {
             let network = self
                 .get_network(local.protocol())
                 .map_err(|_| p2p_err!(P2pErrorCode::NotFound, "network not found: {}", local))?;
-            let on_incoming_tunnel = self.incoming_tunnel_callback();
+            let on_incoming_tunnel = self.incoming_tunnel_acceptance_callback();
             network
-                .listen(&local, out, mapping_port, on_incoming_tunnel)
+                .listen_with_acceptance(&local, out, mapping_port, on_incoming_tunnel)
                 .await?;
         }
 
@@ -167,6 +181,16 @@ impl NetManager {
         })
     }
 
+    pub fn incoming_tunnel_acceptance_callback(
+        self: &Arc<Self>,
+    ) -> IncomingTunnelAcceptanceCallback {
+        let manager = self.clone();
+        Arc::new(move |result| {
+            let manager = manager.clone();
+            Box::pin(async move { manager.dispatch_tunnel_result(result).await })
+        })
+    }
+
     pub async fn add_listen_device(&self, device: P2pIdentityRef) -> P2pResult<()> {
         self.cert_resolver.add_server_identity(device).await
     }
@@ -193,7 +217,28 @@ impl NetManager {
             ));
         }
         log::debug!("register incoming tunnel subscriber local_id={}", local_id);
-        subscriptions.insert(local_id, callback);
+        subscriptions.insert(local_id, IncomingTunnelSubscription::Legacy(callback));
+        Ok(())
+    }
+
+    pub fn register_incoming_tunnel_acceptance_subscriber(
+        &self,
+        local_id: P2pId,
+        callback: IncomingTunnelAcceptanceSubscriber,
+    ) -> P2pResult<()> {
+        let mut subscriptions = self.subscriptions.write().unwrap();
+        if subscriptions.contains_key(&local_id) {
+            return Err(p2p_err!(
+                P2pErrorCode::AlreadyExists,
+                "tunnel acceptor already exists for {}",
+                local_id
+            ));
+        }
+        log::debug!(
+            "register acceptance-aware incoming tunnel subscriber local_id={}",
+            local_id
+        );
+        subscriptions.insert(local_id, IncomingTunnelSubscription::Acceptance(callback));
         Ok(())
     }
 
@@ -213,14 +258,20 @@ impl NetManager {
         }
     }
 
-    async fn dispatch_tunnel_result(&self, result: P2pResult<super::TunnelRef>) {
+    async fn dispatch_tunnel_result(
+        &self,
+        result: P2pResult<super::TunnelRef>,
+    ) -> IncomingTunnelAcceptance {
         match result {
             Ok(tunnel) => self.dispatch_tunnel(tunnel).await,
-            Err(err) => log::warn!("accept tunnel failed: {:?}", err),
+            Err(err) => {
+                log::warn!("accept tunnel failed: {:?}", err);
+                IncomingTunnelAcceptance::Rejected
+            }
         }
     }
 
-    async fn dispatch_tunnel(&self, tunnel: super::TunnelRef) {
+    async fn dispatch_tunnel(&self, tunnel: super::TunnelRef) -> IncomingTunnelAcceptance {
         let ctx = Self::build_validate_context(&tunnel);
         log::debug!(
             "dispatch incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?} reverse={} local_ep={:?} remote_ep={:?}",
@@ -246,6 +297,7 @@ impl NetManager {
                     reason
                 );
                 self.close_tunnel(tunnel).await;
+                IncomingTunnelAcceptance::Rejected
             }
             Err(err) => {
                 log::error!(
@@ -259,6 +311,7 @@ impl NetManager {
                     err.msg()
                 );
                 self.close_tunnel(tunnel).await;
+                IncomingTunnelAcceptance::Rejected
             }
         }
     }
@@ -276,8 +329,30 @@ impl NetManager {
         }
     }
 
-    async fn publish_tunnel(&self, local_id: P2pId, tunnel: super::TunnelRef) {
-        let subscriber = { self.subscriptions.read().unwrap().get(&local_id).cloned() };
+    async fn publish_tunnel(
+        &self,
+        local_id: P2pId,
+        tunnel: super::TunnelRef,
+    ) -> IncomingTunnelAcceptance {
+        enum SelectedSubscriber {
+            Legacy(IncomingTunnelSubscriber),
+            Acceptance(IncomingTunnelAcceptanceSubscriber),
+        }
+
+        let subscriber = {
+            self.subscriptions
+                .read()
+                .unwrap()
+                .get(&local_id)
+                .map(|subscriber| match subscriber {
+                    IncomingTunnelSubscription::Legacy(callback) => {
+                        SelectedSubscriber::Legacy(callback.clone())
+                    }
+                    IncomingTunnelSubscription::Acceptance(callback) => {
+                        SelectedSubscriber::Acceptance(callback.clone())
+                    }
+                })
+        };
         if let Some(subscriber) = subscriber {
             log::debug!(
                 "publish incoming tunnel local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
@@ -287,18 +362,32 @@ impl NetManager {
                 tunnel.tunnel_id(),
                 tunnel.candidate_id()
             );
-            if !subscriber(Ok(tunnel)).await {
-                log::warn!(
-                    "publish incoming tunnel failed because subscriber closed local={}",
-                    local_id
-                );
-                let mut subscriptions = self.subscriptions.write().unwrap();
-                if let Some(current) = subscriptions.get(&local_id) {
-                    if Arc::ptr_eq(current, &subscriber) {
-                        subscriptions.remove(&local_id);
+            let accepted = match subscriber {
+                SelectedSubscriber::Legacy(subscriber) => {
+                    if subscriber(Ok(tunnel.clone())).await {
+                        IncomingTunnelAcceptance::Accepted
+                    } else {
+                        log::warn!(
+                            "publish incoming tunnel failed because subscriber closed local={}",
+                            local_id
+                        );
+                        let mut subscriptions = self.subscriptions.write().unwrap();
+                        if matches!(
+                            subscriptions.get(&local_id),
+                            Some(IncomingTunnelSubscription::Legacy(current))
+                                if Arc::ptr_eq(current, &subscriber)
+                        ) {
+                            subscriptions.remove(&local_id);
+                        }
+                        IncomingTunnelAcceptance::Rejected
                     }
                 }
+                SelectedSubscriber::Acceptance(subscriber) => subscriber(Ok(tunnel.clone())).await,
+            };
+            if accepted == IncomingTunnelAcceptance::Rejected {
+                self.close_tunnel(tunnel).await;
             }
+            accepted
         } else {
             log::warn!(
                 "drop incoming tunnel because no subscriber local={} remote={} protocol={:?} tunnel_id={:?} candidate_id={:?}",
@@ -308,6 +397,8 @@ impl NetManager {
                 tunnel.tunnel_id(),
                 tunnel.candidate_id()
             );
+            self.close_tunnel(tunnel).await;
+            IncomingTunnelAcceptance::Rejected
         }
     }
 
@@ -344,6 +435,15 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     const TEST_CHANNEL_CAPACITY: usize = 8;
+
+    mod post_accept_tests {
+        include!("../../tests/net_manager/net_manager_post_accept_tests.rs");
+    }
+
+    #[cfg(feature = "x509")]
+    mod tcp_post_accept_registry_tests {
+        include!("../../tests/net_manager/net_manager_tcp_post_accept_tests.rs");
+    }
 
     enum TestDecision {
         Accept,

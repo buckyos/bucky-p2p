@@ -159,6 +159,8 @@ LEVEL_TABLE_HEADINGS = ("Unit Tests", "DV Tests", "Integration Tests")
 SUBMODULE_TYPES = {"business", "shared", "technical", "assembly"}
 GRAB_BAG_SHARED_NAMES = {"common", "utils", "util", "misc", "helpers", "helper"}
 COMPATIBILITY_VALUES = {"new", "backward-compatible", "migration-required", "breaking"}
+PUBLIC_API_IMPACTS = {"none", "backward-compatible", "migration-required", "breaking"}
+MIGRATION_STATUSES = {"migrated", "allowed-negative-fixture", "allowed-compatibility-shim", "verified-none"}
 NOT_APPLICABLE_RE = re.compile(r"(?i)^not-applicable\s*:\s*\S.*$")
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s+([\s\S]*?)```", re.IGNORECASE)
 CODE_BLOCK_RE = re.compile(r"```([A-Za-z0-9_+-]+)\s+([\s\S]*?)```", re.IGNORECASE)
@@ -378,20 +380,59 @@ def check_uml_dependency_cycles(path: Path, blocks: list[str]) -> None:
 
 def check_file_level_interfaces(path: Path, text: str) -> None:
     body = visible_section_body(text, "File-Level Interfaces", path)
-    if section_declares_not_applicable(body):
+    values: set[str] = set()
+    if not section_declares_not_applicable(body):
+        blocks = CODE_BLOCK_RE.findall(body)
+        source_blocks = [lang.lower() for lang, code in blocks if lang.lower() not in {"mermaid", "text", "txt", "plain", "markdown", "md"} and non_empty(code)]
+        if not source_blocks:
+            fail(f"{path} ## File-Level Interfaces must use fenced code blocks with the project language, or record not-applicable")
+        if not re.search(r"(?im)^\s*-\s*Consumer\s*:\s*\S", body):
+            fail(f"{path} ## File-Level Interfaces must name the consumer module or change_id")
+        compatibility = re.search(r"(?im)^\s*-\s*Compatibility\s*:\s*([^\n]+)", body)
+        if not compatibility:
+            fail(f"{path} ## File-Level Interfaces must record compatibility")
+        values = {part.strip().lower() for part in re.split(r"[/,]", compatibility.group(1))}
+        if not values & COMPATIBILITY_VALUES:
+            fail(f"{path} ## File-Level Interfaces compatibility must include one of: {', '.join(sorted(COMPATIBILITY_VALUES))}")
+    impact_body = visible_section_body(text, "API and Build Surface Impact", path)
+    impact_match = re.search(r"(?im)^\s*-\s*Public API impact\s*:\s*([^\n]+)", impact_body)
+    public_api = impact_match.group(1).strip().lower() if impact_match else ""
+    if public_api not in PUBLIC_API_IMPACTS:
+        fail(f"{path} ## API and Build Surface Impact has invalid Public API impact: {public_api or '<missing>'}")
+    flags: list[bool] = []
+    for label in ("Crate-root export change", "Build-surface change", "Documentation examples affected"):
+        match = re.search(rf"(?im)^\s*-\s*{re.escape(label)}\s*:\s*(yes|no)\s*$", impact_body)
+        if not match:
+            fail(f"{path} ## API and Build Surface Impact missing yes/no value for {label}")
+        flags.append(match.group(1).lower() == "yes")
+    risky = (
+        public_api in {"breaking", "migration-required"}
+        or bool(values & {"breaking", "migration-required"})
+        or any(flags)
+    )
+    if not risky:
         return
-    blocks = CODE_BLOCK_RE.findall(body)
-    source_blocks = [lang.lower() for lang, code in blocks if lang.lower() not in {"mermaid", "text", "txt", "plain", "markdown", "md"} and non_empty(code)]
-    if not source_blocks:
-        fail(f"{path} ## File-Level Interfaces must use fenced code blocks with the project language, or record not-applicable")
-    if not re.search(r"(?im)^\s*-\s*Consumer\s*:\s*\S", body):
-        fail(f"{path} ## File-Level Interfaces must name the consumer module or change_id")
-    compatibility = re.search(r"(?im)^\s*-\s*Compatibility\s*:\s*([^\n]+)", body)
-    if not compatibility:
-        fail(f"{path} ## File-Level Interfaces must record compatibility")
-    values = {part.strip().lower() for part in re.split(r"[/,]", compatibility.group(1))}
-    if not values & COMPATIBILITY_VALUES:
-        fail(f"{path} ## File-Level Interfaces compatibility must include one of: {', '.join(sorted(COMPATIBILITY_VALUES))}")
+    rows = table_after_heading(text, "Consumer Migration Closure", path)
+    for index, row in enumerate(rows, start=1):
+        for column in ("old_symbol", "new_path", "change_id", "consumer_kind", "migration_status"):
+            if not non_empty(row.get(column, "")):
+                fail(f"{path} ## Consumer Migration Closure row {index} missing concrete {column}")
+        status = row["migration_status"].strip().lower()
+        if status not in MIGRATION_STATUSES:
+            fail(f"{path} ## Consumer Migration Closure row {index} has invalid migration_status: {status}")
+        if (public_api == "breaking" or "breaking" in values) and status == "allowed-compatibility-shim":
+            fail(f"{path} breaking interfaces cannot retain an allowed-compatibility-shim")
+        consumer = row.get("consumer_path", "").strip().strip("`")
+        if status == "verified-none":
+            if consumer.lower() not in {"none-found", "verified-none"}:
+                fail(f"{path} verified-none consumer rows must use consumer_path none-found")
+        elif (
+            not non_empty(consumer)
+            or consumer.endswith("/")
+            or any(token in consumer for token in ("*", "?", "["))
+            or consumer.lower() in {"all callers", "all consumers"}
+        ):
+            fail(f"{path} ## Consumer Migration Closure row {index} must name one concrete consumer file")
 
 
 def is_not_applicable(value: str) -> bool:

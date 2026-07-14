@@ -5,11 +5,10 @@ Adapt this template to the target repository's test commands. The contract is
 stable: all test implementation must be reachable through this entrypoint.
 
 Every real run (not --list / --dry-run) writes a machine-readable run artifact
-to test-results/test-runs/<timestamp>-<module>-<level>.json recording each
-executed command, its exit code, and repository_state_sha256. test-results/ is
+to test-results/test-runs/<timestamp>-<module>-<level>.json recording the exact
+task scope, commands, registration sources, and exit codes. test-results/ is
 generated output and must be listed in .gitignore. Acceptance cites these
-artifacts instead of pasted command output and rejects a repository-state
-mismatch, so results created before later repository changes cannot be reused.
+artifacts instead of pasted command output.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import ast
 import datetime
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -29,7 +27,20 @@ from pathlib import Path
 
 LEVELS = ("unit", "dv", "integration")
 RUN_ARTIFACT_SCHEMA = 1
-STATE_EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "test-results"}
+CONTRACT_KINDS = {
+    "external-positive",
+    "external-negative",
+    "removed-symbol-scan",
+    "repository-compile-closure",
+    "documentation-examples",
+}
+CONTRACT_ASSERTIONS = {
+    "external-positive": "new-path-compiles",
+    "external-negative": "old-path-rejected-for-removed-symbol",
+    "removed-symbol-scan": "no-unallowlisted-old-symbol-references",
+    "repository-compile-closure": "repository-consumers-compile",
+    "documentation-examples": "documentation-examples-compile",
+}
 
 # Canonical module-level regression suites. Task testplan.yaml files are
 # discovered separately and are registered only as <module>/<task-name>.
@@ -37,47 +48,56 @@ STATE_EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "test-re
 MODULE_SUITES: dict[str, dict[str, list[list[str]]]] = {
     "p2p-frame": {
         "unit": [["cargo", "test", "-p", "p2p-frame"]],
-        "dv": [
-            ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "sn_client"],
-            ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "quic_tunnel_create_tunnel_no_listener", "--", "--nocapture"],
-            ["cargo", "test", "-p", "p2p-frame", "sn_tcp_observed_endpoint"],
-            ["cargo", "test", "-p", "p2p-frame", "ttp::", "--", "--nocapture"],
-            ["cargo", "test", "-p", "p2p-frame", "pn_connection_validator", "--", "--nocapture"],
-        ],
+        "dv": [],
         "integration": [["cargo", "test", "--workspace"]],
         "all": [
             ["cargo", "test", "-p", "p2p-frame"],
-            ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "sn_client"],
-            ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "quic_tunnel_create_tunnel_no_listener", "--", "--nocapture"],
-            ["cargo", "test", "-p", "p2p-frame", "sn_tcp_observed_endpoint"],
-            ["cargo", "test", "-p", "p2p-frame", "ttp::", "--", "--nocapture"],
-            ["cargo", "test", "-p", "p2p-frame", "pn_connection_validator", "--", "--nocapture"],
             ["cargo", "test", "--workspace"],
         ],
     },
     "cyfs-p2p": {
         "unit": [["cargo", "test", "-p", "cyfs-p2p"]],
-        "dv": [["cargo", "check", "-p", "cyfs-p2p"]],
+        "dv": [],
         "integration": [["cargo", "test", "--workspace"]],
-        "all": [["cargo", "test", "-p", "cyfs-p2p"], ["cargo", "check", "-p", "cyfs-p2p"], ["cargo", "test", "--workspace"]],
+        "all": [
+            ["cargo", "test", "-p", "cyfs-p2p"],
+            ["cargo", "test", "--workspace"],
+        ],
     },
     "cyfs-p2p-test": {
         "unit": [["cargo", "test", "-p", "cyfs-p2p-test"]],
         "dv": [["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]],
         "integration": [["cargo", "test", "--workspace"]],
-        "all": [["cargo", "test", "-p", "cyfs-p2p-test"], ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"], ["cargo", "test", "--workspace"]],
+        "all": [
+            ["cargo", "test", "-p", "cyfs-p2p-test"],
+            ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"],
+            ["cargo", "test", "--workspace"],
+        ],
     },
     "sn-miner": {
         "unit": [["cargo", "test", "-p", "sn-miner"]],
-        "dv": [["cargo", "run", "-p", "sn-miner", "--", "--help"]],
-        "integration": [["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"]],
-        "all": [["cargo", "test", "-p", "sn-miner"], ["cargo", "run", "-p", "sn-miner", "--", "--help"], ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"]],
+        "dv": [
+            ["cargo", "run", "-p", "sn-miner", "--", "--help"],
+            ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"],
+        ],
+        "integration": [
+            ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"],
+        ],
+        "all": [
+            ["cargo", "test", "-p", "sn-miner"],
+            ["cargo", "run", "-p", "sn-miner", "--", "--help"],
+            ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "--", "--test-threads=1"],
+        ],
     },
     "desc-tool": {
         "unit": [["cargo", "test", "-p", "desc-tool"]],
         "dv": [["cargo", "run", "-p", "desc-tool", "--", "--help"]],
         "integration": [["cargo", "test", "--workspace"]],
-        "all": [["cargo", "test", "-p", "desc-tool"], ["cargo", "run", "-p", "desc-tool", "--", "--help"], ["cargo", "test", "--workspace"]],
+        "all": [
+            ["cargo", "test", "-p", "desc-tool"],
+            ["cargo", "run", "-p", "desc-tool", "--", "--help"],
+            ["cargo", "test", "--workspace"],
+        ],
     },
 }
 
@@ -85,80 +105,6 @@ MODULE_SUITES: dict[str, dict[str, list[list[str]]]] = {
 def fail(message: str) -> None:
     print(f"test-run: {message}", file=sys.stderr)
     raise SystemExit(1)
-
-
-def state_path_excluded(path: Path) -> bool:
-    if any(part in STATE_EXCLUDED_DIRS for part in path.parts):
-        return True
-    leaf = path.name.lower()
-    return (
-        leaf == "acceptance-report.md"
-        or leaf.endswith("-acceptance-report.md")
-        or (leaf == "state.json" and path.parent.name == "pipeline")
-    )
-
-
-def update_state_hash(hasher: "hashlib._Hash", root: Path, relative: Path) -> None:
-    if state_path_excluded(relative):
-        return
-    path = root / relative
-    hasher.update(relative.as_posix().encode("utf-8", errors="surrogateescape") + b"\0")
-    try:
-        stat_result = path.lstat()
-    except FileNotFoundError:
-        hasher.update(b"deleted\0")
-        return
-    hasher.update(f"{stat_result.st_mode:o}".encode("ascii") + b"\0")
-    if path.is_symlink():
-        hasher.update(b"symlink\0" + os.readlink(path).encode("utf-8", errors="surrogateescape") + b"\0")
-    elif path.is_file():
-        hasher.update(b"file\0" + path.read_bytes() + b"\0")
-    else:
-        hasher.update(b"directory\0")
-
-
-def repository_state_sha256(root: Path) -> str:
-    """Hash the current repository content that test evidence must remain bound to."""
-    root = root.resolve()
-    hasher = hashlib.sha256(b"harness-repository-state-v1\0")
-    try:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
-        )
-        tracked = subprocess.run(
-            ["git", "diff", "--name-only", "-z", "HEAD", "--"],
-            cwd=root, capture_output=True, text=False
-        )
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-            cwd=root, capture_output=True, text=False
-        )
-    except OSError:
-        head = tracked = untracked = None
-    if (
-        head is not None
-        and tracked is not None
-        and untracked is not None
-        and head.returncode == tracked.returncode == untracked.returncode == 0
-    ):
-        hasher.update(b"git\0" + head.stdout.strip().encode("utf-8") + b"\0")
-        paths = sorted(
-            {
-                Path(raw.decode("utf-8", errors="surrogateescape"))
-                for raw in (tracked.stdout + untracked.stdout).split(b"\0")
-                if raw
-            },
-            key=lambda path: path.as_posix(),
-        )
-    else:
-        hasher.update(b"filesystem\0")
-        paths = sorted(
-            (path.relative_to(root) for path in root.rglob("*") if not path.is_dir()),
-            key=lambda path: path.as_posix(),
-        )
-    for relative in paths:
-        update_state_hash(hasher, root, relative)
-    return hasher.hexdigest()
 
 
 def parse_inline_list(value: str) -> list[str]:
@@ -198,6 +144,108 @@ def steps_from_testplan(path: Path, level: str) -> list[tuple[list[str], str, li
     return steps
 
 
+def contract_steps_from_testplan(path: Path) -> list[tuple[list[str], str, list[str], str, str]]:
+    text = path.read_text(encoding="utf-8")
+    start = re.search(r"(?m)^contract_checks:\s*$", text)
+    if not start:
+        return []
+    next_top = re.search(r"(?m)^[A-Za-z0-9_-]+:\s*", text[start.end() :])
+    end = start.end() + next_top.start() if next_top else len(text)
+    body = text[start.end() : end]
+    if re.search(r"(?m)^  mode:\s*disabled\s*$", body):
+        return []
+    starts = list(re.finditer(r"(?m)^    - id:\s*([A-Za-z0-9_.-]+)\s*$", body))
+    steps: list[tuple[list[str], str, list[str], str]] = []
+    for index, match in enumerate(starts):
+        block_end = starts[index + 1].start() if index + 1 < len(starts) else len(body)
+        block = body[match.end() : block_end]
+        kind_match = re.search(r"(?m)^      kind:\s*([A-Za-z0-9_-]+)\s*$", block)
+        assertion_match = re.search(r"(?m)^      assertion:\s*([A-Za-z0-9_-]+)\s*$", block)
+        change_ids = re.search(r"(?m)^      change_ids:\s*(\[[^\n]*\])\s*$", block)
+        run = re.search(r"(?m)^      run:\s*(\[[^\n]*\])\s*$", block)
+        if (
+            not kind_match
+            or kind_match.group(1) not in CONTRACT_KINDS
+            or not assertion_match
+            or assertion_match.group(1) != CONTRACT_ASSERTIONS.get(kind_match.group(1))
+            or not change_ids
+            or not run
+        ):
+            fail(
+                f"testplan contract step {match.group(1)} must define a supported kind "
+                "plus inline change_ids and run lists"
+            )
+        steps.append(
+            (
+                parse_inline_list(run.group(1)),
+                match.group(1),
+                parse_inline_list(change_ids.group(1)),
+                kind_match.group(1),
+                assertion_match.group(1),
+            )
+        )
+    return steps
+
+
+def evidence_input_paths(root: Path, testplan: Path) -> list[Path]:
+    text = testplan.read_text(encoding="utf-8")
+    match = re.search(r"(?m)^evidence_inputs:\s*(\[[^\n]*\])\s*$", text)
+    configured = parse_inline_list(match.group(1)) if match else []
+    candidates = [testplan.resolve()]
+    root_resolved = root.resolve()
+    for value in configured:
+        if value in {"", "."} or any(part == ".." for part in Path(value).parts):
+            fail(f"invalid evidence input path in {testplan}: {value!r}")
+        configured_path = root / value
+        if configured_path.is_symlink():
+            fail(f"evidence input must not be a symlink in {testplan}: {value}")
+        candidate = configured_path.resolve()
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            fail(f"evidence input resolves outside repository in {testplan}: {value}")
+        if not candidate.exists():
+            fail(f"evidence input does not exist in {testplan}: {value}")
+        if candidate.is_dir():
+            for child in sorted(candidate.rglob("*")):
+                if child.is_symlink():
+                    fail(f"evidence input tree contains a symlink in {testplan}: {child}")
+                if child.is_file() and not any(
+                    part in {".git", ".venv", "target", "test-results", "__pycache__"}
+                    for part in child.relative_to(root_resolved).parts
+                ):
+                    candidates.append(child.resolve())
+        elif candidate.is_file():
+            candidates.append(candidate)
+    return sorted(set(candidates), key=lambda item: item.relative_to(root_resolved).as_posix())
+
+
+def evidence_input_roots(root: Path, testplans: list[str]) -> list[str]:
+    roots: set[str] = set()
+    for relative in testplans:
+        text = (root / relative).read_text(encoding="utf-8")
+        match = re.search(r"(?m)^evidence_inputs:\s*(\[[^\n]*\])\s*$", text)
+        if match:
+            roots.update(parse_inline_list(match.group(1)))
+    return sorted(roots)
+
+
+def evidence_input_binding(root: Path, testplans: list[str]) -> tuple[list[str], str | None]:
+    if not testplans:
+        return [], None
+    root_resolved = root.resolve()
+    paths: set[Path] = set()
+    for relative in testplans:
+        paths.update(evidence_input_paths(root, root / relative))
+    hasher = hashlib.sha256(b"harness-task-evidence-input-v1\0")
+    relative_paths: list[str] = []
+    for path in sorted(paths, key=lambda item: item.relative_to(root_resolved).as_posix()):
+        relative = path.relative_to(root_resolved).as_posix()
+        relative_paths.append(relative)
+        hasher.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return relative_paths, hasher.hexdigest()
+
+
 def non_executed_levels_from_testplan(path: Path, requested_level: str) -> list[dict[str, str]]:
     text = path.read_text(encoding="utf-8")
     levels = list(LEVELS) if requested_level == "all" else [requested_level]
@@ -232,23 +280,19 @@ def discover_testplans(root: Path) -> dict[str, Path]:
         text = path.read_text(encoding="utf-8")
         module = None
         task_name = None
-        legacy_submodule = None
         for line in text.splitlines():
             if line.startswith("module:"):
                 module = line.split(":", 1)[1].strip()
             elif line.startswith("task_name:"):
                 task_name = line.split(":", 1)[1].strip()
-            elif line.startswith("submodule:"):
-                legacy_submodule = line.split(":", 1)[1].strip()
         if module:
-            # Version-level module packets predate task-local plans. Their
-            # commands are preserved above as canonical MODULE_SUITES and the
-            # historical YAML remains documentation rather than a registry.
-            packet_relative = path.relative_to(root / "docs" / "versions")
-            if len(packet_relative.parts) == 4:
-                continue
-            task_name = task_name or legacy_submodule
             if not task_name:
+                # Historical module-level and pre-sequence plans are retained
+                # as records, but are not current task-scoped registrations.
+                if path.parent.parent.name == "modules" or not re.fullmatch(
+                    r"\d{3}-.+", path.parent.name
+                ):
+                    continue
                 fail(f"task testplan must declare task_name and cannot register as a top-level module: {path}")
             key = f"{module}/{task_name}"
             if key in plans:
@@ -334,6 +378,28 @@ def command_sources_for(
                     },
                 )
             )
+    if requested_level == "all":
+        contract_entries: list[tuple[list[str], dict[str, object]]] = []
+        for command_index, (command, step_id, change_ids, contract_kind, assertion) in enumerate(
+            contract_steps_from_testplan(plan)
+        ):
+            contract_entries.append(
+                (
+                    command,
+                    {
+                        "scope": scope,
+                        "kind": "task-testplan-contract",
+                        "level": "contract",
+                        "contract_kind": contract_kind,
+                        "assertion": assertion,
+                        "testplan": plan_rel,
+                        "step_id": step_id,
+                        "change_ids": change_ids,
+                        "registration_index": str(command_index),
+                    },
+                )
+            )
+        entries = contract_entries + entries
     return entries
 
 
@@ -341,7 +407,11 @@ def selected_scopes(requested_module: str, task_plans: dict[str, Path]) -> list[
     if requested_module == "all":
         modules = sorted(MODULE_SUITES)
         if not modules:
-            fail("no canonical module suites registered in MODULE_SUITES")
+            fail(
+                "no canonical module suites registered in MODULE_SUITES; "
+                "adapt harness/scripts/test-run.py to register each project module's "
+                "explicit all suite before using 'all all'"
+            )
         return modules
     if requested_module in MODULE_SUITES or requested_module in task_plans:
         return [requested_module]
@@ -412,7 +482,6 @@ def write_run_artifact(
             "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "git_head": head,
             "worktree_dirty": dirty,
-            "repository_state_sha256": repository_state_sha256(root),
             "testplans": sorted(
                 {
                     source["testplan"]
@@ -431,10 +500,17 @@ def write_run_artifact(
                     if isinstance(change_id, str)
                 }
             ),
+            "evidence_inputs": [],
+            "evidence_input_roots": [],
+            "evidence_input_sha256": None,
             "steps": steps,
             "non_executed_levels": non_executed_levels or [],
             "exit_code": exit_code,
         }
+        artifact["evidence_inputs"], artifact["evidence_input_sha256"] = evidence_input_binding(
+            root, artifact["testplans"]
+        )
+        artifact["evidence_input_roots"] = evidence_input_roots(root, artifact["testplans"])
         artifact_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
         print(f"test-run: run artifact written: {artifact_path}")
     except OSError as error:

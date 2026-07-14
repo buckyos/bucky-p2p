@@ -11,7 +11,7 @@
 - Active task packet selected by the current user request, `docs/modules/<module>.md` Current/Active Task, or a confirmed unfinished-task record. Manual flow requires `proposal.md` and `design.md`; explicitly launched auto-pipeline requires `proposal.md` plus `pipeline/plan.md` design mappings and MUST NOT require `design.md`. Packet locations:
   - `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`
   - `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/`
-- `docs/versions/<version>/evidence/admission/<task-id>.md`.
+- `docs/versions/<version>/evidence/admission/<evidence-id>.md`.
 
 ## Admission Rule
 - Admission MUST pass before editing production code, build files, or resources.
@@ -20,7 +20,7 @@
 - Admission evidence MUST record `proposal_read`, `design_read`, `change_scope_matches_request`, `active_module_resolved`, `same_module_task_selection`, and `no_chat_only_evidence`, each `pass` with concrete source and notes.
 - Evidence file names MUST be `docs/versions/<version>/evidence/admission/<YYYYMMDD>-<task-slug>.md` using today's date.
 - Evidence MUST bind to current approved document content with `## Document Binding` hashes and `## Coverage Quotes` for each admitted `change_id`; `admission-check.py` re-verifies both and fails closed on mismatch.
-- A passing `admission-check.py` run writes `docs/versions/<version>/evidence/admission/<task-id>.<module>[.<submodule>][.<target-module>].stamp.json`. `admission-check.py --verify-only` and `check-all.py` revalidate it. Never hand-write stamp files.
+- A passing `admission-check.py` run writes `docs/versions/<version>/evidence/admission/<evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json`. Reuse that stamp while its bound documents, evidence, target module, `change_id` values, and Scope Paths remain unchanged. Never hand-write stamp files.
 - Bugfix tasks follow the same rule unless a versioned repo rule defines a narrower exception.
 - Bugfix testing MUST produce red-green regression evidence for the bugfix `change_id`, or a concrete reason pre-fix reproduction is not feasible.
 - The active `version`, `module`, and concrete `change_id` values MUST be known; task packets also require `--submodule <task-seq>-<task-slug>`.
@@ -31,8 +31,9 @@
 - If direct coverage is missing from approved docs, create or route to a sibling task packet or amendment/fix task instead of editing the approved packet or implementing first and documenting later.
 
 ## Required Commands
+- Run the following only when no passing result exists for the current inputs or when their owned inputs changed. Do not replay them in acceptance or `check-all.py`.
 - `uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-- `uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md`
+- `uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
 - Add `--submodule <task-seq>-<task-slug>` to both commands for task packets.
 - For a `globals` packet, also add `--target-module <project>` and repeat admission independently for every affected project.
 

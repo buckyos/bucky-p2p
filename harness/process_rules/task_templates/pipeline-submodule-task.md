@@ -38,12 +38,12 @@
 - [ ] Scope stays inside the named stage unless the user explicitly requested cross-stage synchronization
 - [ ] For design: this submodule's same-level structure and child mappings are recorded in `pipeline/plan.md`, without generating `design.md` or task-local `design/`
 - [ ] For design: file-level modules owned by this submodule are recorded in the pipeline-plan implementation sequence in dependency order before implementation starts
-- [ ] For single-stage tasks, `stage-scope-check.py --stage <stage> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` passed for this task's recorded changed paths (implementation runs add `--target-module <project> --change-id <change_id>` so paths bind to the correct target's Scope Paths)
+- [ ] For single-stage tasks, a current stage-scope result exists for this task's recorded changed paths; unchanged inputs were not replayed
 - [ ] For implementation: the proposal is confirmed by an explicit current user launch recorded verbatim as `User launch statement`, and dependency/interface/state/failure/alternative design inputs for this submodule are validated
 - [ ] For implementation: active `version`, packet `module`, `target_module`, submodule, and `change_id` are explicit
-- [ ] For implementation: `schema-check.py --submodule <submodule>` passed for the submodule packet
-- [ ] For implementation: `docs/versions/<version>/evidence/admission/<task-id>.md` contains required admission evidence
-- [ ] For implementation: `admission-check.py --submodule <submodule> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md` passed for every admitted `change_id`
+- [ ] For implementation: a current schema result exists for the submodule packet; unchanged inputs were not rechecked
+- [ ] For implementation: `docs/versions/<version>/evidence/admission/<evidence-id>.md` contains required admission evidence
+- [ ] For implementation: a current admission stamp exists for every admitted `change_id`; unchanged inputs were not replayed
 - [ ] For implementation: inspection of the launch-confirmed proposal and task-relevant pipeline-plan mapping is recorded in the admission evidence file
 - [ ] For implementation: this child task implements the next ready file-level module in the validated pipeline-plan dependency sequence
 - [ ] For implementation: context is limited to the task-relevant pipeline-plan mapping, `change_id`, `Scope Paths`, interfaces, and source files for this file-level module

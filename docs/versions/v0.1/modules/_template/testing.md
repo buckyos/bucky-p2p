@@ -23,10 +23,13 @@ approved_content_sha256:
 ## Unified Test Entry
 - Machine-readable task plan: `docs/versions/<version>/modules/<module>/<task-name>/testplan.yaml`
 - Task all: `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
-- Canonical module level: `uv run --active python ./harness/scripts/test-run.py <module> unit|dv|integration`
-- Canonical module regression: `uv run --active python ./harness/scripts/test-run.py <module> all`
-- Canonical project regression: `uv run --active python ./harness/scripts/test-run.py all all`
+- Single-task boundary: do not run package/module scopes, `all all`, root shortcuts, or quality gates
 - Registration: every generated or changed automated test is reachable through the unified entrypoint.
+
+## Repository Consumer Closure
+| Old Symbol | New Path | Repository Consumer File | Consumer Kind | Migration Status | Contract Check ID |
+|------------|----------|--------------------------|---------------|------------------|-------------------|
+| `crate::OldType` | `crate::new::NewType` | `tests/api.rs` | test | migrated | removed-symbol-scan |
 
 ## Submodule Tests
 | Submodule | Responsibility | Detailed Test Doc | Required Behaviors | Edge/Failure Cases | Test Type | Test Files | Status | Gap / Manual Reason |
@@ -105,8 +108,8 @@ approved_content_sha256:
 - [ ] Generated tests are registered with `harness/scripts/test-run.py`
 - [ ] New unit tests live in dedicated test files, test directories, or test-only crates/packages; no new inline test bodies were added to production source files
 - [ ] `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all` reaches only this task's plan
-- [ ] `uv run --active python ./harness/scripts/test-run.py <module> all` runs only this module's canonical `all` suite
-- [ ] `uv run --active python ./harness/scripts/test-run.py all all` runs each module's canonical `all` suite once without appending task plans
+- [ ] This task did not directly select package/module runtime suites, `all all`, root shortcuts, or quality gates; any broad compile-only command was a required task-local consumer-closure step
+- [ ] Breaking/migration-required APIs and crate-root/build-surface changes include the required task-local contract checks and a complete repository consumer closure
 - [ ] Module-level tests cover key boundary behavior and failure paths
 - [ ] External interfaces have contract-focused tests
 - [ ] Unit tests execute every conditional branch of changed code, or each uncovered branch has a per-branch gap reason

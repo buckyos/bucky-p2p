@@ -301,6 +301,22 @@ struct QuicTunnelListenerState {
     reuse_address: bool,
 }
 
+fn ensure_worker_endpoints_available(closed: bool, endpoints_empty: bool) -> P2pResult<()> {
+    if closed {
+        return Err(p2p_err!(
+            P2pErrorCode::Interrupted,
+            "quic listener closed"
+        ));
+    }
+    if endpoints_empty {
+        return Err(p2p_err!(
+            P2pErrorCode::ErrorState,
+            "quic listener has no worker endpoint"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct QuicTunnelListener {
     cert_cache: P2pIdentityCertCacheRef,
     cert_resolver: ServerCertResolverRef,
@@ -351,19 +367,25 @@ impl QuicTunnelListener {
         self.state.read().unwrap().local.unwrap()
     }
 
-    pub(crate) fn bound_local(&self) -> Endpoint {
-        let endpoint = self
-            .state
-            .read()
-            .unwrap()
-            .endpoints
-            .first()
-            .cloned()
-            .unwrap();
-        Endpoint::from((
+    pub(crate) fn bound_local(&self) -> P2pResult<Endpoint> {
+        let endpoint = {
+            let state = self.state.read().unwrap();
+            ensure_worker_endpoints_available(
+                self.closed.load(Ordering::SeqCst),
+                state.endpoints.is_empty(),
+            )?;
+            state.endpoints[0].clone()
+        };
+        Ok(Endpoint::from((
             crate::endpoint::Protocol::Quic,
-            endpoint.endpoint.local_addr().unwrap(),
-        ))
+            endpoint.endpoint.local_addr().map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::ErrorState,
+                    "get quic listener worker local address failed: {}",
+                    err
+                )
+            })?,
+        )))
     }
 
     pub(crate) fn mapping_port(&self) -> Option<u16> {
@@ -383,6 +405,10 @@ impl QuicTunnelListener {
     ) -> P2pResult<quinn::Connection> {
         let endpoint = {
             let state = self.state.read().unwrap();
+            ensure_worker_endpoints_available(
+                self.closed.load(Ordering::SeqCst),
+                state.endpoints.is_empty(),
+            )?;
             let index = rand::rng().random_range(0..state.endpoints.len());
             state.endpoints[index].clone()
         };
@@ -897,6 +923,11 @@ mod udp_punch_tests {
     use crate::types::{TunnelCandidateId, TunnelId};
     use sfo_reuseport::{ServerRuntimeConfig, UdpServer};
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    #[cfg(feature = "x509")]
+    mod lifecycle_regression {
+        include!("listener/tests.rs");
+    }
 
     fn endpoint(protocol: Protocol, ip: Ipv4Addr, port: u16, area: EndpointArea) -> Endpoint {
         let mut ep = Endpoint::from((protocol, SocketAddr::V4(SocketAddrV4::new(ip, port))));

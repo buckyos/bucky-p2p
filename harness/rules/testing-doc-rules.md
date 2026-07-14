@@ -22,6 +22,7 @@
 - Per-level tables: `## Unit Tests`, `## DV Tests`, `## Integration Tests`, following `harness/rules/test-design-rules.md`.
 - `## Design Element Coverage` mapping parameter domains, state transitions, failure paths, error categories, invariants, and concurrency declarations to cases or gaps.
 - Stable test entrypoints aligned with `testplan.yaml` for completed testing work.
+- For breaking/migration-required public APIs, crate-root export changes, or build-surface changes: a file-level repository consumer closure and risk-triggered contract checks derived from design.
 - Explicit gap records for missing direct validation.
 - Large-module submodule test documentation when design uses direct submodules.
 
@@ -36,6 +37,7 @@
 - Testing tasks are single-stage by default and MUST NOT edit proposal, design, acceptance, production code, `docs/architecture/`, or another task packet unless explicitly requested.
 - Testing may modify test code, fixtures, runners, optional testing artifacts, and unified test entrypoint wiring needed to register tests.
 - Code inside an existing Rust `#[cfg(test)]` item is test code. Every newly created unit test MUST live in a dedicated test file, test directory, or test-only crate/package; testing MUST NOT add new inline test bodies to production source files.
+- A production-path Rust file passes testing-stage scope only when `stage-scope-check.py` compares it to `HEAD` or a recorded task-start `--base` and proves that every change is inside a pre-existing exact `#[cfg(test)]` item. Missing baselines, self-comparisons after commit, new inline items, and mixed production/test changes fail closed.
 - Task-local testing artifacts stay in the same task packet, not older `testing/<task-seq>-<task-slug>/` directories.
 - Human-authored testing docs MUST stay under 1000 lines, splitting by submodule, responsibility, validation layer, or interface boundary when needed.
 - Every implemented change MUST have direct validation coverage or an explicit gap.
@@ -44,7 +46,13 @@
 - Every implemented `change_id` MUST have case-type rows; non-covered, manual, disabled, or not-applicable rows need concrete reasons.
 - Every generated or changed automated test MUST be reachable through `harness/scripts/test-run.py`.
 - The task's `testplan.yaml` MUST declare `task_name`, register only as `<module>/<task-name>`, and be reachable through `<module>/<task-name> all` without being aggregated into the top-level module.
-- Module and whole-project regression use canonical module suites: `<module> all` runs that module's explicit canonical `all` suite and `all all` runs each module's canonical `all` suite once.
+- Single-task testing runs only `<module>/<task-name> <level-or-all>` from the active task plan. It MUST NOT trigger package/module suites, `all all`, root shortcuts, or quality gates; broader suites are explicit user-directed maintenance only.
+- Narrow exception: when design marks `public-api: breaking` / `migration-required`, a crate-root export change, or a build-surface change, the task-local plan MUST contain the required repository consumer contract checks. The invocation remains `<module>/<task-name> all`, but its task-local `repository-compile-closure` step MAY run a package/workspace compile-only command such as `cargo test -p <package> --no-run --all-targets` for the affected consumer closure. This exception does not authorize executing the package's runtime test suite.
+- Rust `--all-targets` excludes doctests. When documentation examples are affected, add a separate `documentation-examples` step such as `cargo test -p <package> --doc`, or a repository-defined README/example compile wrapper.
+- Breaking APIs MUST provide `external-positive`, `external-negative`, `removed-symbol-scan`, and `repository-compile-closure` contract checks. The negative wrapper must succeed only when compilation fails for the expected removed symbol; raw failing compiler commands are not valid evidence.
+- `removed-symbol-scan` MUST invoke the canonical `harness/scripts/consumer-closure-check.py`, which scans declared evidence-input roots, permits only explicitly recorded negative fixtures, and fails on remaining old-symbol references.
+- Migration-required APIs MUST provide `external-positive`, `removed-symbol-scan`, and `repository-compile-closure`. Crate-root export changes require external-positive plus compile closure; build-surface-only changes require compile closure. Documentation-example impact requires `documentation-examples`.
+- Risk-triggered tasks MUST declare `evidence_inputs` covering production scope, repository consumer files, external fixtures, test code, and affected documentation. Run artifacts bind their current content with `evidence_input_sha256` so acceptance rejects stale evidence.
 - Test execution evidence is the machine-written artifact under `test-results/test-runs/`; pasted command output is not evidence.
 - Bugfix testing MUST show red-green regression evidence for the bugfix `change_id`, or record why pre-fix reproduction is not feasible.
 - Validation paths MUST prove named behavior or risk, not unrelated checks.

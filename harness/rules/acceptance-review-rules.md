@@ -24,31 +24,23 @@ Optional changed-file discovery commands:
 - `git diff --name-status`
 - `git diff --check`
 
-These commands do not pass or fail acceptance by themselves. For public symbol, API, codec, or wire-format migrations, run targeted searches such as `rg "old_symbol|old_encoding|old_method"` only when that migration is part of the reviewed task scope.
+These commands do not pass or fail acceptance by themselves. For public symbol, API, codec, or wire-format migrations, ad hoc `rg` is discovery only; accepted evidence must come from the task's machine-recorded removed-symbol-scan contract step.
 
-## Required Harness Commands
-For every evidence-bearing module, run and record:
-- `uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-- `uv run --active python ./harness/scripts/admission-check.py --verify-only --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md`
-- Acceptance MUST use `--verify-only`; a missing pre-existing stamp fails acceptance, and acceptance MUST NOT create or refresh admission evidence after implementation.
-- Relevant task tests through `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
-- Canonical module tests through `uv run --active python ./harness/scripts/test-run.py <module> <level-or-all>` only when module-level regression is relevant
+## Validation Evidence Reuse
+Acceptance MUST cite the existing passing schema result, admission stamp, stage-scope result, pipeline-plan result when applicable, and task-test artifact. It MUST NOT rerun those checkers or tests while their owned inputs are unchanged.
 
-For task packets, add `--submodule <task-seq>-<task-slug>` to schema/admission commands.
+Rerun only the checker whose owned input changed after its latest pass:
+- schema: a schema-bearing packet document or metadata file changed
+- admission: a bound proposal/design/plan, admission evidence, target module, `change_id`, or admitted Scope Path changed
+- stage scope: the manifest, sidecar, baseline, governed task path, or admitted Scope Path changed
+- pipeline plan: task-local plan, state, or completion evidence changed
+- task tests: affected implementation, test code, testplan, or registered command changed
 
-For whole-project or final pipeline evidence, run and record these only when the reviewed task scope, pipeline plan, or repo-local custom rules require whole-project proof:
-- `uv run --active python ./harness/scripts/test-run.py all all`
-- The project-root shortcut with no arguments, unless the current platform cannot execute that format.
+A stage transition, acceptance start, commit, CI run, or need to fill the report is not an input change. A missing prior result fails acceptance and returns to the owning stage; acceptance MUST NOT manufacture it by replaying the checker. Run `acceptance-report-check.py` only after creating or modifying the acceptance report itself.
 
-Also run and record only when task-relevant:
-- `uv run --active python ./harness/scripts/architecture-doc-check.py` when `docs/architecture/` evidence is in scope.
-- `uv run --active python ./harness/scripts/quality-check.py` whenever `harness/quality-gates.yaml` declares runnable gates; report `not relevant` only for an explicitly empty gate list with a concrete reason.
-- `uv run --active python ./harness/scripts/stage-scope-check.py --stage <stage> --version <version> --module <module> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` for single-stage tasks, plus `--submodule <task-seq>-<task-slug>` and implementation `--change-id <change_id>` where applicable.
-- `uv run --active python ./harness/scripts/acceptance-report-check.py <report>` before completion.
+Task-relevant execution evidence MUST be a machine-written task artifact under `test-results/test-runs/`. Reuse it when its implementation, tests, testplan, and registered command inputs are unchanged. The acceptance checker MUST compare report `Version`, `Module`, `Task name`, and reviewed `change_id` values to artifact `testplans`, `requested_module`, `requested_level`, `change_ids`, and non-empty successful executed steps; exit code alone is insufficient. It MUST NOT require or validate a repository/package state hash. An accepted report without an automated task run MUST include a structured `## Automated Test Exception` with `Applies: yes`, concrete reason, owner, risk, acceptance impact, and alternative evidence. A bare `not applicable` statement is invalid.
 
-Task-relevant test and quality execution evidence MUST be machine-written run artifacts under `test-results/test-runs/` and, when quality gates apply, `test-results/quality-runs/`. When the report is created, the acceptance checker MUST compare report `Version`, `Module`, `Task name`, and reviewed `change_id` values to artifact `testplans`, `requested_module`, `requested_level`, `change_ids`, and non-empty successful executed steps; exit code alone is insufficient. Every cited artifact MUST contain `repository_state_sha256` matching the current repository state, so an artifact created before any later repository change is stale and MUST NOT be reused. An accepted report without an automated task run MUST include a structured `## Automated Test Exception` with `Applies: yes`, concrete reason, owner, risk, acceptance impact, and alternative evidence. A bare `not applicable` statement is invalid.
-
-Quality-gate relevance comes from `harness/quality-gates.yaml`, not from report wording. When it declares runnable gates, an accepted report MUST cite a passing quality-run artifact and MUST NOT mark quality gates `not relevant`. `not relevant` is valid only when the versioned configuration declares `gates: []` with a concrete `empty_reason`.
+Quality gates are not part of automatic single-task acceptance. Changes under `harness/**` or `docs/**` never trigger them. They may be run and cited only after an explicit user request.
 
 ## Evidence Scope
 Acceptance MUST identify the documents, code paths, tests, and results used for each approved behavior. Unrelated worktree churn and unrelated validations are not blocking and must not be executed as acceptance requirements. Reject only when reviewed evidence shows missing approved behavior, document inconsistency, project-rule-governed architecture doc inconsistency, document/code mismatch, logical contradiction, unsupported assumption, or relevant correctness defect.
@@ -56,7 +48,8 @@ Acceptance MUST identify the documents, code paths, tests, and results used for 
 ## Cross-Module Admission
 - Every evidence-bearing module or task packet MUST have approved manual-flow proposal/design coverage or launch-confirmed auto-pipeline proposal/design mappings, direct `change_id` mapping, and post-implementation test evidence or explicit gaps.
 - Every automated test used as evidence MUST be reachable through the unified test entrypoint.
-- Project-root shortcuts MUST delegate to the unified entrypoint when shortcut behavior is in scope or whole-project evidence is required.
+- Project-root shortcuts, package/module suites, and whole-project commands are explicit maintenance interfaces outside single-task acceptance.
+- Exception: acceptance still invokes only `<module>/<task-name> all`, but a risk-triggered task artifact MUST include its task-local repository compile-only closure and other required API contract steps. This is not permission to run a broad runtime suite.
 - Multi-project behavior MUST use a `globals/<task-seq>-<task-slug>/` packet and pass checks for each affected implementation scope.
 - New task evidence MUST come from the current task packet, not older packets; approved packets MUST NOT be treated as editable containers for new or expanded work.
 - Draft, missing, ambiguous, or non-covering docs fail acceptance even when workspace tests pass.
@@ -113,6 +106,8 @@ Every defect MUST identify the earliest owning stage. If the proposal is ambiguo
 - Required evidence lacks approved manual-flow proposal/design coverage or launch-confirmed auto-pipeline proposal/design mappings, post-implementation test evidence, or required project-rule-governed architecture docs when applicable.
 - Stage scope checks are missing or failing.
 - Public API, codec, wire format, or runtime semantics changed without design coverage and test evidence or explicit gap.
+- Breaking/migration-required API, crate-root export, build-surface, or documentation-example impact lacks its mechanically required contract kinds, consumer closure, or current scoped evidence hash.
+- A breaking API is accepted only from one task artifact containing successful new-path external compilation, expected old-path rejection, removed-symbol scan, repository compile closure, and documentation example closure when applicable.
 - Test design/implementation does not reasonably cover proposal/design/code behavior and required per-level contracts.
 - Task-relevant test execution evidence lacks either a passing machine-written artifact with executed steps or a complete structured automated-test exception.
 - Quality gates are missing, unrun, or failing when the task scope or repo-local custom rules make them relevant.

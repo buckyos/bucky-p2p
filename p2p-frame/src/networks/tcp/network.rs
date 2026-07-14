@@ -7,8 +7,9 @@ use super::tunnel::{LocalTunnelPhase, TcpTunnel, TcpTunnelConnector};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
-    IncomingControlStream, IncomingDatagram, IncomingStream, IncomingTunnelCallback, Tunnel,
-    TunnelConnectIntent, TunnelForm, TunnelListenerInfo, TunnelNetwork, TunnelRef,
+    IncomingControlStream, IncomingDatagram, IncomingStream, IncomingTunnelAcceptance,
+    IncomingTunnelAcceptanceCallback, IncomingTunnelCallback, Tunnel, TunnelConnectIntent,
+    TunnelForm, TunnelListenerInfo, TunnelNetwork, TunnelRef,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
@@ -67,6 +68,35 @@ impl TcpTunnelNetwork {
             reuse_address: AtomicBool::new(false),
             server_runtime,
         }
+    }
+
+    async fn listen_with_incoming_acceptance(
+        &self,
+        local: &Endpoint,
+        out: Option<Endpoint>,
+        mapping_port: Option<u16>,
+        on_incoming_tunnel: IncomingTunnelAcceptanceCallback,
+    ) -> P2pResult<()> {
+        let listener = TcpTunnelListener::new_with_acceptance(
+            self.cert_resolver.clone(),
+            self.cert_factory.clone(),
+            self.registry.clone(),
+            self.timeout,
+            self.heartbeat_interval,
+            self.heartbeat_timeout,
+            self.server_runtime.clone(),
+            on_incoming_tunnel,
+        );
+        listener
+            .start(
+                *local,
+                out,
+                mapping_port,
+                self.reuse_address.load(Ordering::Relaxed),
+            )
+            .await?;
+        self.listeners.lock().unwrap().push(listener.clone());
+        Ok(())
     }
 
     async fn open_tunnel_inner(
@@ -178,26 +208,26 @@ impl TunnelNetwork for TcpTunnelNetwork {
         mapping_port: Option<u16>,
         on_incoming_tunnel: IncomingTunnelCallback,
     ) -> P2pResult<()> {
-        let listener = TcpTunnelListener::new(
-            self.cert_resolver.clone(),
-            self.cert_factory.clone(),
-            self.registry.clone(),
-            self.timeout,
-            self.heartbeat_interval,
-            self.heartbeat_timeout,
-            self.server_runtime.clone(),
-            on_incoming_tunnel,
-        );
-        listener
-            .start(
-                *local,
-                out,
-                mapping_port,
-                self.reuse_address.load(Ordering::Relaxed),
-            )
-            .await?;
-        self.listeners.lock().unwrap().push(listener.clone());
-        Ok(())
+        let callback: IncomingTunnelAcceptanceCallback = Arc::new(move |result| {
+            let on_incoming_tunnel = on_incoming_tunnel.clone();
+            Box::pin(async move {
+                on_incoming_tunnel(result).await;
+                IncomingTunnelAcceptance::Accepted
+            })
+        });
+        self.listen_with_incoming_acceptance(local, out, mapping_port, callback)
+            .await
+    }
+
+    async fn listen_with_acceptance(
+        &self,
+        local: &Endpoint,
+        out: Option<Endpoint>,
+        mapping_port: Option<u16>,
+        on_incoming_tunnel: IncomingTunnelAcceptanceCallback,
+    ) -> P2pResult<()> {
+        self.listen_with_incoming_acceptance(local, out, mapping_port, on_incoming_tunnel)
+            .await
     }
 
     async fn close_all_listener(&self) -> P2pResult<()> {
@@ -381,6 +411,7 @@ mod tests {
     use tokio::time::timeout;
 
     static TLS_INIT: Once = Once::new();
+
     type TestStreamRx = mpsc::Receiver<P2pResult<IncomingStream>>;
     type TestDatagramRx = mpsc::Receiver<P2pResult<IncomingDatagram>>;
     type TestControlStreamRx = mpsc::Receiver<P2pResult<IncomingControlStream>>;

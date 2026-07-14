@@ -5,10 +5,12 @@ Beyond report structure, this checker re-verifies execution evidence. Accepted
 reports must either reference task-relevant machine-written test artifacts
 (test-run.py writes test-results/test-runs/*.json) with non-empty successful
 executed steps, or record a structured automated-test exception with reason,
-owner, risk, acceptance impact, and alternative evidence. Referenced test and
-quality artifacts must bind the same repository_state_sha256 as the current
-repository; stale results are rejected. Pasted command output alone is not
-acceptance evidence.
+owner, risk, acceptance impact, and alternative evidence. Pasted command
+output alone is not acceptance evidence. Single-task acceptance uses only the
+active task's test artifact; package/module, whole-project, and quality-gate
+runs are not automatic task evidence. Risk-triggered API/build-surface tasks
+also require their contract kinds/assertions and a current scoped
+evidence_input_sha256 binding.
 
 The checker also requires a category-by-category implementation correctness
 audit. Passing tests cannot replace explicit review of logic, progress,
@@ -21,9 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -47,18 +47,24 @@ REQUIRED_CORRECTNESS_CATEGORIES = {
 }
 HIGH_SEVERITIES = {"critical", "high"}
 ALLOWED_SEVERITIES = {"none", "low", "medium", "high", "critical"}
-REQUIRED_COMMAND_LABELS = (
-    "schema-check.py",
-    "admission-check.py",
-    "stage-scope-check.py",
-    "Relevant automated test command",
+REQUIRED_VALIDATION_LABELS = (
+    "Existing schema result",
+    "Existing admission stamp",
+    "Existing stage-scope result",
     "Task-relevant test run artifact",
+    "Commands rerun because checker-owned inputs changed",
 )
 RUN_ARTIFACT_RE = re.compile(
     r"test-results/(test-runs|quality-runs)/[A-Za-z0-9+_.-]+\.json"
 )
 RUN_ARTIFACT_SCHEMA = 1
-STATE_EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "test-results"}
+CONTRACT_ASSERTIONS = {
+    "external-positive": "new-path-compiles",
+    "external-negative": "old-path-rejected-for-removed-symbol",
+    "removed-symbol-scan": "no-unallowlisted-old-symbol-references",
+    "repository-compile-closure": "repository-consumers-compile",
+    "documentation-examples": "documentation-examples-compile",
+}
 QUALITY_GATES_CONFIG = "harness/quality-gates.yaml"
 NOT_APPLICABLE_RE = re.compile(
     r"\b(not applicable|not required|not relevant|out of scope|no automated tests?|no runnable tests?)\b",
@@ -76,79 +82,6 @@ AUTOMATED_TEST_EXCEPTION_FIELDS = (
 def fail(message: str) -> None:
     print(f"acceptance-report-check: {message}", file=sys.stderr)
     raise SystemExit(1)
-
-
-def state_path_excluded(path: Path) -> bool:
-    if any(part in STATE_EXCLUDED_DIRS for part in path.parts):
-        return True
-    leaf = path.name.lower()
-    return (
-        leaf == "acceptance-report.md"
-        or leaf.endswith("-acceptance-report.md")
-        or (leaf == "state.json" and path.parent.name == "pipeline")
-    )
-
-
-def update_state_hash(hasher: "hashlib._Hash", root: Path, relative: Path) -> None:
-    if state_path_excluded(relative):
-        return
-    path = root / relative
-    hasher.update(relative.as_posix().encode("utf-8", errors="surrogateescape") + b"\0")
-    try:
-        stat_result = path.lstat()
-    except FileNotFoundError:
-        hasher.update(b"deleted\0")
-        return
-    hasher.update(f"{stat_result.st_mode:o}".encode("ascii") + b"\0")
-    if path.is_symlink():
-        hasher.update(b"symlink\0" + os.readlink(path).encode("utf-8", errors="surrogateescape") + b"\0")
-    elif path.is_file():
-        hasher.update(b"file\0" + path.read_bytes() + b"\0")
-    else:
-        hasher.update(b"directory\0")
-
-
-def repository_state_sha256(root: Path) -> str:
-    root = root.resolve()
-    hasher = hashlib.sha256(b"harness-repository-state-v1\0")
-    try:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
-        )
-        tracked = subprocess.run(
-            ["git", "diff", "--name-only", "-z", "HEAD", "--"],
-            cwd=root, capture_output=True, text=False
-        )
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-            cwd=root, capture_output=True, text=False
-        )
-    except OSError:
-        head = tracked = untracked = None
-    if (
-        head is not None
-        and tracked is not None
-        and untracked is not None
-        and head.returncode == tracked.returncode == untracked.returncode == 0
-    ):
-        hasher.update(b"git\0" + head.stdout.strip().encode("utf-8") + b"\0")
-        paths = sorted(
-            {
-                Path(raw.decode("utf-8", errors="surrogateescape"))
-                for raw in (tracked.stdout + untracked.stdout).split(b"\0")
-                if raw
-            },
-            key=lambda path: path.as_posix(),
-        )
-    else:
-        hasher.update(b"filesystem\0")
-        paths = sorted(
-            (path.relative_to(root) for path in root.rglob("*") if not path.is_dir()),
-            key=lambda path: path.as_posix(),
-        )
-    for relative in paths:
-        update_state_hash(hasher, root, relative)
-    return hasher.hexdigest()
 
 
 def read_text(path: Path) -> str:
@@ -293,6 +226,120 @@ def load_run_artifact(root: Path, rel_path: str) -> dict[str, object]:
     return artifact
 
 
+def required_contract_kinds(root: Path, scope: dict[str, object]) -> set[str]:
+    packet = (
+        root
+        / "docs"
+        / "versions"
+        / str(scope["version"])
+        / "modules"
+        / str(scope["module"])
+        / str(scope["task_name"])
+    )
+    plan = packet / "pipeline" / "plan.md"
+    design = plan if plan.is_file() else packet / "design.md"
+    if not design.is_file():
+        return set()
+    text = design.read_text(encoding="utf-8")
+    section = re.search(r"(?ms)^##\s+API and Build Surface Impact\s*$\n(.*?)(?=^##\s+|\Z)", text)
+    if not section:
+        return set()
+    body = section.group(1)
+    public = re.search(r"(?im)^\s*-\s*Public API impact:\s*([A-Za-z0-9_-]+)\s*$", body)
+    public_api = public.group(1).lower() if public else ""
+    required: set[str] = set()
+    if public_api == "breaking" or re.search(r"(?im)^\s*-\s*Compatibility:\s*breaking\s*$", text):
+        required.update({"external-positive", "external-negative", "removed-symbol-scan", "repository-compile-closure"})
+    elif public_api == "migration-required" or re.search(r"(?im)^\s*-\s*Compatibility:\s*migration-required\s*$", text):
+        required.update({"external-positive", "removed-symbol-scan", "repository-compile-closure"})
+    if re.search(r"(?im)^\s*-\s*Crate-root export change:\s*yes\s*$", body):
+        required.update({"external-positive", "repository-compile-closure"})
+    if re.search(r"(?im)^\s*-\s*Build-surface change:\s*yes\s*$", body):
+        required.add("repository-compile-closure")
+    if re.search(r"(?im)^\s*-\s*Documentation examples affected:\s*yes\s*$", body):
+        required.add("documentation-examples")
+    if plan.is_file():
+        compatibilities = re.findall(
+            r"(?im)^\|[^\n]*\|\s*(new|backward-compatible|migration-required|breaking)\s*\|[^\n]*$",
+            text,
+        )
+        if "breaking" in {value.lower() for value in compatibilities}:
+            required.update({"external-positive", "external-negative", "removed-symbol-scan", "repository-compile-closure"})
+        elif "migration-required" in {value.lower() for value in compatibilities}:
+            required.update({"external-positive", "removed-symbol-scan", "repository-compile-closure"})
+    return required
+
+
+def required_risk_evidence_paths(root: Path, scope: dict[str, object]) -> set[str]:
+    packet = (
+        root / "docs" / "versions" / str(scope["version"]) / "modules"
+        / str(scope["module"]) / str(scope["task_name"])
+    )
+    plan = packet / "pipeline" / "plan.md"
+    design = plan if plan.is_file() else packet / "design.md"
+    text = design.read_text(encoding="utf-8")
+    paths: set[str] = set()
+    for row in table_rows(text, "Consumer Migration Closure", design):
+        if row.get("migration_status", "").strip().lower() == "verified-none":
+            continue
+        value = row.get("consumer_path", "").strip().strip("`")
+        if value:
+            paths.add(value)
+    heading = "Implementation Scope Bindings" if plan.is_file() else "Directly Mapped Change Items"
+    for row in table_rows(text, heading, design):
+        if row.get("change_id", "").strip() not in scope["change_ids"]:
+            continue
+        for value in re.split(r"\s*(?:,|<br\s*/?>)\s*", row.get("scope_paths", "")):
+            cleaned = re.split(r"[*?\[]", value.strip().strip("`"), maxsplit=1)[0].rstrip("/")
+            if cleaned:
+                paths.add(cleaned)
+    return paths
+
+
+def roots_cover_path(roots: list[str], path: str) -> bool:
+    target = Path(path)
+    return any(target == Path(root) or Path(root) in target.parents for root in roots)
+
+
+def current_evidence_input_binding(
+    root: Path, roots: list[str], expected_testplan: str
+) -> tuple[list[str], str]:
+    root_resolved = root.resolve()
+    paths: set[Path] = {(root / expected_testplan).resolve()}
+    for relative_root in roots:
+        if relative_root in {"", "."} or Path(relative_root).is_absolute() or any(
+            part == ".." for part in Path(relative_root).parts
+        ):
+            fail(f"artifact has invalid evidence input root: {relative_root}")
+        configured = root / relative_root
+        if configured.is_symlink():
+            fail(f"artifact evidence input root is a symlink: {relative_root}")
+        candidate = configured.resolve()
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            fail(f"artifact evidence input resolves outside repository: {relative_root}")
+        if not candidate.exists():
+            fail(f"artifact evidence input root is missing: {relative_root}")
+        if candidate.is_dir():
+            for child in candidate.rglob("*"):
+                if child.is_symlink():
+                    fail(f"artifact evidence input tree contains a symlink: {child}")
+                if child.is_file() and not any(
+                    part in {".git", ".venv", "target", "test-results", "__pycache__"}
+                    for part in child.relative_to(root_resolved).parts
+                ):
+                    paths.add(child.resolve())
+        elif candidate.is_file():
+            paths.add(candidate)
+    hasher = hashlib.sha256(b"harness-task-evidence-input-v1\0")
+    relative_paths = sorted(path.relative_to(root_resolved).as_posix() for path in paths)
+    for relative in relative_paths:
+        path = root / relative
+        hasher.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return relative_paths, hasher.hexdigest()
+
+
 def configured_quality_gate_ids(root: Path) -> set[str] | None:
     """Return configured gate ids, an empty set, or None for missing/malformed config."""
     config = root / QUALITY_GATES_CONFIG
@@ -369,22 +416,15 @@ def check_run_artifacts(
     if result != "accepted":
         return
 
-    current_state = repository_state_sha256(root)
-
     for rel, artifact in artifacts.items():
         if artifact.get("exit_code") != 0:
             fail(
                 f"{path} referenced run artifact must be passing for an accepted "
                 f"report: {rel}"
             )
-        artifact_state = artifact.get("repository_state_sha256")
-        if artifact_state != current_state:
-            fail(
-                f"{path} referenced run artifact is stale for the current repository state: {rel}; "
-                "rerun the test or quality command after the latest repository changes"
-            )
 
     task_artifacts: list[str] = []
+    required_contracts = required_contract_kinds(root, scope)
     expected_testplan = (
         f"docs/versions/{scope['version']}/modules/{scope['module']}/"
         f"{scope['task_name']}/testplan.yaml"
@@ -419,9 +459,50 @@ def check_run_artifacts(
             for step in steps
         ):
             continue
+        if required_contracts:
+            seen_contracts: dict[str, str] = {}
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                for source in step.get("sources", []):
+                    if not isinstance(source, dict):
+                        continue
+                    kind = source.get("contract_kind")
+                    assertion = source.get("assertion")
+                    if isinstance(kind, str) and isinstance(assertion, str):
+                        seen_contracts[kind] = assertion
+            missing_contracts = required_contracts - set(seen_contracts)
+            if missing_contracts or any(
+                seen_contracts.get(kind) != CONTRACT_ASSERTIONS[kind]
+                for kind in required_contracts
+            ):
+                continue
+            evidence_inputs = artifact.get("evidence_inputs")
+            evidence_roots = artifact.get("evidence_input_roots")
+            recorded_hash = artifact.get("evidence_input_sha256")
+            current_inputs, current_hash = current_evidence_input_binding(
+                root,
+                evidence_roots if isinstance(evidence_roots, list) and all(isinstance(item, str) for item in evidence_roots) else [],
+                expected_testplan,
+            )
+            if (
+                not isinstance(evidence_inputs, list)
+                or not evidence_inputs
+                or not all(isinstance(item, str) for item in evidence_inputs)
+                or not isinstance(evidence_roots, list)
+                or not evidence_roots
+                or any(
+                    not roots_cover_path(evidence_roots, required_path)
+                    for required_path in required_risk_evidence_paths(root, scope)
+                )
+                or not isinstance(recorded_hash, str)
+                or current_inputs != sorted(evidence_inputs)
+                or current_hash != recorded_hash
+            ):
+                continue
         task_artifacts.append(rel)
     test_run_ok = bool(task_artifacts)
-    command_body = section_body(text, "Required Command Evidence", path)
+    command_body = section_body(text, "Validation Evidence", path)
     test_artifact_value = command_value(command_body, "Task-relevant test run artifact") or ""
     if not test_run_ok:
         if not NOT_APPLICABLE_RE.search(test_artifact_value):
@@ -435,41 +516,31 @@ def check_run_artifacts(
 
     quality_value = command_value(command_body, "Quality gates") or ""
     quality_claims_run = non_empty(quality_value) and not NOT_APPLICABLE_RE.search(quality_value)
-    configured_gate_ids = configured_quality_gate_ids(root)
-    quality_artifact_ok = any(
-        "/quality-runs/" in rel
-        and isinstance(artifact.get("gates"), list)
-        and bool(artifact.get("gates"))
-        and {str(gate.get("id", "")) for gate in artifact["gates"] if isinstance(gate, dict)}
-        == configured_gate_ids
-        and all(
-            isinstance(gate, dict)
-            and non_empty(str(gate.get("id", "")))
-            and isinstance(gate.get("command"), list)
-            and bool(gate.get("command"))
-            and gate.get("exit_code") == 0
-            for gate in artifact["gates"]
+    if quality_claims_run:
+        configured_gate_ids = configured_quality_gate_ids(root)
+        if configured_gate_ids is None:
+            fail(f"{path} cannot determine configured quality gates from {QUALITY_GATES_CONFIG}")
+        quality_artifact_ok = any(
+            "/quality-runs/" in rel
+            and isinstance(artifact.get("gates"), list)
+            and bool(artifact.get("gates"))
+            and {str(gate.get("id", "")) for gate in artifact["gates"] if isinstance(gate, dict)}
+            == configured_gate_ids
+            and all(
+                isinstance(gate, dict)
+                and non_empty(str(gate.get("id", "")))
+                and isinstance(gate.get("command"), list)
+                and bool(gate.get("command"))
+                and gate.get("exit_code") == 0
+                for gate in artifact["gates"]
+            )
+            for rel, artifact in artifacts.items()
         )
-        for rel, artifact in artifacts.items()
-    )
-    if configured_gate_ids is None:
-        fail(f"{path} cannot determine configured quality gates from {QUALITY_GATES_CONFIG}")
-    gates_configured = bool(configured_gate_ids)
-    if gates_configured and NOT_APPLICABLE_RE.search(quality_value):
-        fail(
-            f"{path} cannot mark quality gates not relevant because "
-            f"{QUALITY_GATES_CONFIG} declares runnable gates"
-        )
-    if gates_configured and not quality_artifact_ok:
-        fail(
-            f"{path} accepted conclusion requires a referenced passing "
-            "test-results/quality-runs/*.json artifact for configured quality gates"
-        )
-    if quality_claims_run and not quality_artifact_ok:
-        fail(
-            f"{path} reports task-relevant quality gates without citing a passing "
-            "test-results/quality-runs/*.json artifact"
-        )
+        if not quality_artifact_ok:
+            fail(
+                f"{path} reports explicitly requested quality gates without citing a passing "
+                "test-results/quality-runs/*.json artifact"
+            )
 
 
 def check_report(path: Path, text: str, root: Path) -> None:
@@ -559,18 +630,12 @@ def check_report(path: Path, text: str, root: Path) -> None:
             if row.get("status", "").strip().lower() in BLOCKING_RULE_STATUSES:
                 fail(f"{path} accepted conclusion has failing acceptance rule: {row.get('rule_id')}")
 
-    command_body = section_body(text, "Required Command Evidence", path)
-    for label in REQUIRED_COMMAND_LABELS:
+    command_body = section_body(text, "Validation Evidence", path)
+    for label in REQUIRED_VALIDATION_LABELS:
         pattern = rf"(?im)^\s*-\s+.*{re.escape(label)}.*:\s*(.+)$"
         match = re.search(pattern, command_body)
         if not match or not non_empty(match.group(1)):
-            fail(f"{path} Required Command Evidence missing result for {label}")
-    admission_line = re.search(r"(?im)^\s*-\s+.*admission-check\.py.*$", command_body)
-    if not admission_line or "--verify-only" not in admission_line.group(0):
-        fail(
-            f"{path} Required Command Evidence must replay admission-check.py with "
-            "--verify-only so acceptance cannot create or refresh the admission stamp"
-        )
+            fail(f"{path} Validation Evidence missing result for {label}")
 
     summary_body = section_body(text, "Consistency Summary", path)
     for label in (

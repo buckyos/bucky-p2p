@@ -191,7 +191,18 @@ struct FakeTunnel {
     opened_stream_vports: Mutex<Vec<u16>>,
     opened_control_stream_vports: Mutex<Vec<u16>>,
     opened_datagram_vports: Mutex<Vec<u16>>,
+    stream_listen_error: Mutex<Option<(P2pErrorCode, &'static str)>>,
+    control_stream_listen_error: Mutex<Option<(P2pErrorCode, &'static str)>>,
+    datagram_listen_error: Mutex<Option<(P2pErrorCode, &'static str)>>,
+    close_error: Mutex<Option<(P2pErrorCode, &'static str)>>,
     close_count: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+enum FakeListenerKind {
+    Stream,
+    ControlStream,
+    Datagram,
 }
 
 impl FakeTunnel {
@@ -223,8 +234,38 @@ impl FakeTunnel {
             opened_stream_vports: Mutex::new(Vec::new()),
             opened_control_stream_vports: Mutex::new(Vec::new()),
             opened_datagram_vports: Mutex::new(Vec::new()),
+            stream_listen_error: Mutex::new(None),
+            control_stream_listen_error: Mutex::new(None),
+            datagram_listen_error: Mutex::new(None),
+            close_error: Mutex::new(None),
             close_count: AtomicUsize::new(0),
         })
+    }
+
+    fn set_listen_error(
+        &self,
+        listener: FakeListenerKind,
+        code: P2pErrorCode,
+        message: &'static str,
+    ) {
+        let slot = match listener {
+            FakeListenerKind::Stream => &self.stream_listen_error,
+            FakeListenerKind::ControlStream => &self.control_stream_listen_error,
+            FakeListenerKind::Datagram => &self.datagram_listen_error,
+        };
+        *slot.lock().unwrap() = Some((code, message));
+    }
+
+    fn set_close_error(&self, code: P2pErrorCode, message: &'static str) {
+        *self.close_error.lock().unwrap() = Some((code, message));
+    }
+
+    fn registered_listeners(&self) -> (bool, bool, bool) {
+        (
+            self.stream_callback.lock().unwrap().is_some(),
+            self.control_stream_callback.lock().unwrap().is_some(),
+            self.datagram_callback.lock().unwrap().is_some(),
+        )
     }
 
     fn push_stream(&self, vport: u16) -> P2pResult<()> {
@@ -367,6 +408,9 @@ impl Tunnel for FakeTunnel {
 
     fn close(&self) -> P2pResult<()> {
         self.close_count.fetch_add(1, Ordering::SeqCst);
+        if let Some((code, message)) = *self.close_error.lock().unwrap() {
+            return Err(P2pError::new(code, message.to_owned()));
+        }
         Ok(())
     }
 
@@ -375,6 +419,9 @@ impl Tunnel for FakeTunnel {
         _vports: crate::networks::ListenVPortsRef,
         callback: crate::networks::IncomingStreamCallback,
     ) -> P2pResult<()> {
+        if let Some((code, message)) = *self.stream_listen_error.lock().unwrap() {
+            return Err(P2pError::new(code, message.to_owned()));
+        }
         *self.stream_callback.lock().unwrap() = Some(callback.clone());
         let mut rx = self.incoming_stream_rx.lock().await;
         while let Ok(accepted) = rx.try_recv() {
@@ -388,6 +435,9 @@ impl Tunnel for FakeTunnel {
         _vports: crate::networks::ListenVPortsRef,
         callback: crate::networks::IncomingDatagramCallback,
     ) -> P2pResult<()> {
+        if let Some((code, message)) = *self.datagram_listen_error.lock().unwrap() {
+            return Err(P2pError::new(code, message.to_owned()));
+        }
         *self.datagram_callback.lock().unwrap() = Some(callback.clone());
         let mut rx = self.incoming_datagram_rx.lock().await;
         while let Ok(accepted) = rx.try_recv() {
@@ -401,6 +451,9 @@ impl Tunnel for FakeTunnel {
         _vports: crate::networks::ListenVPortsRef,
         callback: crate::networks::IncomingControlStreamCallback,
     ) -> P2pResult<()> {
+        if let Some((code, message)) = *self.control_stream_listen_error.lock().unwrap() {
+            return Err(P2pError::new(code, message.to_owned()));
+        }
         *self.control_stream_callback.lock().unwrap() = Some(callback.clone());
         let mut rx = self.incoming_control_stream_rx.lock().await;
         while let Ok(accepted) = rx.try_recv() {
@@ -576,6 +629,114 @@ fn make_identity(id: u8, name: &str, endpoint: Endpoint) -> P2pIdentityRef {
 
 fn make_manager(network: TunnelNetworkRef) -> NetManagerRef {
     NetManager::new(vec![network], DefaultTlsServerCertResolver::new()).unwrap()
+}
+
+fn make_attach_test_tunnel() -> Arc<FakeTunnel> {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24901".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24902".parse().unwrap()));
+    FakeTunnel::new(
+        P2pId::from(vec![91; 32]),
+        P2pId::from(vec![92; 32]),
+        local_ep,
+        remote_ep,
+    )
+}
+
+#[tokio::test]
+async fn ttp_attach_failure_closes_each_listener_registration_error() {
+    let cases = [
+        (
+            FakeListenerKind::Stream,
+            "test stream listener failed",
+            (false, false, false),
+        ),
+        (
+            FakeListenerKind::ControlStream,
+            "test control stream listener failed",
+            (true, false, false),
+        ),
+        (
+            FakeListenerKind::Datagram,
+            "test datagram listener failed",
+            (true, true, false),
+        ),
+    ];
+
+    for (listener, message, expected_registered) in cases {
+        let runtime = super::runtime::TtpRuntime::new();
+        let tunnel = make_attach_test_tunnel();
+        tunnel.set_listen_error(listener, P2pErrorCode::ErrorState, message);
+
+        let err = runtime
+            .attach_tunnel(tunnel.clone() as TunnelRef)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), P2pErrorCode::ErrorState);
+        assert_eq!(err.msg(), message);
+        assert_eq!(tunnel.close_count(), 1);
+        assert_eq!(tunnel.registered_listeners(), expected_registered);
+    }
+}
+
+#[tokio::test]
+async fn ttp_attach_failure_preserves_registration_error_when_close_fails() {
+    let runtime = super::runtime::TtpRuntime::new();
+    let tunnel = make_attach_test_tunnel();
+    tunnel.set_listen_error(
+        FakeListenerKind::Stream,
+        P2pErrorCode::ConnectionAborted,
+        "test attach cause",
+    );
+    tunnel.set_close_error(P2pErrorCode::OutOfLimit, "test close cleanup failed");
+
+    let err = runtime
+        .attach_tunnel(tunnel.clone() as TunnelRef)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), P2pErrorCode::ConnectionAborted);
+    assert_eq!(err.msg(), "test attach cause");
+    assert_eq!(tunnel.close_count(), 1);
+}
+
+#[tokio::test]
+async fn ttp_attach_failure_success_and_not_support_do_not_close() {
+    let success_runtime = super::runtime::TtpRuntime::new();
+    let success_tunnel = make_attach_test_tunnel();
+    success_runtime
+        .attach_tunnel(success_tunnel.clone() as TunnelRef)
+        .await
+        .unwrap();
+    assert_eq!(success_tunnel.close_count(), 0);
+    assert_eq!(success_tunnel.registered_listeners(), (true, true, true));
+
+    let unsupported_runtime = super::runtime::TtpRuntime::new();
+    let unsupported_tunnel = make_attach_test_tunnel();
+    unsupported_tunnel.set_listen_error(
+        FakeListenerKind::Stream,
+        P2pErrorCode::NotSupport,
+        "test stream unsupported",
+    );
+    unsupported_tunnel.set_listen_error(
+        FakeListenerKind::ControlStream,
+        P2pErrorCode::NotSupport,
+        "test control stream unsupported",
+    );
+    unsupported_tunnel.set_listen_error(
+        FakeListenerKind::Datagram,
+        P2pErrorCode::NotSupport,
+        "test datagram unsupported",
+    );
+    unsupported_runtime
+        .attach_tunnel(unsupported_tunnel.clone() as TunnelRef)
+        .await
+        .unwrap();
+    assert_eq!(unsupported_tunnel.close_count(), 0);
+    assert_eq!(
+        unsupported_tunnel.registered_listeners(),
+        (false, false, false)
+    );
 }
 
 #[tokio::test]

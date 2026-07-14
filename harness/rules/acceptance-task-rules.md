@@ -16,7 +16,8 @@
 ## Acceptance Rule
 - Acceptance first defines the task-relevant acceptance scope: reviewed `change_id` values, active task packet, affected module paths, and evidence-bearing modules.
 - Acceptance evaluates only the evidence chain relevant to that scope and MUST apply `harness/rules/acceptance-review-rules.md`.
-- Acceptance MUST NOT execute unrelated module, whole-project, root-shortcut, architecture-doc, quality-gate, or migration-search checks unless proposal/design, testplan, or repo-local custom rules make that evidence relevant to the reviewed behavior.
+- Acceptance MUST execute only task-scoped automated tests. Direct package/module runtime suites, whole-project suites, root shortcuts, and quality-gate commands are forbidden in single-task acceptance; changes under `harness/**` or `docs/**` never trigger them.
+- Risk-triggered API/build-surface tasks remain task-scoped: acceptance invokes only `<module>/<task-name> all`, whose task-local plan may contain the required package/workspace compile-only consumer closure. The exception never authorizes broad runtime test execution.
 - Git diff/status output is discovery evidence only, not the acceptance standard.
 - Acceptance MUST check consistency between proposal, design, relevant project-rule-governed `docs/architecture/` docs when applicable, implementation, testing implementation, generated acceptance rules, and expected results.
 - Approved `proposal.md` is authoritative when downstream artifacts conflict.
@@ -29,18 +30,17 @@
 - Completed testing work MUST include `testplan.yaml` unless a versioned exception records reason, owner, risk, and acceptance impact.
 - Acceptance MUST judge post-implementation test design adequacy for proposal/design/code behavior, including relevant normal, boundary, negative, error, compatibility, lifecycle, and cross-module cases.
 - Acceptance MUST perform and record an implementation correctness audit beyond test pass/fail. It MUST cover logic/control flow, termination/progress, concurrency/synchronization, resource lifetime/cleanup, state/data integrity, error handling/recovery, interface boundaries/compatibility, and security/capacity safety; every category needs inspected evidence and either pass, a concrete finding, or a concrete not-applicable reason.
-- Automated test evidence MUST be reachable through `harness/scripts/test-run.py`; run `<module>/<task-name> all` for task evidence, canonical module/level commands only when module regression is relevant, and `test-run.py all all` only when whole-project behavior is in scope.
-- Execution evidence MUST cite machine-written artifacts: `test-results/test-runs/*.json` and, when quality gates are task-relevant, `test-results/quality-runs/*.json`. Every cited artifact MUST carry `repository_state_sha256` matching the current repository state; stale artifacts are rejected and the relevant command must be rerun. An accepted task report MUST name `Module`, `Version`, `Task name`, and reviewed `change_id` values, and its required task run artifact MUST match `<module>/<task-name> all` and cover those ids.
+- Automated test evidence MUST be reachable through `harness/scripts/test-run.py`; reuse the existing `<module>/<task-name> all` artifact while implementation, tests, testplan, and registration are unchanged, and rerun only after one of those inputs changes.
+- Execution evidence MUST cite a machine-written `test-results/test-runs/*.json` artifact matching `<module>/<task-name> all` and the reviewed `change_id` values. Artifacts MUST NOT carry or be validated by a repository/package state hash.
+- Risk-triggered API/build-surface artifacts instead carry explicit evidence-input roots, their expanded files, and `evidence_input_sha256`; acceptance re-expands and rehashes that scoped closure so new or modified consumer inputs invalidate stale evidence.
 - When no automated task run can apply, acceptance MUST replace the run artifact with a structured `## Automated Test Exception` containing `Applies: yes`, a concrete reason, owner, risk, acceptance impact, and alternative evidence; `not applicable` alone is not sufficient.
-- Runnable gates declared in `harness/quality-gates.yaml` are always acceptance-blocking and require `quality-check.py` to record a passing artifact; `not relevant` is valid only for `gates: []` with a concrete `empty_reason`.
+- Quality gates are independent, explicitly user-invoked checks and are not acceptance-blocking single-task evidence.
 - Bugfix acceptance MUST verify red-green regression evidence or a concrete infeasibility reason.
 - Implementation task paths MUST be bound to admitted design `Scope Paths` through `stage-scope-check.py --stage implementation --change-id ... --changed-paths-file ...`.
-- Acceptance MUST replay implementation admission with `admission-check.py --verify-only`; it MUST fail when the pre-existing stamp is missing or stale and MUST NOT create or refresh the stamp. Normal updates to `pipeline/state.json` do not stale the stamp because admission binds only `proposal.md` and immutable `pipeline/plan.md`.
+- Acceptance MUST cite the pre-existing admission stamp and MUST NOT replay implementation admission while its bound inputs are unchanged. A missing result returns to the owning stage; acceptance does not create or refresh admission evidence.
 - Missing active module, active task packet, `change_id`, or required evidence is blocking.
 - Passing tests alone never imply acceptance.
-- Before final judgment, run only task-relevant validation and then acceptance-report validation:
-  - `uv run --active python ./harness/scripts/architecture-doc-check.py` only when `docs/architecture/` evidence is in scope
-  - `uv run --active python ./harness/scripts/acceptance-report-check.py <report>`
+- Before final judgment, reuse existing task-relevant validation. Run a gate again only after its owned inputs changed; run `acceptance-report-check.py` after the report itself is created or modified.
 
 ## Failure Handling
 - Proposal ambiguity, contradiction, incorrect requirement, or incorrect acceptance boundary: stop acceptance and any auto-pipeline, report the issue, and ask the user to decide. Do not infer the requirement or open an automatic proposal return task.

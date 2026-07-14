@@ -21,9 +21,10 @@ use futures::stream::{FuturesUnordered, StreamExt};
 
 use super::{ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionInfoCacheRef};
 use crate::networks::{
-    IncomingTunnelCallback, ListenVPortsRef, NetManagerRef, TunnelCommandResult,
-    TunnelConnectIntent, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelListenerInfo,
-    TunnelNetwork, TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    IncomingTunnelAcceptance, IncomingTunnelCallback, ListenVPortsRef, NetManagerRef,
+    TunnelCommandResult, TunnelConnectIntent, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm,
+    TunnelListenerInfo, TunnelNetwork, TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead,
+    TunnelStreamWrite,
 };
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
@@ -292,27 +293,33 @@ impl TunnelManager {
             .unwrap(),
         });
         let weak = Arc::downgrade(&manager);
-        manager.net_manager.register_incoming_tunnel_subscriber(
-            local_identity.get_id(),
-            Arc::new(move |result| {
-                let Some(manager) = weak.upgrade() else {
-                    return Box::pin(async { false });
-                };
-                let tunnel = match result {
-                    Ok(tunnel) => tunnel,
-                    Err(err) => {
-                        log::warn!("receive incoming tunnel failed: {:?}", err);
-                        return Box::pin(async { true });
-                    }
-                };
-                Box::pin(async move {
-                    if let Err(err) = manager.on_incoming_tunnel(tunnel).await {
-                        log::warn!("register incoming tunnel failed: {:?}", err);
-                    }
-                    true
-                })
-            }),
-        )?;
+        manager
+            .net_manager
+            .register_incoming_tunnel_acceptance_subscriber(
+                local_identity.get_id(),
+                Arc::new(move |result| {
+                    let Some(manager) = weak.upgrade() else {
+                        return Box::pin(async { IncomingTunnelAcceptance::Rejected });
+                    };
+                    let tunnel = match result {
+                        Ok(tunnel) => tunnel,
+                        Err(err) => {
+                            log::warn!("receive incoming tunnel failed: {:?}", err);
+                            return Box::pin(async { IncomingTunnelAcceptance::Rejected });
+                        }
+                    };
+                    Box::pin(async move {
+                        match manager.on_incoming_tunnel(tunnel).await {
+                            Ok(true) => IncomingTunnelAcceptance::Accepted,
+                            Ok(false) => IncomingTunnelAcceptance::Rejected,
+                            Err(err) => {
+                                log::warn!("register incoming tunnel failed: {:?}", err);
+                                IncomingTunnelAcceptance::Rejected
+                            }
+                        }
+                    })
+                }),
+            )?;
         if let Some(sn_service) = sn_service_for_listener {
             let weak = Arc::downgrade(&manager);
             sn_service.set_listener(move |called: SnCalled| {
@@ -509,7 +516,7 @@ impl TunnelManager {
         self.open_known_tunnel(remote_eps, remote_id, None).await
     }
 
-    async fn on_incoming_tunnel(&self, tunnel: TunnelRef) -> P2pResult<()> {
+    async fn on_incoming_tunnel(&self, tunnel: TunnelRef) -> P2pResult<bool> {
         let remote_id = tunnel.remote_id();
         let tunnel_id = tunnel.tunnel_id();
         log::debug!(
@@ -530,7 +537,7 @@ impl TunnelManager {
                     tunnel_id
                 );
                 tunnel.close()?;
-                return Ok(());
+                return Ok(false);
             };
             log::debug!(
                 "incoming tunnel remote={} tunnel_id={:?} matched reverse waiter",
@@ -538,7 +545,7 @@ impl TunnelManager {
                 tunnel_id
             );
             waiter.notify(Ok(tunnel));
-            return Ok(());
+            return Ok(true);
         }
         let tunnel = self.register_tunnel(tunnel).await?;
         self.publish_registered_tunnel(&tunnel)?;
@@ -547,7 +554,7 @@ impl TunnelManager {
             remote_id,
             tunnel_id
         );
-        Ok(())
+        Ok(true)
     }
 
     async fn open_known_tunnel(

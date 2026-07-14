@@ -20,6 +20,7 @@ use crate::runtime;
 pub(crate) const MAX_CONTROL_DATA_FRAME_SIZE: usize = 64 * 1024;
 const CONTROL_STREAM_WRITE_CHUNK: usize = 60 * 1024;
 const CONTROL_STREAM_QUEUE_CAPACITY: usize = 1024;
+const CONTROL_STREAM_QUEUE_TERMINAL_RESERVE: usize = 1;
 const CONTROL_STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) type ControlDataSenderFuture = Pin<Box<dyn Future<Output = P2pResult<()>> + Send>>;
@@ -104,6 +105,7 @@ struct ControlStreamRuntimeInner {
     pending_opens: Mutex<HashMap<u32, PendingOpen>>,
     listener: RwLock<Option<(ListenVPortsRef, IncomingControlStreamCallback)>>,
     next_stream_id: AtomicU32,
+    local_stream_id_parity: u32,
     closed: AtomicBool,
     close_reason: Mutex<Option<(P2pErrorCode, String)>>,
 }
@@ -116,12 +118,12 @@ pub(crate) struct ControlStreamRuntime {
 pub(crate) struct ControlStreamRead {
     rx: mpsc::Receiver<InboundItem>,
     pending: Vec<u8>,
-    closed: Option<P2pError>,
+    pending_offset: usize,
 }
 
 pub(crate) struct ControlStreamWrite {
     stream_id: u32,
-    sender: ControlDataSenderRef,
+    inner: Arc<ControlStreamRuntimeInner>,
     pending_write: Option<ControlDataSenderFuture>,
     pending_write_len: usize,
     pending_shutdown: Option<ControlDataSenderFuture>,
@@ -137,6 +139,7 @@ impl ControlStreamRuntime {
             pending_opens: Mutex::new(HashMap::new()),
             listener: RwLock::new(None),
             next_stream_id: AtomicU32::new(first),
+            local_stream_id_parity: first & 1,
             closed: AtomicBool::new(false),
             close_reason: Mutex::new(None),
         });
@@ -159,7 +162,7 @@ impl ControlStreamRuntime {
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         self.check_open()?;
         let stream_id = self.alloc_stream_id();
-        let (tx, rx) = mpsc::channel(CONTROL_STREAM_QUEUE_CAPACITY);
+        let (tx, rx) = Self::inbound_channel();
         let (waiter_tx, waiter_rx) = oneshot::channel();
         self.inner.pending_opens.lock().unwrap().insert(
             stream_id,
@@ -180,7 +183,7 @@ impl ControlStreamRuntime {
                 let read: TunnelStreamRead = Box::pin(ControlStreamRead::new(rx));
                 let write: TunnelStreamWrite = Box::pin(ControlStreamWrite::new(
                     stream_id,
-                    self.inner.sender.clone(),
+                    self.inner.clone(),
                 ));
                 Ok((read, write))
             }
@@ -241,7 +244,9 @@ impl ControlStreamRuntime {
             ControlStreamFrame::OpenResp { stream_id, result } => {
                 self.handle_open_resp(stream_id, result)
             }
-            ControlStreamFrame::Data { stream_id, bytes } => self.deliver(stream_id, bytes),
+            ControlStreamFrame::Data { stream_id, bytes } => {
+                self.deliver(stream_id, bytes).await
+            }
             ControlStreamFrame::Fin { stream_id } => self.finish_stream(stream_id),
             ControlStreamFrame::Reset { stream_id, reason } => {
                 self.reset_stream(stream_id, reason.into_p2p_error("control stream reset"))
@@ -251,6 +256,29 @@ impl ControlStreamRuntime {
     }
 
     async fn handle_open(&self, stream_id: u32, purpose: TunnelPurpose) -> P2pResult<()> {
+        if !self.is_peer_stream_id(stream_id) {
+            self.send_frame(ControlStreamFrame::OpenResp {
+                stream_id,
+                result: TunnelCommandResult::InvalidParam,
+            })
+            .await?;
+            return Ok(());
+        }
+        if self
+            .inner
+            .pending_opens
+            .lock()
+            .unwrap()
+            .contains_key(&stream_id)
+            || self.inner.streams.lock().unwrap().contains_key(&stream_id)
+        {
+            self.send_frame(ControlStreamFrame::OpenResp {
+                stream_id,
+                result: TunnelCommandResult::ConflictLost,
+            })
+            .await?;
+            return Ok(());
+        }
         let listener = self.inner.listener.read().unwrap().clone();
         let Some((purposes, callback)) = listener else {
             self.send_frame(ControlStreamFrame::OpenResp {
@@ -268,8 +296,24 @@ impl ControlStreamRuntime {
             .await?;
             return Ok(());
         }
-        let (tx, rx) = mpsc::channel(CONTROL_STREAM_QUEUE_CAPACITY);
-        self.inner.streams.lock().unwrap().insert(stream_id, tx);
+        let (tx, rx) = Self::inbound_channel();
+        let inserted = {
+            let mut streams = self.inner.streams.lock().unwrap();
+            if streams.contains_key(&stream_id) {
+                false
+            } else {
+                streams.insert(stream_id, tx);
+                true
+            }
+        };
+        if !inserted {
+            self.send_frame(ControlStreamFrame::OpenResp {
+                stream_id,
+                result: TunnelCommandResult::ConflictLost,
+            })
+            .await?;
+            return Ok(());
+        }
         self.send_frame(ControlStreamFrame::OpenResp {
             stream_id,
             result: TunnelCommandResult::Success,
@@ -278,9 +322,11 @@ impl ControlStreamRuntime {
         let read: TunnelStreamRead = Box::pin(ControlStreamRead::new(rx));
         let write: TunnelStreamWrite = Box::pin(ControlStreamWrite::new(
             stream_id,
-            self.inner.sender.clone(),
+            self.inner.clone(),
         ));
-        callback(Ok((purpose, read, write))).await;
+        runtime::task::spawn(async move {
+            callback(Ok((purpose, read, write))).await;
+        });
         Ok(())
     }
 
@@ -306,17 +352,51 @@ impl ControlStreamRuntime {
         Ok(())
     }
 
-    fn deliver(&self, stream_id: u32, bytes: Vec<u8>) -> P2pResult<()> {
-        let tx = self.inner.streams.lock().unwrap().get(&stream_id).cloned();
-        let Some(tx) = tx else {
+    async fn deliver(&self, stream_id: u32, bytes: Vec<u8>) -> P2pResult<()> {
+        enum DeliveryFailure {
+            Overflow,
+            ReaderClosed,
+        }
+
+        let failure = {
+            let mut streams = self.inner.streams.lock().unwrap();
+            let Some(tx) = streams.get(&stream_id).cloned() else {
+                return Ok(());
+            };
+            if tx.capacity() <= CONTROL_STREAM_QUEUE_TERMINAL_RESERVE {
+                streams.remove(&stream_id);
+                let _ = tx.try_send(InboundItem::Reset(
+                    P2pErrorCode::OutOfLimit,
+                    "control stream inbound queue full".to_owned(),
+                ));
+                Some(DeliveryFailure::Overflow)
+            } else {
+                match tx.try_send(InboundItem::Data(bytes)) {
+                    Ok(()) => None,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        streams.remove(&stream_id);
+                        let _ = tx.try_send(InboundItem::Reset(
+                            P2pErrorCode::OutOfLimit,
+                            "control stream inbound queue full".to_owned(),
+                        ));
+                        Some(DeliveryFailure::Overflow)
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        streams.remove(&stream_id);
+                        Some(DeliveryFailure::ReaderClosed)
+                    }
+                }
+            }
+        };
+        let Some(failure) = failure else {
             return Ok(());
         };
-        tx.try_send(InboundItem::Data(bytes)).map_err(|_| {
-            p2p_err!(
-                P2pErrorCode::OutOfLimit,
-                "control stream inbound queue full"
-            )
-        })
+        let reason = match failure {
+            DeliveryFailure::Overflow => TunnelCommandResult::AcceptQueueFull,
+            DeliveryFailure::ReaderClosed => TunnelCommandResult::Interrupted,
+        };
+        self.send_frame(ControlStreamFrame::Reset { stream_id, reason })
+            .await
     }
 
     fn finish_stream(&self, stream_id: u32) -> P2pResult<()> {
@@ -369,7 +449,30 @@ impl ControlStreamRuntime {
     }
 
     fn alloc_stream_id(&self) -> u32 {
-        self.inner.next_stream_id.fetch_add(2, Ordering::SeqCst)
+        loop {
+            let stream_id = self.inner.next_stream_id.fetch_add(2, Ordering::SeqCst);
+            if stream_id == 0 {
+                continue;
+            }
+            if !self
+                .inner
+                .pending_opens
+                .lock()
+                .unwrap()
+                .contains_key(&stream_id)
+                && !self.inner.streams.lock().unwrap().contains_key(&stream_id)
+            {
+                return stream_id;
+            }
+        }
+    }
+
+    fn is_peer_stream_id(&self, stream_id: u32) -> bool {
+        stream_id != 0 && stream_id & 1 != self.inner.local_stream_id_parity
+    }
+
+    fn inbound_channel() -> (mpsc::Sender<InboundItem>, mpsc::Receiver<InboundItem>) {
+        mpsc::channel(CONTROL_STREAM_QUEUE_CAPACITY + CONTROL_STREAM_QUEUE_TERMINAL_RESERVE)
     }
 }
 
@@ -378,7 +481,7 @@ impl ControlStreamRead {
         Self {
             rx,
             pending: Vec::new(),
-            closed: None,
+            pending_offset: 0,
         }
     }
 }
@@ -389,16 +492,15 @@ impl tokio::io::AsyncRead for ControlStreamRead {
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Some(err) = self.closed.take() {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                err.to_string(),
-            )));
-        }
-        if !self.pending.is_empty() {
-            let len = self.pending.len().min(buf.remaining());
-            buf.put_slice(&self.pending[..len]);
-            self.pending.drain(..len);
+        if self.pending_offset < self.pending.len() {
+            let start = self.pending_offset;
+            let len = (self.pending.len() - start).min(buf.remaining());
+            buf.put_slice(&self.pending[start..start + len]);
+            self.pending_offset += len;
+            if self.pending_offset == self.pending.len() {
+                self.pending.clear();
+                self.pending_offset = 0;
+            }
             return Poll::Ready(Ok(()));
         }
         match Pin::new(&mut self.rx).poll_recv(cx) {
@@ -406,7 +508,8 @@ impl tokio::io::AsyncRead for ControlStreamRead {
                 let len = bytes.len().min(buf.remaining());
                 buf.put_slice(&bytes[..len]);
                 if len < bytes.len() {
-                    self.pending.extend_from_slice(&bytes[len..]);
+                    self.pending = bytes;
+                    self.pending_offset = len;
                 }
                 Poll::Ready(Ok(()))
             }
@@ -420,10 +523,10 @@ impl tokio::io::AsyncRead for ControlStreamRead {
 }
 
 impl ControlStreamWrite {
-    fn new(stream_id: u32, sender: ControlDataSenderRef) -> Self {
+    fn new(stream_id: u32, inner: Arc<ControlStreamRuntimeInner>) -> Self {
         Self {
             stream_id,
-            sender,
+            inner,
             pending_write: None,
             pending_write_len: 0,
             pending_shutdown: None,
@@ -445,6 +548,12 @@ impl ControlStreamWrite {
     }
 
     fn poll_pending_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            self.pending_write = None;
+            self.pending_write_len = 0;
+            self.closed = true;
+            return Poll::Ready(Err(self.closed_error()));
+        }
         let Some(send) = self.pending_write.as_mut() else {
             return Poll::Ready(Ok(0));
         };
@@ -453,7 +562,12 @@ impl ControlStreamWrite {
                 self.pending_write = None;
                 let len = self.pending_write_len;
                 self.pending_write_len = 0;
-                Poll::Ready(Ok(len))
+                if self.inner.closed.load(Ordering::SeqCst) {
+                    self.closed = true;
+                    Poll::Ready(Err(self.closed_error()))
+                } else {
+                    Poll::Ready(Ok(len))
+                }
             }
             Poll::Ready(Err(err)) => {
                 self.pending_write = None;
@@ -467,6 +581,18 @@ impl ControlStreamWrite {
             Poll::Pending => Poll::Pending,
         }
     }
+
+    fn closed_error(&self) -> io::Error {
+        let message = self
+            .inner
+            .close_reason
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, msg)| msg.clone())
+            .unwrap_or_else(|| "control stream closed".to_owned());
+        io::Error::new(io::ErrorKind::BrokenPipe, message)
+    }
 }
 
 impl tokio::io::AsyncWrite for ControlStreamWrite {
@@ -476,11 +602,9 @@ impl tokio::io::AsyncWrite for ControlStreamWrite {
         src: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.closed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "control stream closed",
-            )));
+        if this.closed || this.inner.closed.load(Ordering::SeqCst) {
+            this.closed = true;
+            return Poll::Ready(Err(this.closed_error()));
         }
         if this.pending_write.is_some() {
             return this.poll_pending_write(cx);
@@ -494,7 +618,7 @@ impl tokio::io::AsyncWrite for ControlStreamWrite {
             bytes: src[..len].to_vec(),
         })?;
         this.pending_write_len = len;
-        this.pending_write = Some(this.sender.send(payload));
+        this.pending_write = Some(this.inner.sender.send(payload));
         this.poll_pending_write(cx)
     }
 
@@ -505,21 +629,40 @@ impl tokio::io::AsyncWrite for ControlStreamWrite {
                 Poll::Pending => return Poll::Pending,
             }
         }
+        if self.inner.closed.load(Ordering::SeqCst) {
+            self.closed = true;
+            return Poll::Ready(Err(self.closed_error()));
+        }
         Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.pending_write.is_some() {
+            match self.poll_pending_write(cx)? {
+                Poll::Ready(_) => {}
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        if self.inner.closed.load(Ordering::SeqCst) {
+            self.pending_shutdown = None;
+            self.closed = true;
+            return Poll::Ready(Err(self.closed_error()));
+        }
         if !self.closed {
             if self.pending_shutdown.is_none() {
                 let payload = self.encode_frame(ControlStreamFrame::Fin {
                     stream_id: self.stream_id,
                 })?;
-                self.pending_shutdown = Some(self.sender.send(payload));
+                self.pending_shutdown = Some(self.inner.sender.send(payload));
             }
             if let Some(send) = self.pending_shutdown.as_mut() {
                 match send.as_mut().poll(cx) {
                     Poll::Ready(Ok(())) => {
                         self.pending_shutdown = None;
+                        if self.inner.closed.load(Ordering::SeqCst) {
+                            self.closed = true;
+                            return Poll::Ready(Err(self.closed_error()));
+                        }
                         self.closed = true;
                     }
                     Poll::Ready(Err(err)) => {
@@ -539,133 +682,4 @@ impl tokio::io::AsyncWrite for ControlStreamWrite {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::networks::allow_all_listen_vports;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    struct NoopSender;
-
-    impl ControlDataSender for NoopSender {
-        fn send(&self, _payload: Vec<u8>) -> ControlDataSenderFuture {
-            Box::pin(async { Ok(()) })
-        }
-    }
-
-    struct CaptureSender {
-        tx: mpsc::Sender<usize>,
-    }
-
-    impl ControlDataSender for CaptureSender {
-        fn send(&self, payload: Vec<u8>) -> ControlDataSenderFuture {
-            let tx = self.tx.clone();
-            Box::pin(async move {
-                assert!(payload.len() <= MAX_CONTROL_DATA_FRAME_SIZE);
-                tx.send(payload.len())
-                    .await
-                    .map_err(|_| p2p_err!(P2pErrorCode::Interrupted, "capture sender closed"))
-            })
-        }
-    }
-
-    fn linked_runtimes() -> (ControlStreamRuntime, ControlStreamRuntime) {
-        let (a_tx, mut a_rx) = mpsc::channel::<Vec<u8>>(CONTROL_STREAM_QUEUE_CAPACITY);
-        let (b_tx, mut b_rx) = mpsc::channel::<Vec<u8>>(CONTROL_STREAM_QUEUE_CAPACITY);
-        let a = ControlStreamRuntime::new(true, Arc::new(a_tx));
-        let b = ControlStreamRuntime::new(false, Arc::new(b_tx));
-        let a_in = a.clone();
-        runtime::task::spawn(async move {
-            while let Some(payload) = b_rx.recv().await {
-                let _ = a_in.on_data(payload).await;
-            }
-        });
-        let b_in = b.clone();
-        runtime::task::spawn(async move {
-            while let Some(payload) = a_rx.recv().await {
-                let _ = b_in.on_data(payload).await;
-            }
-        });
-        (a, b)
-    }
-
-    #[tokio::test]
-    async fn control_stream_open_listen_and_transfer() {
-        let (a, b) = linked_runtimes();
-        let (accepted_tx, mut accepted_rx) = mpsc::channel(1);
-        b.listen(
-            allow_all_listen_vports(),
-            Arc::new(move |result| {
-                let accepted_tx = accepted_tx.clone();
-                Box::pin(async move {
-                    accepted_tx.send(result).await.unwrap();
-                })
-            }),
-        )
-        .await
-        .unwrap();
-
-        let purpose = TunnelPurpose::from_value(&7u16).unwrap();
-        let (mut a_read, mut a_write) = a.open(purpose.clone()).await.unwrap();
-        let (_accepted_purpose, mut b_read, mut b_write) =
-            accepted_rx.recv().await.unwrap().unwrap();
-
-        a_write.write_all(b"ping").await.unwrap();
-        let mut buf = [0u8; 4];
-        b_read.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"ping");
-
-        b_write.write_all(b"pong").await.unwrap();
-        a_read.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"pong");
-    }
-
-    #[tokio::test]
-    async fn control_stream_rejects_oversized_outer_data() {
-        let runtime = ControlStreamRuntime::new(true, Arc::new(NoopSender));
-        let err = runtime
-            .on_data(vec![0u8; MAX_CONTROL_DATA_FRAME_SIZE + 1])
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(err.code(), P2pErrorCode::InvalidData);
-        let err = runtime
-            .open(TunnelPurpose::from_value(&9u16).unwrap())
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(err.code(), P2pErrorCode::InvalidData);
-    }
-
-    #[tokio::test]
-    async fn control_stream_canceled_open_cleans_pending_and_ignores_late_response() {
-        let (capture_tx, mut capture_rx) = mpsc::channel::<usize>(1);
-        let runtime = ControlStreamRuntime::new(true, Arc::new(CaptureSender { tx: capture_tx }));
-        let opener = runtime.clone();
-        let task = runtime::task::spawn(async move {
-            opener.open(TunnelPurpose::from_value(&9u16).unwrap()).await
-        });
-
-        assert!(capture_rx.recv().await.is_some());
-        task.abort();
-        let _ = task.await;
-        assert!(runtime.inner.pending_opens.lock().unwrap().is_empty());
-
-        runtime
-            .handle_open_resp(1, TunnelCommandResult::Success)
-            .unwrap();
-        assert!(runtime.inner.streams.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn control_stream_write_splits_below_outer_limit() {
-        let (capture_tx, mut capture_rx) = mpsc::channel::<usize>(4);
-        let runtime = ControlStreamRuntime::new(true, Arc::new(CaptureSender { tx: capture_tx }));
-        let mut write = ControlStreamWrite::new(1, runtime.inner.sender.clone());
-        let written = write
-            .write(&vec![1u8; MAX_CONTROL_DATA_FRAME_SIZE * 2])
-            .await
-            .unwrap();
-        assert_eq!(written, CONTROL_STREAM_WRITE_CHUNK);
-        assert!(capture_rx.recv().await.unwrap() <= MAX_CONTROL_DATA_FRAME_SIZE);
-    }
-}
+mod tests;

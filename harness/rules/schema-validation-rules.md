@@ -84,6 +84,16 @@ version: <version>
 module: <module>
 task_name: <task-seq>-<task-slug> # required for task packets
 submodule: <task-seq>-<task-slug> # optional; required only when explicit submodule metadata is used
+api_impact:
+  public_api: none | backward-compatible | migration-required | breaking
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["<production-or-consumer-path>"]
+contract_checks:
+  mode: enabled | disabled
+  reason: <required when disabled>
+  steps: [] # enabled risk-triggered checks add id/kind/assertion/name/change_ids/run
 levels:
   unit|dv|integration:
     mode: enabled | manual | disabled
@@ -102,6 +112,8 @@ levels:
 ```
 
 Rules:
+- Every testplan declares structured `api_impact`, a non-empty repository-relative `evidence_inputs` list, and `contract_checks` with `enabled` or reasoned `disabled` mode.
+- Contract steps define `kind` plus its fixed matching `assertion`; mismatched or arbitrary assertions fail validation.
 - Enabled levels need at least one step.
 - Enabled steps define `id`, `name`, `change_ids`, and `run`.
 - Step ids are unique within the task packet.
@@ -112,17 +124,17 @@ Rules:
 - `schema-check.py` validates packet structure, approval provenance, and optional testplan shape, with `--submodule <task-seq>-<task-slug>` for task directories.
 - `admission-check.py` validates explicit `version`, packet `module`, optional `submodule`, concrete `target_module`, `change_id` values, mandatory proposal/design traceability, and approval provenance. `--module globals` requires `--target-module`.
 - `admission-check.py --evidence-file ...` also validates proposal/design reading evidence, direct coverage judgment, active module resolution, same-module task selection or cross-module task exclusion, no chat-only evidence, file name date, document hashes, and verbatim coverage quotes.
-- `admission-check.py --verify-only` revalidates existing evidence and the machine-written stamp without updating timestamps; `check-all.py` uses this mode for explicit repository-wide audits.
-- On success, `admission-check.py` writes an admission stamp with bound document hashes and admitted design `Scope Paths`; `admission-check.py --verify-only` and `check-all.py` revalidate the stamp. `stage-scope-check.py` only evaluates the current task manifest against the selected stage and `change_id` Scope Paths.
-- `stage-scope-check.py` validates per-task changed path manifests using canonical paths resolved beneath the real repository root. Absolute paths, `..`, symlink escapes, and glob Scope Paths fail closed. After matching `--submodule`, it strips that task-directory prefix before classifying task-local `design/` and `testing/` paths. It allows only narrow stage companion paths required by the workflow: proposal task-index updates; auto-pipeline task-local `pipeline/plan.md` only for design; task-local `pipeline/state.json` for design/implementation/testing/acceptance bookkeeping; testing-stage `harness/scripts/test-run.py` entrypoint wiring; testing-stage `test-results/test-runs/*.json` run evidence; and stage-scope/admission evidence. Implementation runs require `--version`, packet `--module`, concrete `--target-module`, repeatable `--change-id`, and `--changed-paths-file`, then fail paths outside the selected target's admitted `Scope Paths` except task evidence and allowed state bookkeeping; implementation also rejects stage artifacts in every task packet, not only the active packet.
-- Every `.paths` manifest MUST have a sibling `.paths.meta.json` with schema `1`, stage, version, packet module, optional task submodule, concrete `target_module`, and implementation `change_ids`; `check-all.py` fails closed on missing metadata and replays `stage-scope-check.py`.
+- `admission-check.py --verify-only` is reserved for an explicit user-requested audit or an admission-owned input change; acceptance and `check-all.py` MUST NOT invoke it for unchanged evidence.
+- On success, `admission-check.py` writes an admission stamp with bound document hashes and admitted design `Scope Paths`; later stages reuse it while those inputs remain unchanged. `stage-scope-check.py` only evaluates the current task manifest against the selected stage and `change_id` Scope Paths.
+- `stage-scope-check.py` validates per-task changed path manifests using canonical paths resolved beneath the real repository root. Absolute paths, `..`, symlink escapes, and glob Scope Paths fail closed. After matching `--submodule`, it strips that task-directory prefix before classifying task-local `design/` and `testing/` paths. It allows only narrow stage companion paths required by the workflow: proposal task-index updates; auto-pipeline task-local `pipeline/plan.md` only for design; task-local `pipeline/state.json` for design/implementation/testing/acceptance bookkeeping; testing-stage `harness/scripts/test-run.py` entrypoint wiring; testing-stage `test-results/test-runs/*.json` run evidence; and stage-scope/admission evidence. During testing, a production-path Rust file is allowed only when comparison with `HEAD` or explicit `--base` proves all changes are inside pre-existing exact `#[cfg(test)]` items; new inline items, mixed production/test changes, missing baselines, and extension-only allowances fail closed. Implementation runs require `--version`, packet `--module`, concrete `--target-module`, repeatable `--change-id`, and `--changed-paths-file`, then fail paths outside the selected target's admitted `Scope Paths` except task evidence and allowed state bookkeeping; implementation also rejects stage artifacts in every task packet, not only the active packet.
+- Every `.paths` manifest MUST have a sibling `.paths.meta.json` with schema `1`, stage, version, packet module, optional task submodule, concrete `target_module`, optional task-start Git `base`, and implementation `change_ids`; testing tasks that change existing inline Rust tests record `base`. Run `stage-scope-check.py` after this metadata, the manifest, governed paths, baseline, or design Scope Paths change; do not replay it otherwise.
 - `doc-structure-check.py` validates proposal core sections, design UML diagrams, source-language file-level interface blocks, acyclic relationships, useful design sections, testing case coverage, and mandatory tables needed by admission/testing.
 - `testing-coverage-check.py` validates direct `change_id` coverage, gap reasons, testplan mapping, case-type coverage, and unified test entrypoint reachability.
-- `test-run.py` writes machine-readable run artifacts under `test-results/test-runs/`; those artifacts are the only valid automated test execution evidence and MUST carry a `repository_state_sha256` matching the repository state reviewed by acceptance.
-- Task-local `pipeline/state.json` is control-plane bookkeeping and is excluded from `repository_state_sha256`; changing it does not stale test/quality evidence. Task-local `pipeline/plan.md` remains included, so design or Scope Path changes do stale prior execution evidence and admission.
-- `quality-check.py` runs `harness/quality-gates.yaml`, fails closed when config/gates fail, and writes artifacts under `test-results/quality-runs/`.
-- `acceptance-report-check.py` validates reports when created, including blocking findings, command evidence, consistency evidence, acceptance rules, test design evidence, and referenced passing run artifacts; stale repository-state bindings fail, while historical reports are not replayed by `check-all.py`.
-- `pipeline-plan-check.py` validates task-local immutable `pipeline/plan.md`, its sibling `pipeline/state.json`, launch evidence, stage graph dependencies, task statuses, testing evidence, and exit-condition evidence; `--print-plan-hash` provides the LF-normalized hash recorded by state.
+- `test-run.py` writes machine-readable task run artifacts under `test-results/test-runs/`; artifacts record exact task scope, testplan, `change_id` values, commands, sources, and exit codes without a repository/package state hash.
+- Changes under `harness/**` or `docs/**` do not invalidate task evidence and MUST NOT trigger package/module tests, whole-project tests, or quality gates.
+- `quality-check.py` runs `harness/quality-gates.yaml` only on explicit user request and writes artifacts under `test-results/quality-runs/`; `check-all.py`, task execution, and acceptance do not invoke it automatically.
+- `acceptance-report-check.py` validates reports when created, including blocking findings, command evidence, consistency evidence, acceptance rules, test design evidence, and referenced passing task artifacts; historical reports are not replayed by `check-all.py`.
+- `pipeline-plan-check.py` validates task-local immutable `pipeline/plan.md`, its sibling `pipeline/state.json`, launch evidence, stage graph dependencies, task statuses, testing evidence, and exit-condition evidence. Run it only after one of those inputs changes; later stages reuse the latest passing result.
 - All checkers MUST exit non-zero on missing mandatory files, invalid approvals, missing traceability, ambiguous active module, malformed optional metadata, or out-of-stage paths.
 - Stage scope checks fail proposal, design, testing, acceptance, or implementation tasks that change paths outside their stage and the explicit companion paths above; only design may change task-local `pipeline/plan.md`, while design/implementation/testing/acceptance may update task-local `pipeline/state.json`.
 - Passing checkers are necessary but not sufficient: agents must still read approved docs and keep edits inside admitted scope.

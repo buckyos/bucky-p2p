@@ -1,7 +1,7 @@
-# Task <task-id> Admission Evidence
+# Task <task-seq>-<task-slug> Admission Evidence
 
 <!--
-File name contract: docs/versions/<version>/evidence/admission/<YYYYMMDD>-<task-slug>.md
+File name contract: docs/versions/<version>/evidence/admission/<evidence-id>.md, where `<evidence-id>` is `<YYYYMMDD>-<task-slug>` and is distinct from the sequence-prefixed task packet id.
 - <YYYYMMDD> is today's date; admission-check.py rejects malformed or future dates.
 - Generate the ## Document Binding hashes with:
   uv run --active python ./harness/scripts/admission-check.py --version <version> --module <packet-module> [--submodule <task-name>] [--target-module <project>] --print-doc-hashes
@@ -9,11 +9,10 @@ File name contract: docs/versions/<version>/evidence/admission/<YYYYMMDD>-<task-
 - Quotes must be copied verbatim from the current approved documents; admission-check.py
   re-verifies hashes and quotes against the documents, so editing a document after writing
   this file invalidates the evidence.
-- A passing admission-check.py run writes <task-id>.<module>[.<submodule>][.<target-module>].stamp.json next
-  to this file. Never create or edit stamp files by hand; `admission-check.py --verify-only`
-  and `check-all.py` revalidate the stamp and its design Scope Paths.
-- `check-all.py` reruns `admission-check.py --verify-only` for every evidence/stamp pair and
-  fails orphan evidence, malformed stamps, stale document bindings, or altered scope paths.
+- A passing admission-check.py run writes <evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json next
+  to this file. Never create or edit stamp files by hand. Reuse the stamp while its bound
+  documents, evidence, target module, change_ids, and Scope Paths remain unchanged; acceptance
+  and check-all.py do not replay admission for unchanged inputs.
 -->
 
 ## Implementation Admission Evidence

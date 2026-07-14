@@ -11,10 +11,10 @@ coverage quotes that the checker re-verifies against the current documents,
 so stale or fabricated evidence fails closed.
 
 On success the checker writes a machine-readable admission stamp
-(`docs/versions/<version>/evidence/admission/<task-id>.<module>[.<submodule>][.<target-module>].stamp.json`)
+(`docs/versions/<version>/evidence/admission/<evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json`)
 recording the bound document hashes and the admitted design Scope Paths.
-`--verify-only`, check-all.py, and stage-scope-check.py replay the same evidence
-and scope bindings.
+Later stages reuse the stamp while its bound inputs remain unchanged.
+`--verify-only` is reserved for explicit audits or relevant-input changes.
 """
 
 from __future__ import annotations
@@ -445,33 +445,6 @@ def validate_admission_evidence(path: Path, change_ids: list[str]) -> None:
             fail(f"{path} must cite admitted change_id: {change_id}")
 
 
-def document_exempt_modules(root: Path) -> set[str]:
-    """Load the repository-local legacy top-level packet exemptions."""
-    governance = root / "harness" / "workspace-governance.yaml"
-    if not governance.exists():
-        return set()
-    modules: set[str] = set()
-    in_exempt_list = False
-    list_indent = 0
-    for line in governance.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if in_exempt_list:
-            indent = len(line) - len(line.lstrip(" "))
-            if indent <= list_indent and not stripped.startswith("-"):
-                break
-            if stripped.startswith("-"):
-                value = stripped[1:].strip().strip("\"'")
-                if value:
-                    modules.add(value)
-            continue
-        if stripped == "document_exempt_modules:":
-            in_exempt_list = True
-            list_indent = len(line) - len(line.lstrip(" "))
-    return modules
-
-
 def parse_scope_paths(cell: str) -> list[str]:
     """Parse a design Scope Paths cell into repo-relative path entries.
 
@@ -696,10 +669,7 @@ def main() -> int:
         fail("--change-id is required")
     if not args.evidence_file:
         fail("--evidence-file is required")
-    is_document_exempt = (
-        args.submodule is None and args.module in document_exempt_modules(root)
-    )
-    approval_docs = [] if no_stage_docs or is_document_exempt else list(APPROVAL_DOCS)
+    approval_docs = [] if no_stage_docs else list(APPROVAL_DOCS)
     for name in approval_docs:
         require_approved(root, packet / name, args.module, args.version, args.submodule)
 

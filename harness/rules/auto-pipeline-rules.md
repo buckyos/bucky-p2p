@@ -25,7 +25,7 @@
 - Auto-pipeline design and testing stages MUST NOT generate or update persistent `design.md`, task-local `design/`, `testing.md`, or `testing/` artifacts. Testing MUST generate `testplan.yaml`.
 - Auto-pipeline tasks MUST NOT run `doc-structure-check.py`; their document/mapping structure gates are `schema-check.py`, `pipeline-plan-check.py`, and `testing-coverage-check.py`. Proposal document structure is completed before pipeline launch.
 - Auto-pipeline design-stage outputs MUST be recorded in task-local `pipeline/plan.md` as dependency graphs plus their machine-checkable node/dependency table, exported interfaces with concrete consumers and compatibility decisions, single-owner state models with failure transitions, cross-boundary failure flows and handling, rejected boundary/technical/collaboration alternatives, implementation order, and concrete `Scope Paths`; testing-stage outputs MUST include `testplan.yaml`, task-local `pipeline/state.json` coverage/evidence references, test code, test runner wiring, and machine-written test run artifacts.
-- After creating or intentionally revising `pipeline/plan.md`, run `pipeline-plan-check.py <task-packet>/pipeline/plan.md --print-plan-hash` and record the result as sibling `pipeline/state.json` `plan_sha256`. A design revision intentionally invalidates earlier admission stamps; ordinary state updates never alter plan or its admission binding.
+- When creating or intentionally revising `pipeline/plan.md`, record its LF-normalized sha256 as sibling `pipeline/state.json` `plan_sha256` before the plan's validation run. A design revision intentionally invalidates earlier admission stamps; ordinary state updates never alter plan or its admission binding.
 - When a repository-local extension adds a document-producing stage, the pipeline MUST auto-confirm that stage by updating the produced stage document front matter to:
   - `status: approved`
   - `approved_by: auto-pipeline`
@@ -35,7 +35,7 @@
 - `approved_by: auto-pipeline` is valid only while `pipeline/plan.md` records confirmed launch evidence and the same `Version`, `Packet module`, and `Task name` as that document; `schema-check.py` and `admission-check.py` fail unbound approval claims.
 - Outside an explicitly launched pipeline, the normal approval authority rule applies: agents MUST NOT set `status: approved` themselves, and user approvals require a filled `## Approval Record`.
 - After each child task completes, the pipeline MUST update the task-local `pipeline/state.json` task status to `confirmed` or `complete` before continuing to dependent tasks.
-- The pipeline MUST run `uv run --active python ./harness/scripts/pipeline-plan-check.py <task-packet>/pipeline/plan.md` before downstream execution, and MUST run it with `--require-complete` before final completion. The checker validates sibling `state.json`; complete mode requires the bound task's `testplan.yaml`, a successful matching task test-run artifact whose `repository_state_sha256` matches the current repository, and an `acceptance-report.md` that passes `acceptance-report-check.py`; matching an `accepted` state alone is never sufficient.
+- The pipeline MUST run `pipeline-plan-check.py` after creating or modifying `pipeline/plan.md` or sibling `state.json`; that latest passing result satisfies downstream entry while those inputs remain unchanged. It MUST run `--require-complete` only after completion state or completion evidence changes. Reaching the next stage or final completion without an input change MUST NOT trigger another run. Complete mode verifies the bound task's `testplan.yaml`, successful matching `<module>/<task-name> all` artifact, and acceptance-report reference without rerunning their owning checkers. It MUST NOT trigger package/module tests, `all all`, root shortcuts, or quality gates.
 - Implementation completion MUST be recorded in task-local `pipeline/state.json` and implementation evidence, and final acceptance MUST be recorded in task-local `pipeline/state.json` and the acceptance report.
 - This authorization confirms the bound proposal and does not waive proposal authority, design-stage rules, testing-stage rules, stage write scopes, `stage-scope-check.py`, implementation admission, schema checks, admission checks, required validation, or final acceptance; it only changes proposal approval metadata requirements and where auto-pipeline records design and testing outputs.
 
@@ -95,12 +95,12 @@
   - the user-launch-bound `proposal.md` exists
 - `pipeline/plan.md` records design coverage, concrete `target_module`, and concrete `Scope Paths` for every admitted `change_id`
 - Implementation tasks MUST read the launch-confirmed proposal and pipeline-plan design mapping, then confirm they cover the current task before coding.
-- Implementation tasks MUST record that confirmation in `docs/versions/<version>/evidence/admission/<task-id>.md`, and `admission-check.py` MUST validate it with `--evidence-file`.
+- Implementation tasks MUST record that confirmation in `docs/versions/<version>/evidence/admission/<evidence-id>.md`, and `admission-check.py` MUST validate it with `--evidence-file`.
 - Implementation tasks MUST identify explicit `version`, packet `module`, `target_module`, and `change_id` values before coding. `--module globals` always requires a concrete `--target-module`.
 - If the requested task module is clearly different from unfinished task records, the pipeline MUST create a new task packet immediately and MUST NOT consider continuing a different-module unfinished task.
 - Implementation tasks for direct submodule packets MUST also identify explicit `submodule`.
 - Implementation tasks MUST pass `schema-check.py` and `admission-check.py` for each affected module packet.
-- Implementation tasks MUST pass `admission-check.py --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md` for each affected module packet.
+- Implementation tasks MUST pass `admission-check.py --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md` for each affected module packet.
 - Implementation tasks for direct submodule packets MUST pass those checks with `--submodule <submodule>`.
 - Cross-module implementation tasks MUST pass admission independently for every affected module.
 - Cross-submodule implementation tasks MUST pass admission independently for every affected submodule packet.

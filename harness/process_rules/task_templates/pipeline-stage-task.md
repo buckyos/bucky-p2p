@@ -39,13 +39,13 @@
 - [ ] For design: the design decomposes top-down from the whole affected module to child submodules, nested submodules, and file-level modules where applicable
 - [ ] For design: every child submodule or nested submodule is recorded in `pipeline/plan.md` design mappings instead of generated design documents
 - [ ] For design: `pipeline/plan.md` `## File-Level Implementation Sequence` lists concrete source files to create or modify in dependency order
-- [ ] For single-stage tasks, `stage-scope-check.py --stage <stage> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` passed for this task's recorded changed paths (implementation runs add `--target-module <project> --change-id <change_id>` so paths bind to the correct target's Scope Paths)
+- [ ] For single-stage tasks, a current stage-scope result exists for this task's recorded changed paths; unchanged inputs were not replayed
 - [ ] For implementation: task-local `pipeline/plan.md` `User launch statement` copies the user's explicit current instruction verbatim, and validated dependency/interface/state/failure/alternative evidence plus scope bindings cover admitted `change_id` values
 - [ ] For implementation: active `version`, packet `module`, `target_module`, and `change_id` are explicit
 - [ ] For implementation in a direct submodule packet: active `submodule` is explicit
-- [ ] For implementation: `schema-check.py` passed for the active module packet
-- [ ] For implementation: `docs/versions/<version>/evidence/admission/<task-id>.md` contains required admission evidence
-- [ ] For implementation: `admission-check.py --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md` passed for every admitted `change_id`
+- [ ] For implementation: a current schema result exists for the active packet; unchanged inputs were not rechecked
+- [ ] For implementation: `docs/versions/<version>/evidence/admission/<evidence-id>.md` contains required admission evidence
+- [ ] For implementation: a current admission stamp exists for every admitted `change_id`; unchanged inputs were not replayed
 - [ ] For implementation in a direct submodule packet: both checks passed with `--submodule <submodule>`
 - [ ] For implementation: approved-doc inspection and task coverage judgment are recorded in the admission evidence file
 - [ ] For implementation: this child task corresponds to the next ready item in the pipeline-plan file-level implementation sequence

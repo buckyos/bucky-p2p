@@ -8,6 +8,12 @@
 - Apply it before task-type process rules or repository edits.
 - Narrow exception: after an explicit current user launch whose verbatim instruction is recorded as task-local `pipeline/plan.md` `User launch statement`, `auto-pipeline-rules.md` has higher priority only for its no-`design.md` / no-`testing.md` policy and use of validated pipeline-plan design mappings. Agents never infer or synthesize launch. The exception does not relax any other entry, approval, scope, or validation gate.
 
+## Harness Rule Activation
+- All harness rules apply by default.
+- An explicit current user instruction to skip all harness rules disables every harness rule for the scope named by the user. If the user names no scope, apply the skip only to the current task.
+- Evaluate this explicit all-rules opt-out before this task entry gate and every other harness rule. Do not infer the opt-out from urgency, a request to proceed, or user silence.
+- The opt-out does not override system or developer instructions, safety requirements, remaining user scope constraints, or repository requirements outside the harness.
+
 ## Scope
 - Code, test, runtime, UI, build, bugfix, optimization, refactor, and implementation-shaped requests.
 
@@ -40,9 +46,10 @@
 - Acceptance: only evidence audit, architecture-doc validation, generated/final acceptance rules and expected results, and review reports.
 - A task MUST NOT edit multiple stage artifact groups unless the user explicitly names the stages or asks for cross-stage synchronization.
 - Multi-stage authorization MUST be recorded from the user's own words in the evidence file or produced report; otherwise the task is single-stage.
-- Every single-stage task MUST maintain `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, one repo-relative path per line, plus `<task-id>.paths.meta.json` recording schema `1`, stage, version, module, optional submodule, and implementation `change_ids` so `check-all.py` can replay the checker.
+- Every single-stage task MUST maintain `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, one repo-relative path per line, plus `<task-id>.paths.meta.json` recording schema `1`, stage, version, module, optional submodule, optional task-start Git `base`, and implementation `change_ids`.
 - Changing an upstream document does not authorize downstream edits. Record the return route or follow-up unless the user explicitly requested those edits.
 - Before finishing a single-stage task, run `uv run --active python ./harness/scripts/stage-scope-check.py --stage <stage> --version <version> --module <module> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` plus `--submodule <task-seq>-<task-slug>` for task packets.
+- Do not rerun a passing stage-scope check unless the manifest, sidecar metadata, baseline, a governed task path, or the admitted design Scope Paths changed after that pass. Acceptance and `check-all.py` reuse the existing result.
 - Implementation-stage scope checks also pass concrete `--target-module <project>` and repeatable `--change-id <change_id>` so recorded paths are bound to the correct project's admitted design `Scope Paths`.
 - Whole-worktree git status or diff is diagnostic only; task completion evidence MUST use the explicit path manifest.
 
@@ -66,15 +73,16 @@
 - `globals` is a specialized packet-module keyword, not an implementation target. Cross-project work uses `globals/<task-seq>-<task-slug>/` for shared intent and binds each affected project independently with `--module globals --submodule <task-seq>-<task-slug> --target-module <project>`.
 - Do not reuse older task packets for new work, and do not edit approved packets to absorb new work.
 - Before implementation starts, read approved `proposal.md` plus approved `design.md` in manual flow, or the user-launch-confirmed `proposal.md` plus validated `pipeline/plan.md` design mappings and `Scope Paths` in auto-pipeline.
-- Create `docs/versions/<version>/evidence/admission/<task-id>.md`, where `<task-id>` is `<YYYYMMDD>-<task-slug>` using today's date.
+- Create `docs/versions/<version>/evidence/admission/<evidence-id>.md`, where `<evidence-id>` is `<YYYYMMDD>-<task-slug>` using today's date. The dated evidence id MUST NOT be used as the task packet name or unfinished-index `task_id`; those remain `<task-seq>-<task-slug>`.
 - Admission evidence MUST include `proposal_read`, `design_read`, `change_scope_matches_request`, `active_module_resolved`, `same_module_task_selection`, and `no_chat_only_evidence`, each `pass` with concrete source and notes.
 - Evidence MUST include `## Document Binding` hashes from `admission-check.py --print-doc-hashes` and `## Coverage Quotes` for each admitted `change_id` from proposal plus the active design source (`design.md` or `pipeline/plan.md`).
 - `admission-check.py` re-verifies hashes and quotes against current documents and writes the only valid admission stamp. Do not hand-write stamp files.
 - Before code edits, run:
   - `uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-  - `uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<task-id>.md`
+  - `uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
 - Add `--submodule <task-seq>-<task-slug>` to both checks for task packets.
 - Code modification may begin only after admission passes with the task evidence file.
+- If schema and admission already passed for the exact current packet documents, evidence, target module, `change_id` values, and Scope Paths, reuse those results. A later stage, acceptance, commit, CI, or report is not a reason to rerun them.
 
 ## Default Stage Classification
 - If the user does not explicitly name proposal, design, testing, or acceptance, classify by likely artifact changes.

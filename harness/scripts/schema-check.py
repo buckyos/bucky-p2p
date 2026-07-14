@@ -11,6 +11,7 @@ for completed testing work.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -28,6 +29,21 @@ REQUIRED_FRONT_MATTER = (
 )
 ALLOWED_LEVELS = {"unit", "dv", "integration"}
 ALLOWED_MODES = {"enabled", "manual", "disabled"}
+CONTRACT_KINDS = {
+    "external-positive",
+    "external-negative",
+    "removed-symbol-scan",
+    "repository-compile-closure",
+    "documentation-examples",
+}
+CONTRACT_ASSERTIONS = {
+    "external-positive": "new-path-compiles",
+    "external-negative": "old-path-rejected-for-removed-symbol",
+    "removed-symbol-scan": "no-unallowlisted-old-symbol-references",
+    "repository-compile-closure": "repository-consumers-compile",
+    "documentation-examples": "documentation-examples-compile",
+}
+PUBLIC_API_IMPACTS = {"none", "backward-compatible", "migration-required", "breaking"}
 PIPELINE_APPROVER = "auto-pipeline"
 FORBIDDEN_APPROVERS = {
     "agent", "assistant", "ai", "bot", "llm", "model", "self", "auto",
@@ -267,6 +283,7 @@ def extract_level_blocks(text: str) -> dict[str, str]:
 
 def validate_testplan(path: Path, module: str, version: str, submodule: str | None = None) -> None:
     text = read_text(path)
+    step_ids: set[str] = set()
     for key, value in (("schema_version", "1"), ("version", version), ("module", module)):
         if not re.search(rf"(?m)^{re.escape(key)}:\s*{re.escape(value)}\s*$", text):
             fail(f"{path} missing or mismatched {key}: {value}")
@@ -283,12 +300,71 @@ def validate_testplan(path: Path, module: str, version: str, submodule: str | No
         if not re.search(rf"(?m)^submodule:\s*{re.escape(submodule)}\s*$", text):
             fail(f"{path} submodule mismatch: expected {submodule}")
 
+    impact = re.search(r"(?ms)^api_impact:\s*$\n(.*?)(?=^[A-Za-z0-9_-]+:\s*|\Z)", text)
+    if not impact:
+        fail(f"{path} missing api_impact")
+    impact_body = impact.group(1)
+    public_api = re.search(r"(?m)^  public_api:\s*([A-Za-z0-9_-]+)\s*$", impact_body)
+    if not public_api or public_api.group(1) not in PUBLIC_API_IMPACTS:
+        fail(f"{path} api_impact.public_api must be one of: {', '.join(sorted(PUBLIC_API_IMPACTS))}")
+    for key in ("crate_root_export_change", "build_surface_change", "documentation_examples_affected"):
+        if not re.search(rf"(?m)^  {re.escape(key)}:\s*(true|false)\s*$", impact_body):
+            fail(f"{path} api_impact.{key} must be true or false")
+
+    evidence_inputs = re.search(r"(?m)^evidence_inputs:\s*(\[[^\n]*\])\s*$", text)
+    if not evidence_inputs:
+        fail(f"{path} missing inline evidence_inputs list")
+    try:
+        parsed_inputs = ast.literal_eval(evidence_inputs.group(1))
+    except (SyntaxError, ValueError) as error:
+        fail(f"{path} evidence_inputs is invalid: {error}")
+    if not isinstance(parsed_inputs, list) or not parsed_inputs or not all(
+        isinstance(item, str) and item not in {"", "."} for item in parsed_inputs
+    ):
+        fail(f"{path} evidence_inputs must be a non-empty list of repository-relative paths")
+    if any(Path(item).is_absolute() or any(part == ".." for part in Path(item).parts) for item in parsed_inputs):
+        fail(f"{path} evidence_inputs must stay inside the repository")
+
+    contract = re.search(r"(?ms)^contract_checks:\s*$\n(.*?)(?=^[A-Za-z0-9_-]+:\s*|\Z)", text)
+    if not contract:
+        fail(f"{path} missing contract_checks")
+    contract_body = contract.group(1)
+    contract_mode = re.search(r"(?m)^  mode:\s*(enabled|disabled)\s*$", contract_body)
+    if not contract_mode:
+        fail(f"{path} contract_checks.mode must be enabled or disabled")
+    contract_ids = re.findall(r"(?m)^    - id:\s*([A-Za-z0-9_.-]+)\s*$", contract_body)
+    if contract_mode.group(1) == "disabled":
+        if not re.search(r"(?m)^  reason:\s*\S.+$", contract_body):
+            fail(f"{path} disabled contract_checks require a concrete reason")
+        if contract_ids:
+            fail(f"{path} disabled contract_checks must not declare steps")
+    elif not contract_ids:
+        fail(f"{path} enabled contract_checks require steps")
+    for step_id in contract_ids:
+        if step_id in step_ids:
+            fail(f"{path} duplicate step id: {step_id}")
+        step_ids.add(step_id)
+        start = re.search(rf"(?m)^    - id:\s*{re.escape(step_id)}\s*$", contract_body)
+        assert start is not None
+        following = re.search(r"(?m)^    - id:\s*", contract_body[start.end() :])
+        end = start.end() + following.start() if following else len(contract_body)
+        block = contract_body[start.end() : end]
+        kind = re.search(r"(?m)^      kind:\s*([A-Za-z0-9_-]+)\s*$", block)
+        if not kind or kind.group(1) not in CONTRACT_KINDS:
+            fail(f"{path} contract step {step_id} has missing or unsupported kind")
+        assertion = re.search(r"(?m)^      assertion:\s*([A-Za-z0-9_-]+)\s*$", block)
+        if not assertion or assertion.group(1) != CONTRACT_ASSERTIONS[kind.group(1)]:
+            fail(f"{path} contract step {step_id} assertion does not match kind {kind.group(1)}")
+        for key in ("name", "change_ids", "run"):
+            pattern = rf"(?m)^      {key}:\s*\S.+$" if key == "name" else rf"(?m)^      {key}:\s*\[.+\]\s*$"
+            if not re.search(pattern, block):
+                fail(f"{path} contract step {step_id} must define {key}")
+
     blocks = extract_level_blocks(text)
     unknown = set(blocks) - ALLOWED_LEVELS
     if unknown:
         fail(f"{path} has unknown test levels: {', '.join(sorted(unknown))}")
 
-    step_ids: set[str] = set()
     for level in sorted(ALLOWED_LEVELS):
         if level not in blocks:
             fail(f"{path} missing test level: {level}")

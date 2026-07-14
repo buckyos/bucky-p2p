@@ -4,6 +4,53 @@ version: v0.1
 module: example-module
 task_name: 001-example-task
 submodule:
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+# Exact files or directories whose current content binds the run artifact. Risk-triggered
+# API/build-surface tasks must include production scope, repository consumers, fixtures,
+# test code, and documentation examples. testplan.yaml itself is always included.
+evidence_inputs: ["src"]
+contract_checks:
+  mode: disabled
+  reason: no breaking API, crate-root export, build-surface, or documentation-example impact
+  steps: []
+# Risk-triggered example (enable only the kinds required by API/build impact):
+# contract_checks:
+#   mode: enabled
+#   steps:
+#     - id: external-new-path
+#       kind: external-positive
+#       assertion: new-path-compiles
+#       name: compile an external consumer using the new path
+#       change_ids: ["CHG-example"]
+#       run: ["<tool>", "<positive-consumer-args>"]
+#     - id: external-old-path
+#       kind: external-negative
+#       assertion: old-path-rejected-for-removed-symbol
+#       name: prove the removed path fails for the expected symbol reason
+#       change_ids: ["CHG-example"]
+#       run: ["<tool>", "<negative-consumer-wrapper-args>"]
+#     - id: removed-symbol-scan
+#       kind: removed-symbol-scan
+#       assertion: no-unallowlisted-old-symbol-references
+#       name: fail on unallowlisted repository references to removed symbols
+#       change_ids: ["CHG-example"]
+#       run: ["uv", "run", "--active", "python", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "example-module", "--task-name", "001-example-task"]
+#     - id: repository-compile-closure
+#       kind: repository-compile-closure
+#       assertion: repository-consumers-compile
+#       name: compile affected repository consumers without running tests
+#       change_ids: ["CHG-example"]
+#       run: ["cargo", "test", "-p", "<package>", "--no-run", "--all-targets"]
+#     - id: documentation-examples
+#       kind: documentation-examples
+#       assertion: documentation-examples-compile
+#       name: compile and run doctests or a repository-defined README compile fixture
+#       change_ids: ["CHG-example"]
+#       run: ["cargo", "test", "-p", "<package>", "--doc"]
 defaults:
   workdir: .
   timeout_sec: 600
