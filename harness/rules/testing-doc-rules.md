@@ -37,7 +37,8 @@
 - Testing tasks are single-stage by default and MUST NOT edit proposal, design, acceptance, production code, `docs/architecture/`, or another task packet unless explicitly requested.
 - Testing may modify test code, fixtures, runners, optional testing artifacts, and unified test entrypoint wiring needed to register tests.
 - Code inside an existing Rust `#[cfg(test)]` item is test code. Every newly created unit test MUST live in a dedicated test file, test directory, or test-only crate/package; testing MUST NOT add new inline test bodies to production source files.
-- A production-path Rust file passes testing-stage scope only when `stage-scope-check.py` compares it to `HEAD` or a recorded task-start `--base` and proves that every change is inside a pre-existing exact `#[cfg(test)]` item. Missing baselines, self-comparisons after commit, new inline items, and mixed production/test changes fail closed.
+- A production-path Rust file passes testing-stage scope only when `stage-scope-check.py --baseline-manifest .harness/baselines/<task-id>/manifest.json` compares it with a pre-edit snapshot captured by `baseline-snapshot.py` and proves that every change is inside a pre-existing exact `#[cfg(test)]` item. Missing/tampered baselines, new inline items, and mixed production/test changes fail closed.
+- Baseline capture is project-local generated state. `.harness/` MUST be git-ignored, and testing tasks MUST NOT use `GIT_INDEX_FILE`, `git read-tree`, `git write-tree`, or `git commit-tree` to create synthetic Git baseline objects.
 - Task-local testing artifacts stay in the same task packet, not older `testing/<task-seq>-<task-slug>/` directories.
 - Human-authored testing docs MUST stay under 1000 lines, splitting by submodule, responsibility, validation layer, or interface boundary when needed.
 - Every implemented change MUST have direct validation coverage or an explicit gap.
@@ -61,7 +62,7 @@
 - Upstream design or implementation problems route to the owning stage instead of silently widening testing scope.
 - Downstream acceptance follow-up is recorded unless cross-stage synchronization is explicitly requested.
 - Before completion, run:
-  - manual flow: `uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs testing` only when optional `testing.md` exists
+  - manual flow: `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs testing` only when optional `testing.md` exists
   - auto-pipeline: do not run `doc-structure-check.py --docs testing`, because `testing.md` / `testing/` are forbidden; validate pipeline testing evidence and `testplan.yaml` through `testing-coverage-check.py`
-  - `uv run --active python ./harness/scripts/testing-coverage-check.py --version <version> --module <module>`
+  - `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/testing-coverage-check.py --version <version> --module <module>`
 - Use `testing-coverage-check.py --allow-missing-testplan` only with a recorded repo-local versioned exception.

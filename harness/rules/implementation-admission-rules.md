@@ -32,8 +32,8 @@
 
 ## Required Commands
 - Run the following only when no passing result exists for the current inputs or when their owned inputs changed. Do not replay them in acceptance or `check-all.py`.
-- `uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-- `uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
 - Add `--submodule <task-seq>-<task-slug>` to both commands for task packets.
 - For a `globals` packet, also add `--target-module <project>` and repeat admission independently for every affected project.
 

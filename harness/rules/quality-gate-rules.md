@@ -17,7 +17,7 @@
 - Choosing, adding, or removing gates is a harness/process change: it belongs to a harness governance task, not to an implementation task. `stage-scope-check.py` rejects implementation-stage edits to `harness/quality-gates.yaml`.
 
 ## Execution Rule
-- Run gates through `uv run --active python ./harness/scripts/quality-check.py`; do not run "equivalent" ad hoc commands as gate evidence.
+- Run gates through `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/quality-check.py`; do not run "equivalent" ad hoc commands as gate evidence.
 - `quality-check.py` writes a run artifact to `test-results/quality-runs/<timestamp>-quality.json` recording each gate's command, exit code, and duration; it MUST NOT calculate or record a repository/package state hash.
 - Task execution, testing, acceptance, auto-pipeline completion, and `check-all.py` MUST NOT invoke quality gates automatically. Run `quality-check.py` only when the current user explicitly requests it.
 - Changes under `harness/**` or `docs/**` MUST NOT trigger quality gates.

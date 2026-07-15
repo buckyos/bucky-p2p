@@ -14,7 +14,7 @@
 ### Unit
 - Object: changed functions, methods, and branches; external dependencies are stubbed or mocked.
 - Placement: code inside an existing Rust `#[cfg(test)]` item is test code, but every newly created unit test MUST be implemented in a dedicated test file, test directory, or test-only crate/package rather than as a new inline test body in a production source file.
-- Mechanical scope: when testing changes an existing inline Rust test item, `stage-scope-check.py` compares the mixed file to `HEAD` or explicit `--base` and passes it only if all changes are confined to pre-existing exact `#[cfg(test)]` items. It fails closed for a missing baseline, a newly added inline item, or any production-content change.
+- Mechanical scope: when testing changes an existing inline Rust test item, `baseline-snapshot.py` first captures the file under `.harness/baselines/<task-id>/`, and `stage-scope-check.py --baseline-manifest ...` passes it only if all changes are confined to pre-existing exact `#[cfg(test)]` items. It fails closed for a missing/tampered baseline, a newly added inline item, or any production-content change.
 - MUST cover every public function touched by implemented `change_id` values and every conditional branch in changed code: if/else arms, match/switch arms, early returns, error returns, loop zero/one/many iterations, and boundary comparisons.
 - Uncovered branches MUST be recorded per branch with a concrete reason in `## Unit Tests`.
 - Not responsible for cross-module behavior, real external I/O, or full workflows.

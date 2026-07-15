@@ -22,7 +22,7 @@ approved_content_sha256:
 
 ## Unified Test Entry
 - Machine-readable task plan: `docs/versions/<version>/modules/<module>/<task-name>/testplan.yaml`
-- Task all: `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
+- Task all: `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
 - Single-task boundary: do not run package/module scopes, `all all`, root shortcuts, or quality gates
 - Registration: every generated or changed automated test is reachable through the unified entrypoint.
 
@@ -107,7 +107,7 @@ approved_content_sha256:
 - [ ] `testplan.yaml` exists for completed testing work, unless a repo-local versioned exception explicitly permits missing machine-readable test metadata and records reason, owner, risk, and acceptance impact
 - [ ] Generated tests are registered with `harness/scripts/test-run.py`
 - [ ] New unit tests live in dedicated test files, test directories, or test-only crates/packages; no new inline test bodies were added to production source files
-- [ ] `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all` reaches only this task's plan
+- [ ] `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all` reaches only this task's plan
 - [ ] This task did not directly select package/module runtime suites, `all all`, root shortcuts, or quality gates; any broad compile-only command was a required task-local consumer-closure step
 - [ ] Breaking/migration-required APIs and crate-root/build-surface changes include the required task-local contract checks and a complete repository consumer closure
 - [ ] Module-level tests cover key boundary behavior and failure paths

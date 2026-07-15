@@ -15,6 +15,9 @@
 - Parent Task:
 - Depends On:
 - Owner:
+- Exclusive Write Scope:
+- Parallel-Eligible Ready Tasks:
+- Serialization Reason: none / dependency / overlapping-write-scope / concurrency-capacity
 
 ## Goal
 - Describe the single stage outcome this task must complete.
@@ -32,6 +35,8 @@
 - [ ] Required upstream approvals exist
 - [ ] If per-stage user confirmation is skipped, the pipeline plan records explicit user auto-pipeline authorization
 - [ ] Task-local `pipeline/state.json` status was updated to `confirmed` or `complete` before dependent tasks continue
+- [ ] The parent orchestrator, not this child agent, owns shared `pipeline/plan.md`, `pipeline/state.json`, task indexes, shared `testplan.yaml`, and shared runner registration
+- [ ] Every dependency-ready task with a disjoint write scope was launched concurrently up to available child-agent capacity before the parent waited
 - [ ] Auto-pipeline design/testing tasks did not generate `design.md`, task-local `design/`, `testing.md`, or `testing/`, and testing generated `testplan.yaml`
 - [ ] If a repository-local extension produces a stage document and auto-confirmation is enabled, the document front matter was updated to `status: approved`, `approved_by: auto-pipeline`, `approved_at`, and `approved_content_sha256`
 - [ ] Scope does not cross into another stage
@@ -68,12 +73,12 @@
 | same_module_task_selection | `docs/versions/<version>/modules/tasks.md` and module Current/Active Task | pass/fail | reused tasks are same-module only, or different-module unfinished tasks were excluded and a new packet was created |
 | no_chat_only_evidence | versioned docs and inspected code | pass/fail | confirm no oral/chat-only requirement is used as admission evidence |
 
-Stage-task defaults:
+Stage-task defaults (shared-artifact entries are proposed by the child and applied only by the parent orchestrator):
 - Proposal can modify: `proposal.md` in the active task packet only
-- Design can modify: `pipeline/plan.md` design mappings, required long-lived boundary sync, and project-rule-required `docs/architecture/` updates only; no `design.md` or task-local `design/` is generated in auto-pipeline mode
+- Design can return: proposed `pipeline/plan.md` design mappings; direct writes are limited to its reserved long-lived boundary or project-rule-required `docs/architecture/` scope; no `design.md` or task-local `design/` is generated in auto-pipeline mode
 - Implementation can modify: production code, required non-test runtime/build resources, and task admission evidence under `docs/versions/<version>/evidence/admission/` only
-- Testing can modify: test code, test fixtures, test runners, unified test entrypoint wiring, `testplan.yaml`, task-local `pipeline/state.json` testing evidence/status, and run artifacts only; no `testing.md` or `testing/` is generated in auto-pipeline mode
-- Acceptance can modify: the task-packet acceptance report and task-local `pipeline/state.json` acceptance/return status only
+- Testing can return: proposed shared `testplan.yaml`, shared runner registration, and `pipeline/state.json` evidence/status; direct writes are limited to reserved test code, fixtures, runner files, and run artifacts; no `testing.md` or `testing/` is generated in auto-pipeline mode
+- Acceptance can return: proposed task-local `pipeline/state.json` acceptance/return status; direct writes are limited to its reserved task-packet acceptance report
 - Acceptance can modify: review reports and generated acceptance rules/expected-result evidence only
 - Downstream follow-up from an upstream change is recorded as a return route unless cross-stage synchronization was explicitly requested
 

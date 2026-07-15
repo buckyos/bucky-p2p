@@ -15,19 +15,19 @@
 - Project-root shortcut:
   - Windows: `test-run.bat [<module> <level>]`
   - Unix: `./test-run.sh [<module> <level>]`
-- `uv run --active python ./harness/scripts/test-run.py <module> unit`
-- `uv run --active python ./harness/scripts/test-run.py <module> dv`
-- `uv run --active python ./harness/scripts/test-run.py <module> integration`
-- `uv run --active python ./harness/scripts/test-run.py <module> all`
-- `uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
-- `uv run --active python ./harness/scripts/test-run.py all all`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module> unit`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module> dv`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module> integration`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module> all`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py all all`
 
 ## Consistency Rule
 - `harness/scripts/test-run.py` is mandatory in generated repositories.
 - What each level (`unit` / `dv` / `integration`) must verify and how deep is defined by `harness/rules/test-design-rules.md`; this rule governs how those tests are invoked.
 - A generated repository MUST include both project-root one-click test shortcuts: `test-run.bat` for Windows and `test-run.sh` for Unix-like systems.
 - The root shortcut MUST check whether `uv` is installed and print an installation hint when it is missing.
-- The root shortcuts MUST create a local `.venv` when it is missing, use `uv` to sync or install dependencies when project metadata exists, activate the project virtual environment, and then invoke `harness/scripts/test-run.py` through `uv run --active python`.
+- The root shortcuts MUST create a local `.venv` when it is missing, use `uv` to sync or install dependencies when project metadata exists, activate the project virtual environment, and then invoke `harness/scripts/test-run.py` through `UV_CACHE_DIR=.harness/uv-cache uv run --active python`.
 - The root shortcut MUST NOT bypass the unified test entrypoint.
 - The unified test interface MUST be able to run every project test that is part of the harness evidence chain.
 - Bootstrap and harness refresh work MUST replace the empty example `MODULE_SUITES` mapping with explicit registrations for the target repository. Each registered module MUST define a non-empty canonical `all` suite; scaffold self-check MUST fail when no canonical module suite is registered.

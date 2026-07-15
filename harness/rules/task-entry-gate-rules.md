@@ -21,7 +21,7 @@
 - Every new manual-flow task MUST use a packet with its own `proposal.md`, `design.md`, optional `testing.md`, and optional `acceptance.md`.
 - Every explicitly launched auto-pipeline task MUST use a packet with `proposal.md`, `pipeline/plan.md`, `pipeline/state.json`, and later `testplan.yaml`; generated `design.md`, task-local `design/`, `testing.md`, and `testing/` are forbidden. Admission-relevant design mappings are recorded in plan; mutable testing coverage and execution status are recorded in state.
 - Every new task name MUST use `<task-seq>-<task-slug>`; `<task-seq>` is a version-local sequence number, defaults to 3 digits, starts at `001` for each version, and increments by 1 across all project modules and `globals` in that version.
-- When creating a task packet, run `uv run --active python ./harness/scripts/task-seq.py next --version <version> --slug <task-slug>` and use the returned `<task-seq>-<task-slug>` for the directory, front matter `task_name`, checker `--submodule`, and unfinished-task index `task_id`.
+- When creating a task packet, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/task-seq.py next --version <version> --slug <task-slug>` and use the returned `<task-seq>-<task-slug>` for the directory, front matter `task_name`, checker `--submodule`, and unfinished-task index `task_id`.
 - Sequence numbers identify creation order only; do not use the largest number to decide the current/latest task.
 - Single-project task packet: `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`.
 - Cross-project task packet: `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/`.
@@ -37,7 +37,7 @@
 
 ## Stage Write Scope
 - When the user explicitly enters one stage, that stage is the only write scope by default.
-- Proposal: active packet `proposal.md`, plus the unfinished-task index at `docs/versions/<version>/modules/tasks.md` when creating or closing task records.
+- Proposal: active packet `proposal.md`, plus the unfinished-task index (`docs/versions/<version>/modules/tasks.md`, or legacy `docs/modules/tasks.md` when that repository uses it) when creating or closing task records.
 - Design: only `design.md`, task-local `design/`, required long-lived boundary sync, project-rule-required `docs/architecture/` updates, and task-local `pipeline/plan.md` plus `pipeline/state.json` during an explicitly launched auto-pipeline.
 - Testing: only test code, fixtures, runners, unified entrypoint wiring (`harness/scripts/test-run.py`), generated run evidence under `test-results/test-runs/*.json`, optional `testing.md`, `testing/`, `testplan.yaml`, and task-local `pipeline/state.json` coverage/status during an explicitly launched auto-pipeline.
 - Testing treats code inside an existing Rust `#[cfg(test)]` item as test code, but new unit tests MUST use dedicated test files, test directories, or test-only crates/packages rather than new inline test bodies in production source files.
@@ -46,9 +46,12 @@
 - Acceptance: only evidence audit, architecture-doc validation, generated/final acceptance rules and expected results, and review reports.
 - A task MUST NOT edit multiple stage artifact groups unless the user explicitly names the stages or asks for cross-stage synchronization.
 - Multi-stage authorization MUST be recorded from the user's own words in the evidence file or produced report; otherwise the task is single-stage.
-- Every single-stage task MUST maintain `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, one repo-relative path per line, plus `<task-id>.paths.meta.json` recording schema `1`, stage, version, module, optional submodule, optional task-start Git `base`, and implementation `change_ids`.
+- Every single-stage task MUST maintain `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, one repo-relative path per line, plus `<task-id>.paths.meta.json` recording schema `1`, stage, version, module, optional submodule, optional `.harness/baselines/<task-id>/manifest.json`, and implementation `change_ids`.
+- Bootstrap and Harness refresh create project-root `.harness/` and ensure `.gitignore` contains `.harness/` without removing existing entries. Runtime files under `.harness/` are omitted from task path manifests.
+- Every direct `uv` invocation uses `UV_CACHE_DIR=.harness/uv-cache`; root shortcuts set the equivalent absolute project-local cache path before any `uv` command. Do not allocate per-task `UV_CACHE_DIR` paths under `/tmp`.
+- A testing task that edits an existing Rust inline test MUST capture the target before editing with `harness/scripts/baseline-snapshot.py`. Never synthesize a baseline through `GIT_INDEX_FILE`, `git read-tree`, `git write-tree`, or `git commit-tree`.
 - Changing an upstream document does not authorize downstream edits. Record the return route or follow-up unless the user explicitly requested those edits.
-- Before finishing a single-stage task, run `uv run --active python ./harness/scripts/stage-scope-check.py --stage <stage> --version <version> --module <module> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` plus `--submodule <task-seq>-<task-slug>` for task packets.
+- Before finishing a single-stage task, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/stage-scope-check.py --stage <stage> --version <version> --module <module> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` plus `--submodule <task-seq>-<task-slug>` for task packets.
 - Do not rerun a passing stage-scope check unless the manifest, sidecar metadata, baseline, a governed task path, or the admitted design Scope Paths changed after that pass. Acceptance and `check-all.py` reuse the existing result.
 - Implementation-stage scope checks also pass concrete `--target-module <project>` and repeatable `--change-id <change_id>` so recorded paths are bound to the correct project's admitted design `Scope Paths`.
 - Whole-worktree git status or diff is diagnostic only; task completion evidence MUST use the explicit path manifest.
@@ -64,7 +67,7 @@
 - Requests that add, remove, narrow, widen, or reclassify goals, scope, non-goals, obligations, supported/unsupported behavior, acceptance boundaries, or success evidence default to proposal stage.
 - Requirement language such as "does not need", "no longer needs", "should not provide", "must provide", "support", or "do not support" defaults to proposal stage unless the user explicitly requests downstream synchronization.
 - Proposal-stage work updates `proposal.md`, fills `## Requirement Review` and `## Proposal Items`, and keeps the document focused on requirements, boundaries, tradeoffs, success criteria, `change_id` values, and approval.
-- Before proposal completion, run `uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs proposal`.
+- Before proposal completion, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs proposal`.
 
 ## Implementation Entry Gate
 - Implementation-shaped requests MUST NOT edit code immediately.
@@ -78,8 +81,8 @@
 - Evidence MUST include `## Document Binding` hashes from `admission-check.py --print-doc-hashes` and `## Coverage Quotes` for each admitted `change_id` from proposal plus the active design source (`design.md` or `pipeline/plan.md`).
 - `admission-check.py` re-verifies hashes and quotes against current documents and writes the only valid admission stamp. Do not hand-write stamp files.
 - Before code edits, run:
-  - `uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-  - `uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
+  - `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
+  - `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
 - Add `--submodule <task-seq>-<task-slug>` to both checks for task packets.
 - Code modification may begin only after admission passes with the task evidence file.
 - If schema and admission already passed for the exact current packet documents, evidence, target module, `change_id` values, and Scope Paths, reuse those results. A later stage, acceptance, commit, CI, or report is not a reason to rerun them.

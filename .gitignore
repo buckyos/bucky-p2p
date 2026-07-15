@@ -6,6 +6,7 @@ logs
 __pycache__/
 *.py[cod]
 test-results/
+.harness/
 
 # Local editor and agent state
 .codex

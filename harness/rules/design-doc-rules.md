@@ -76,4 +76,4 @@
 - Design MUST update `docs/architecture/` only when repo-local project rules require global architecture documentation changes. Default generated rules do not require mirrored implementation directories, proposal/design docs, or source hash bindings under `docs/architecture/`.
 - Proposal ambiguity routes back to proposal.
 - Downstream testing or acceptance follow-up is recorded unless cross-stage synchronization is explicitly requested.
-- Before completion, run `uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs design`.
+- Before completion, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs design`.

@@ -34,6 +34,7 @@ REQUIRED_SCRIPTS = (
     "schema-check.py",
     "task-seq.py",
     "admission-check.py",
+    "baseline-snapshot.py",
     "stage-scope-check.py",
     "harness-self-check.py",
     "doc-structure-check.py",
@@ -141,8 +142,9 @@ def check_root(root: Path) -> None:
     require_path(root / "harness" / "scripts", directory=True)
     require_path(root / "harness" / "process_rules", directory=True)
     require_path(root / "harness" / "quality-gates.yaml", directory=False)
+    require_path(root / ".harness", directory=True)
     check_version_evidence_dirs(root)
-    check_test_results_ignored(root)
+    check_generated_output_ignored(root)
 
 
 def check_version_evidence_dirs(root: Path) -> None:
@@ -159,17 +161,21 @@ def check_version_evidence_dirs(root: Path) -> None:
             directory=False,
         )
 
-def check_test_results_ignored(root: Path) -> None:
-    """test-results/ holds generated run artifacts and must stay untracked."""
+def check_generated_output_ignored(root: Path) -> None:
+    """Generated run artifacts and local Harness state must stay untracked."""
     gitignore = root / ".gitignore"
     if not gitignore.is_file():
-        fail("missing .gitignore: the test-results/ run artifact directory must be git-ignored")
+        fail("missing .gitignore: test-results/ and .harness/ must be git-ignored")
     entries = {
         line.strip().lstrip("/").rstrip("/")
         for line in read_text(gitignore).splitlines()
     }
-    if "test-results" not in entries:
-        fail(".gitignore must contain a test-results/ entry; run artifacts are generated output")
+    missing = [entry for entry in ("test-results", ".harness") if entry not in entries]
+    if missing:
+        fail(
+            ".gitignore must ignore generated Harness output: "
+            + ", ".join(f"{entry}/" for entry in missing)
+        )
 
 
 def check_rules(root: Path) -> None:
@@ -192,7 +198,10 @@ def check_scripts(root: Path) -> None:
         if "raise SystemExit(main())" not in text:
             warn(f"{path} does not expose the standard main() exit pattern")
 
-    require_contains(root / "test-run.bat", ("uv", ".venv", "uv run", "--active", "python"))
+    require_contains(
+        root / "test-run.bat",
+        ("uv", ".venv", "uv run", "--active", "python", "UV_CACHE_DIR", ".harness\\uv-cache"),
+    )
     require_any(
         root / "test-run.bat",
         ("harness/scripts/test-run.py", "harness\\scripts\\test-run.py"),
@@ -200,7 +209,17 @@ def check_scripts(root: Path) -> None:
     )
     require_contains(
         root / "test-run.sh",
-        ("uv", ".venv", "uv run", "--active", "python", "harness/scripts/test-run.py"),
+        (
+            "uv",
+            ".venv",
+            "uv run",
+            "--active",
+            "python",
+            "harness/scripts/test-run.py",
+            "UV_CACHE_DIR",
+            ".harness/uv-cache",
+            "mkdir -p",
+        ),
     )
     require_configured_module_suites(scripts_dir / "test-run.py")
     require_contains(
@@ -234,6 +253,7 @@ def check_markdown_path_references(root: Path) -> None:
     """Catch obvious stale generated path references in default harness files."""
 
     checked_roots = [root / "AGENTS.md", root / "harness" / "rules", root / "harness" / "process_rules"]
+    optional_legacy_paths = {"docs/modules/tasks.md"}
     pattern = re.compile(r"`((?:harness|docs|test-run)[^`]+?)`")
     missing: list[tuple[Path, str]] = []
     for base in checked_roots:
@@ -243,6 +263,8 @@ def check_markdown_path_references(root: Path) -> None:
             for match in pattern.finditer(text):
                 raw = match.group(1).strip()
                 if any(token in raw for token in ("<", ">", "|", "*", " ", "\n")):
+                    continue
+                if raw in optional_legacy_paths:
                     continue
                 candidate = root / raw.replace("\\", "/")
                 if not candidate.exists() and raw.startswith(("harness/", "docs/")):

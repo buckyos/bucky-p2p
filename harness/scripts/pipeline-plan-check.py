@@ -269,6 +269,23 @@ def check_task_graph(
     return tasks, dependencies
 
 
+def check_parallel_policy(text: str, path: Path) -> None:
+    body = section_body(text, "Parallel Scheduling", path)
+    required = (
+        "Strategy: dependency-ready-set",
+        "runtime-available child-agent slots",
+        "Shared artifact owner: parent-orchestrator",
+        ".harness/locks/",
+        "maximum dependency-ready set",
+        "immediately backfill free slots",
+        "explicit dependency, overlapping write scope, or exhausted concurrency capacity only",
+        "pipeline/state.json",
+    )
+    missing = [value for value in required if value not in body]
+    if missing:
+        fail(f"{path} ## Parallel Scheduling missing required policy: {', '.join(missing)}")
+
+
 def check_dependency_graphs(text: str, path: Path) -> None:
     body = section_body(text, "Dependency Graphs", path)
     mermaid = re.search(r"(?ms)```mermaid\s+(.+?)```", body)
@@ -628,6 +645,69 @@ def check_task_state(
             fail(f"{state_path} task {task_id} must be confirmed or complete before pipeline completion")
 
 
+def check_scheduler_state(
+    state: dict[str, object],
+    state_path: Path,
+    tasks: dict[str, dict[str, str]],
+    dependencies: dict[str, list[str]],
+    require_complete: bool,
+) -> None:
+    scheduler = state.get("scheduler")
+    if not isinstance(scheduler, dict):
+        fail(f"{state_path} scheduler must be an object")
+    expected = {
+        "strategy": "dependency-ready-set",
+        "max_concurrency": "runtime-available-slots",
+        "shared_artifact_owner": "parent-orchestrator",
+        "lock_directory": ".harness/locks",
+    }
+    for key, value in expected.items():
+        if scheduler.get(key) != value:
+            fail(f"{state_path} scheduler.{key} must be {value}")
+    waves = scheduler.get("waves")
+    if not isinstance(waves, list):
+        fail(f"{state_path} scheduler.waves must be an array")
+
+    previously_launched: set[str] = set()
+    for index, wave in enumerate(waves, start=1):
+        if not isinstance(wave, dict):
+            fail(f"{state_path} scheduler wave {index} must be an object")
+        task_ids = wave.get("tasks")
+        reasons = wave.get("serialization_reasons")
+        if (
+            not isinstance(task_ids, list)
+            or not task_ids
+            or any(not isinstance(task_id, str) for task_id in task_ids)
+            or len(task_ids) != len(set(task_ids))
+        ):
+            fail(f"{state_path} scheduler wave {index} tasks must be a non-empty unique string array")
+        if not isinstance(reasons, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in reasons.items()
+        ):
+            fail(f"{state_path} scheduler wave {index} serialization_reasons must be a string map")
+        unknown = set(task_ids) - set(tasks)
+        if unknown:
+            fail(f"{state_path} scheduler wave {index} has unknown tasks: {', '.join(sorted(unknown))}")
+        for task_id in task_ids:
+            unfinished = [
+                dependency
+                for dependency in dependencies[task_id]
+                if dependency not in previously_launched
+            ]
+            if unfinished:
+                fail(
+                    f"{state_path} scheduler wave {index} launches {task_id} before dependencies: "
+                    + ", ".join(unfinished)
+                )
+        previously_launched.update(task_ids)
+
+    if require_complete:
+        missing = set(tasks) - previously_launched
+        if missing:
+            fail(f"{state_path} completed pipeline scheduler never launched: {', '.join(sorted(missing))}")
+
+
 def check_testing_evidence(
     state: dict[str, object], state_path: Path, trigger: dict[str, object], require_complete: bool
 ) -> None:
@@ -801,7 +881,9 @@ def main() -> int:
     state_path, state = load_pipeline_state(path)
     check_state_metadata(state, state_path, trigger)
     tasks, dependencies = check_task_graph(text, path)
+    check_parallel_policy(text, path)
     check_task_state(state, state_path, tasks, dependencies, args.require_complete)
+    check_scheduler_state(state, state_path, tasks, dependencies, args.require_complete)
     check_design_evidence(text, path)
     bindings = check_implementation_scope_bindings(text, path, trigger)
     check_file_sequence(text, path, tasks, bindings)

@@ -1,19 +1,23 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::num::NonZeroU32;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, Weak,
     atomic::{self, AtomicBool},
 };
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sfo_io::{
     LimitStream, SfoSpeedStat, SpeedLimitSession, SpeedLimiter, SpeedLimiterRef, SpeedStat,
     SpeedTracker, StatStream,
 };
-use tokio::io::{ReadBuf, copy_bidirectional};
+use tokio::{
+    io::{ReadBuf, copy_bidirectional},
+    sync::Notify,
+};
 
 use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
@@ -32,6 +36,9 @@ use crate::runtime;
 use crate::ttp::{TtpConnector, TtpPortListener, TtpServer, TtpServerRef, TtpTarget};
 
 const PN_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+const PN_TRAFFIC_CLEANUP_MAX_WAIT: Duration = Duration::from_secs(60 * 60);
+const PN_TRAFFIC_CLEANUP_BATCH_SIZE: usize = 64;
+const PN_TRAFFIC_RETENTION_MAX: Duration = Duration::from_secs(2_592_000);
 
 struct ProxyStream<R, W> {
     read: R,
@@ -101,12 +108,21 @@ pub struct PnUserTrafficSnapshot {
     pub tx_speed: u64,
     pub rx_bytes: u64,
     pub rx_speed: u64,
+    pub tx_delta_bytes: u64,
+    pub rx_delta_bytes: u64,
+}
+
+#[derive(Default)]
+struct PnTrafficSnapshotBaseline {
+    tx_bytes: u64,
+    rx_bytes: u64,
 }
 
 struct PnUserTrafficEntry {
     tx_limiter: SpeedLimiterRef,
     rx_limiter: SpeedLimiterRef,
     stat: Arc<SfoSpeedStat>,
+    snapshot_baseline: Mutex<PnTrafficSnapshotBaseline>,
 }
 
 impl PnUserTrafficEntry {
@@ -115,16 +131,42 @@ impl PnUserTrafficEntry {
             tx_limiter: SpeedLimiter::new(None, None, None),
             rx_limiter: SpeedLimiter::new(None, None, None),
             stat: Arc::new(SfoSpeedStat::new()),
+            snapshot_baseline: Mutex::new(PnTrafficSnapshotBaseline::default()),
         }
     }
 
     fn snapshot(&self) -> PnUserTrafficSnapshot {
-        PnUserTrafficSnapshot {
-            tx_bytes: self.stat.get_read_sum_size(),
+        self.read_snapshot(true)
+    }
+
+    fn set_limit(&self, config: PnTrafficLimitConfig) {
+        self.tx_limiter
+            .set_limit(config.tx_rate, config.tx_weight);
+        self.rx_limiter
+            .set_limit(config.rx_rate, config.rx_weight);
+    }
+
+    fn peek_snapshot(&self) -> PnUserTrafficSnapshot {
+        self.read_snapshot(false)
+    }
+
+    fn read_snapshot(&self, consume: bool) -> PnUserTrafficSnapshot {
+        let mut baseline = self.snapshot_baseline.lock().unwrap();
+        let tx_bytes = self.stat.get_read_sum_size();
+        let rx_bytes = self.stat.get_write_sum_size();
+        let snapshot = PnUserTrafficSnapshot {
+            tx_bytes,
             tx_speed: self.stat.get_read_speed(),
-            rx_bytes: self.stat.get_write_sum_size(),
+            rx_bytes,
             rx_speed: self.stat.get_write_speed(),
+            tx_delta_bytes: tx_bytes.saturating_sub(baseline.tx_bytes),
+            rx_delta_bytes: rx_bytes.saturating_sub(baseline.rx_bytes),
+        };
+        if consume {
+            baseline.tx_bytes = tx_bytes;
+            baseline.rx_bytes = rx_bytes;
         }
+        snapshot
     }
 }
 
@@ -133,47 +175,407 @@ struct PnTrafficSession {
     source_write_limit: SpeedLimitSession,
     source_tracker: Arc<dyn SpeedTracker>,
     target_tracker: Arc<dyn SpeedTracker>,
+    lifecycle: PnTrafficSessionGuard,
+}
+
+struct PnTrafficUserState {
+    entry: Arc<PnUserTrafficEntry>,
+    active_sessions: usize,
+    idle_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PnTrafficCleanupDeadline {
+    deadline: Instant,
+    user: P2pId,
+}
+
+#[derive(Default)]
+struct PnTrafficManagerState {
+    users: BTreeMap<P2pId, PnTrafficUserState>,
+    limit_configs: BTreeMap<P2pId, PnTrafficLimitConfig>,
+    retention: Duration,
+    cleanup_deadlines: BTreeSet<PnTrafficCleanupDeadline>,
+    shutdown: bool,
+}
+
+struct PnTrafficManagerShared {
+    state: Mutex<PnTrafficManagerState>,
+    cleanup_wakeup: Notify,
+}
+
+enum PnTrafficCleanupAction {
+    Shutdown,
+    WaitForNotification,
+    WaitForDeadline(Duration),
+    Yield,
+}
+
+struct PnTrafficSessionParticipant {
+    user: P2pId,
+    entry: Arc<PnUserTrafficEntry>,
+}
+
+struct PnTrafficSessionGuard {
+    traffic_manager: Weak<PnTrafficManager>,
+    source: PnTrafficSessionParticipant,
+    target: Option<PnTrafficSessionParticipant>,
+}
+
+impl Drop for PnTrafficSessionGuard {
+    fn drop(&mut self) {
+        let Some(traffic_manager) = self.traffic_manager.upgrade() else {
+            return;
+        };
+        traffic_manager.end_session(&self.source, self.target.as_ref());
+    }
 }
 
 struct PnTrafficManager {
-    users: Mutex<std::collections::HashMap<P2pId, Arc<PnUserTrafficEntry>>>,
+    shared: Arc<PnTrafficManagerShared>,
+    cleanup_task: Mutex<Option<crate::executor::SpawnHandle<()>>>,
+}
+
+pub struct PnUserTrafficSnapshotIter {
+    traffic_manager: Arc<PnTrafficManager>,
+    next_after: Option<P2pId>,
+}
+
+impl Iterator for PnUserTrafficSnapshotIter {
+    type Item = (P2pId, PnUserTrafficSnapshot);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (user, entry) = self
+            .traffic_manager
+            .next_entry(self.next_after.as_ref())?;
+        self.next_after = Some(user.clone());
+        Some((user, entry.snapshot()))
+    }
 }
 
 impl PnTrafficManager {
+    fn retention_deadline(now: Instant, retention: Duration) -> Option<Instant> {
+        now.checked_add(retention)
+    }
+
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            users: Mutex::new(std::collections::HashMap::new()),
+            shared: Arc::new(PnTrafficManagerShared {
+                state: Mutex::new(PnTrafficManagerState::default()),
+                cleanup_wakeup: Notify::new(),
+            }),
+            cleanup_task: Mutex::new(None),
         })
     }
 
-    fn user_entry(&self, user: &P2pId) -> Arc<PnUserTrafficEntry> {
-        let mut users = self.users.lock().unwrap();
-        users
-            .entry(user.clone())
-            .or_insert_with(|| Arc::new(PnUserTrafficEntry::new()))
-            .clone()
+    fn start_cleanup_task(&self) -> P2pResult<()> {
+        let mut cleanup_task = self.cleanup_task.lock().unwrap();
+        if cleanup_task.is_some() {
+            return Ok(());
+        }
+
+        let state = self.shared.state.lock().unwrap();
+        if state.shutdown {
+            return Ok(());
+        }
+
+        let shared = self.shared.clone();
+        let task = Executor::spawn_with_handle(async move {
+            Self::run_cleanup_task(shared).await;
+        })?;
+        *cleanup_task = Some(task);
+        Ok(())
     }
 
-    fn begin_session(&self, source_user: &P2pId, target_user: &P2pId) -> PnTrafficSession {
-        let source_entry = self.user_entry(source_user);
-        let target_entry = self.user_entry(target_user);
+    async fn run_cleanup_task(shared: Arc<PnTrafficManagerShared>) {
+        loop {
+            let notified = shared.cleanup_wakeup.notified();
+            tokio::pin!(notified);
+            match Self::cleanup_action(&shared) {
+                PnTrafficCleanupAction::Shutdown => return,
+                PnTrafficCleanupAction::WaitForNotification => notified.await,
+                PnTrafficCleanupAction::WaitForDeadline(wait) => {
+                    tokio::select! {
+                        _ = runtime::sleep(wait) => {}
+                        _ = &mut notified => {}
+                    }
+                }
+                PnTrafficCleanupAction::Yield => tokio::task::yield_now().await,
+            }
+        }
+    }
+
+    fn cleanup_action(shared: &PnTrafficManagerShared) -> PnTrafficCleanupAction {
+        let mut state = shared.state.lock().unwrap();
+        if state.shutdown {
+            return PnTrafficCleanupAction::Shutdown;
+        }
+
+        let now = Instant::now();
+        let mut processed = 0;
+        while processed < PN_TRAFFIC_CLEANUP_BATCH_SIZE {
+            let Some(next_deadline) = state.cleanup_deadlines.first().cloned() else {
+                break;
+            };
+            if next_deadline.deadline > now {
+                break;
+            }
+
+            state.cleanup_deadlines.remove(&next_deadline);
+            processed += 1;
+            let remove = state
+                .users
+                .get(&next_deadline.user)
+                .is_some_and(|user_state| {
+                    user_state.active_sessions == 0
+                        && user_state.idle_deadline == Some(next_deadline.deadline)
+                });
+            if remove {
+                state.users.remove(&next_deadline.user);
+            }
+        }
+
+        let Some(next_deadline) = state.cleanup_deadlines.first() else {
+            return PnTrafficCleanupAction::WaitForNotification;
+        };
+        if next_deadline.deadline <= now {
+            return PnTrafficCleanupAction::Yield;
+        }
+
+        PnTrafficCleanupAction::WaitForDeadline(
+            next_deadline
+                .deadline
+                .saturating_duration_since(now)
+                .min(PN_TRAFFIC_CLEANUP_MAX_WAIT),
+        )
+    }
+
+    fn iter(self: &Arc<Self>) -> PnUserTrafficSnapshotIter {
+        PnUserTrafficSnapshotIter {
+            traffic_manager: self.clone(),
+            next_after: None,
+        }
+    }
+
+    fn next_entry(
+        &self,
+        after: Option<&P2pId>,
+    ) -> Option<(P2pId, Arc<PnUserTrafficEntry>)> {
+        let state = self.shared.state.lock().unwrap();
+        let (user, entry) = match after {
+            Some(after) => state.users.range((Excluded(after), Unbounded)).next(),
+            None => state.users.first_key_value(),
+        }?;
+        Some((user.clone(), entry.entry.clone()))
+    }
+
+    fn acquire_user(
+        state: &mut PnTrafficManagerState,
+        user: &P2pId,
+    ) -> (Arc<PnUserTrafficEntry>, bool) {
+        if let Some(user_state) = state.users.get_mut(user) {
+            let canceled_deadline = user_state.idle_deadline.take().map(|deadline| {
+                PnTrafficCleanupDeadline {
+                    deadline,
+                    user: user.clone(),
+                }
+            });
+            user_state.active_sessions += 1;
+            let entry = user_state.entry.clone();
+            let canceled = canceled_deadline
+                .as_ref()
+                .is_some_and(|deadline| state.cleanup_deadlines.remove(deadline));
+            return (entry, canceled);
+        }
+
+        let entry = Arc::new(PnUserTrafficEntry::new());
+        if let Some(config) = state.limit_configs.get(user).copied() {
+            entry.set_limit(config);
+        }
+        state.users.insert(
+            user.clone(),
+            PnTrafficUserState {
+                entry: entry.clone(),
+                active_sessions: 1,
+                idle_deadline: None,
+            },
+        );
+        (entry, false)
+    }
+
+    fn begin_session(
+        self: &Arc<Self>,
+        source_user: &P2pId,
+        target_user: &P2pId,
+    ) -> PnTrafficSession {
+        let mut state = self.shared.state.lock().unwrap();
+        let shutdown = state.shutdown;
+        let (source_entry, target_entry, schedule_changed) = if shutdown {
+            let source_entry = Arc::new(PnUserTrafficEntry::new());
+            let target_entry = if source_user == target_user {
+                source_entry.clone()
+            } else {
+                Arc::new(PnUserTrafficEntry::new())
+            };
+            (source_entry, target_entry, false)
+        } else {
+            let (source_entry, source_canceled) =
+                Self::acquire_user(&mut state, source_user);
+            let (target_entry, target_canceled) = if source_user == target_user {
+                (source_entry.clone(), false)
+            } else {
+                Self::acquire_user(&mut state, target_user)
+            };
+            (
+                source_entry,
+                target_entry,
+                source_canceled || target_canceled,
+            )
+        };
+        drop(state);
+        if schedule_changed {
+            self.shared.cleanup_wakeup.notify_one();
+        }
+
+        let lifecycle = PnTrafficSessionGuard {
+            traffic_manager: if shutdown {
+                Weak::new()
+            } else {
+                Arc::downgrade(self)
+            },
+            source: PnTrafficSessionParticipant {
+                user: source_user.clone(),
+                entry: source_entry.clone(),
+            },
+            target: (source_user != target_user).then(|| PnTrafficSessionParticipant {
+                user: target_user.clone(),
+                entry: target_entry.clone(),
+            }),
+        };
         PnTrafficSession {
             source_read_limit: source_entry.tx_limiter.new_limit_session(),
             source_write_limit: source_entry.rx_limiter.new_limit_session(),
             source_tracker: source_entry.stat.clone(),
             target_tracker: target_entry.stat.clone(),
+            lifecycle,
+        }
+    }
+
+    fn end_session(
+        &self,
+        source: &PnTrafficSessionParticipant,
+        target: Option<&PnTrafficSessionParticipant>,
+    ) {
+        let mut state = self.shared.state.lock().unwrap();
+        let mut schedule_changed = Self::release_user(&mut state, source);
+        if let Some(target) = target {
+            schedule_changed |= Self::release_user(&mut state, target);
+        }
+        drop(state);
+        if schedule_changed {
+            self.shared.cleanup_wakeup.notify_one();
+        }
+    }
+
+    fn release_user(
+        state: &mut PnTrafficManagerState,
+        participant: &PnTrafficSessionParticipant,
+    ) -> bool {
+        let became_idle = match state.users.get_mut(&participant.user) {
+            Some(user_state) if Arc::ptr_eq(&user_state.entry, &participant.entry) => {
+                if user_state.active_sessions == 0 {
+                    false
+                } else {
+                    user_state.active_sessions -= 1;
+                    user_state.active_sessions == 0
+                }
+            }
+            _ => false,
+        };
+        if !became_idle {
+            return false;
+        }
+
+        if state.retention.is_zero() || state.shutdown {
+            state.users.remove(&participant.user);
+            return false;
+        }
+
+        let Some(deadline) = Self::retention_deadline(Instant::now(), state.retention) else {
+            state.users.remove(&participant.user);
+            return false;
+        };
+        let Some(user_state) = state.users.get_mut(&participant.user) else {
+            return false;
+        };
+        user_state.idle_deadline = Some(deadline);
+        state.cleanup_deadlines.insert(PnTrafficCleanupDeadline {
+            deadline,
+            user: participant.user.clone(),
+        })
+    }
+
+    fn set_retention(&self, retention: Duration) {
+        let mut state = self.shared.state.lock().unwrap();
+        if !state.shutdown {
+            state.retention = retention.min(PN_TRAFFIC_RETENTION_MAX);
         }
     }
 
     fn set_user_limit(&self, user: P2pId, config: PnTrafficLimitConfig) {
-        let entry = self.user_entry(&user);
-        entry.tx_limiter.set_limit(config.tx_rate, config.tx_weight);
-        entry.rx_limiter.set_limit(config.rx_rate, config.rx_weight);
+        let mut state = self.shared.state.lock().unwrap();
+        if state.shutdown {
+            return;
+        }
+        state.limit_configs.insert(user.clone(), config);
+        if let Some(user_state) = state.users.get(&user) {
+            user_state.entry.set_limit(config);
+        }
     }
 
     fn snapshot(&self, user: &P2pId) -> Option<PnUserTrafficSnapshot> {
-        let users = self.users.lock().unwrap();
-        users.get(user).map(|entry| entry.snapshot())
+        let entry = self
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .users
+            .get(user)
+            .map(|user_state| user_state.entry.clone())?;
+        Some(entry.snapshot())
+    }
+
+    fn peek_snapshot(&self, user: &P2pId) -> Option<PnUserTrafficSnapshot> {
+        let entry = self
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .users
+            .get(user)
+            .map(|user_state| user_state.entry.clone())?;
+        Some(entry.peek_snapshot())
+    }
+
+    fn shutdown(&self) {
+        let cleanup_task = {
+            let mut cleanup_task = self.cleanup_task.lock().unwrap();
+            let mut state = self.shared.state.lock().unwrap();
+            state.shutdown = true;
+            state.users.clear();
+            state.limit_configs.clear();
+            state.cleanup_deadlines.clear();
+            state.retention = Duration::ZERO;
+            cleanup_task.take()
+        };
+        self.shared.cleanup_wakeup.notify_one();
+        drop(cleanup_task);
+    }
+}
+
+impl Drop for PnTrafficManager {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -580,20 +982,24 @@ impl PnService {
                 req.purpose,
                 PROXY_SERVICE
             );
-            let traffic_session = self.traffic_manager.begin_session(&req.from, &req.to);
+            let PnTrafficSession {
+                source_read_limit,
+                source_write_limit,
+                source_tracker,
+                target_tracker,
+                lifecycle: _traffic_lifecycle,
+            } = self.traffic_manager.begin_session(&req.from, &req.to);
             let source_stream = ProxyStream::new(read, source_write);
             let source_stream = LimitStream::new(
                 source_stream,
-                traffic_session.source_read_limit,
-                traffic_session.source_write_limit,
+                source_read_limit,
+                source_write_limit,
             );
-            let mut source_stream =
-                StatStream::new_with_tracker(source_stream, traffic_session.source_tracker);
+            let mut source_stream = StatStream::new_with_tracker(source_stream, source_tracker);
             let target_stream = ProxyStream::new(target_read, target_write);
-            let mut target_stream =
-                StatStream::new_with_tracker(target_stream, traffic_session.target_tracker);
+            let mut target_stream = StatStream::new_with_tracker(target_stream, target_tracker);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
-            if let Some(snapshot) = self.traffic_manager.snapshot(&req.from) {
+            if let Some(snapshot) = self.traffic_manager.peek_snapshot(&req.from) {
                 log::debug!(
                     "pn server bridge stop tunnel_id={:?} from={} to={} tx_bytes={} rx_bytes={} tx_speed={} rx_speed={}",
                     req.tunnel_id,
@@ -605,7 +1011,7 @@ impl PnService {
                     snapshot.rx_speed
                 );
             }
-            if let Some(snapshot) = self.traffic_manager.snapshot(&req.to) {
+            if let Some(snapshot) = self.traffic_manager.peek_snapshot(&req.to) {
                 log::debug!(
                     "pn server bridge target stop tunnel_id={:?} target={} tx_bytes={} rx_bytes={} tx_speed={} rx_speed={}",
                     req.tunnel_id,
@@ -730,18 +1136,22 @@ impl PnService {
                 req.to,
                 PROXY_SERVICE
             );
-            let traffic_session = self.traffic_manager.begin_session(&req.from, &req.to);
+            let PnTrafficSession {
+                source_read_limit,
+                source_write_limit,
+                source_tracker,
+                target_tracker,
+                lifecycle: _traffic_lifecycle,
+            } = self.traffic_manager.begin_session(&req.from, &req.to);
             let source_stream = ProxyStream::new(read, source_write);
             let source_stream = LimitStream::new(
                 source_stream,
-                traffic_session.source_read_limit,
-                traffic_session.source_write_limit,
+                source_read_limit,
+                source_write_limit,
             );
-            let mut source_stream =
-                StatStream::new_with_tracker(source_stream, traffic_session.source_tracker);
+            let mut source_stream = StatStream::new_with_tracker(source_stream, source_tracker);
             let target_stream = ProxyStream::new(target_read, target_write);
-            let mut target_stream =
-                StatStream::new_with_tracker(target_stream, traffic_session.target_tracker);
+            let mut target_stream = StatStream::new_with_tracker(target_stream, target_tracker);
             let _ = copy_bidirectional(&mut source_stream, &mut target_stream).await;
             self.unregister_relay_session(req.tunnel_id, &req.from, &req.to);
             log::debug!(
@@ -834,8 +1244,20 @@ impl PnServer {
         self.service.traffic_manager.set_user_limit(user, config);
     }
 
+    /// Sets retention for users that become idle in the future.
+    ///
+    /// Values above 30 days are clamped to 30 days; existing idle deadlines are
+    /// unchanged.
+    pub fn set_user_traffic_retention(&self, retention: Duration) {
+        self.service.traffic_manager.set_retention(retention);
+    }
+
     pub fn get_user_traffic_snapshot(&self, user: &P2pId) -> Option<PnUserTrafficSnapshot> {
         self.service.traffic_manager.snapshot(user)
+    }
+
+    pub fn iter_user_traffic_snapshots(&self) -> PnUserTrafficSnapshotIter {
+        self.service.traffic_manager.iter()
     }
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
@@ -850,6 +1272,11 @@ impl PnServer {
             .is_err()
         {
             return Ok(());
+        }
+
+        if let Err(err) = self.service.traffic_manager.start_cleanup_task() {
+            self.started.store(false, atomic::Ordering::SeqCst);
+            return Err(err);
         }
 
         let weak = Arc::downgrade(self);
@@ -898,6 +1325,7 @@ impl PnServer {
     pub fn stop(&self) {
         self.stopped.store(true, atomic::Ordering::Relaxed);
         self.abort_accept_task();
+        self.service.traffic_manager.shutdown();
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -914,6 +1342,7 @@ impl PnServer {
 impl Drop for PnServer {
     fn drop(&mut self) {
         self.abort_accept_task();
+        self.service.traffic_manager.shutdown();
     }
 }
 
@@ -950,6 +1379,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod traffic_manager_tests;
+
     use super::*;
     use crate::endpoint::{Endpoint, Protocol};
     use crate::error::p2p_err;
@@ -1718,6 +2149,13 @@ mod tests {
             .unwrap();
         assert_eq!(reply_buf, reply);
 
+        let source_snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(source_snapshot.tx_bytes, payload.len() as u64);
+        assert_eq!(source_snapshot.rx_bytes, reply.len() as u64);
+        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
+        assert_eq!(target_snapshot.tx_bytes, reply.len() as u64);
+        assert_eq!(target_snapshot.rx_bytes, payload.len() as u64);
+
         drop(source_write);
         drop(target_write);
         drop(source_read);
@@ -1726,13 +2164,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-
-        let source_snapshot = traffic_manager.snapshot(&source_id).unwrap();
-        assert_eq!(source_snapshot.tx_bytes, payload.len() as u64);
-        assert_eq!(source_snapshot.rx_bytes, reply.len() as u64);
-        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
-        assert_eq!(target_snapshot.tx_bytes, reply.len() as u64);
-        assert_eq!(target_snapshot.rx_bytes, payload.len() as u64);
+        assert_eq!(traffic_manager.snapshot(&source_id), None);
+        assert_eq!(traffic_manager.snapshot(&target_id), None);
     }
 
     #[tokio::test]
@@ -1815,15 +2248,6 @@ mod tests {
         source_read.read_exact(&mut pong_buf).await.unwrap();
         assert_eq!(&pong_buf, target_payload);
 
-        drop(source_write);
-        drop(target_write);
-        drop(source_read);
-        drop(target_read);
-        timeout(Duration::from_secs(1), service_task)
-            .await
-            .unwrap()
-            .unwrap();
-
         let snapshot = traffic_manager.snapshot(&source_id).unwrap();
         assert_eq!(
             snapshot,
@@ -1832,6 +2256,8 @@ mod tests {
                 tx_speed: 0,
                 rx_bytes: 6,
                 rx_speed: 0,
+                tx_delta_bytes: 4,
+                rx_delta_bytes: 6,
             }
         );
         let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
@@ -1842,8 +2268,22 @@ mod tests {
                 tx_speed: 0,
                 rx_bytes: 4,
                 rx_speed: 0,
+                tx_delta_bytes: 6,
+                rx_delta_bytes: 4,
             }
         );
+        assert_eq!(traffic_manager.snapshot(&forged_source_id), None);
+
+        drop(source_write);
+        drop(target_write);
+        drop(source_read);
+        drop(target_read);
+        timeout(Duration::from_secs(1), service_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(traffic_manager.snapshot(&source_id), None);
+        assert_eq!(traffic_manager.snapshot(&target_id), None);
         assert_eq!(traffic_manager.snapshot(&forged_source_id), None);
     }
 
@@ -1938,6 +2378,13 @@ mod tests {
             elapsed
         );
 
+        let snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(snapshot.tx_bytes, payload.len() as u64);
+        assert_eq!(snapshot.rx_bytes, 0);
+        let target_snapshot = traffic_manager.snapshot(&req.to).unwrap();
+        assert_eq!(target_snapshot.tx_bytes, 0);
+        assert_eq!(target_snapshot.rx_bytes, payload.len() as u64);
+
         drop(source_write);
         drop(target_write);
         drop(source_read);
@@ -1946,13 +2393,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-
-        let snapshot = traffic_manager.snapshot(&source_id).unwrap();
-        assert_eq!(snapshot.tx_bytes, payload.len() as u64);
-        assert_eq!(snapshot.rx_bytes, 0);
-        let target_snapshot = traffic_manager.snapshot(&req.to).unwrap();
-        assert_eq!(target_snapshot.tx_bytes, 0);
-        assert_eq!(target_snapshot.rx_bytes, payload.len() as u64);
+        assert_eq!(traffic_manager.snapshot(&source_id), None);
+        assert_eq!(traffic_manager.snapshot(&req.to), None);
     }
 
     #[tokio::test]
@@ -2046,6 +2488,13 @@ mod tests {
             elapsed
         );
 
+        let source_snapshot = traffic_manager.snapshot(&source_id).unwrap();
+        assert_eq!(source_snapshot.tx_bytes, 0);
+        assert_eq!(source_snapshot.rx_bytes, payload.len() as u64);
+        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
+        assert_eq!(target_snapshot.tx_bytes, payload.len() as u64);
+        assert_eq!(target_snapshot.rx_bytes, 0);
+
         drop(source_write);
         drop(target_write);
         drop(source_read);
@@ -2054,13 +2503,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-
-        let source_snapshot = traffic_manager.snapshot(&source_id).unwrap();
-        assert_eq!(source_snapshot.tx_bytes, 0);
-        assert_eq!(source_snapshot.rx_bytes, payload.len() as u64);
-        let target_snapshot = traffic_manager.snapshot(&target_id).unwrap();
-        assert_eq!(target_snapshot.tx_bytes, payload.len() as u64);
-        assert_eq!(target_snapshot.rx_bytes, 0);
+        assert_eq!(traffic_manager.snapshot(&source_id), None);
+        assert_eq!(traffic_manager.snapshot(&target_id), None);
     }
 
     #[tokio::test]

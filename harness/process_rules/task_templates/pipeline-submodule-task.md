@@ -13,6 +13,9 @@
 - Parent Task:
 - Depends On:
 - Owner:
+- Exclusive Write Scope:
+- Parallel-Eligible Ready Tasks:
+- Serialization Reason: none / dependency / overlapping-write-scope / concurrency-capacity
 
 ## Goal
 - Complete the named stage for this task packet or direct submodule only.
@@ -33,6 +36,8 @@
 - [ ] The launch-confirmed proposal and required upstream pipeline-plan mappings exist; auto-pipeline does not require approved `design.md` or `testing.md`
 - [ ] If per-stage user confirmation is skipped, the pipeline plan records explicit user auto-pipeline authorization
 - [ ] Task-local `pipeline/state.json` status was updated to `confirmed` or `complete` before dependent tasks continue
+- [ ] The parent orchestrator owns shared pipeline/state/testplan/runner artifacts; this child writes only its exclusive scope and task-specific evidence
+- [ ] All ready sibling tasks with disjoint write scopes were launched concurrently up to available child-agent capacity before waiting
 - [ ] If a repository-local extension produces a stage document, its auto-confirmation metadata is complete; normal auto-pipeline design/testing tasks produce no stage Markdown document
 - [ ] Scope stays inside this task packet or direct submodule
 - [ ] Scope stays inside the named stage unless the user explicitly requested cross-stage synchronization
@@ -66,10 +71,10 @@
 - Can modify:
 - Must not modify:
 
-Stage-task defaults:
-- Design can modify: this submodule's mappings and implementation sequence in `pipeline/plan.md`, plus required long-lived boundary sync only; it MUST NOT generate `design.md` or task-local `design/`
+Stage-task defaults (shared-artifact entries are proposed by the child and applied only by the parent orchestrator):
+- Design can return: this submodule's proposed mappings and implementation sequence for `pipeline/plan.md`; direct writes are limited to its reserved long-lived boundary scope; it MUST NOT generate `design.md` or task-local `design/`
 - Implementation can modify: production code, required non-test runtime/build resources, and task admission evidence under `docs/versions/<version>/evidence/admission/` only
-- Testing can modify: test code, test fixtures, test runners, unified test entrypoint wiring, the bound task packet `testplan.yaml`, pipeline-plan testing evidence, and run artifacts only; it MUST NOT generate `testing.md` or task-local `testing/`
+- Testing can return: proposed shared `testplan.yaml`, shared runner registration, and pipeline testing evidence; direct writes are limited to reserved test code, fixtures, runner files, and run artifacts; it MUST NOT generate `testing.md` or task-local `testing/`
 - Acceptance can modify: review reports and generated acceptance rules/expected-result evidence only
 - Cross-stage edits require explicit user instruction naming the extra stage(s) or asking for cross-stage synchronization
 

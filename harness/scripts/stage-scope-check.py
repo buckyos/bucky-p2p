@@ -20,14 +20,16 @@ available only through --from-git for local diagnosis and MUST NOT be used as
 single-task completion evidence.
 
 Rust source files at production paths receive one narrow testing-stage
-exception: a Git baseline comparison must prove that every change is confined
-to an exact #[cfg(test)] item that already existed in the baseline. The normal
-path policy remains fail-closed for every other production-path source file.
+exception: a task-start file snapshot under .harness/baselines/ must prove that
+every change is confined to an exact #[cfg(test)] item that already existed in
+the baseline. The normal path policy remains fail-closed for every other
+production-path source file. Baseline capture never writes Git metadata.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -66,24 +68,6 @@ def git(args: list[str], root: Path) -> str:
     return result.stdout.decode("utf-8", errors="replace")
 
 
-def git_optional(args: list[str], root: Path) -> str | None:
-    """Run a read-only git query and return None when the requested object is absent."""
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=root,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.decode("utf-8", errors="replace")
-
-
 def normalize(path: str) -> str:
     normalized = path.replace("\\", "/").lstrip("\ufeff")
     if normalized.startswith("./"):
@@ -103,6 +87,64 @@ def canonical_repo_path(root: Path, path: str) -> str:
         return candidate.relative_to(root_resolved).as_posix()
     except ValueError:
         fail(f"path resolves outside the repository: {path}")
+
+
+def baseline_sources_from_manifest(root: Path, raw_manifest: str) -> dict[str, str]:
+    """Load and verify a project-local task-start baseline manifest."""
+    root_resolved = root.resolve()
+    manifest = Path(raw_manifest)
+    if not manifest.is_absolute():
+        manifest = root_resolved / manifest
+    manifest = manifest.resolve(strict=False)
+    try:
+        manifest_relative = manifest.relative_to(root_resolved).as_posix()
+    except ValueError:
+        fail(f"baseline manifest resolves outside the repository: {raw_manifest}")
+    if not manifest_relative.startswith(".harness/baselines/"):
+        fail("baseline manifest must live under .harness/baselines/")
+    if not manifest.is_file():
+        fail(f"baseline manifest does not exist: {manifest_relative}")
+
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"invalid baseline manifest {manifest_relative}: {error}")
+    if not isinstance(payload, dict) or payload.get("schema") != 1:
+        fail(f"baseline manifest {manifest_relative} must use schema 1")
+    records = payload.get("files")
+    if not isinstance(records, list) or not records:
+        fail(f"baseline manifest {manifest_relative} must contain files")
+
+    sources: dict[str, str] = {}
+    manifest_dir = manifest.parent.resolve()
+    for record in records:
+        if not isinstance(record, dict):
+            fail(f"baseline manifest {manifest_relative} contains a malformed file record")
+        raw_path = record.get("path")
+        raw_snapshot = record.get("snapshot")
+        expected_hash = record.get("sha256")
+        if not all(
+            isinstance(value, str) and value
+            for value in (raw_path, raw_snapshot, expected_hash)
+        ):
+            fail(f"baseline manifest {manifest_relative} contains an incomplete file record")
+        path = canonical_repo_path(root_resolved, raw_path)
+        snapshot_relative = normalize(raw_snapshot)
+        snapshot = (manifest_dir / snapshot_relative).resolve(strict=False)
+        try:
+            snapshot.relative_to(manifest_dir)
+        except ValueError:
+            fail(f"baseline snapshot resolves outside its task directory: {raw_snapshot}")
+        if not snapshot.is_file():
+            fail(f"baseline snapshot does not exist: {raw_snapshot}")
+        data = snapshot.read_bytes()
+        if hashlib.sha256(data).hexdigest() != expected_hash:
+            fail(f"baseline snapshot hash mismatch for: {path}")
+        try:
+            sources[path] = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            fail(f"baseline snapshot is not utf-8 for {path}: {error}")
+    return sources
 
 
 def parse_status_z(output: str) -> list[str]:
@@ -221,7 +263,13 @@ def explicit_changed_paths(args: argparse.Namespace, root: Path) -> list[str]:
             file_path = root / file_path
         paths.extend(changed_paths_from_file(file_path))
     if args.from_git:
-        paths.extend(changed_paths_from_git(root, args.base, include_untracked=not args.ignore_untracked))
+        paths.extend(
+            changed_paths_from_git(
+                root,
+                args.git_diff_base,
+                include_untracked=not args.ignore_untracked,
+            )
+        )
     if not paths:
         fail(
             "no task changed paths supplied; pass --changed-paths-file "
@@ -561,21 +609,20 @@ def rust_production_projection(source: str) -> tuple[str, int]:
     return "".join(pieces), len(spans)
 
 
-def rust_inline_test_only_change(root: Path, path: str, base: str | None) -> bool:
+def rust_inline_test_only_change(root: Path, path: str, baselines: dict[str, str]) -> bool:
     """Prove that a mixed Rust file changed only inside pre-existing cfg(test) items."""
     if not path.endswith(".rs"):
         return False
     current_path = root / path
     if not current_path.is_file():
         return False
-    baseline = git_optional(["show", f"{base or 'HEAD'}:{path}"], root)
+    baseline = baselines.get(path)
     if baseline is None:
         return False
     current = current_path.read_text(encoding="utf-8")
     if current == baseline:
-        # A manifest claims this path changed, so equality means HEAD was used
-        # after the task was committed. Refuse the self-comparison and require
-        # the task's recorded starting revision via --base.
+        # A manifest claims this path changed, so equality cannot prove that the
+        # task changed only an existing inline test item.
         return False
     before_projection, before_count = rust_production_projection(baseline)
     after_projection, after_count = rust_production_projection(current)
@@ -785,17 +832,25 @@ def main() -> int:
         help="implementation stage: bind task paths to admitted change_id Scope Paths from design.md or no-doc auto-pipeline plan",
     )
     parser.add_argument(
-        "--base",
+        "--baseline-manifest",
         help=(
-            "git revision used as the testing-stage baseline for mixed Rust files; "
-            "with --from-git, also discover committed paths from <base>...HEAD"
+            "testing-stage task-start snapshot manifest under "
+            ".harness/baselines/<task-id>/manifest.json"
         ),
+    )
+    parser.add_argument(
+        "--git-diff-base",
+        help="with --from-git, discover committed paths from <git-diff-base>...HEAD",
     )
     parser.add_argument("--ignore-untracked", action="store_true")
     args = parser.parse_args()
 
     if args.ignore_untracked and not args.from_git:
         fail("--ignore-untracked applies only with --from-git")
+    if args.git_diff_base and not args.from_git:
+        fail("--git-diff-base applies only with --from-git")
+    if args.baseline_manifest and args.stage != "testing":
+        fail("--baseline-manifest applies only to the testing stage")
 
     if args.stage in {"proposal", "design", "testing"} and not (args.version and args.module):
         fail(
@@ -823,6 +878,11 @@ def main() -> int:
         fail(f"invalid --target-module: {target_module}")
 
     root = Path(args.root)
+    baselines = (
+        baseline_sources_from_manifest(root, args.baseline_manifest)
+        if args.baseline_manifest
+        else {}
+    )
     scope_paths: list[str] = []
     if args.stage == "implementation":
         scope_paths = design_scope_paths(
@@ -846,7 +906,7 @@ def main() -> int:
         if (
             not path_allowed
             and args.stage == "testing"
-            and rust_inline_test_only_change(root, path, args.base)
+            and rust_inline_test_only_change(root, path, baselines)
         ):
             path_allowed = True
         if not path_allowed:

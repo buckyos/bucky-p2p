@@ -105,6 +105,7 @@
 - 改动准入检查：`python3 ./harness/scripts/admission-check.py --version v0.1 --module <packet-module> --submodule <task-name> --target-module <module> --change-id <change_id> --evidence-file docs/versions/v0.1/evidence/admission/<evidence-id>.md`
 - 兼容准入入口：`python3 ./harness/scripts/check-implementation-admission.py v0.1 <packet-module> --submodule <task-name> --target-module <module> --evidence-file docs/versions/v0.1/evidence/admission/<evidence-id>.md <change_id>`
 - 阶段范围检查：`python3 ./harness/scripts/stage-scope-check.py --stage <stage> --version v0.1 --module <packet-module> --changed-paths-file docs/versions/v0.1/evidence/stage-scope/<task-id>.paths`
+- 测试阶段基线快照：`python3 ./harness/scripts/baseline-snapshot.py --task-id <task-id> --path <repo-relative-file>`（输出位于已忽略的 `.harness/baselines/`）
 - Harness 自检：`python3 ./harness/scripts/harness-self-check.py`
 - 架构文档检查：`python3 ./harness/scripts/architecture-doc-check.py`
 - 文档结构检查：`python3 ./harness/scripts/doc-structure-check.py --version v0.1 --module <module> --docs <all|mandatory|proposal|design|testing>`

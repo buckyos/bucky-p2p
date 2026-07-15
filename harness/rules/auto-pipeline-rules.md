@@ -24,7 +24,7 @@
 - That launch instruction authorizes downstream design, implementation, post-implementation testing, and acceptance execution according to the pipeline plan.
 - Auto-pipeline design and testing stages MUST NOT generate or update persistent `design.md`, task-local `design/`, `testing.md`, or `testing/` artifacts. Testing MUST generate `testplan.yaml`.
 - Auto-pipeline tasks MUST NOT run `doc-structure-check.py`; their document/mapping structure gates are `schema-check.py`, `pipeline-plan-check.py`, and `testing-coverage-check.py`. Proposal document structure is completed before pipeline launch.
-- Auto-pipeline design-stage outputs MUST be recorded in task-local `pipeline/plan.md` as dependency graphs plus their machine-checkable node/dependency table, exported interfaces with concrete consumers and compatibility decisions, single-owner state models with failure transitions, cross-boundary failure flows and handling, rejected boundary/technical/collaboration alternatives, implementation order, and concrete `Scope Paths`; testing-stage outputs MUST include `testplan.yaml`, task-local `pipeline/state.json` coverage/evidence references, test code, test runner wiring, and machine-written test run artifacts.
+- Auto-pipeline design-stage outputs MUST be recorded in task-local `pipeline/plan.md` as dependency graphs plus their machine-checkable node/dependency table, exported interfaces with concrete consumers and compatibility decisions, structured API/build impact plus consumer migration closure, single-owner state models with failure transitions, cross-boundary failure flows and handling, rejected boundary/technical/collaboration alternatives, implementation order, and concrete `Scope Paths`; testing-stage outputs MUST include `testplan.yaml`, task-local `pipeline/state.json` coverage/evidence references, test code, test runner wiring, and machine-written test run artifacts.
 - When creating or intentionally revising `pipeline/plan.md`, record its LF-normalized sha256 as sibling `pipeline/state.json` `plan_sha256` before the plan's validation run. A design revision intentionally invalidates earlier admission stamps; ordinary state updates never alter plan or its admission binding.
 - When a repository-local extension adds a document-producing stage, the pipeline MUST auto-confirm that stage by updating the produced stage document front matter to:
   - `status: approved`
@@ -34,7 +34,8 @@
 - Auto-confirmation happens only after that stage's declared done criteria and required checks pass.
 - `approved_by: auto-pipeline` is valid only while `pipeline/plan.md` records confirmed launch evidence and the same `Version`, `Packet module`, and `Task name` as that document; `schema-check.py` and `admission-check.py` fail unbound approval claims.
 - Outside an explicitly launched pipeline, the normal approval authority rule applies: agents MUST NOT set `status: approved` themselves, and user approvals require a filled `## Approval Record`.
-- After each child task completes, the pipeline MUST update the task-local `pipeline/state.json` task status to `confirmed` or `complete` before continuing to dependent tasks.
+- The parent orchestrator is the sole writer for shared coordination artifacts including `pipeline/plan.md`, `pipeline/state.json`, unfinished-task indexes, shared `testplan.yaml`, and shared test-runner registration. Child agents return scoped results; the parent merges them and updates statuses/evidence.
+- After each child task completes, the parent orchestrator MUST update the task-local `pipeline/state.json` task status to `confirmed` or `complete` before continuing to dependent tasks.
 - The pipeline MUST run `pipeline-plan-check.py` after creating or modifying `pipeline/plan.md` or sibling `state.json`; that latest passing result satisfies downstream entry while those inputs remain unchanged. It MUST run `--require-complete` only after completion state or completion evidence changes. Reaching the next stage or final completion without an input change MUST NOT trigger another run. Complete mode verifies the bound task's `testplan.yaml`, successful matching `<module>/<task-name> all` artifact, and acceptance-report reference without rerunning their owning checkers. It MUST NOT trigger package/module tests, `all all`, root shortcuts, or quality gates.
 - Implementation completion MUST be recorded in task-local `pipeline/state.json` and implementation evidence, and final acceptance MUST be recorded in task-local `pipeline/state.json` and the acceptance report.
 - This authorization confirms the bound proposal and does not waive proposal authority, design-stage rules, testing-stage rules, stage write scopes, `stage-scope-check.py`, implementation admission, schema checks, admission checks, required validation, or final acceptance; it only changes proposal approval metadata requirements and where auto-pipeline records design and testing outputs.
@@ -59,6 +60,7 @@
   - keep module and submodule dependencies acyclic
   - make every dependency row belong to one level and parent, and reject unknown cross-parent dependencies
   - name a concrete consumer and compatibility decision for every exported interface; breaking or migration-required interfaces also name affected callers and a migration path
+  - record old symbol -> new path -> concrete repository consumer file -> migration status rows for breaking/migration-required APIs and crate-root/build-surface changes
   - assign every persistent/shared state to exactly one owner and record lifecycle plus failure transitions
   - record handling for every key cross-boundary failure flow
   - record rejected boundary, technical, and collaboration alternatives with concrete reasons
@@ -66,6 +68,7 @@
 - Testing responsibility:
   - after implementation completes, design test cases from proposal, pipeline-plan design mappings, and delivered code, then generate test implementation and runnable evidence
   - produce no persistent `testing.md` or `testing/` documents in auto-pipeline mode; generate `testplan.yaml` and record coverage and gaps in the pipeline plan
+  - generate risk-triggered task-local contract checks and scoped evidence inputs; affected package/workspace compile-only closure is allowed without broad runtime test execution
 - Implementation responsibility:
   - deliver the smallest production code changes that satisfy the launch-confirmed proposal and design inputs
   - execute file-level implementation child tasks in the pipeline-plan design mapping dependency order
@@ -86,7 +89,7 @@
   - dependencies
   - outputs
   - done conditions
-- Implementation tasks MUST be generated from the pipeline-plan `## File-Level Implementation Sequence`; when multiple file-level modules are listed, their child tasks MUST follow that dependency order.
+- Implementation tasks MUST be generated from the pipeline-plan `## File-Level Implementation Sequence`; dependency-related file-level child tasks follow dependency order, while ready tasks with disjoint Scope Paths execute concurrently.
 - Each implementation child task MUST limit its context to the relevant proposal excerpt, pipeline-plan design mapping, `change_id`, `Scope Paths`, interfaces, and source files for that file-level module.
 
 ## Implementation Admission Rule
@@ -110,10 +113,15 @@
 
 ## Stage Execution Rule
 - Each stage MUST execute as an independent child task.
-- Each stage child task MUST keep writes inside that stage's artifact group unless the user explicitly requested cross-stage synchronization for that task. Narrow workflow-required companion writes are allowed: design may update task-local `pipeline/plan.md`; design/implementation/testing/acceptance may update task-local `pipeline/state.json`; testing may update `harness/scripts/test-run.py` and write `test-results/test-runs/*.json` run evidence. Auto-pipeline design/testing child tasks MUST NOT create `design.md`, task-local `design/`, `testing.md`, or `testing/`; testing child tasks MUST create or update `testplan.yaml`.
+- At every scheduling point, compute the dependency-ready set of pending child tasks whose declared dependencies are `confirmed` or `complete`. Reserve exclusive write scopes under `.harness/locks/`, launch the maximum non-conflicting dependency-ready set concurrently up to the runtime's available child-agent slots, and immediately backfill a free slot when another ready task exists.
+- The orchestrator MUST NOT enter agent waiting while a ready non-conflicting child task and a free agent slot both exist. Serialization is allowed only for an explicit dependency, overlapping write scope, or exhausted runtime concurrency capacity; record the concrete reason in scheduler state.
+- Child agents MUST NOT write shared coordination artifacts directly. They write only exclusive task Scope Paths and task-specific evidence, then return results to the parent for shared-file merging and batched `pipeline/state.json` updates.
+- Each stage child task MUST keep direct writes inside its reserved exclusive stage scope unless the user explicitly requested cross-stage synchronization for that task. A child may return proposed shared-artifact mutations, but only the parent orchestrator applies them to `pipeline/plan.md`, `pipeline/state.json`, shared `testplan.yaml`, unfinished-task indexes, or shared test-runner registration. Testing children may write exclusively owned test code, fixtures, runner files, and `test-results/test-runs/*.json` evidence. Auto-pipeline design/testing child tasks MUST NOT create `design.md`, task-local `design/`, `testing.md`, or `testing/`; testing children return testplan content for the parent to create or merge.
 - Each single-stage child task MUST record its changed paths in `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, then run `stage-scope-check.py --stage <stage> --version <version> --module <module> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` (plus `--submodule <submodule>` for submodule packets) before completion and fail on out-of-stage task paths.
+- A testing child task that edits an existing Rust inline test captures the file before editing with `baseline-snapshot.py` under git-ignored `.harness/baselines/<task-id>/` and passes `--baseline-manifest` to `stage-scope-check.py`; it never synthesizes a Git index, tree, or commit.
 - Upstream-stage changes MUST NOT automatically edit downstream-stage artifacts. If a downstream artifact becomes stale, the pipeline MUST create or reopen the downstream stage task instead of silently bundling the edit into the upstream task.
 - If a stage contains direct submodules, the pipeline MUST create independent child tasks for those submodules or record a concrete merged-task reason in the pipeline plan.
+- `pipeline/state.json` MUST record scheduler strategy, shared-artifact ownership, and scheduling waves. Each wave lists child tasks launched together; tasks in one wave MUST have no dependency relationship, and completed pipelines require every declared task to appear in at least one wave.
 - Each child task MUST have:
   - one owner
   - one clear output
