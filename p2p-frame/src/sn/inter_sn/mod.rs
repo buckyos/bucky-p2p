@@ -11,7 +11,7 @@ use crate::sn::protocol::{
     InterSnCommandCode, SnCall, SnDetailQuery, SnDetailResp, SnOwnerHeartbeat, SnPublishLease,
     SnQueryLease, SnQueryLeaseResp, SnRelayCall,
 };
-use crate::sn::types::{SnTunnelRead, SnTunnelWrite};
+use crate::sn::types::{OwnerCmdPkgLen, SnTunnelRead, SnTunnelWrite};
 use crate::ttp::{TtpConnector, TtpNodeRef, TtpPortListener, TtpTarget};
 use async_trait::async_trait;
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
@@ -34,7 +34,7 @@ type OwnerCmdNodeService = sfo_cmd_server::DefaultCmdNodeService<
     SnTunnelRead,
     SnTunnelWrite,
     OwnerTunnelFactory,
-    u32,
+    OwnerCmdPkgLen,
     InterSnCommandCode,
 >;
 
@@ -690,7 +690,7 @@ fn register_owner_cmd_handlers(
             move |_local_id: PeerId,
                   remote_id: PeerId,
                   _tunnel_id,
-                  header: CmdHeader<u32, InterSnCommandCode>,
+                  header: CmdHeader<OwnerCmdPkgLen, InterSnCommandCode>,
                   mut body: CmdBody| {
                 let peer = peer.clone();
                 async move {
@@ -705,7 +705,7 @@ fn register_owner_cmd_handlers(
 async fn handle_owner_cmd(
     peer: Arc<dyn InterSnPeer>,
     remote_sn_id: P2pId,
-    header: CmdHeader<u32, InterSnCommandCode>,
+    header: CmdHeader<OwnerCmdPkgLen, InterSnCommandCode>,
     body: &mut CmdBody,
 ) -> CmdResult<Option<CmdBody>> {
     let request = InterSnRequest::clone_from_slice(

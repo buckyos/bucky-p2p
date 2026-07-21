@@ -10,7 +10,7 @@ use crate::networks::{TunnelStreamRead, TunnelStreamWrite};
 use crate::p2p_identity::P2pId;
 use crate::sn::inter_sn::TtpInterSnClientRef;
 use crate::sn::protocol::{SnPublishLease, SnQueryLease};
-use crate::sn::types::{SnTunnelRead, SnTunnelWrite};
+use crate::sn::types::{OwnerCmdPkgLen, SnTunnelRead, SnTunnelWrite};
 use crate::ttp::{TtpConnector, TtpTarget};
 use async_trait::async_trait;
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawFrom};
@@ -31,7 +31,7 @@ type OwnerServingCmdClient = sfo_cmd_server::client::DefaultCmdClient<
     SnTunnelRead,
     SnTunnelWrite,
     OwnerServingTunnelFactory,
-    u32,
+    OwnerCmdPkgLen,
     OwnerServingCommandCode,
 >;
 

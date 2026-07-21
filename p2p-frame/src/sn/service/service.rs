@@ -21,7 +21,9 @@ use crate::sn::inter_sn::{
 };
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
-use crate::sn::types::{CmdTunnelId, SnCmdHeader, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose};
+use crate::sn::types::{
+    CmdTunnelId, SnCmdHeader, SnCmdPkgLen, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose,
+};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
 use crate::ttp::{TtpClient, TtpConnector, TtpNode, TtpPortListener, TtpServer, TtpServerRef};
 use crate::types::{SequenceGenerator, Timestamp, TunnelId};
@@ -46,7 +48,7 @@ use std::{
 //     begin_time: Instant,
 // }
 
-type SnCmdService = DefaultCmdServerService<(), SnTunnelRead, SnTunnelWrite, u16, u8>;
+type SnCmdService = DefaultCmdServerService<(), SnTunnelRead, SnTunnelWrite, SnCmdPkgLen, u8>;
 pub type SnCmdServiceRef = Arc<SnCmdService>;
 pub type SnServiceRef = Arc<SnService>;
 pub type SnServerRef = Arc<SnServer>;

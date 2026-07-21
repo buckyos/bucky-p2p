@@ -12,7 +12,8 @@ use crate::sn::protocol::{
     Package, PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp,
 };
 use crate::sn::types::{
-    CmdTunnelId, SnCmdHeader, SnTunnelClassification, SnTunnelRead, SnTunnelWrite, sn_cmd_purpose,
+    CmdTunnelId, SnCmdHeader, SnCmdPkgLen, SnTunnelClassification, SnTunnelRead, SnTunnelWrite,
+    sn_cmd_purpose,
 };
 use crate::ttp::{TtpClient, TtpClientRef, TtpConnector, TtpTarget};
 use crate::types::{Sequence, SequenceGenerator, TunnelId, TunnelIdGenerator};
@@ -267,7 +268,7 @@ pub type SnCmdClient = DefaultClassifiedCmdClient<
     SnTunnelRead,
     SnTunnelWrite,
     SnClientTunnelFactory,
-    u16,
+    SnCmdPkgLen,
     u8,
 >;
 

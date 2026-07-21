@@ -23,7 +23,7 @@ use crate::sn::inter_sn::{
     allow_all_sn_inter_service_validator, require_accept,
 };
 use crate::sn::protocol::{SnPublishLease, SnQueryLease, SnQueryLeaseResp};
-use crate::sn::types::{SnTunnelRead, SnTunnelWrite};
+use crate::sn::types::{OwnerCmdPkgLen, SnTunnelRead, SnTunnelWrite};
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver, init_tls};
 use crate::ttp::{TtpNode, TtpNodeRef, TtpPortListener, TtpServer, TtpServerRef};
 use async_trait::async_trait;
@@ -51,7 +51,7 @@ type OwnerServingCmdServerService = sfo_cmd_server::server::DefaultCmdServerServ
     (),
     SnTunnelRead,
     SnTunnelWrite,
-    u32,
+    OwnerCmdPkgLen,
     OwnerServingCommandCode,
 >;
 
@@ -950,7 +950,7 @@ fn register_owner_serving_cmd_handlers(
             move |_local_id: PeerId,
                   remote_id: PeerId,
                   _tunnel_id,
-                  header: CmdHeader<u32, OwnerServingCommandCode>,
+                  header: CmdHeader<OwnerCmdPkgLen, OwnerServingCommandCode>,
                   mut body: CmdBody| {
                 let service = service.clone();
                 async move {
@@ -970,7 +970,7 @@ fn register_owner_serving_cmd_handlers(
 async fn handle_owner_serving_cmd(
     service: OwnerDirectoryServiceRef,
     remote_sn_id: P2pId,
-    header: CmdHeader<u32, OwnerServingCommandCode>,
+    header: CmdHeader<OwnerCmdPkgLen, OwnerServingCommandCode>,
     body: &mut CmdBody,
 ) -> CmdResult<Option<CmdBody>> {
     let response = dispatch_owner_serving_cmd(service, remote_sn_id, header.cmd_code(), body).await;

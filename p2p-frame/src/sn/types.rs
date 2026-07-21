@@ -229,5 +229,7 @@ impl tokio::io::AsyncWrite for SnTunnelWrite {
     }
 }
 
-pub type SnCmdHeader = sfo_cmd_server::CmdHeader<u16, u8>;
+pub type SnCmdPkgLen = sfo_cmd_server::U16;
+pub type OwnerCmdPkgLen = sfo_cmd_server::U24<{ 10 * 1024 * 1024 }>;
+pub type SnCmdHeader = sfo_cmd_server::CmdHeader<SnCmdPkgLen, u8>;
 pub type CmdTunnelId = sfo_cmd_server::TunnelId;
