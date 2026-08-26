@@ -1,9 +1,10 @@
 use super::connection::{TcpTlsConnection, connect_with_optional_local};
 use super::protocol::{
     ClaimConnAck, ClaimConnAckResult, ClaimConnReq, ControlConnReady, ControlConnReadyResult,
-    DataConnReady, DataConnReadyResult, OpenDataConnReq, PingCmd, PongCmd, ReadDone, TcpChannelId,
-    TcpChannelKind, TcpConnId, TcpConnectionHello, TcpConnectionRole, TcpControlCmd,
-    TcpControlData, TcpLeaseSeq, TcpRequestId, WriteFin, read_raw_frame, write_raw_frame,
+    DataConnReady, DataConnReadyResult, OpenDataConnReq, OpenDataConnResp,
+    OpenDataConnRespResult, PingCmd, PongCmd, ReadDone, TcpChannelId, TcpChannelKind, TcpConnId,
+    TcpConnectionHello, TcpConnectionRole, TcpControlCmd, TcpControlData, TcpLeaseSeq,
+    TcpRequestId, WriteFin, read_raw_frame, write_raw_frame,
 };
 use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
@@ -131,6 +132,7 @@ struct DataConnInner {
 struct DataConnEntry {
     conn_id: TcpConnId,
     created_by_local: bool,
+    first_claim_local: bool,
     stream: Mutex<Option<runtime::TlsStream<runtime::TcpStream>>>,
     local_ep: Endpoint,
     remote_ep: Endpoint,
@@ -139,6 +141,193 @@ struct DataConnEntry {
     remote_id: P2pId,
     remote_name: String,
     inner: Mutex<DataConnInner>,
+}
+
+struct PendingOpenRequest {
+    sender: Option<oneshot::Sender<P2pResult<Arc<DataConnEntry>>>>,
+    staged_entry: Option<Arc<DataConnEntry>>,
+    correlation: ReverseOpenCorrelation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReverseOpenCorrelationEvent {
+    Arrival(TcpConnId),
+    ArrivalRegistered(TcpConnId),
+    SuccessResponse(TcpConnId),
+    Failure,
+    TerminalCleanup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReverseOpenCorrelationError {
+    DuplicateArrival,
+    ConnIdMismatch,
+    ArrivalNotStaged,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReverseOpenCorrelationOutcome {
+    Wait,
+    Complete(TcpConnId),
+    Idempotent,
+    Terminal,
+    Reject(ReverseOpenCorrelationError),
+}
+
+#[derive(Default)]
+pub(crate) struct ReverseOpenCorrelation {
+    arrival_conn_id: Option<TcpConnId>,
+    response_conn_id: Option<TcpConnId>,
+    arrival_registered: bool,
+    terminal: bool,
+    completed_conn_id: Option<TcpConnId>,
+}
+
+impl ReverseOpenCorrelation {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn apply(
+        &mut self,
+        event: ReverseOpenCorrelationEvent,
+    ) -> ReverseOpenCorrelationOutcome {
+        if self.terminal {
+            if let ReverseOpenCorrelationEvent::SuccessResponse(conn_id) = event {
+                if self.completed_conn_id == Some(conn_id) {
+                    return ReverseOpenCorrelationOutcome::Idempotent;
+                }
+                if self.completed_conn_id.is_some() {
+                    return ReverseOpenCorrelationOutcome::Reject(
+                        ReverseOpenCorrelationError::ConnIdMismatch,
+                    );
+                }
+            }
+            return ReverseOpenCorrelationOutcome::Reject(
+                ReverseOpenCorrelationError::Terminal,
+            );
+        }
+
+        match event {
+            ReverseOpenCorrelationEvent::Arrival(conn_id) => {
+                if let Some(recorded) = self.arrival_conn_id {
+                    self.terminal = true;
+                    return ReverseOpenCorrelationOutcome::Reject(if recorded == conn_id {
+                        ReverseOpenCorrelationError::DuplicateArrival
+                    } else {
+                        ReverseOpenCorrelationError::ConnIdMismatch
+                    });
+                }
+                if self
+                    .response_conn_id
+                    .is_some_and(|recorded| recorded != conn_id)
+                {
+                    self.terminal = true;
+                    return ReverseOpenCorrelationOutcome::Reject(
+                        ReverseOpenCorrelationError::ConnIdMismatch,
+                    );
+                }
+                self.arrival_conn_id = Some(conn_id);
+                ReverseOpenCorrelationOutcome::Wait
+            }
+            ReverseOpenCorrelationEvent::ArrivalRegistered(conn_id) => {
+                if self.arrival_conn_id != Some(conn_id) {
+                    self.terminal = true;
+                    return ReverseOpenCorrelationOutcome::Reject(
+                        if self.arrival_conn_id.is_some() {
+                            ReverseOpenCorrelationError::ConnIdMismatch
+                        } else {
+                            ReverseOpenCorrelationError::ArrivalNotStaged
+                        },
+                    );
+                }
+                if self.arrival_registered {
+                    return ReverseOpenCorrelationOutcome::Idempotent;
+                }
+                self.arrival_registered = true;
+                if self.response_conn_id == Some(conn_id) {
+                    self.terminal = true;
+                    self.completed_conn_id = Some(conn_id);
+                    ReverseOpenCorrelationOutcome::Complete(conn_id)
+                } else {
+                    ReverseOpenCorrelationOutcome::Wait
+                }
+            }
+            ReverseOpenCorrelationEvent::SuccessResponse(conn_id) => {
+                if let Some(recorded) = self.response_conn_id {
+                    if recorded != conn_id {
+                        self.terminal = true;
+                        return ReverseOpenCorrelationOutcome::Reject(
+                            ReverseOpenCorrelationError::ConnIdMismatch,
+                        );
+                    }
+                    if self.arrival_registered {
+                        self.terminal = true;
+                        self.completed_conn_id = Some(conn_id);
+                        return ReverseOpenCorrelationOutcome::Complete(conn_id);
+                    }
+                    return ReverseOpenCorrelationOutcome::Idempotent;
+                }
+                if self
+                    .arrival_conn_id
+                    .is_some_and(|recorded| recorded != conn_id)
+                {
+                    self.terminal = true;
+                    return ReverseOpenCorrelationOutcome::Reject(
+                        ReverseOpenCorrelationError::ConnIdMismatch,
+                    );
+                }
+                self.response_conn_id = Some(conn_id);
+                if self.arrival_registered {
+                    self.terminal = true;
+                    self.completed_conn_id = Some(conn_id);
+                    ReverseOpenCorrelationOutcome::Complete(conn_id)
+                } else {
+                    ReverseOpenCorrelationOutcome::Wait
+                }
+            }
+            ReverseOpenCorrelationEvent::Failure
+            | ReverseOpenCorrelationEvent::TerminalCleanup => {
+                self.terminal = true;
+                ReverseOpenCorrelationOutcome::Terminal
+            }
+        }
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub(crate) fn completed_conn_id(&self) -> Option<TcpConnId> {
+        self.completed_conn_id
+    }
+}
+
+pub(crate) fn validate_remote_first_claim(
+    first_claim_local: bool,
+    lease_seq: TcpLeaseSeq,
+) -> Result<(), ClaimConnAckResult> {
+    if lease_seq != TcpLeaseSeq::from(1) {
+        Err(ClaimConnAckResult::LeaseMismatch)
+    } else if first_claim_local {
+        Err(ClaimConnAckResult::ProtocolError)
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn local_simultaneous_claim_wins(
+    local_id: &P2pId,
+    remote_id: &P2pId,
+    local_nonce: u64,
+    remote_nonce: u64,
+) -> bool {
+    if local_nonce == remote_nonce {
+        local_id.as_slice() > remote_id.as_slice()
+    } else {
+        local_nonce > remote_nonce
+    }
 }
 
 struct LeaseContext {
@@ -182,7 +371,7 @@ struct TcpTunnelState {
     last_pong_at: Instant,
     data_conns: HashMap<TcpConnId, Arc<DataConnEntry>>,
     pending_drains: HashMap<PendingDrainKey, PendingDrainFacts>,
-    pending_open_requests: HashMap<TcpRequestId, oneshot::Sender<P2pResult<Arc<DataConnEntry>>>>,
+    pending_open_requests: HashMap<TcpRequestId, PendingOpenRequest>,
     pending_claims: HashMap<TcpChannelId, oneshot::Sender<P2pResult<Arc<Mutex<LeaseContext>>>>>,
 }
 
@@ -232,15 +421,89 @@ pub(crate) struct TcpTunnel {
     control_streams: ControlStreamRuntime,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
-    unclaimed_data_conn_budget: AtomicU64,
     connected_notify: Notify,
+    #[cfg(test)]
+    reverse_open_test_control: ReverseOpenTestControl,
+}
+
+#[cfg(test)]
+const REVERSE_OPEN_TEST_RESPONSE_NORMAL: u8 = 0;
+#[cfg(test)]
+const REVERSE_OPEN_TEST_RESPONSE_PAUSE: u8 = 1;
+#[cfg(test)]
+const REVERSE_OPEN_TEST_RESPONSE_SUPPRESS: u8 = 2;
+#[cfg(test)]
+const LEGACY_TCP_CONTROL_MAX_COMMAND_ID: u8 = 11;
+
+#[cfg(test)]
+struct ReverseOpenTestControl {
+    response_mode: AtomicU8,
+    response_reached: AtomicBool,
+    response_released: AtomicBool,
+    response_reached_notify: Notify,
+    response_release_notify: Notify,
+    max_control_command_id: AtomicU8,
+}
+
+#[cfg(test)]
+impl Default for ReverseOpenTestControl {
+    fn default() -> Self {
+        Self {
+            response_mode: AtomicU8::new(REVERSE_OPEN_TEST_RESPONSE_NORMAL),
+            response_reached: AtomicBool::new(false),
+            response_released: AtomicBool::new(false),
+            response_reached_notify: Notify::new(),
+            response_release_notify: Notify::new(),
+            max_control_command_id: AtomicU8::new(u8::MAX),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReverseOpenTestSnapshot {
+    pub pending_requests: usize,
+    pub staged_entries: usize,
+    pub data_connections: usize,
+}
+
+struct PendingOpenRequestGuard {
+    tunnel: Arc<TcpTunnel>,
+    request_id: Option<TcpRequestId>,
+}
+
+impl PendingOpenRequestGuard {
+    fn new(tunnel: Arc<TcpTunnel>, request_id: TcpRequestId) -> Self {
+        Self {
+            tunnel,
+            request_id: Some(request_id),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.request_id = None;
+    }
+}
+
+impl Drop for PendingOpenRequestGuard {
+    fn drop(&mut self) {
+        if let Some(request_id) = self.request_id.take() {
+            self.tunnel.cancel_pending_open_request(request_id);
+        }
+    }
 }
 
 impl DataConnEntry {
-    fn new(connection: TcpTlsConnection, conn_id: TcpConnId, created_by_local: bool) -> Arc<Self> {
+    fn new(
+        connection: TcpTlsConnection,
+        conn_id: TcpConnId,
+        created_by_local: bool,
+        first_claim_local: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             conn_id,
             created_by_local,
+            first_claim_local,
             stream: Mutex::new(Some(connection.stream)),
             local_ep: connection.local_ep,
             remote_ep: connection.remote_ep,
@@ -596,8 +859,9 @@ impl TcpTunnel {
             control_streams,
             heartbeat_interval,
             heartbeat_timeout,
-            unclaimed_data_conn_budget: AtomicU64::new(8),
             connected_notify: Notify::new(),
+            #[cfg(test)]
+            reverse_open_test_control: ReverseOpenTestControl::default(),
         });
         *tunnel.self_weak.lock().unwrap() = Arc::downgrade(&tunnel);
         Self::start_loops(tunnel.clone(), control_read);
@@ -709,6 +973,11 @@ impl TcpTunnel {
             let mut state = self.state.lock().unwrap();
             state.phase = phase;
             state.pending_drains.clear();
+            for pending in state.pending_open_requests.values_mut() {
+                let _ = pending
+                    .correlation
+                    .apply(ReverseOpenCorrelationEvent::TerminalCleanup);
+            }
             (
                 std::mem::take(&mut state.pending_open_requests),
                 std::mem::take(&mut state.pending_claims),
@@ -717,8 +986,13 @@ impl TcpTunnel {
         };
         self.connected_notify.notify_waiters();
 
-        for (_, tx) in pending_open_requests {
-            let _ = tx.send(Err(p2p_err!(reason, "tunnel closed")));
+        for (_, pending) in pending_open_requests {
+            if let Some(entry) = pending.staged_entry {
+                self.retire_plain_entry(&entry, reason);
+            }
+            if let Some(sender) = pending.sender {
+                let _ = sender.send(Err(p2p_err!(reason, "tunnel closed")));
+            }
         }
         for (_, tx) in pending_claims {
             let _ = tx.send(Err(p2p_err!(reason, "tunnel closed")));
@@ -769,6 +1043,13 @@ impl TcpTunnel {
         mut control_read: runtime::ReadHalf<runtime::TlsStream<runtime::TcpStream>>,
     ) {
         loop {
+            #[cfg(test)]
+            let cmd = TcpControlCmd::read_from_wire_with_dynamic_max_command_id(
+                &mut control_read,
+                &self.reverse_open_test_control.max_control_command_id,
+            )
+            .await;
+            #[cfg(not(test))]
             let cmd = read_raw_frame::<_, TcpControlCmd>(&mut control_read).await;
             let cmd = match cmd {
                 Ok(cmd) => cmd,
@@ -817,6 +1098,9 @@ impl TcpTunnel {
             }
             TcpControlCmd::OpenDataConnReq(req) => {
                 self.spawn_reverse_data_connection(req.request_id);
+            }
+            TcpControlCmd::OpenDataConnResp(resp) => {
+                self.handle_open_data_conn_resp(resp)?;
             }
             TcpControlCmd::ClaimConnReq(req) => {
                 self.handle_claim_req(req).await?;
@@ -868,27 +1152,31 @@ impl TcpTunnel {
         TcpLeaseSeq::from(if next == 0 { 1 } else { next })
     }
 
-    fn owns_id_high_bit(&self) -> u32 {
-        match self.form {
-            TunnelForm::Active | TunnelForm::Proxy => 0,
-            TunnelForm::Passive => 1,
+    fn register_entry(&self, entry: Arc<DataConnEntry>) -> P2pResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.data_conns.contains_key(&entry.conn_id) {
+            return Err(p2p_err!(
+                P2pErrorCode::Conflict,
+                "tcp data conn id already registered"
+            ));
         }
-    }
-
-    fn is_local_conn_creator(&self, conn_id: TcpConnId) -> bool {
-        (conn_id.value() >> 31) == self.owns_id_high_bit()
-    }
-
-    fn register_entry(&self, entry: Arc<DataConnEntry>) {
-        self.state
-            .lock()
-            .unwrap()
-            .data_conns
-            .insert(entry.conn_id, entry);
+        state.data_conns.insert(entry.conn_id, entry);
+        Ok(())
     }
 
     fn remove_entry(&self, conn_id: TcpConnId) {
         self.state.lock().unwrap().data_conns.remove(&conn_id);
+    }
+
+    fn remove_entry_if_same(&self, entry: &Arc<DataConnEntry>) {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .data_conns
+            .get(&entry.conn_id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, entry))
+        {
+            state.data_conns.remove(&entry.conn_id);
+        }
     }
 
     fn get_entry(&self, conn_id: TcpConnId) -> Option<Arc<DataConnEntry>> {
@@ -968,20 +1256,181 @@ impl TcpTunnel {
         }
     }
 
-    fn send_pending_open_request_result(
+    fn fail_pending_open_request(&self, request_id: TcpRequestId, err: P2pError) {
+        let pending = self.take_terminal_pending_open_request(
+            request_id,
+            ReverseOpenCorrelationEvent::Failure,
+        );
+        if let Some(pending) = pending {
+            if let Some(entry) = pending.staged_entry {
+                self.retire_plain_entry(&entry, err.code());
+            }
+            if let Some(sender) = pending.sender {
+                let _ = sender.send(Err(err));
+            }
+        }
+    }
+
+    fn take_terminal_pending_open_request(
         &self,
         request_id: TcpRequestId,
-        result: P2pResult<Arc<DataConnEntry>>,
-    ) {
-        if let Some(tx) = self
-            .state
-            .lock()
-            .unwrap()
-            .pending_open_requests
-            .remove(&request_id)
-        {
-            let _ = tx.send(result);
+        event: ReverseOpenCorrelationEvent,
+    ) -> Option<PendingOpenRequest> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(pending) = state.pending_open_requests.get_mut(&request_id) {
+            let _ = pending.correlation.apply(event);
         }
+        state.pending_open_requests.remove(&request_id)
+    }
+
+    fn cancel_pending_open_request(&self, request_id: TcpRequestId) {
+        if let Some(pending) = self.take_terminal_pending_open_request(
+            request_id,
+            ReverseOpenCorrelationEvent::TerminalCleanup,
+        ) {
+            if let Some(entry) = pending.staged_entry {
+                self.retire_plain_entry(&entry, P2pErrorCode::Interrupted);
+            }
+        }
+    }
+
+    fn consume_completed_pending_open_request(
+        &self,
+        request_id: TcpRequestId,
+        entry: &Arc<DataConnEntry>,
+    ) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let can_consume = state
+            .pending_open_requests
+            .get(&request_id)
+            .is_some_and(|pending| {
+                pending.sender.is_none()
+                    && pending.correlation.completed_conn_id() == Some(entry.conn_id)
+                    && pending
+                        .staged_entry
+                        .as_ref()
+                        .is_some_and(|staged| Arc::ptr_eq(staged, entry))
+            });
+        if can_consume {
+            state.pending_open_requests.remove(&request_id);
+        }
+        can_consume
+    }
+
+    fn correlation_error(error: ReverseOpenCorrelationError) -> P2pError {
+        match error {
+            ReverseOpenCorrelationError::DuplicateArrival => p2p_err!(
+                P2pErrorCode::AlreadyExists,
+                "duplicate reverse data connection"
+            ),
+            ReverseOpenCorrelationError::ConnIdMismatch => p2p_err!(
+                P2pErrorCode::InvalidData,
+                "reverse data connection correlation conn_id mismatch"
+            ),
+            ReverseOpenCorrelationError::ArrivalNotStaged => p2p_err!(
+                P2pErrorCode::ErrorState,
+                "reverse data connection arrival not staged"
+            ),
+            ReverseOpenCorrelationError::Terminal => p2p_err!(
+                P2pErrorCode::Interrupted,
+                "reverse data connection correlation already terminal"
+            ),
+        }
+    }
+
+    pub(crate) fn open_data_resp_error(result: OpenDataConnRespResult) -> P2pError {
+        match result {
+            OpenDataConnRespResult::Success => p2p_err!(
+                P2pErrorCode::InvalidData,
+                "invalid successful reverse data response"
+            ),
+            OpenDataConnRespResult::ConnectFailed => p2p_err!(
+                P2pErrorCode::ConnectFailed,
+                "peer failed to create reverse data connection"
+            ),
+            OpenDataConnRespResult::ProtocolError => p2p_err!(
+                P2pErrorCode::InvalidData,
+                "peer rejected reverse data connection protocol"
+            ),
+            OpenDataConnRespResult::InternalError => p2p_err!(
+                P2pErrorCode::InternalError,
+                "peer failed to register reverse data connection"
+            ),
+        }
+    }
+
+    fn handle_open_data_conn_resp(self: &Arc<Self>, resp: OpenDataConnResp) -> P2pResult<()> {
+        if (resp.result == OpenDataConnRespResult::Success) != resp.conn_id.is_some() {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "invalid reverse data response result/conn_id combination"
+            ));
+        }
+
+        if resp.result != OpenDataConnRespResult::Success {
+            self.fail_pending_open_request(resp.request_id, Self::open_data_resp_error(resp.result));
+            return Ok(());
+        }
+
+        let conn_id = resp.conn_id.unwrap();
+        let mut success_delivery = None;
+        let mut failure = None;
+        let mut failed_pending = None;
+        {
+            let mut state = self.state.lock().unwrap();
+            let Some(pending) = state.pending_open_requests.get_mut(&resp.request_id) else {
+                return Ok(());
+            };
+            match pending
+                .correlation
+                .apply(ReverseOpenCorrelationEvent::SuccessResponse(conn_id))
+            {
+                ReverseOpenCorrelationOutcome::Wait
+                | ReverseOpenCorrelationOutcome::Idempotent => {}
+                ReverseOpenCorrelationOutcome::Complete(completed_conn_id) => {
+                    debug_assert_eq!(completed_conn_id, conn_id);
+                    match (pending.sender.take(), pending.staged_entry.clone()) {
+                        (Some(sender), Some(entry)) => {
+                            success_delivery = Some((sender, entry));
+                        }
+                        _ => {
+                            failure = Some(p2p_err!(
+                                P2pErrorCode::ErrorState,
+                                "reverse data response completed without request owner or entry"
+                            ));
+                        }
+                    }
+                }
+                ReverseOpenCorrelationOutcome::Reject(err) => {
+                    failure = Some(Self::correlation_error(err));
+                }
+                ReverseOpenCorrelationOutcome::Terminal => {
+                    failure = Some(p2p_err!(
+                        P2pErrorCode::InvalidData,
+                        "unexpected terminal reverse data response transition"
+                    ));
+                }
+            }
+
+            if failure.is_some() {
+                failed_pending = state.pending_open_requests.remove(&resp.request_id);
+            }
+        }
+
+        if let Some(pending) = failed_pending {
+            let err = failure.unwrap();
+            if let Some(entry) = pending.staged_entry {
+                self.retire_plain_entry(&entry, err.code());
+            }
+            if let Some(sender) = pending.sender {
+                let _ = sender.send(Err(err));
+            }
+        } else if let Some((sender, entry)) = success_delivery {
+            if sender.send(Ok(entry)).is_err() {
+                self.cancel_pending_open_request(resp.request_id);
+            }
+        }
+        Ok(())
     }
 
     fn insert_pending_write_fin(&self, fin: WriteFin) -> P2pResult<()> {
@@ -1319,7 +1768,7 @@ impl TcpTunnel {
         };
         entry.drop_stream();
         self.clear_pending_drains_for_conn(entry.conn_id);
-        self.remove_entry(entry.conn_id);
+        self.remove_entry_if_same(entry);
         if let Some(channel_id) = pending_channel {
             self.send_pending_claim_result(channel_id, Err(p2p_err!(reason, "tcp claim retired")));
         }
@@ -1867,7 +2316,7 @@ impl TcpTunnel {
                         inner.state,
                         DataConnEntryState::Bound(_) | DataConnEntryState::Draining(_)
                     ) {
-                        inner.state = if entry.created_by_local
+                        inner.state = if entry.first_claim_local
                             && inner.committed_lease_seq == TcpLeaseSeq::default()
                         {
                             DataConnEntryState::FirstClaimPending
@@ -1876,7 +2325,7 @@ impl TcpTunnel {
                         };
                     }
                 } else {
-                    inner.state = if entry.created_by_local
+                    inner.state = if entry.first_claim_local
                         && inner.committed_lease_seq == TcpLeaseSeq::default()
                     {
                         DataConnEntryState::FirstClaimPending
@@ -2174,16 +2623,16 @@ impl TcpTunnel {
                             ClaimDecision::Err(ClaimConnAckResult::Retired),
                         ),
                         DataConnEntryState::FirstClaimPending => {
-                            if req.lease_seq != TcpLeaseSeq::from(1) {
-                                ClaimDecisionPlan::Ready(ClaimDecision::Err(
-                                    ClaimConnAckResult::LeaseMismatch,
-                                ))
-                            } else if entry.created_by_local {
-                                ClaimDecisionPlan::Ready(ClaimDecision::Err(
-                                    ClaimConnAckResult::ProtocolError,
-                                ))
-                            } else {
-                                ClaimDecisionPlan::CheckThen(ClaimDecision::Accept)
+                            match validate_remote_first_claim(
+                                entry.first_claim_local,
+                                req.lease_seq,
+                            ) {
+                                Ok(()) => {
+                                    ClaimDecisionPlan::CheckThen(ClaimDecision::Accept)
+                                }
+                                Err(result) => {
+                                    ClaimDecisionPlan::Ready(ClaimDecision::Err(result))
+                                }
                             }
                         }
                         DataConnEntryState::Idle => {
@@ -2201,11 +2650,12 @@ impl TcpTunnel {
                                     ClaimConnAckResult::LeaseMismatch,
                                 ))
                             } else {
-                                let local_wins = if claiming.claim_nonce == req.claim_nonce {
-                                    self.local_id.as_slice() > self.remote_id.as_slice()
-                                } else {
-                                    claiming.claim_nonce > req.claim_nonce
-                                };
+                                let local_wins = local_simultaneous_claim_wins(
+                                    &self.local_id,
+                                    &self.remote_id,
+                                    claiming.claim_nonce,
+                                    req.claim_nonce,
+                                );
                                 if local_wins {
                                     ClaimDecisionPlan::CheckThen(ClaimDecision::ConflictWin)
                                 } else {
@@ -2228,16 +2678,14 @@ impl TcpTunnel {
                         ClaimDecisionPlan::Ready(ClaimDecision::Err(ClaimConnAckResult::Retired))
                     }
                     DataConnEntryState::FirstClaimPending => {
-                        if req.lease_seq != TcpLeaseSeq::from(1) {
-                            ClaimDecisionPlan::Ready(ClaimDecision::Err(
-                                ClaimConnAckResult::LeaseMismatch,
-                            ))
-                        } else if entry.created_by_local {
-                            ClaimDecisionPlan::Ready(ClaimDecision::Err(
-                                ClaimConnAckResult::ProtocolError,
-                            ))
-                        } else {
-                            ClaimDecisionPlan::CheckThen(ClaimDecision::Accept)
+                        match validate_remote_first_claim(
+                            entry.first_claim_local,
+                            req.lease_seq,
+                        ) {
+                            Ok(()) => ClaimDecisionPlan::CheckThen(ClaimDecision::Accept),
+                            Err(result) => {
+                                ClaimDecisionPlan::Ready(ClaimDecision::Err(result))
+                            }
                         }
                     }
                     DataConnEntryState::Idle => {
@@ -2255,11 +2703,12 @@ impl TcpTunnel {
                                 ClaimConnAckResult::LeaseMismatch,
                             ))
                         } else {
-                            let local_wins = if claiming.claim_nonce == req.claim_nonce {
-                                self.local_id.as_slice() > self.remote_id.as_slice()
-                            } else {
-                                claiming.claim_nonce > req.claim_nonce
-                            };
+                            let local_wins = local_simultaneous_claim_wins(
+                                &self.local_id,
+                                &self.remote_id,
+                                claiming.claim_nonce,
+                                req.claim_nonce,
+                            );
                             if local_wins {
                                 ClaimDecisionPlan::CheckThen(ClaimDecision::ConflictWin)
                             } else {
@@ -2449,7 +2898,7 @@ impl TcpTunnel {
             }
             let inner = entry.inner.lock().unwrap();
             match &inner.state {
-                DataConnEntryState::FirstClaimPending if entry.created_by_local => {
+                DataConnEntryState::FirstClaimPending if entry.first_claim_local => {
                     return Some(entry.clone());
                 }
                 DataConnEntryState::Idle => return Some(entry.clone()),
@@ -2457,31 +2906,6 @@ impl TcpTunnel {
             }
         }
         None
-    }
-
-    fn unclaimed_entry_count(&self) -> usize {
-        let entries = self
-            .state
-            .lock()
-            .unwrap()
-            .data_conns
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        entries
-            .into_iter()
-            .filter(|entry| {
-                matches!(
-                    entry.inner.lock().unwrap().state,
-                    DataConnEntryState::FirstClaimPending | DataConnEntryState::Idle
-                )
-            })
-            .count()
-    }
-
-    fn allow_late_open_request_connection(&self) -> bool {
-        self.unclaimed_entry_count()
-            < self.unclaimed_data_conn_budget.load(Ordering::SeqCst) as usize
     }
 
     async fn create_data_connection(
@@ -2534,21 +2958,198 @@ impl TcpTunnel {
             Err(_) => {}
         }
 
-        let entry = DataConnEntry::new(connection, conn_id, true);
-        self.register_entry(entry.clone());
-        self.start_first_claim_timeout(entry.clone());
+        let first_claim_local = open_request_id.is_none();
+        let entry = DataConnEntry::new(connection, conn_id, true, first_claim_local);
+        debug_assert!(entry.created_by_local);
+        if let Err(err) = self.register_entry(entry.clone()) {
+            entry.drop_stream();
+            return Err(err);
+        }
+        if open_request_id.is_none() {
+            self.start_first_claim_timeout(entry.clone());
+        }
         Ok(entry)
+    }
+
+    pub(crate) fn open_data_resp_result_from_error(
+        err: &P2pError,
+    ) -> OpenDataConnRespResult {
+        match err.code() {
+            P2pErrorCode::ConnectFailed
+            | P2pErrorCode::ConnectInterZoneFailed
+            | P2pErrorCode::ConnectionRefused
+            | P2pErrorCode::ConnectionReset
+            | P2pErrorCode::ConnectionAborted
+            | P2pErrorCode::NotConnected
+            | P2pErrorCode::AddrNotAvailable
+            | P2pErrorCode::Timeout
+            | P2pErrorCode::TlsError => OpenDataConnRespResult::ConnectFailed,
+            P2pErrorCode::InvalidParam
+            | P2pErrorCode::InvalidFormat
+            | P2pErrorCode::InvalidInput
+            | P2pErrorCode::InvalidData
+            | P2pErrorCode::Reject
+            | P2pErrorCode::Unmatch
+            | P2pErrorCode::NotMatch => OpenDataConnRespResult::ProtocolError,
+            _ => OpenDataConnRespResult::InternalError,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pause_reverse_open_response(&self) {
+        self.reverse_open_test_control
+            .response_reached
+            .store(false, Ordering::SeqCst);
+        self.reverse_open_test_control
+            .response_released
+            .store(false, Ordering::SeqCst);
+        self.reverse_open_test_control
+            .response_mode
+            .store(REVERSE_OPEN_TEST_RESPONSE_PAUSE, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_suppress_reverse_open_response(&self) {
+        self.reverse_open_test_control
+            .response_reached
+            .store(false, Ordering::SeqCst);
+        self.reverse_open_test_control
+            .response_released
+            .store(false, Ordering::SeqCst);
+        self.reverse_open_test_control
+            .response_mode
+            .store(REVERSE_OPEN_TEST_RESPONSE_SUPPRESS, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_use_legacy_control_decoder(&self) {
+        self.reverse_open_test_control
+            .max_control_command_id
+            .store(LEGACY_TCP_CONTROL_MAX_COMMAND_ID, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_wait_reverse_open_response_ready(&self) {
+        loop {
+            if self
+                .reverse_open_test_control
+                .response_reached
+                .load(Ordering::SeqCst)
+            {
+                return;
+            }
+            self.reverse_open_test_control
+                .response_reached_notify
+                .notified()
+                .await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_release_reverse_open_response(&self) {
+        self.reverse_open_test_control
+            .response_released
+            .store(true, Ordering::SeqCst);
+        self.reverse_open_test_control
+            .response_release_notify
+            .notify_waiters();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reverse_open_snapshot(&self) -> ReverseOpenTestSnapshot {
+        let state = self.state.lock().unwrap();
+        ReverseOpenTestSnapshot {
+            pending_requests: state.pending_open_requests.len(),
+            staged_entries: state
+                .pending_open_requests
+                .values()
+                .filter(|pending| pending.staged_entry.is_some())
+                .count(),
+            data_connections: state.data_conns.len(),
+        }
+    }
+
+    #[cfg(test)]
+    async fn test_before_reverse_open_response(&self) -> bool {
+        let mode = self
+            .reverse_open_test_control
+            .response_mode
+            .load(Ordering::SeqCst);
+        if mode == REVERSE_OPEN_TEST_RESPONSE_NORMAL {
+            return false;
+        }
+        self.reverse_open_test_control
+            .response_reached
+            .store(true, Ordering::SeqCst);
+        self.reverse_open_test_control
+            .response_reached_notify
+            .notify_waiters();
+        if mode == REVERSE_OPEN_TEST_RESPONSE_SUPPRESS {
+            return true;
+        }
+        while !self
+            .reverse_open_test_control
+            .response_released
+            .load(Ordering::SeqCst)
+        {
+            self.reverse_open_test_control
+                .response_release_notify
+                .notified()
+                .await;
+        }
+        false
     }
 
     fn spawn_reverse_data_connection(self: &Arc<Self>, request_id: TcpRequestId) {
         let this = self.clone();
         let _ = Executor::spawn(async move {
-            if let Err(err) = this.create_data_connection(Some(request_id)).await {
-                log::warn!(
-                    "tcp tunnel {} reverse data connection failed: {:?}",
-                    this.tunnel_id.value(),
-                    err
-                );
+            match this.create_data_connection(Some(request_id)).await {
+                Ok(entry) => {
+                    #[cfg(test)]
+                    if this.test_before_reverse_open_response().await {
+                        this.start_first_claim_timeout(entry);
+                        return;
+                    }
+                    if let Err(err) = this
+                        .send_control(&TcpControlCmd::OpenDataConnResp(OpenDataConnResp {
+                            request_id,
+                            conn_id: Some(entry.conn_id),
+                            result: OpenDataConnRespResult::Success,
+                        }))
+                        .await
+                    {
+                        this.retire_plain_entry(&entry, err.code());
+                        log::warn!(
+                            "tcp tunnel {} reverse data registration response failed: {:?}",
+                            this.tunnel_id.value(),
+                            err
+                        );
+                    } else {
+                        this.start_first_claim_timeout(entry);
+                    }
+                }
+                Err(err) => {
+                    let result = Self::open_data_resp_result_from_error(&err);
+                    if let Err(send_err) = this
+                        .send_control(&TcpControlCmd::OpenDataConnResp(OpenDataConnResp {
+                            request_id,
+                            conn_id: None,
+                            result,
+                        }))
+                        .await
+                    {
+                        log::warn!(
+                            "tcp tunnel {} reverse data failure response failed: {:?}",
+                            this.tunnel_id.value(),
+                            send_err
+                        );
+                    }
+                    log::warn!(
+                        "tcp tunnel {} reverse data connection failed: {:?}",
+                        this.tunnel_id.value(),
+                        err
+                    );
+                }
             }
         });
     }
@@ -2560,7 +3161,15 @@ impl TcpTunnel {
             .lock()
             .unwrap()
             .pending_open_requests
-            .insert(request_id, tx);
+            .insert(
+                request_id,
+                PendingOpenRequest {
+                    sender: Some(tx),
+                    staged_entry: None,
+                    correlation: ReverseOpenCorrelation::new(),
+                },
+            );
+        let mut owner = PendingOpenRequestGuard::new(self.clone(), request_id);
 
         if let Err(err) = self
             .send_control(&TcpControlCmd::OpenDataConnReq(OpenDataConnReq {
@@ -2568,32 +3177,58 @@ impl TcpTunnel {
             }))
             .await
         {
-            self.state
-                .lock()
-                .unwrap()
-                .pending_open_requests
-                .remove(&request_id);
+            let pending = self.take_terminal_pending_open_request(
+                request_id,
+                ReverseOpenCorrelationEvent::TerminalCleanup,
+            );
+            if let Some(pending) = pending {
+                if let Some(entry) = pending.staged_entry {
+                    self.retire_plain_entry(&entry, err.code());
+                }
+            }
+            owner.disarm();
             return Err(err);
         }
 
-        match runtime::timeout(self.connector.timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(p2p_err!(
-                P2pErrorCode::Interrupted,
-                "reverse data connection waiter dropped"
-            )),
+        let result = match runtime::timeout(self.connector.timeout, rx).await {
+            Ok(Ok(Ok(entry))) => {
+                if self.consume_completed_pending_open_request(request_id, &entry) {
+                    self.start_first_claim_timeout(entry.clone());
+                    Ok(entry)
+                } else {
+                    self.retire_plain_entry(&entry, P2pErrorCode::Interrupted);
+                    Err(p2p_err!(
+                        P2pErrorCode::Interrupted,
+                        "reverse data connection ownership lost before consumption"
+                    ))
+                }
+            }
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => {
+                self.cancel_pending_open_request(request_id);
+                Err(p2p_err!(
+                    P2pErrorCode::Interrupted,
+                    "reverse data connection waiter dropped"
+                ))
+            }
             Err(_) => {
-                self.state
-                    .lock()
-                    .unwrap()
-                    .pending_open_requests
-                    .remove(&request_id);
+                let pending = self.take_terminal_pending_open_request(
+                    request_id,
+                    ReverseOpenCorrelationEvent::TerminalCleanup,
+                );
+                if let Some(pending) = pending {
+                    if let Some(entry) = pending.staged_entry {
+                        self.retire_plain_entry(&entry, P2pErrorCode::Timeout);
+                    }
+                }
                 Err(p2p_err!(
                     P2pErrorCode::Timeout,
                     "wait reverse data connection timeout"
                 ))
             }
-        }
+        };
+        owner.disarm();
+        result
     }
 
     pub(crate) async fn on_incoming_data_connection(
@@ -2628,45 +3263,171 @@ impl TcpTunnel {
             return Err(p2p_err!(P2pErrorCode::Conflict, "conn_id conflict"));
         }
 
-        if let Some(request_id) = hello.open_request_id {
-            let has_pending_request = self
-                .state
-                .lock()
-                .unwrap()
-                .pending_open_requests
-                .contains_key(&request_id);
-            if !has_pending_request && !self.allow_late_open_request_connection() {
-                write_raw_frame(
-                    &mut connection.stream,
-                    &DataConnReady {
-                        conn_id,
-                        candidate_id: hello.candidate_id,
-                        result: DataConnReadyResult::InternalError,
-                    },
-                )
-                .await?;
-                return Err(p2p_err!(
-                    P2pErrorCode::OutOfLimit,
-                    "late reverse data connection over budget"
-                ));
+        let Some(request_id) = hello.open_request_id else {
+            write_raw_frame(
+                &mut connection.stream,
+                &DataConnReady {
+                    conn_id,
+                    candidate_id: hello.candidate_id,
+                    result: DataConnReadyResult::Success,
+                },
+            )
+            .await?;
+            let entry = DataConnEntry::new(connection, conn_id, false, false);
+            debug_assert!(!entry.created_by_local);
+            if let Err(err) = self.register_entry(entry.clone()) {
+                entry.drop_stream();
+                return Err(err);
             }
+            self.start_first_claim_timeout(entry);
+            return Ok(());
+        };
+
+        let entry = DataConnEntry::new(connection, conn_id, false, true);
+        debug_assert!(!entry.created_by_local);
+        let stage_error = {
+            let mut state = self.state.lock().unwrap();
+            match state.pending_open_requests.get_mut(&request_id) {
+                None => Some(p2p_err!(
+                    P2pErrorCode::NotFound,
+                    "late reverse data connection request not found"
+                )),
+                Some(pending) => match pending
+                    .correlation
+                    .apply(ReverseOpenCorrelationEvent::Arrival(conn_id))
+                {
+                    ReverseOpenCorrelationOutcome::Wait => {
+                        pending.staged_entry = Some(entry.clone());
+                        None
+                    }
+                    ReverseOpenCorrelationOutcome::Reject(err) => {
+                        Some(Self::correlation_error(err))
+                    }
+                    ReverseOpenCorrelationOutcome::Idempotent => Some(p2p_err!(
+                        P2pErrorCode::AlreadyExists,
+                        "duplicate reverse data connection arrival"
+                    )),
+                    ReverseOpenCorrelationOutcome::Complete(_)
+                    | ReverseOpenCorrelationOutcome::Terminal => Some(p2p_err!(
+                        P2pErrorCode::ErrorState,
+                        "unexpected reverse data arrival transition"
+                    )),
+                },
+            }
+        };
+        if let Some(err) = stage_error {
+            if err.code() != P2pErrorCode::NotFound {
+                self.fail_pending_open_request(
+                    request_id,
+                    P2pError::new(
+                        err.code(),
+                        format!("reverse data connection staging failed: {:?}", err),
+                    ),
+                );
+            }
+            let result = if err.code() == P2pErrorCode::NotFound {
+                DataConnReadyResult::InternalError
+            } else {
+                DataConnReadyResult::ProtocolError
+            };
+            let mut stream = entry.take_stream()?;
+            write_raw_frame(
+                &mut stream,
+                &DataConnReady {
+                    conn_id,
+                    candidate_id: hello.candidate_id,
+                    result,
+                },
+            )
+            .await?;
+            return Err(err);
         }
 
-        write_raw_frame(
-            &mut connection.stream,
+        let mut stream = entry.take_stream()?;
+        if let Err(err) = write_raw_frame(
+            &mut stream,
             &DataConnReady {
                 conn_id,
                 candidate_id: hello.candidate_id,
                 result: DataConnReadyResult::Success,
             },
         )
-        .await?;
+        .await
+        {
+            self.fail_pending_open_request(
+                request_id,
+                P2pError::new(
+                    err.code(),
+                    format!("send reverse data ready failed: {:?}", err),
+                ),
+            );
+            return Err(err);
+        }
+        entry.put_stream(stream);
 
-        let entry = DataConnEntry::new(connection, conn_id, self.is_local_conn_creator(conn_id));
-        self.register_entry(entry.clone());
-        self.start_first_claim_timeout(entry.clone());
-        if let Some(request_id) = hello.open_request_id {
-            self.send_pending_open_request_result(request_id, Ok(entry));
+        let mut success_delivery = None;
+        let registration_error = {
+            let mut state = self.state.lock().unwrap();
+            let staged_matches = state
+                .pending_open_requests
+                .get(&request_id)
+                .and_then(|pending| pending.staged_entry.as_ref())
+                .is_some_and(|staged| Arc::ptr_eq(staged, &entry));
+            if !staged_matches {
+                Some(p2p_err!(
+                    P2pErrorCode::Interrupted,
+                    "reverse data request completed before local registration"
+                ))
+            } else if state.data_conns.contains_key(&conn_id) {
+                Some(p2p_err!(
+                    P2pErrorCode::Conflict,
+                    "reverse data conn_id registered concurrently"
+                ))
+            } else {
+                state.data_conns.insert(conn_id, entry.clone());
+                let pending = state.pending_open_requests.get_mut(&request_id).unwrap();
+                match pending
+                    .correlation
+                    .apply(ReverseOpenCorrelationEvent::ArrivalRegistered(conn_id))
+                {
+                    ReverseOpenCorrelationOutcome::Wait
+                    | ReverseOpenCorrelationOutcome::Idempotent => None,
+                    ReverseOpenCorrelationOutcome::Complete(completed_conn_id) => {
+                        debug_assert_eq!(completed_conn_id, conn_id);
+                        match pending.sender.take() {
+                            Some(sender) => {
+                                success_delivery = Some(sender);
+                                None
+                            }
+                            None => Some(p2p_err!(
+                                P2pErrorCode::ErrorState,
+                                "reverse data registration completed without request owner"
+                            )),
+                        }
+                    }
+                    ReverseOpenCorrelationOutcome::Reject(err) => {
+                        Some(Self::correlation_error(err))
+                    }
+                    ReverseOpenCorrelationOutcome::Terminal => Some(p2p_err!(
+                            P2pErrorCode::ErrorState,
+                            "unexpected terminal reverse data registration transition"
+                        )),
+                }
+            }
+        };
+
+        if let Some(err) = registration_error {
+            self.fail_pending_open_request(request_id, err);
+            entry.drop_stream();
+            return Err(p2p_err!(
+                P2pErrorCode::Interrupted,
+                "reverse data local registration failed"
+            ));
+        }
+        if let Some(sender) = success_delivery {
+            if sender.send(Ok(entry)).is_err() {
+                self.cancel_pending_open_request(request_id);
+            }
         }
         Ok(())
     }
@@ -2682,7 +3443,7 @@ impl TcpTunnel {
             let mut inner = entry.inner.lock().unwrap();
             let expected_next = Self::next_lease_seq(inner.committed_lease_seq);
             match &inner.state {
-                DataConnEntryState::FirstClaimPending if entry.created_by_local => {
+                DataConnEntryState::FirstClaimPending if entry.first_claim_local => {
                     let claim_nonce = random::<u64>();
                     inner.state = DataConnEntryState::Claiming(ClaimingState {
                         lease_seq: TcpLeaseSeq::from(1),
@@ -2737,7 +3498,7 @@ impl TcpTunnel {
                 .remove(&channel_id);
             {
                 let mut inner = entry.inner.lock().unwrap();
-                inner.state = if entry.created_by_local
+                inner.state = if entry.first_claim_local
                     && inner.committed_lease_seq == TcpLeaseSeq::default()
                 {
                     DataConnEntryState::FirstClaimPending
@@ -2770,28 +3531,39 @@ impl TcpTunnel {
     ) -> P2pResult<Arc<Mutex<LeaseContext>>> {
         self.wait_until_connected().await?;
         let mut skipped_conn_ids = Vec::new();
+        let mut last_conflict = None;
         for _ in 0..4 {
             let entry = match self.find_claimable_entry(&skipped_conn_ids) {
                 Some(entry) => entry,
                 None => match self.create_data_connection(None).await {
                     Ok(entry) => entry,
-                    Err(_) => self.request_remote_data_connection().await?,
+                    Err(direct_err) => self.request_remote_data_connection().await.map_err(
+                        |reverse_err| {
+                            P2pError::new(
+                                reverse_err.code(),
+                                format!(
+                                    "direct data connection failed: {:?}; reverse data connection failed: {:?}",
+                                    direct_err, reverse_err
+                                ),
+                            )
+                        },
+                    )?,
                 },
             };
             let conn_id = entry.conn_id;
             match self.claim_entry(entry, kind, purpose.clone()).await {
                 Ok(lease) => return Ok(lease),
-                Err(err)
-                    if err.code() == P2pErrorCode::Conflict
-                        || err.code() == P2pErrorCode::ErrorState =>
-                {
+                Err(err) if err.code() == P2pErrorCode::Conflict => {
                     skipped_conn_ids.push(conn_id);
+                    last_conflict = Some(err);
                     continue;
                 }
                 Err(err) => return Err(err),
             }
         }
-        Err(p2p_err!(P2pErrorCode::Conflict, "claim retries exhausted"))
+        Err(last_conflict.unwrap_or_else(|| {
+            p2p_err!(P2pErrorCode::ErrorState, "no claimable data connection")
+        }))
     }
 
     async fn heartbeat_loop(self: Arc<Self>) {
@@ -2978,6 +3750,11 @@ impl Drop for TcpTunnel {
             LocalTunnelPhase::Connected | LocalTunnelPhase::PassiveReady
         ) {
             state.phase = LocalTunnelPhase::Closed;
+        }
+        for pending in state.pending_open_requests.values_mut() {
+            let _ = pending
+                .correlation
+                .apply(ReverseOpenCorrelationEvent::TerminalCleanup);
         }
         state.pending_open_requests.clear();
         state.pending_claims.clear();

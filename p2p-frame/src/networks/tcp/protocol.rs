@@ -6,6 +6,8 @@ use crate::networks::{
 use crate::runtime;
 use crate::types::{Timestamp, TunnelCandidateId, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 pub type TcpConnId = TunnelId;
 pub type TcpLeaseSeq = TunnelId;
@@ -29,6 +31,7 @@ enum TcpCommandId {
     WriteFin = 9,
     ReadDone = 10,
     Data = 11,
+    OpenDataConnResp = 12,
 }
 
 impl TcpCommandId {
@@ -45,6 +48,7 @@ impl TcpCommandId {
             x if x == Self::WriteFin as u8 => Some(Self::WriteFin),
             x if x == Self::ReadDone as u8 => Some(Self::ReadDone),
             x if x == Self::Data as u8 => Some(Self::Data),
+            x if x == Self::OpenDataConnResp as u8 => Some(Self::OpenDataConnResp),
             _ => None,
         }
     }
@@ -138,6 +142,26 @@ pub struct OpenDataConnReq {
 
 impl TunnelCommandBody for OpenDataConnReq {
     const COMMAND_ID: u8 = TcpCommandId::OpenDataConnReq as u8;
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, RawEncode, RawDecode)]
+pub enum OpenDataConnRespResult {
+    Success = 0,
+    ConnectFailed = 1,
+    ProtocolError = 2,
+    InternalError = 3,
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+pub struct OpenDataConnResp {
+    pub request_id: TcpRequestId,
+    pub conn_id: Option<TcpConnId>,
+    pub result: OpenDataConnRespResult,
+}
+
+impl TunnelCommandBody for OpenDataConnResp {
+    const COMMAND_ID: u8 = TcpCommandId::OpenDataConnResp as u8;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, RawEncode, RawDecode)]
@@ -243,6 +267,7 @@ pub enum TcpControlCmd {
     Ping(PingCmd),
     Pong(PongCmd),
     OpenDataConnReq(OpenDataConnReq),
+    OpenDataConnResp(OpenDataConnResp),
     ClaimConnReq(ClaimConnReq),
     ClaimConnAck(ClaimConnAck),
     WriteFin(WriteFin),
@@ -331,6 +356,7 @@ impl TcpTunnelWireEncode for TcpControlCmd {
             Self::Ping(cmd) => encode_tunnel_command_bytes(cmd),
             Self::Pong(cmd) => encode_tunnel_command_bytes(cmd),
             Self::OpenDataConnReq(cmd) => encode_tunnel_command_bytes(cmd),
+            Self::OpenDataConnResp(cmd) => encode_tunnel_command_bytes(cmd),
             Self::ClaimConnReq(cmd) => encode_tunnel_command_bytes(cmd),
             Self::ClaimConnAck(cmd) => encode_tunnel_command_bytes(cmd),
             Self::WriteFin(cmd) => encode_tunnel_command_bytes(cmd),
@@ -340,14 +366,24 @@ impl TcpTunnelWireEncode for TcpControlCmd {
     }
 }
 
-#[async_trait::async_trait]
-impl TcpTunnelWireDecode for TcpControlCmd {
-    async fn read_from_wire<R>(read: &mut R) -> P2pResult<Self>
+impl TcpControlCmd {
+    async fn decode_from_wire_header_bounded<R>(
+        read: &mut R,
+        header: TunnelCommandHeader,
+        max_command_id: u8,
+    ) -> P2pResult<Self>
     where
         R: runtime::AsyncRead + Unpin + Send,
     {
-        let header = read_tunnel_command_header(read).await?;
         validate_header_len(&header)?;
+        if header.command_id > max_command_id {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "unsupported tcp tunnel command id {} for peer maximum {}",
+                header.command_id,
+                max_command_id
+            ));
+        }
         let command_id = TcpCommandId::from_u8(header.command_id).ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::InvalidData,
@@ -372,6 +408,9 @@ impl TcpTunnelWireDecode for TcpControlCmd {
             TcpCommandId::OpenDataConnReq => Ok(Self::OpenDataConnReq(
                 decode_tunnel_command_body::<_, OpenDataConnReq>(read, header).await?,
             )),
+            TcpCommandId::OpenDataConnResp => Ok(Self::OpenDataConnResp(
+                decode_tunnel_command_body::<_, OpenDataConnResp>(read, header).await?,
+            )),
             TcpCommandId::ClaimConnReq => Ok(Self::ClaimConnReq(
                 decode_tunnel_command_body::<_, ClaimConnReq>(read, header).await?,
             )),
@@ -388,6 +427,37 @@ impl TcpTunnelWireDecode for TcpControlCmd {
                 decode_tunnel_command_body::<_, TcpControlData>(read, header).await?,
             )),
         }
+    }
+
+    async fn read_from_wire_bounded<R>(read: &mut R, max_command_id: u8) -> P2pResult<Self>
+    where
+        R: runtime::AsyncRead + Unpin + Send,
+    {
+        let header = read_tunnel_command_header(read).await?;
+        Self::decode_from_wire_header_bounded(read, header, max_command_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn read_from_wire_with_dynamic_max_command_id<R>(
+        read: &mut R,
+        max_command_id: &AtomicU8,
+    ) -> P2pResult<Self>
+    where
+        R: runtime::AsyncRead + Unpin + Send,
+    {
+        let header = read_tunnel_command_header(read).await?;
+        let max_command_id = max_command_id.load(Ordering::SeqCst);
+        Self::decode_from_wire_header_bounded(read, header, max_command_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl TcpTunnelWireDecode for TcpControlCmd {
+    async fn read_from_wire<R>(read: &mut R) -> P2pResult<Self>
+    where
+        R: runtime::AsyncRead + Unpin + Send,
+    {
+        Self::read_from_wire_bounded(read, TcpCommandId::OpenDataConnResp as u8).await
     }
 }
 

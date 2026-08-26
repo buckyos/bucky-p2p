@@ -299,6 +299,11 @@ mod construction_tests {
     use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
     use std::sync::Arc;
 
+    #[cfg(feature = "x509")]
+    mod reverse_data_first_claim_tests {
+        include!("tests/reverse_data_first_claim_tests.rs");
+    }
+
     struct TestCertFactory;
 
     impl P2pIdentityCertFactory for TestCertFactory {

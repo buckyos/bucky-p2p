@@ -7,6 +7,3 @@ members = [
     "desc-tool",
     "p2p-frame",
 ]
-
-[patch.crates-io]
-callback-result = { path = "third-party/callback-result" }

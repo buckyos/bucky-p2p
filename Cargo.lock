@@ -650,7 +650,9 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "callback-result"
-version = "0.2.4"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f671a207a542ec897beadea9bd46ea74db13284c3e61b80c68e1e578d81bece"
 dependencies = [
  "notify-future 0.2.5",
  "tokio",

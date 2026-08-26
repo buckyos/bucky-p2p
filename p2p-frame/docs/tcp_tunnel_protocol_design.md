@@ -109,7 +109,7 @@ TCP tunnel 的唯一控制连接。它负责：
 
 - tunnel 建立与确认
 - tunnel 心跳
-- data connection 的反向建立请求
+- data connection 的反向建立请求与注册完成响应
 - channel claim / ack / nack
 - `WriteFin` / `ReadDone`
 - tunnel 关闭后的一致性收敛
@@ -134,7 +134,7 @@ registered 只表示这条连接已经完成注册握手，不表示双方已经
 为避免把“某一侧已经完成本地登记”与“双方都确认注册完成”混为一体，本文固定区分两层语义：
 
 - `locally registered`：被动接收侧已经完成本地 `conn_id -> connection` 登记，并已发送 `DataConnReady(Success)`
-- `registered data connection`：创建方已经收到匹配的 `DataConnReady(Success)`，且双方都已进入各自等待首轮 claim 的本地状态
+- `registered data connection`：创建方已经收到匹配的 `DataConnReady(Success)`；对于 request-associated reverse connection，请求方还必须收到创建方在本地注册完成后发送的匹配 `OpenDataConnResp(Success, conn_id)`，双方才进入各自等待首轮 claim 的本地状态
 
 除非特别说明，后文的 `registered data connection` 默认指第二层，也就是双方已经完成这一轮注册握手的全局条件。
 
@@ -422,7 +422,7 @@ struct PongCmd {
 - `conn_id` 只用于 data connection，control connection 不参与这个编号空间
 - `conn_id` 在单个 `Tunnel` 生命周期内必须视为一次性 ID；一旦分配，无论后续注册成功、失败、claim 成功、claim 失败、连接关闭还是进入 `Retired`，都不得复用
 
-只要双方都知道 control connection 的主被动方向，就必须能仅凭 `conn_id` 的分区规则，对“该 data connection 的创建方是谁”得出完全一致的结论；首轮 claim 权也完全由这个结论决定。
+只要双方都知道 control connection 的主被动方向，就必须能仅凭 `conn_id` 的分区规则，对“该 data connection 的创建方是谁”得出完全一致的结论。普通直接 data connection 的首轮 claim 权属于物理创建方；带 `open_request_id` 的 request-associated reverse connection 是显式例外，其首轮 claim 权属于 `OpenDataConnReq` 请求方，并且只有在匹配的 `OpenDataConnResp(Success, conn_id)` 建立创建方注册屏障后才能行使。
 
 ### `lease_seq`
 
@@ -499,8 +499,8 @@ struct PongCmd {
 
 - 未知 `conn_id` 的 claim 不是正常乱序，而是 `ProtocolError`
 - 未注册 `conn_id` 的 claim 不是正常乱序，而是 `ProtocolError`
-- `DataConnReady(Success)` 到达前，创建方不得把连接视为可发起 claim 的 `FirstClaimPending`
-- 被动接收侧在本地注册并发送 `DataConnReady` 后，可以把连接视为 `FirstClaimPending`，但该状态下只允许接收首轮 claim，不允许主动发起 claim
+- 普通直接连接在 `DataConnReady(Success)` 到达前，创建方不得把连接视为可发起 claim 的 `FirstClaimPending`
+- request-associated reverse connection 的请求方在匹配 `OpenDataConnResp(Success, conn_id)` 到达前不得发起首轮 claim；物理创建方在本地注册并成功发送该响应后只允许接收请求方的首轮 claim
 - 只有连接已经至少完成过一轮成功绑定，并从 `Draining` 安全回到 `Idle` 后，双方才都可以对该连接主动发起后续 claim
 
 ### Claim 时的 `lease_seq` 判定规则
@@ -512,7 +512,7 @@ struct PongCmd {
 
 发起方规则：
 
-- 连接处于 `FirstClaimPending` 时，只允许创建方发起首轮 claim，且 `lease_seq` 必须为 `1`
+- 连接处于 `FirstClaimPending` 时，只允许该连接确定的 `first_claim_owner` 发起首轮 claim，且 `lease_seq` 必须为 `1`；普通直接连接的 owner 是物理创建方，request-associated reverse connection 的 owner 是请求方
 - 连接处于 `Idle` 时，双方都只能发起 `lease_seq = expected_next_lease_seq` 的 claim
 - 发起方不得跳号发送未来 lease，也不得重发一个已经提交过的旧 lease 作为新 claim
 
@@ -523,8 +523,8 @@ struct PongCmd {
 3. 先做 `lease_seq` 与当前连接状态的可受理性判定；这一步先于 `vport/listener/accept queue` 校验，用来尽早过滤 stale / future / not-idle claim：
    - 若本地状态为 `FirstClaimPending`：
      - 只有首轮 `lease_seq = 1` 是合法候选值
-     - 若该请求来自首轮创建方，则按首轮 claim 正常处理
-     - 若该请求来自被动接收侧自己不应拥有的首轮主动 claim，统一返回 `ClaimConnAck { result = ProtocolError }`，并保持当前连接状态不变
+    - 若该请求来自本连接的 `first_claim_owner`，则按首轮 claim 正常处理
+    - 若该请求来自不拥有首轮主动权的一侧，统一返回 `ClaimConnAck { result = ProtocolError }`，并保持当前连接状态不变
      - 若 `lease_seq != 1`，返回 `ClaimConnAck { result = LeaseMismatch }`
    - 若本地状态为 `Idle`：
      - 只有 `lease_seq = expected_next_lease_seq` 才能进入正常 claim / 冲突仲裁流程
@@ -549,7 +549,7 @@ struct PongCmd {
 ### 原则 1：tunnel 建立、data 建连与复用阶段分离
 
 - control connection 先建立并确认 tunnel
-- data connection 在进入业务传输前，允许承载极少量建连握手帧：`TcpConnectionHello(role = Data)` 与 `DataConnReady`
+- data connection 在进入业务传输前，允许承载极少量建连握手帧：`TcpConnectionHello(role = Data)` 与 `DataConnReady`；request-associated reverse connection 还通过 control connection 的 `OpenDataConnResp` 建立跨连接注册屏障
 - 只有完成注册后，这条 data connection 才进入“后续只传业务数据”的阶段
 - 所有 channel 绑定、复用、完成、失败、退役都通过 control 通道传递
 
@@ -587,8 +587,8 @@ struct PongCmd {
 
 - 本章节不负责 channel 绑定
 - 本章节不负责 `WriteFin` / `ReadDone`
-- 本章节结束条件是：被动接收侧完成本地注册并发送 `DataConnReady(Success)`，创建方收到匹配的 `DataConnReady(Success)`，且双方都进入各自等待首轮 claim 的本地状态 `FirstClaimPending`
-- 只有本章节成功完成后，才允许由连接创建方发起首轮 `ClaimConnReq`
+- 本章节结束条件是：普通直接连接由被动接收侧完成本地注册并发送 `DataConnReady(Success)`、创建方收到匹配 ready；request-associated reverse connection 还必须由物理创建方完成本地注册并在 control connection 上发送匹配 `OpenDataConnResp(Success, conn_id)`。完成对应屏障后双方才进入 `FirstClaimPending`
+- 只有本章节成功完成后，才允许由确定的 `first_claim_owner` 发起首轮 `ClaimConnReq`
 
 ### 建连消息
 
@@ -600,6 +600,19 @@ struct PongCmd {
 ```rust
 struct OpenDataConnReq {
     request_id: u64,
+}
+
+enum OpenDataConnRespResult {
+    Success = 0,
+    ConnectFailed = 1,
+    ProtocolError = 2,
+    InternalError = 3,
+}
+
+struct OpenDataConnResp {
+    request_id: u64,
+    conn_id: Option<u64>,
+    result: OpenDataConnRespResult,
 }
 ```
 
@@ -643,7 +656,7 @@ enum DataConnReadyResult {
 - 对 data connection 而言，`conn_id` 为必填字段；若 `role = Data` 但 `conn_id = None`，则为 `ProtocolError`
 - `DataConnReady(Success)` 表示接收端已经成功完成本地注册
 - `DataConnReady(Failed...)` 表示这条 data connection 不得进入 claim 阶段，发送后应关闭该连接；即使失败，`DataConnReady.conn_id` 也必须回显该连接在 `TcpConnectionHello` 中携带的 `conn_id`
-- `OpenDataConnReq` 没有单独的正向 `Ack`；请求方是否成功，最终只以匹配的反向 data connection 是否真正到达并完成注册为准
+- `OpenDataConnResp` 是 control 面上的注册完成响应，而不是仅表示请求已收到的早期 Ack；创建方只能在收到 `DataConnReady(Success)`、完成本地 entry 注册并赋予远端首轮 claim 权之后发送 `Success`，失败结果必须携带同一 `request_id`，仅成功结果携带匹配 `conn_id`
 - 返回 `DataConnReady` 时，`conn_id` 与 `candidate_id` 都必须原样回显本条 data connection 上先前 `TcpConnectionHello(role = Data)` 里的值
 - 创建方收到 `DataConnReady` 时，必须校验它来自当前这条等待中的 data connection，且 `conn_id` 与 `candidate_id` 都与本端刚刚发送的 hello 完全一致；否则当前 data connection 必须按 `ProtocolError` 关闭
 - 一条新的 data connection 在注册阶段只允许出现一次 `DataConnReady`；重复或矛盾的 ready 都属于 `ProtocolError`
@@ -663,22 +676,20 @@ enum DataConnReadyResult {
 - 响应 `OpenDataConnReq(request_id)` 创建的反向 data connection，`open_request_id = Some(request_id)`
 - 请求方应维护 `pending_open_request[request_id]`
 - 即使对应等待后来超时、取消或失败，该 `request_id` 也只能结束生命周期，不能重新分配给新的 `OpenDataConnReq`
-- 请求方在发送 `OpenDataConnReq` 后，即进入“等待匹配的 `TcpConnectionHello { role: Data, open_request_id: Some(request_id) }` 真正到达”的阶段
-- `pending_open_request[request_id]` 的等待超时建议单独命名为 `open_request_arrival_timeout`，默认取 `connect_timeout`
-- 若等待方超时或上层取消，则必须移除对应 `pending_open_request[request_id]`
-- 若请求方收到带 `Some(request_id)` 的 `TcpConnectionHello(role = Data)`，且本地仍有对应 pending request，则可将这条新连接与该请求关联并唤醒等待者
-- 若本地已没有对应 pending request（例如等待方已超时或上层已取消），仍可继续按普通 data connection 完成注册并纳入连接池；此时只是不再把它视为某个仍在等待中的反向建连结果
-- 但实现必须限制这类“晚到连接”在单个 `Tunnel` 下的积压数量；若本地 idle pool / 未 claim 连接预算已满，则应直接关闭该连接并标记为 `Retired`
-- 若这类晚到连接最终完成 `DataConnReady(Success)`，则它后续应与普通新建 data connection 完全一致：立即进入 `FirstClaimPending`，并仍由该 `conn_id` 的创建方拥有首轮 claim 权；协议不额外引入“冷却态”
+- 请求方在发送 `OpenDataConnReq` 后，同时等待匹配的 `TcpConnectionHello { role: Data, open_request_id: Some(request_id) }` 与匹配的 `OpenDataConnResp`；两者允许任意先后到达，但只有 `conn_id` 一致且本地 `DataConnReady` 已成功发送后才能完成请求并开始首轮 claim
+- `pending_open_request[request_id]` 的整体等待超时命名为 `open_request_timeout`，默认取 `connect_timeout`
+- pending request 的所有权属于发起本次等待的 future；等待方超时、上层取消/drop、发送失败或 tunnel 关闭时，必须用同一原子清理操作移除 pending 项并退役已经关联的 entry
+- 若请求方收到带 `Some(request_id)` 的 `TcpConnectionHello(role = Data)`，且本地仍有对应 pending request，则把连接暂存在该 request 下；在 `DataConnReady(Success)` 发送成功后标记 data-side ready，但在匹配响应到达前不得进入普通 pool 或被 claim
+- 若本地已没有对应 pending request（超时、取消、失败或已完成），该 arrival 属于晚到/重复输入：必须回复失败的 `DataConnReady` 并立即关闭/退役，不得降级为普通 data connection
+- 对同一 request 的重复 arrival、矛盾 response 或不匹配 `conn_id` 必须 fail closed 并退役 request-owned entry；内容完全相同且尚未完成的重复 response 可以幂等忽略
 
 ### `FirstClaimPending`
 
 对初次建立的 data connection，首轮 `lease_seq = 1` 使用以下非对称规则：
 
-- 只有 `conn_id` 创建方可以主动发起首轮 `ClaimConnReq`
-- 被动接收侧在首轮绑定完成前，不得主动 claim 这条连接
-- 被动接收侧在本地注册并发送 `DataConnReady` 后，进入 `FirstClaimPending`
-- 创建方收到 `DataConnReady(Success)` 后，也将该连接视为 `FirstClaimPending`
+- 普通直接连接只有 `conn_id` 物理创建方可以主动发起首轮 `ClaimConnReq`
+- request-associated reverse connection 只有 `OpenDataConnReq` 请求方可以主动发起首轮 `ClaimConnReq`
+- 非 owner 一侧在首轮绑定完成前不得主动 claim；owner 侧必须等对应的注册屏障完成后才能 claim
 - `FirstClaimPending` 不是稳定驻留态；若连接在该状态下长期未等到合法的首轮 `ClaimConnReq`，则应按超时失败处理并直接 `Retired`
 - 只有至少成功完成一轮绑定，并在后续 drain 完成后回到 `Idle`，这条连接才进入双方对称可复用态
 - 双方都应在各自本地把连接迁移到 `FirstClaimPending` 的同一时刻启动 `first_claim_timeout`；该定时器是纯本地超时，不要求双边同步，只要求任一侧超时后本地都不得再复用这条连接
@@ -706,8 +717,10 @@ enum DataConnReadyResult {
    - 用 `open_request_id` 关联本地 pending 的 `OpenDataConnReq(request_id)`（若该请求仍存在）
    - 完成本地注册
    - 在这条 data connection 上回复 `DataConnReady { conn_id, Success }`
-6. A 在发送 `DataConnReady(Success)` 后，将该连接视为 `FirstClaimPending`，但只能等待 B 的首轮 claim
-7. B 收到 `DataConnReady(Success)` 后，才把这条连接视为 `FirstClaimPending`，并由 B 拥有首轮主动 claim 权
+6. A 发送 `DataConnReady(Success)` 后，把 entry 暂存在 `pending_open_request[request_id]` 下，不进入普通连接池
+7. B 收到 `DataConnReady(Success)` 后，先在本地注册 entry，并把 A 设为远端首轮 claim owner
+8. B 通过 control connection 发送 `OpenDataConnResp { request_id, conn_id: Some(conn_id), result: Success }`
+9. A 将 response 与 staged entry 的 `conn_id` 匹配，完成 pending request，并由 A 发起首轮 claim；B 只等待该首轮 claim
 
 ### 失败处理
 
@@ -718,15 +731,17 @@ enum DataConnReadyResult {
 - `TcpConnectionHello(role = Data)` 字段非法
 - `DataConnReady` 返回失败
 - 等待 `DataConnReady` 超时
+- `OpenDataConnResp` 返回失败、与 staged `conn_id` 不匹配或等待超时
+- 请求方 future 被取消/drop，或 control tunnel 在请求完成前关闭
 
 说明：
 
-- `DataConnReady` 只在 data connection 自身上传递，不通过 control 通道回传
-- 首轮 claim 权只属于 data connection 创建方；被动接收侧即使已经完成本地注册，也必须等待创建方发起首轮 claim
+- `DataConnReady` 只在 data connection 自身上传递；`OpenDataConnResp` 只在 control connection 上传递，两者共同构成 request-associated reverse connection 的注册屏障
+- 普通直接连接的首轮 claim 权属于物理创建方；request-associated reverse connection 的首轮 claim 权属于请求方
 - `open_request_id` 只用于把“control 面上的反向建连请求”与“data 面上实际到达的新连接”关联起来，不参与后续 claim / reuse / drain 的一致性主键
 - 同一局域网场景下，双方各自需要新建 data connection 时都直接建连，因此不会产生 `open_request_id`
-- 若反向建连请求在对端无法执行，则不额外定义独立的 control 面失败回执；请求方通过 `open_request_arrival_timeout` 超时感知失败
-- 这样可避免“接收端已经注册，但发送端还不知道是否可以 claim”的跨连接同步空窗
+- 若反向建连请求在对端无法执行，对端通过 bounded `OpenDataConnResp` 失败结果返回实际错误类别；control 已不可用时请求方以关闭/超时收敛
+- 该 control response 正是消除“接收端已经注册，但请求方还不知道物理创建方是否完成注册”的跨连接同步空窗
 
 ## 协议消息
 
@@ -877,7 +892,7 @@ struct ReadDone {
 - 若本地当前正处于匹配的 `Claiming(conn_id, lease_seq, channel_id)`：
   - 若 `result = Success`：
     - 提交 `committed_lease_seq = lease_seq`
-    - 首轮 claim 成功时（创建方本地等待 `Ack` 的路径）：`Claiming -> Bound`
+    - 首轮 claim 成功时（`first_claim_owner` 本地等待 `Ack` 的路径）：`Claiming -> Bound`
     - 后续复用 claim 成功时：`Claiming -> Bound`
     - 唤醒对应 opening channel，开始 data 面传输
   - 若 `result = ConflictLost`：
@@ -1282,8 +1297,8 @@ Registering
   -> Retired
 
 FirstClaimPending
-  -> Claiming    (仅创建方可发起首轮 claim)
-  -> Bound       (被动接收侧接受创建方首轮 claim)
+  -> Claiming    (仅该连接的 first_claim_owner 可发起首轮 claim)
+  -> Bound       (非 owner 侧接受 owner 的首轮 claim)
   -> Retired
 
 Idle
@@ -1357,7 +1372,7 @@ Draining
 - `ConflictLost` 场景下等待对端补发 `ClaimConnAck { result = ConflictLost }` 的超时：`heartbeat_timeout`
 - 收到对端 `WriteFin` 后等待本地 drain 完成的“无进展超时”：`max(2 * heartbeat_timeout, 2s)`
 - `pending_fin_by_conn_lease` / `pending_read_done_by_conn_lease` 的“无进展超时”：`max(2 * heartbeat_timeout, 2s)`
-- `pending_open_request[request_id]` 的 `open_request_arrival_timeout`：`connect_timeout`
+- `pending_open_request[request_id]` 的 `open_request_timeout`：`connect_timeout`
 
 如果后续实现维护了 RTT 估计值，也可以把上述控制面超时进一步收敛为：
 
@@ -1369,7 +1384,7 @@ Draining
 
 - `ControlConnReady` 超时由 control connection 主动建立方启动；收到 `ControlConnReady` 或连接关闭后立即取消
 - `DataConnReady` 超时由 data connection 创建方启动；收到 `DataConnReady` 或连接关闭后立即取消
-- `pending_open_request[request_id]` 的 `open_request_arrival_timeout` 由发送 `OpenDataConnReq` 的请求方启动；收到匹配的 `TcpConnectionHello(role = Data)`、本地取消、或 tunnel 关闭后立即取消
+- `pending_open_request[request_id]` 的 `open_request_timeout` 由发送 `OpenDataConnReq` 的请求方启动；只有匹配 arrival 与成功 response 完成整个屏障、或 timeout/cancel/close 的统一清理完成后才取消
 - `first_claim_timeout` 由双方在各自本地把连接迁移到 `FirstClaimPending` 时独立启动；首轮合法 claim 成功、连接进入 `Retired`、或物理连接关闭后立即取消；该定时器不要求双边同步触发
 - `ClaimConnReq` 超时由 claim 发起方启动；收到匹配的 `ClaimConnAck`、本地取消、或连接进入 `Retired` 后立即取消
 - `ConflictLost` 失败方等待迟到 `ClaimConnAck { result = ConflictLost }` 的超时，仍归本地 opening channel 所有；该超时只结束 opening channel，不得回滚已被对端占用的连接状态
@@ -1392,18 +1407,18 @@ Draining
 - 直接关闭该连接
 - 该连接不得进入 `Idle`，也不得参与 claim
 
-### 反向 data connection 到达超时
+### 反向 data connection 请求超时或取消
 
-如果请求方发送 `OpenDataConnReq(request_id)` 后，在 `open_request_arrival_timeout` 内仍未等到匹配的 `TcpConnectionHello { role: Data, open_request_id: Some(request_id) }`：
+如果请求方发送 `OpenDataConnReq(request_id)` 后，在 `open_request_timeout` 内未完成匹配 arrival 与 `OpenDataConnResp(Success, conn_id)` 的双条件屏障，或者 owner future 被取消/drop：
 
 - 当前这次“请求对端反向建连”的等待失败
-- 必须移除对应 `pending_open_request[request_id]`
+- 必须原子移除对应 `pending_open_request[request_id]`，并关闭/退役已经关联的 staged entry
 - 这次失败不产生任何已注册 data connection，也不提交任何 `lease_seq`
-- 若对应 data connection 之后迟到到达，仍按前文“晚到连接”规则处理：可继续注册为普通新连接，或在预算不足时直接 `Retired`
+- 对应 response 或 data connection 之后迟到时必须 fail closed，不得注册为普通新连接
 
 ### `FirstClaimPending` 超时
 
-如果一条已注册 data connection 进入 `FirstClaimPending` 后，在 `first_claim_timeout` 内仍未等到创建方发起的合法首轮 `ClaimConnReq`：
+如果一条已注册 data connection 进入 `FirstClaimPending` 后，在 `first_claim_timeout` 内仍未等到该连接 `first_claim_owner` 发起的合法首轮 `ClaimConnReq`：
 
 - 说明这条“已建立但尚未首轮绑定”的连接已经失去继续保留的价值
 - 本地应直接关闭对应 data connection，并将其标记为 `Retired`
@@ -1496,6 +1511,7 @@ control connection 是复用协议的一致性基础。一旦 control connection
 - Rust 实现内部仍保留 `TcpControlCmd` 作为本地分派载体，但它不再是线协议上的直接编码格式；线上仍按具体命令体各自的 `command_id` 编码
 - control 命令体包括：
   - `OpenDataConnReq`
+  - `OpenDataConnResp`
   - `ClaimConnReq`
   - `ClaimConnAck`
   - `WriteFin`
@@ -1531,7 +1547,7 @@ control connection 是复用协议的一致性基础。一旦 control connection
 - tunnel 建立流程包含 `ControlConnReady` 等待逻辑
 - 新建 data connection 包含 `DataConnReady` 等待逻辑
 - `FirstClaimPending` 具有独立超时；超时后直接关闭该 data connection 并标记为 `Retired`
-- 支持 `pending_open_request[request_id]` 与晚到反向 data connection 的预算控制；等待超时后清理 pending 项，但晚到连接仍可按预算规则注册或直接 `Retired`
+- `pending_open_request[request_id]` 同时关联 staged entry、response `conn_id` 和 data-side ready；arrival/response 任意先后但必须一致，owner future drop、等待超时或 tunnel close 使用同一清理路径，晚到/重复/矛盾输入直接 `Retired`
 - 每轮租约维护以下计数与状态：
   - `tx_bytes`
   - `rx_bytes`
@@ -1559,13 +1575,14 @@ control connection 是复用协议的一致性基础。一旦 control connection
 
 ### 正常路径
 
-- 本地新建 data connection，收到 `DataConnReady(Success)` 后进入 `FirstClaimPending`，并只能由创建方发起首轮 claim
+- 本地直接新建 data connection，收到 `DataConnReady(Success)` 后进入 `FirstClaimPending`，并只能由创建方发起首轮 claim
 - 通过 `OpenDataConnReq` 请求对端反向建连成功
+- request-associated reverse connection 只有在请求方关联 arrival、发送 `DataConnReady(Success)`，且创建方完成本地注册并返回匹配 `OpenDataConnResp(Success, conn_id)` 后，才允许请求方首轮 claim
 - 已判断双方位于同一局域网时，A 需要新 data connection 与 B 需要新 data connection 这两种情况都走直接建连，且 `open_request_id = None`
 - 多个并发 `OpenDataConnReq` 可通过 `TcpConnectionHello.open_request_id` 正确关联到各自到达的新 data connection
-- `OpenDataConnReq` 发出后等待反向 data connection 到达超时，会清理 `pending_open_request[request_id]`
+- `OpenDataConnReq` 发出后整体屏障超时或 owner future 取消，会清理 `pending_open_request[request_id]` 和关联 entry
 - 复用 idle connection 后绑定 channel 成功
-- 首轮 `ClaimConnAck` 只将创建方从 `Claiming` 推进到 `Bound`，不会错误把被动侧也当作“本地发起成功”处理
+- 首轮 `ClaimConnAck` 只将该连接的 `first_claim_owner` 从 `Claiming` 推进到 `Bound`，不会错误把另一侧也当作“本地发起成功”处理
 - `stream` 在双向 `WriteFin + ReadDone` 完成后回到 idle pool
 - `datagram` 在双向 `WriteFin + ReadDone` 完成后回到 idle pool
 - `datagram` 的隐藏写侧会自动发送 `WriteFin(0)`，隐藏读侧在确认全程零字节后自动发送 `ReadDone(0)`
@@ -1594,9 +1611,9 @@ control connection 是复用协议的一致性基础。一旦 control connection
 - 未知或未注册 `conn_id` 的 `ClaimConnReq` 返回 `ProtocolError`
 - 被动接收侧 accept 队列已满时，`ClaimConnReq` 返回 `AcceptQueueFull`
 - `(conn_id, lease_seq)` 相同但 `channel_id`、`claim_nonce`、`kind` 或 `vport` 不一致的重复 `ClaimConnReq` 会被当作矛盾消息处理，并返回适当的 `ClaimConnAck { result = ... }` 或直接导致连接 `Retired`
-- 被动接收侧在 `FirstClaimPending` 阶段主动发起首轮 claim，被本地拒绝或按协议错误处理
-- `OpenDataConnReq` 的等待方已经超时或取消，但对应 data connection 稍后到达；该连接仍可完成注册并作为普通新连接使用
-- 晚到的反向 data connection 到达时，若本地 idle pool / 未 claim 连接预算已满，则该连接被直接关闭并 `Retired`
+- 非 `first_claim_owner` 一侧在 `FirstClaimPending` 阶段主动发起首轮 claim，被本地拒绝或按协议错误处理
+- `OpenDataConnReq` 的等待方已经超时、取消或完成，但对应 data connection/response 稍后到达；迟到输入被拒绝且关联连接直接 `Retired`
+- 同一 request 的 duplicate arrival、矛盾 response 或 mismatched `conn_id` 不得唤醒其他请求或进入普通 pool；完全相同的未完成 duplicate response 可幂等忽略
 - 本地 claim 已超时或已撤销后，迟到的 `ClaimConnAck` 被安全丢弃，不改变已收敛的连接状态
 - 非冲突例外场景下，`ClaimConnReq` 超时默认导致当前连接 `Retired`
 - `datagram` 的隐藏读侧观察到任意非零业务字节，或收到对端 `WriteFin.final_tx_bytes != 0`，连接被 `Retired`
