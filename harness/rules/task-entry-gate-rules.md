@@ -1,112 +1,111 @@
 # Task Entry Gate Rules
 
 ## Goal
-- Prevent implementation, bugfix, optimization, and refactor requests from bypassing versioned document admission.
+- Classify governed work by workflow tier, then select the lightest sufficient default flow.
+- Apply this rule after the explicit all-harness-rules opt-out in `AGENTS.md` and before any stage-specific rule.
 
-## Priority
-- This is the highest-priority rule for task classification and implementation admission.
-- Apply it before task-type process rules or repository edits.
-- Narrow exception: after an explicit current user launch whose verbatim instruction is recorded as task-local `pipeline/plan.md` `User launch statement`, `auto-pipeline-rules.md` has higher priority only for its no-`design.md` / no-`testing.md` policy and use of validated pipeline-plan design mappings. Agents never infer or synthesize launch. The exception does not relax any other entry, approval, scope, or validation gate.
+## GitHub Issue Execution Priority
+- When the current task includes GitHub issue content or explicitly points to a GitHub issue, read the available issue description, acceptance criteria/checklists, and requirement-defining comments before making implementation decisions.
+- During execution, satisfying the issue-described behavior is the primary objective. Plans, proposal/design documents, process steps, checkers, existing implementation, and agent summaries are supporting context; they MUST NOT displace, narrow, or substitute for the issue outcome.
+- Keep implementation choices, debugging, tests, and completion judgment anchored to the issue description. When deciding what to do next, prefer work that closes an issue requirement or exposes whether it is satisfied over work that only improves Harness documentation or process evidence.
+- The presence of issue information alone MUST NOT create an additional proposal field, task artifact, checker, workflow stage, or higher workflow tier. Use the normal tier and artifacts justified by the task's actual risk.
+- If issue content is unavailable or materially conflicts with another requirement, surface that conflict instead of guessing. Otherwise continue through the normal workflow without adding issue-specific ceremony.
+- This execution priority remains subject to system/developer instructions, safety requirements, filesystem permissions, and the current user's explicit resolution of a requirement conflict.
 
-## Harness Rule Activation
-- All harness rules apply by default.
-- An explicit current user instruction to skip all harness rules disables every harness rule for the scope named by the user. If the user names no scope, apply the skip only to the current task.
-- Evaluate this explicit all-rules opt-out before this task entry gate and every other harness rule. Do not infer the opt-out from urgency, a request to proceed, or user silence.
-- The opt-out does not override system or developer instructions, safety requirements, remaining user scope constraints, or repository requirements outside the harness.
+## Project Custom-Rule Precedence
+- Matching project-added rules indexed under `harness/custom-rules/` are the highest-priority repository-owned Harness policy.
+- Evaluate and apply every matching custom rule before this task-entry gate, every other generated rule, and every generated checker. When repository-owned Harness policies conflict, the matching custom rule wins.
+- A custom rule that replaces a generated mechanical gate MUST name the replacement command or versioned exception evidence so the project decision remains mechanically auditable.
+- This repository precedence does not override system/developer instructions, safety requirements, filesystem permissions, the current explicit user instruction, or an explicit all-Harness-rules opt-out.
 
-## Scope
-- Code, test, runtime, UI, build, bugfix, optimization, refactor, and implementation-shaped requests.
+## Direct Harness Rule Maintenance
+- When the current request's primary purpose is to add, update, remove, or refresh repository-local Harness policy files under `harness/rules/` or `harness/custom-rules/`, including either directory's rule index, do not enter the task workflow. Execute the requested rule maintenance directly.
+- Evaluate this exception before mandatory proposal responsibility. Do not create or select a task packet, mutate the unfinished-task index, classify a workflow tier or stage, request proposal confirmation, create downstream task artifacts, or run task lifecycle commands for the rule-maintenance scope.
+- Direct execution still includes the inspection and focused validation needed to make the requested rule update safely. It does not waive system/developer instructions, safety requirements, explicit user scope, or non-Harness repository constraints.
+- This exception is limited to repository-local Harness rule policy. A mixed request that also changes product behavior, runtime behavior, build behavior, tests, or non-rule Harness tooling uses the normal task workflow for that additional scope.
 
-## Task Packet Rule
-- Every new manual-flow task MUST use a packet with its own `proposal.md`, `design.md`, optional `testing.md`, and optional `acceptance.md`.
-- Every explicitly launched auto-pipeline task MUST use a packet with `proposal.md`, `pipeline/plan.md`, `pipeline/state.json`, and later `testplan.yaml`; generated `design.md`, task-local `design/`, `testing.md`, and `testing/` are forbidden. Admission-relevant design mappings are recorded in plan; mutable testing coverage and execution status are recorded in state.
-- Every new task name MUST use `<task-seq>-<task-slug>`; `<task-seq>` is a version-local sequence number, defaults to 3 digits, starts at `001` for each version, and increments by 1 across all project modules and `globals` in that version.
-- When creating a task packet, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/task-seq.py next --version <version> --slug <task-slug>` and use the returned `<task-seq>-<task-slug>` for the directory, front matter `task_name`, checker `--submodule`, and unfinished-task index `task_id`.
-- Sequence numbers identify creation order only; do not use the largest number to decide the current/latest task.
-- Single-project task packet: `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`.
-- Cross-project task packet: `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/`.
-- Do not modify an existing task packet to describe new work.
-- A task packet document with `status: approved` is frozen by default. New requirements, new APIs, new `change_id` values, scope expansion, success-criteria changes, or downstream supplements MUST create a sibling task packet instead of editing the approved packet.
-- Corrections to an approved task MUST create a sibling amendment/fix task packet that names the original packet and explains the correction reason; do not directly edit the original approved document.
-- Project-level module packets may contain long-lived overviews, but new implementation admission MUST bind to the current task packet.
-- Maintain `docs/versions/<version>/modules/tasks.md` as the unfinished-task index: add new task packets when created, remove task records when completed, and keep only unfinished tasks in the file.
-- "Latest task" MUST NOT be decided by directory order, timestamps, or agent guessing. It must come from the current user request or a `docs/modules/<module>.md` Current/Active Task field.
-- If the new task clearly belongs to a different module than every relevant unfinished task record, create a new task packet immediately and do not consider continuing any unfinished task from another module.
-- If `docs/versions/<version>/modules/tasks.md` lists multiple same-module unfinished tasks and the user request does not identify one, stop and confirm whether to use an existing task or create a new sibling task packet.
-- Only the explicitly pointed latest task packet whose current-stage document is not `status: approved` may receive further current-stage edits.
+## Mandatory Proposal Responsibility
+- Every governed task creates the same proposal packet before execution: allocate `<task-seq>-<task-slug>`, use the canonical single-project or `globals` packet path, create `task.yaml` plus draft `proposal.md`, and register `task.yaml` in the version's unfinished-task index.
+- Before confirmation, `task.yaml` uses `workflow_tier: pending`. Draft `proposal.md` records the requested outcome, in-scope behavior, out-of-scope behavior or non-goals, success signal, material assumptions or tradeoffs, proposed tier, and concrete rationale or triggered boundaries.
+- Proposal confirmation is mandatory for every tier. Before confirmation, only read-only project inspection and proposal-packet/index maintenance are allowed; do not modify project files or start a tier's execution flow.
+- The confirmation request MUST show the proposal path, requested outcome, scope, non-goals, success criteria, proposed tier, tier rationale/triggered boundaries, and every unresolved question. Offer confirmation as proposed, confirmation with a replacement `trivial`/`standard`/`high-risk` tier, or proposal revision.
+- On confirmation, write the user-selected tier to `task.yaml` and `proposal.md`, record the confirmation, and set the matching proposal to `status: approved`. For `trivial` or `standard`, also set `baseline_manifest` to `.harness/baselines/<version>/<task-name>-delivery/manifest.json`; leave it blank for high-risk unless the active stage requires selected-file comparison evidence. The selected tier becomes final for generated routing and artifacts, subject only to system/developer instructions, safety requirements, or non-Harness repository constraints. Surface known residual risk when the user selects a lower tier.
+- A tier-only reply confirms the displayed proposal and selects that tier only when the confirmation request listed no unresolved proposal question. Otherwise it resolves only the tier; do not infer answers to requirement, scope, tradeoff, or acceptance questions.
 
-## Stage Write Scope
-- When the user explicitly enters one stage, that stage is the only write scope by default.
-- Proposal: active packet `proposal.md`, plus the unfinished-task index (`docs/versions/<version>/modules/tasks.md`, or legacy `docs/modules/tasks.md` when that repository uses it) when creating or closing task records.
-- Design: only `design.md`, task-local `design/`, required long-lived boundary sync, project-rule-required `docs/architecture/` updates, and task-local `pipeline/plan.md` plus `pipeline/state.json` during an explicitly launched auto-pipeline.
-- Testing: only test code, fixtures, runners, unified entrypoint wiring (`harness/scripts/test-run.py`), generated run evidence under `test-results/test-runs/*.json`, optional `testing.md`, `testing/`, `testplan.yaml`, and task-local `pipeline/state.json` coverage/status during an explicitly launched auto-pipeline.
-- Testing treats code inside an existing Rust `#[cfg(test)]` item as test code, but new unit tests MUST use dedicated test files, test directories, or test-only crates/packages rather than new inline test bodies in production source files.
-- Implementation: only production code, required non-test runtime/build resources, task admission evidence after admission passes, and task-local `pipeline/state.json` status during an explicitly launched auto-pipeline.
-- Acceptance: review report, optional manual-flow `acceptance.md`, and task-local `pipeline/state.json` final/return status during an explicitly launched auto-pipeline.
-- Acceptance: only evidence audit, architecture-doc validation, generated/final acceptance rules and expected results, and review reports.
-- A task MUST NOT edit multiple stage artifact groups unless the user explicitly names the stages or asks for cross-stage synchronization.
-- Multi-stage authorization MUST be recorded from the user's own words in the evidence file or produced report; otherwise the task is single-stage.
-- Every single-stage task MUST maintain `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, one repo-relative path per line, plus `<task-id>.paths.meta.json` recording schema `1`, stage, version, module, optional submodule, optional `.harness/baselines/<task-id>/manifest.json`, and implementation `change_ids`.
-- Bootstrap and Harness refresh create project-root `.harness/` and ensure `.gitignore` contains `.harness/` without removing existing entries. Runtime files under `.harness/` are omitted from task path manifests.
-- Every direct `uv` invocation uses `UV_CACHE_DIR=.harness/uv-cache`; root shortcuts set the equivalent absolute project-local cache path before any `uv` command. Do not allocate per-task `UV_CACHE_DIR` paths under `/tmp`.
-- A testing task that edits an existing Rust inline test MUST capture the target before editing with `harness/scripts/baseline-snapshot.py`. Never synthesize a baseline through `GIT_INDEX_FILE`, `git read-tree`, `git write-tree`, or `git commit-tree`.
-- Changing an upstream document does not authorize downstream edits. Record the return route or follow-up unless the user explicitly requested those edits.
-- Before finishing a single-stage task, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/stage-scope-check.py --stage <stage> --version <version> --module <module> --changed-paths-file docs/versions/<version>/evidence/stage-scope/<task-id>.paths` plus `--submodule <task-seq>-<task-slug>` for task packets.
-- Do not rerun a passing stage-scope check unless the manifest, sidecar metadata, baseline, a governed task path, or the admitted design Scope Paths changed after that pass. Acceptance and `check-all.py` reuse the existing result.
-- Implementation-stage scope checks also pass concrete `--target-module <project>` and repeatable `--change-id <change_id>` so recorded paths are bound to the correct project's admitted design `Scope Paths`.
-- Whole-worktree git status or diff is diagnostic only; task completion evidence MUST use the explicit path manifest.
+## Workflow Tier Classification
+- Classify risk before selecting a stage or creating durable artifacts. Use `trivial`, `standard`, or `high-risk`.
+- `trivial` requires all of the following: the request is clear; impact is localized to one project module; no material public contract/protocol/CLI, persistent data/schema/migration, security/privacy, concurrency/lifecycle/runtime integration, dependency/build graph or supply-chain trust, produced artifact, production default/feature rollout, release/deployment, compatibility/rollback, UI/accessibility workflow, Harness-process, cross-project, or architectural-boundary impact is known; and a targeted verification signal is available.
+- `standard` is the default for bounded single-project feature, bugfix, or refactor work that is not trivial and has no high-risk trigger.
+- `high-risk` is mandatory by default when evidence confirms any material impact above, rollback or compatibility requires coordination, ambiguity materially affects scope or acceptance, or the user explicitly requests a staged proposal/design/testing/acceptance artifact or auto-pipeline. A matching path, filename, or broad risk category is screening evidence only and never confirms high-risk by itself.
+- Documentation-only or configuration-only work remains `trivial` or `standard` by default when it changes no governed intent, runtime behavior, public contract, data, security boundary, dependency/build graph, supply-chain trust, produced artifact, production default/rollout, release/deployment surface, compatibility, or rollback requirement. Classify by consequence, not file type.
+- Task size alone never downgrades risk. Before proposal confirmation, start at the lowest tier supported by evidence and automatically revise the proposed tier when investigation reveals a higher-risk condition; the single mandatory proposal confirmation settles the final tier.
+- An explicit current-user tier selection wins over the generated default unless it conflicts with system/developer instructions, safety requirements, or a non-Harness repository constraint. Selecting a tier changes the generated rules and mechanical gates that apply; it does not waive gates within the selected tier. Surface known risk when following an explicit downgrade.
+- Before running a tier's side-effecting default flow or creating post-proposal artifacts, stabilize the recommendation through read-only inspection and proposal routing, then obtain user confirmation.
+
+## Tier Default Flows
+- All tiers retain the approved common `task.yaml` plus `proposal.md` packet and use the same task name and storage rules.
+- For any lower-tier task containing GitHub issue information, implementation, targeted verification, and the completion review MUST judge the delivered behavior against the issue description first; Harness packet/report completion remains secondary evidence and adds no issue-specific artifact.
+- `trivial`: after confirmation, run `lower-tier-check.py --profile pre-edit` before project mutation; it validates the approved proposal and captures the same required task-start working-tree baseline used by high-risk stages. It copies only tracked files already dirty before the task and existing non-ignored untracked files, excluding `harness/`, `.harness/`, and `docs/`. Inspect relevant code, make the smallest change, and run the narrowest useful repository-native check. Then perform a fresh proportional falsification pass over behavior/logic, boundaries/failure paths, and regression/side effects; do not reuse the implementation self-assessment as the review conclusion. Write task-local `completion-report.md`, then run `lower-tier-check.py --profile completion`; it must compare the saved state with final dirty tracked/untracked paths to produce the canonical changed-path manifest before validating the report. Remove only after every task `change_id`, the actual delivery scope, concrete independent defect-discovery evidence, targeted verification, and accepted conclusion pass. Do not create a risk profile, change record, design/testing document, testplan, or full `acceptance-report.md`.
+- `standard`: after the same working-tree-baseline-backed lower-tier pre-edit check, create one lightweight `docs/changes/<change>.md` from `docs/changes/_template.md`, link the common task/proposal, record approach, compact risk screen, affected implementation evidence, and verification; implement and verify in one continuous flow; mark the record complete; then write and validate the same task-local defect-discovery `completion-report.md`. The reviewer actively searches for counterexamples instead of proving the change record complete. Completion first generates the canonical changed-path manifest from the required baseline. Removal requires the complete bound change record plus accepted proposal/current-delivery consistency, complete proportional defect-discovery coverage, and passing targeted verification. Do not create separate design/testing/full-acceptance artifacts or a risk profile.
+- `high-risk`: after confirmation, add `risk-profile.yaml` and use the design, implementation, testing, lifecycle-check, and acceptance rules below in the already-created packet.
+- The lower-tier completion report is a proportional close gate, not a high-risk lifecycle stage: it does not add design/testing receipts, a testplan, or the full acceptance report. Upgrade only when current evidence requires it.
+- Lower-tier report conclusions use the same meanings as high-risk acceptance: `needs changes` for a correction within the approved intent, `rejected` for a user decision/abandonment/re-scope, and `accepted` only after the proportional defect search passes.
+
+## Automatic Upgrade
+- Before initial confirmation, a confirmed higher-risk condition changes the proposed tier immediately. Update `proposal.md` and rerun proposal routing; do not ask for a separate upgrade decision because the mandatory proposal/tier confirmation will settle it.
+- After confirmation, the user-selected tier remains authoritative. Newly requested scope or a requirement change returns the task to proposal, sets the proposal to draft, recomputes the recommendation, and requires confirmation again before further project mutation. Newly discovered risk within the confirmed scope is surfaced and recorded; it does not silently replace the user's tier.
+- If a reconfirmed tier changes from `trivial` to `standard`, create the standard change record and continue. If it changes to `high-risk`, add the risk profile and missing full-lifecycle artifacts to the existing packet and continue from the earliest responsible stage. Never allocate a second task name or packet for the same confirmed requirement revision.
+- A lower-tier `general` route never carries into high-risk. On a user-confirmed high-risk transition, reclassify it to proposal, design, implementation, testing, or acceptance and reroute before further project edits.
+
+## Task Classification
+- Use `general` only for trivial/standard analysis, diagnosis, explanation, internal documentation, or non-behavioral maintenance that does not fit another responsibility stage. It is a routing fallback, not a high-risk lifecycle stage.
+- The mandatory formal `proposal.md` does not by itself select `high-risk`. An explicit request for the full staged lifecycle, a separate design/testing/acceptance artifact, or auto-pipeline selects the high-risk workflow for that scope; the stage remains a responsibility, not a file write scope.
+- In high-risk work, a request that changes goals, scope, non-goals, supported/unsupported behavior, acceptance boundaries, or success evidence is proposal work. Lower tiers record the decision in their handoff or single change record.
+- A production-code, bugfix, optimization, refactor, runtime, UI-behavior, or build-behavior change is implementation-shaped. High-risk work uses `harness/rules/implementation-rules.md`; lower tiers use their tier default flow.
+- Harness governs workflow responsibility and evidence, never repository permissions. Read or write any project file needed for the current user request; no task packet, stage, `Scope Paths`, changed-path manifest, router result, or checker result grants or revokes that access. A failed workflow check blocks completion or routes follow-up, not file access.
+- Never ask the user to skip Harness rules to inspect or modify repository files.
+- Ambiguity that affects behavior, scope, risk, module, task packet, or `change_id` returns to the owning upstream stage instead of being guessed.
+
+## Task Packet Selection
+- This section applies to every governed task. Every new task creates and registers one common proposal packet before confirmation; high-risk later expands that same packet.
+- Every new task begins with canonical `task.yaml`, `workflow_tier: pending`, and draft `proposal.md`. After confirmation, replace `pending` with the final tier. Create `risk-profile.yaml` and downstream stage artifacts only for final `high-risk` work.
+- Every new task name MUST use `<task-seq>-<task-slug>` regardless of final tier.
+- Single-project packets live at `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`.
+- Cross-project packets live at `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/`; `globals` is a packet-module keyword, never a production target.
+- Maintain machine-owned `.harness/tasks/<version>/tasks.json` only through `harness/scripts/task-index.py`: run `init --version <version>` to create it, `add --task <packet>/task.yaml` after packet creation, `list --version <version> --module <module>` for selection, `remove --task <packet>/task.yaml` only after successful completion, and `validate --version <version>` for integrity. Never edit or parse the JSON by hand; other scripts must reuse `task-index.py` helpers.
+- For manual high-risk work, never edit `task.yaml.stage` directly. Use `task-transition.py advance` after each stage and `task-transition.py complete` in acceptance; it records content-bound completion receipts in task-packet `lifecycle.json`. Final `task-index.py remove` fails unless the full receipt chain is valid.
+- Select an existing packet only from an explicit current-user reference or a module's Current/Active Task field. Never infer it from sequence, directory order, timestamp, old code, chat history, or a broad module overview.
+- A clearly different-module request gets a new packet. If module-filtered `task-index.py list` output contains multiple unfinished packets that could apply and the user did not identify one, ask which packet to use; clearly new work still gets a sibling packet.
+- An approved packet document is frozen for the confirmed requirement. Clearly new requirements use a sibling packet; revisions to the current unfinished task return its proposal to draft, record the reason, and require confirmation again.
 
 ## Approval Authority
-- Agents MUST NOT set `status: approved` or fill `approved_by` / `approved_at` on stage documents on their own initiative.
-- Document-stage tasks deliver `status: draft` by default.
-- Approval is allowed only from an explicit user approval instruction, recorded in `## Approval Record` with `approver`, `approval_date`, and verbatim `user_statement`, or from auto-pipeline auto-confirm backed by `pipeline/plan.md` launch evidence.
-- Approval metadata may be updated only as part of explicit approval for that document.
-- `schema-check.py` and `admission-check.py` fail closed on missing, placeholder, inconsistent, agent-like, or unverifiable approval provenance.
+- Every tier's common `proposal.md` requires explicit current-user confirmation before execution. Other standalone stage-document approvals apply only to high-risk.
+- Every proposal confirmation request MUST include the proposed tier and rationale. If the user supplies a different tier, apply that tier immediately, reroute, and use only that tier's required artifacts. A tier-only reply does not approve unresolved questions listed separately in the confirmation request.
+- Proposal-stage work ends at `status: draft`; after the user confirms the displayed file and tier, record the final tier and set it to `status: approved`. Any material difference from what was displayed remains draft and requires confirmation again. High-risk downstream document approval may also use the auto-pipeline transition defined by `harness/rules/auto-pipeline-rules.md`.
+- Silence or inferred intent is not approval.
+- `schema-check.py` validates only the status value. It intentionally does not validate approver identity, conversation provenance, timestamps, or approval records.
 
-## Requirement And Scope Classification
-- Requests that add, remove, narrow, widen, or reclassify goals, scope, non-goals, obligations, supported/unsupported behavior, acceptance boundaries, or success evidence default to proposal stage.
-- Requirement language such as "does not need", "no longer needs", "should not provide", "must provide", "support", or "do not support" defaults to proposal stage unless the user explicitly requests downstream synchronization.
-- Proposal-stage work updates `proposal.md`, fills `## Requirement Review` and `## Proposal Items`, and keeps the document focused on requirements, boundaries, tradeoffs, success criteria, `change_id` values, and approval.
-- Before proposal completion, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs proposal`.
+## Stage Ownership
+- Separate stage ownership is the high-risk default. Trivial and standard tasks combine their responsibilities in one continuous flow.
+- A stage names the task's primary responsibility and expected evidence. Completion fails when the task's changed-path manifest contains artifacts owned by another stage.
+- If work needs artifacts owned by another stage, return or split the work before completion and record the synchronization so the artifact chain remains understandable.
+- Proposal owns requirements, acceptance boundaries, and scripted new-task registration. Design owns implementation shape and Scope Paths. Implementation owns design-bound production changes. Testing owns test design/implementation and task test evidence. Acceptance owns independent defect discovery, requirement/design/implementation/testing findings, secondary document consistency, reporting, and scripted removal of a successfully completed task from `tasks.json`.
+- Detailed content and completion guidance live in the current stage's authoritative rule files listed in `AGENTS.md`.
+- After provisional tier and stage classification, run `harness/scripts/context.py` with both values and the common packet. Proposal-document rules apply to every tier; downstream high-risk stage rules remain excluded from lower-tier routes while matching risk triggers can still inform the pre-confirmation recommendation. Router output is never an exhaustive read list; inspect any additional repository files needed. Loading the quality-gate rule does not execute its gates.
 
-## Implementation Entry Gate
-- Implementation-shaped requests MUST NOT edit code immediately.
-- First locate or create the active task packet from the current user request, `docs/modules/<module>.md` Current/Active Task, or a confirmed `docs/versions/<version>/modules/tasks.md` unfinished-task record; then identify `version`, `module`, and concrete `change_id` values.
-- Task packets under a project-level module or `globals` MUST identify `submodule=<task-seq>-<task-slug>` for generated checkers.
-- `globals` is a specialized packet-module keyword, not an implementation target. Cross-project work uses `globals/<task-seq>-<task-slug>/` for shared intent and binds each affected project independently with `--module globals --submodule <task-seq>-<task-slug> --target-module <project>`.
-- Do not reuse older task packets for new work, and do not edit approved packets to absorb new work.
-- Before implementation starts, read approved `proposal.md` plus approved `design.md` in manual flow, or the user-launch-confirmed `proposal.md` plus validated `pipeline/plan.md` design mappings and `Scope Paths` in auto-pipeline.
-- Create `docs/versions/<version>/evidence/admission/<evidence-id>.md`, where `<evidence-id>` is `<YYYYMMDD>-<task-slug>` using today's date. The dated evidence id MUST NOT be used as the task packet name or unfinished-index `task_id`; those remain `<task-seq>-<task-slug>`.
-- Admission evidence MUST include `proposal_read`, `design_read`, `change_scope_matches_request`, `active_module_resolved`, `same_module_task_selection`, and `no_chat_only_evidence`, each `pass` with concrete source and notes.
-- Evidence MUST include `## Document Binding` hashes from `admission-check.py --print-doc-hashes` and `## Coverage Quotes` for each admitted `change_id` from proposal plus the active design source (`design.md` or `pipeline/plan.md`).
-- `admission-check.py` re-verifies hashes and quotes against current documents and writes the only valid admission stamp. Do not hand-write stamp files.
-- Before code edits, run:
-  - `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-  - `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
-- Add `--submodule <task-seq>-<task-slug>` to both checks for task packets.
-- Code modification may begin only after admission passes with the task evidence file.
-- If schema and admission already passed for the exact current packet documents, evidence, target module, `change_id` values, and Scope Paths, reuse those results. A later stage, acceptance, commit, CI, or report is not a reason to rerun them.
+## Path Evidence
+- Changed-path manifests are required evidence where the selected tier/stage says so. Design `Scope Paths` remain planned-impact metadata; `stage-scope-check.py` rejects changed paths outside the active stage's artifact group.
+- `.harness/` remains the git-ignored runtime root for unfinished-task indexes, generated evidence, caches, pipeline state, and run results.
+- `stage-scope-check.py` MUST return non-zero for a changed path outside the active stage's artifact group. It MUST NOT reject a path solely because it is outside declared design `Scope Paths`.
 
-## Default Stage Classification
-- If the user does not explicitly name proposal, design, testing, or acceptance, classify by likely artifact changes.
-- Requirement or acceptance-boundary changes classify as proposal first.
-- Code-changing requests run implementation admission first.
-- Failed admission routes to the earliest missing or non-covering document stage.
-- Missing active module, submodule, or concrete mapped `change_id` routes to proposal or design.
-- `change_id` maps only from the required proposal and design mapping-table columns.
-- Oral requirements, chat context, old implementation, module overviews, and historical notes are not admission evidence.
-- Ambiguity affecting scope, behavior, risk, or validation routes upstream instead of being guessed.
-- "Read code first" permits inspection only. If inspection reveals a document gap, stop the code path and return upstream.
+## Implementation Transition
+- This section applies only to high-risk implementation. Trivial and standard implementation begins after their tier-specific preparation above.
+- Record explicit `version`, `packet_module`, `task_name`, implementation targets, and concrete `change_id` values in `task.yaml` when maintaining task traceability.
+- Apply `harness/rules/implementation-rules.md` for preparation and design mapping.
 
 ## Return Routing
-- Missing task packet or unapproved `proposal.md`: proposal stage.
-- Missing direct proposal coverage: proposal stage.
-- Manual flow missing or unapproved `design.md`: design stage.
-- Auto-pipeline missing pipeline-plan design mapping or concrete `Scope Paths`: auto-pipeline design task.
-- Missing direct design, boundary, or interface coverage in the active design source: design stage.
-
-## Examples
-- "Fix a 500" is implementation-shaped: run entry gate and admission before code edits.
-- "No longer needs X" is proposal-stage requirement language.
-- "Update design.md" is design write scope only.
-- "Look at why this is slow" allows inspection only until a fix is requested.
+- Missing packet, missing proposal coverage, or a requirement/acceptance-boundary defect: proposal.
+- Missing or inadequate manual design, auto-pipeline design mapping, interface, state/failure model, implementation sequence, Scope Paths, or a design defect found during acceptance: design.
+- Missing task-test coverage, weak defect-detection coverage, or non-runnable task evidence: testing.
+- Implementation defect against adequate governing sources: implementation.
+- Proposal ambiguity or contradiction found during acceptance: finish the canonical report with a blocking requirement finding and `rejected`, then stop and ask the user; do not auto-return it.

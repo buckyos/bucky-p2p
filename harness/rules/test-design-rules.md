@@ -1,5 +1,7 @@
 # Test Design Rules
 
+These full coverage contracts are the high-risk default. Trivial and standard tasks select the lowest-cost targeted verification that can expose the changed behavior; they upgrade to high-risk when discovered test scope reveals a high-risk boundary.
+
 ## Goal
 - Define how post-implementation test cases are designed and recorded.
 - Make completeness derivable from approved design documents and delivered code.
@@ -14,7 +16,7 @@
 ### Unit
 - Object: changed functions, methods, and branches; external dependencies are stubbed or mocked.
 - Placement: code inside an existing Rust `#[cfg(test)]` item is test code, but every newly created unit test MUST be implemented in a dedicated test file, test directory, or test-only crate/package rather than as a new inline test body in a production source file.
-- Mechanical scope: when testing changes an existing inline Rust test item, `baseline-snapshot.py` first captures the file under `.harness/baselines/<task-id>/`, and `stage-scope-check.py --baseline-manifest ...` passes it only if all changes are confined to pre-existing exact `#[cfg(test)]` items. It fails closed for a missing/tampered baseline, a newly added inline item, or any production-content change.
+- File placement is stage evidence rather than filesystem permission: new tests belong in dedicated test files/directories/packages. Testing-stage validation rejects production paths except a mechanically proven edit confined to an existing Rust `#[cfg(test)]` item with selected-file baseline evidence.
 - MUST cover every public function touched by implemented `change_id` values and every conditional branch in changed code: if/else arms, match/switch arms, early returns, error returns, loop zero/one/many iterations, and boundary comparisons.
 - Uncovered branches MUST be recorded per branch with a concrete reason in `## Unit Tests`.
 - Not responsible for cross-module behavior, real external I/O, or full workflows.
@@ -34,10 +36,12 @@
 
 ### API and Repository Consumer Contracts
 - These contract checks complement, and do not replace, unit/DV/integration levels.
-- Breaking public APIs require: new-path external compilation succeeds; old-path external compilation is rejected for the expected removed symbol; the repository scan has no unallowlisted old-symbol references; and all affected repository consumers compile.
+- Required contract kinds are: breaking APIs use `external-positive`, `external-negative`, `removed-symbol-scan`, and `repository-compile-closure`; migration-required APIs omit only `external-negative`; crate-root export changes use `external-positive` plus compile closure; build-surface-only changes use compile closure; documentation-example impact uses `documentation-examples`.
+- The breaking-API negative wrapper succeeds only when compilation fails for the expected removed symbol; raw failing compiler commands are not valid evidence.
 - Repository consumers include production references, tests, examples, benches, doctests, README/documentation compile fixtures, and downstream workspace packages identified by design.
+- Risk-triggered contracts declare `evidence_inputs` covering production scope, repository consumers, external fixtures, tests, and affected documentation.
 - A text scan is discovery/absence evidence, not a substitute for compiler closure. Aliases, re-exports, macros, feature combinations, and generated targets require compiler-backed checks where applicable.
-- The canonical removed-symbol absence check is `harness/scripts/consumer-closure-check.py`; ad hoc `rg`, shell-negated searches, or pasted search output are not acceptance evidence.
+- The canonical removed-symbol absence check is `harness/scripts/consumer-closure-check.py`; ad hoc `rg`, shell-negated searches, or pasted search output are not machine-valid testing evidence.
 
 ## Lowest-Level Placement
 - Verify behavior at the lowest level that can expose its failure: pure logic at `unit`, single-module runtime behavior at `dv`, cross-module contracts at `integration`.
@@ -69,6 +73,6 @@ Test cases MUST derive from design artifacts. Each derivation source below gets 
 - Status vocabulary: `covered`, `gap`, `manual`, `disabled`, `not-applicable`; non-covered statuses need concrete reasons.
 
 ## Guardrails
-- In manual flow, `doc-structure-check.py --docs testing` validates level tables, design element coverage, case-type `level`, and placeholder-only rows when optional `testing.md` exists. Auto-pipeline does not run that document check and validates pipeline-plan testing tables plus `testplan.yaml` through `testing-coverage-check.py`.
+- When testing is before `auto_pipeline_start_stage`, it retains manual semantics: `doc-structure-check.py --docs testing` validates level tables, design element coverage, case-type `level`, and placeholder-only rows in `testing.md`, while `testing-coverage-check.py` validates its `testplan.yaml` mappings. Only automatic testing skips that document check and stores coverage/gaps in runtime state alongside `testplan.yaml`.
 - Acceptance MUST audit per-level depth, not only case-type row presence.
-- Execution evidence and unified-entrypoint registration are governed by `testing-doc-rules.md` and `unified-test-entry-rules.md`.
+- Unified-entrypoint registration and execution evidence are governed by `unified-test-entry-rules.md`.

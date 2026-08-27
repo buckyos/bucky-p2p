@@ -1,0 +1,204 @@
+schema_version: 1
+rules:
+  - id: task-entry-gate
+    file: harness/rules/task-entry-gate-rules.md
+    activation: bootstrap
+    tiers: [trivial, standard, high-risk]
+    stages: []
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: proposal-document
+    file: harness/rules/proposal-doc-rules.md
+    activation: stage
+    tiers: [trivial, standard, high-risk]
+    stages: [proposal]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: design-document
+    file: harness/rules/design-doc-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [design]
+    modes: [manual]
+    triggers: []
+    path_patterns: []
+  - id: implementation
+    file: harness/rules/implementation-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [implementation]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: implementation-admission
+    file: harness/rules/implementation-admission-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [implementation]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: testing-document
+    file: harness/rules/testing-doc-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [testing]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: test-design
+    file: harness/rules/test-design-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [testing]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: unified-test-entry
+    file: harness/rules/unified-test-entry-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [testing]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: acceptance-task
+    file: harness/rules/acceptance-task-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: acceptance-review
+    file: harness/rules/acceptance-review-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: schema-validation
+    file: harness/rules/schema-validation-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: quality-gate
+    file: harness/rules/quality-gate-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: auto-pipeline
+    file: harness/rules/auto-pipeline-rules.md
+    activation: mode
+    tiers: [high-risk]
+    stages: [design, implementation, testing, acceptance]
+    modes: [auto-pipeline]
+    triggers: []
+    path_patterns: []
+  - id: trigger-contract-protocol
+    file: harness/rules/triggers/contract-protocol.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [api, cli, contract, contract-protocol, event, interface, message, protocol, rpc, wire-format]
+    path_patterns: ["**/api/**", "**/cli/**", "**/proto/**", "**/protocol/**", "**/*api*", "**/*proto*"]
+  - id: trigger-data-schema
+    file: harness/rules/triggers/data-schema.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [cache-key, data, data-schema, database, migration, persistence, schema, serialization, storage]
+    path_patterns: ["**/db/**", "**/database/**", "**/migration/**", "**/migrations/**", "**/schema/**", "**/storage/**", "**/*migration*", "**/*schema*"]
+  - id: trigger-security
+    file: harness/rules/triggers/security.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [auth, authentication, authorization, encryption, identity, permission, privacy, secret, security, token]
+    path_patterns: ["**/auth/**", "**/identity/**", "**/permission/**", "**/permissions/**", "**/security/**", "**/secrets/**", "**/*auth*", "**/*permission*", "**/*secret*", "**/*token*"]
+  - id: trigger-runtime-integration
+    file: harness/rules/triggers/runtime-integration.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [background-job, concurrency, distributed, integration, lifecycle, network, retry, runtime, runtime-integration, scheduler, timeout]
+    path_patterns: ["**/integration/**", "**/runtime/**", "**/scheduler/**", "**/worker/**", "**/*integration*", "**/*runtime*", "**/*scheduler*"]
+  - id: trigger-build-config-deployment
+    file: harness/rules/triggers/build-config-deployment.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [build, build-config-deployment, config, dependency, deployment, environment, feature-flag, packaging, release]
+    path_patterns: [".github/workflows/**", "**/.github/workflows/**", "**/config/**", "**/deploy/**", "**/deployment/**", "**/scripts/**", "Cargo.toml", "Cargo.lock", "package.json", "pyproject.toml", "**/Cargo.toml", "**/Cargo.lock", "**/package.json", "**/pyproject.toml", "**/*config*", "**/*deploy*"]
+  - id: trigger-ui-workflow
+    file: harness/rules/triggers/ui-workflow.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [accessibility, frontend, localization, navigation, presentation, ui, ui-workflow, user-workflow]
+    path_patterns: ["**/frontend/**", "**/ui/**", "**/views/**", "**/web/**", "**/*component*", "**/*page*", "**/*view*"]
+  - id: trigger-harness-process
+    file: harness/rules/triggers/harness-process.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [general, proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [harness, harness-process, process, rule, test-infrastructure]
+    path_patterns: ["AGENTS.md", "harness/**", "skills/**", "**/AGENTS.md"]
+  # Compatibility entries for P2P's pre-index generated rules. They remain
+  # available for historical packets but are not part of normal routing.
+  - id: legacy-approval-metadata
+    file: harness/rules/approval-metadata-rules.md
+    activation: trigger
+    tiers: [high-risk]
+    stages: [proposal, design, testing]
+    modes: [manual]
+    triggers: [legacy-approval-metadata]
+    path_patterns: []
+  - id: legacy-direct-change-mapping
+    file: harness/rules/direct-change-mapping-rules.md
+    activation: trigger
+    tiers: [high-risk]
+    stages: [proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [legacy-direct-change-mapping]
+    path_patterns: []
+  - id: legacy-module-doc-exception
+    file: harness/rules/module-doc-exception-rules.md
+    activation: trigger
+    tiers: [high-risk]
+    stages: [proposal, design, implementation, testing, acceptance]
+    modes: [manual]
+    triggers: [legacy-module-doc-exception]
+    path_patterns: []
+  - id: legacy-proposal-first-acceptance
+    file: harness/rules/proposal-first-acceptance-rules.md
+    activation: trigger
+    tiers: [high-risk]
+    stages: [acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [legacy-proposal-first-acceptance]
+    path_patterns: []
+  - id: legacy-trigger-matrix
+    file: harness/rules/trigger-rules.md
+    activation: trigger
+    tiers: [high-risk]
+    stages: [proposal, design, implementation, testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [legacy-trigger-matrix]
+    path_patterns: []

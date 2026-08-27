@@ -11,16 +11,16 @@
 - Active task packet selected by the current user request, `docs/modules/<module>.md` Current/Active Task, or a confirmed unfinished-task record. Manual flow requires `proposal.md` and `design.md`; explicitly launched auto-pipeline requires `proposal.md` plus `pipeline/plan.md` design mappings and MUST NOT require `design.md`. Packet locations:
   - `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`
   - `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/`
-- `docs/versions/<version>/evidence/admission/<evidence-id>.md`.
+- `.harness/evidence/<version>/admission/<evidence-id>.md`.
 
 ## Admission Rule
 - Admission MUST pass before editing production code, build files, or resources.
 - Manual-flow packet docs MUST exist, be `status: approved`, and have valid approval provenance. Auto-pipeline requires an explicit current user launch whose verbatim instruction is recorded as task-local `pipeline/plan.md` `User launch statement`, plus valid dependency/interface/state/failure/alternative design evidence and concrete `Scope Paths`; agents never infer or synthesize launch, and proposal approval metadata is not required.
 - Approved status alone is not enough: the task MUST read the proposal plus active design source (`design.md` or pipeline-plan mappings) and confirm direct coverage.
 - Admission evidence MUST record `proposal_read`, `design_read`, `change_scope_matches_request`, `active_module_resolved`, `same_module_task_selection`, and `no_chat_only_evidence`, each `pass` with concrete source and notes.
-- Evidence file names MUST be `docs/versions/<version>/evidence/admission/<YYYYMMDD>-<task-slug>.md` using today's date.
+- Evidence file names MUST be `.harness/evidence/<version>/admission/<YYYYMMDD>-<task-slug>.md` using today's date.
 - Evidence MUST bind to current approved document content with `## Document Binding` hashes and `## Coverage Quotes` for each admitted `change_id`; `admission-check.py` re-verifies both and fails closed on mismatch.
-- A passing `admission-check.py` run writes `docs/versions/<version>/evidence/admission/<evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json`. Reuse that stamp while its bound documents, evidence, target module, `change_id` values, and Scope Paths remain unchanged. Never hand-write stamp files.
+- A passing `admission-check.py` run writes `.harness/evidence/<version>/admission/<evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json`. Reuse that stamp while its bound documents, evidence, target module, `change_id` values, and Scope Paths remain unchanged. Never hand-write stamp files.
 - Bugfix tasks follow the same rule unless a versioned repo rule defines a narrower exception.
 - Bugfix testing MUST produce red-green regression evidence for the bugfix `change_id`, or a concrete reason pre-fix reproduction is not feasible.
 - The active `version`, `module`, and concrete `change_id` values MUST be known; task packets also require `--submodule <task-seq>-<task-slug>`.
@@ -33,21 +33,21 @@
 ## Required Commands
 - Run the following only when no passing result exists for the current inputs or when their owned inputs changed. Do not replay them in acceptance or `check-all.py`.
 - `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/schema-check.py --version <version> --module <module>`
-- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file docs/versions/<version>/evidence/admission/<evidence-id>.md`
+- `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/admission-check.py --version <version> --module <module> --change-id <change_id> --evidence-file .harness/evidence/<version>/admission/<evidence-id>.md`
 - Add `--submodule <task-seq>-<task-slug>` to both commands for task packets.
 - For a `globals` packet, also add `--target-module <project>` and repeat admission independently for every affected project.
 
 ## Allowed Changes
 - Production code.
 - Required non-test runtime/build resources.
-- Task admission evidence under `docs/versions/<version>/evidence/admission/`.
+- Task admission evidence under `.harness/evidence/<version>/admission/` (runtime state; omit it from durable changed-path manifests).
 
 ## Execution Guardrails
 - Implement the minimum production change needed to satisfy the governing proposal/design and current request.
 - Keep changed production paths inside admitted design `Scope Paths`.
 - When the approved design lists multiple file-level modules, implementation MUST follow `## File-Level Implementation Sequence` in dependency order and create child tasks in that order.
 - Each file-level implementation child task MUST limit its context to the relevant proposal/design excerpts, child design document, `change_id`, `Scope Paths`, interfaces, and source files for that file-level module.
-- Record task paths in `docs/versions/<version>/evidence/stage-scope/<task-id>.paths`, then run `stage-scope-check.py --stage implementation --version <version> --module <module> --change-id <change_id> --changed-paths-file ...` before completion.
+- Record durable task paths in `.harness/evidence/<version>/stage-scope/<task-id>.paths`, then run `stage-scope-check.py --stage implementation --version <version> --module <module> --change-id <change_id> --changed-paths-file ...` before completion. Omit `.harness/` runtime paths from the manifest.
 - If extra paths are legitimately needed, return to design to extend `Scope Paths` or split the work into a separate admitted task.
 - Leave test implementation for post-implementation testing unless the user explicitly requested combined implementation/testing.
 - Match surrounding style, naming, and structure.

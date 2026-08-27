@@ -5,6 +5,7 @@
 - Ensure every generated or hand-written test can be run through one stable command surface.
 
 ## Scope
+- High-risk task evidence must use the task-scoped unified entrypoint. Trivial and standard tasks may invoke the repository's narrow native check directly and do not register a `testplan.yaml` by default.
 - project-root test shortcuts: `test-run.bat` on Windows and `test-run.sh` on Unix-like systems
 - `harness/scripts/test-run.py`
 - generated test implementation
@@ -31,18 +32,21 @@
 - The root shortcut MUST NOT bypass the unified test entrypoint.
 - The unified test interface MUST be able to run every project test that is part of the harness evidence chain.
 - Bootstrap and harness refresh work MUST replace the empty example `MODULE_SUITES` mapping with explicit registrations for the target repository. Each registered module MUST define a non-empty canonical `all` suite; scaffold self-check MUST fail when no canonical module suite is registered.
+- `<module> all` and `all all` MUST compose every command registered under that module's `unit`, `dv`, `integration`, and explicit `all` suites, de-duplicating identical argv. Adding a level-specific regression therefore cannot leave the canonical `all` entrypoint unaware of it.
 - A testing task is not complete until every new or changed test implementation is registered with, or otherwise reachable through, the unified test interface.
-- Every task-local `testplan.yaml` MUST declare `task_name` and register only as `<module>/<task-name>`; it MUST NOT be attached to the bare `<module>` scope.
+- Every task-local `testplan.yaml` MUST reference `task_manifest: task.yaml`; the runner derives its registration as `<module>/<task-name>` from the canonical packet path, and it MUST NOT attach the plan to the bare `<module>` scope.
 - Package/module suites are mandatory maintenance commands independent of task plans; they MUST never be selected by single-task execution.
 - Risk-triggered task-local contract steps are not module-suite selection. `<module>/<task-name> all` MAY execute a design-required package/workspace compile-only closure while remaining a task-scoped artifact; it MUST NOT execute the broad runtime suite.
+- A task-local `repository-compile-closure` MAY run a package/workspace compile-only command such as `cargo test -p <package> --no-run --all-targets`; this does not authorize the package runtime test suite.
+- Rust `--all-targets` excludes doctests. When documentation examples are affected, add a separate `documentation-examples` step such as `cargo test -p <package> --doc`, or a repository-defined README/example compile wrapper.
 - Generated tests, `testing.md`, and `testplan.yaml` must reference the same validation surfaces for completed testing work.
 - Test scripts MUST be non-interactive and return meaningful exit codes.
 - New test execution paths MUST be added to the canonical entrypoint instead of creating unrelated ad hoc commands.
-- Test implementation may use local framework-specific commands internally, but acceptance and pipeline tasks must call them through `harness/scripts/test-run.py`.
+- Test implementation may use local framework-specific commands internally, but testing and pipeline test tasks must call them through `harness/scripts/test-run.py`.
 
 ## Execution Contract
 - Unknown modules or test levels MUST exit non-zero.
-- Every real run (not `--list` / `--dry-run`) MUST write a machine-readable run artifact to `test-results/test-runs/` recording requested task scope, requested level, covered `change_ids`, each executed command, its registration sources, exit code, duration, and optional informational git state. It MUST NOT calculate or record a repository/package state hash. `test-results/` is generated output, lives outside `harness/`, and MUST be listed in `.gitignore`.
+- Every real run (not `--list` / `--dry-run`) MUST write a machine-readable run artifact to `.harness/test-results/test-runs/` recording requested task scope, requested level, covered `change_ids`, each executed command, its registration sources, exit code, duration, and optional informational git state. `.harness/` is generated runtime state, lives outside durable `harness/` tooling, and MUST be listed in `.gitignore`.
 - `<module>/<task-name> all` MUST run only the task's `unit`, `dv`, and `integration` testplan commands.
 - `<module>/<task-name> all` MUST run enabled task-local `contract_checks` before the task's unit/DV/integration commands. Contract sources record `contract_kind` and its exact assertion in the run artifact.
 - Single-task testing, acceptance, and auto-pipeline completion MUST invoke only `<module>/<task-name> <level-or-all>` and MUST NOT invoke `<module> <level-or-all>`, `all all`, or a root shortcut defaulting to those broader scopes.
@@ -50,9 +54,9 @@
 - Exact argv duplicates MUST execute once and the run artifact MUST preserve all contributing registration sources.
 - The runner MUST NOT infer semantic containment between different argv values. Broad and filtered framework commands remain distinct unless scope isolation prevents them from being selected together.
 - Enabled steps MUST execute in declared order.
-- "success without executing steps" MUST be reserved for task scopes whose every selected level is `manual` or `disabled` with a concrete reason; the run artifact records those non-executed levels and is not automated acceptance evidence by itself.
+- "success without executing steps" MUST be reserved for task scopes whose every selected level is `manual` or `disabled` with a concrete reason; the run artifact records those non-executed levels.
 - Each enabled step MUST declare stable machine-readable fields `id`, `name`, `change_ids`, and `run`.
 - Each contract step MUST additionally declare `kind` and the matching fixed `assertion`; arbitrary prose assertions do not satisfy acceptance.
-- Task runs with API/build-surface contract checks MUST record expanded `evidence_inputs` plus `evidence_input_sha256`; acceptance recomputes the scoped hash instead of relying on a whole-repository hash.
-- Each enabled step MUST declare the `change_ids` it validates when it is used as acceptance evidence.
+- Task runs with API/build-surface contract checks MUST record their expanded `evidence_inputs`.
+- Each enabled step MUST declare the `change_ids` it validates for testing and pipeline traceability.
 - `harness/scripts/schema-check.py` MUST reject unknown levels, duplicate step ids, enabled levels without steps, enabled steps without `change_ids`, and manual or disabled levels without reasons when `testplan.yaml` exists.

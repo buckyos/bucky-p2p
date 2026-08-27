@@ -1,0 +1,10 @@
+schema_version: 1
+rules:
+  - id: module-interface-export
+    file: harness/custom-rules/module-interface-export-rules.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [design, implementation, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: [module-interface, refactor, rust-module]
+    path_patterns: ["**/mod.rs"]

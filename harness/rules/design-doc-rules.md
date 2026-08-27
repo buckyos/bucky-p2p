@@ -5,19 +5,19 @@
 - Keep design documents readable by using UML diagrams for module relationships and source-language signatures for file-level interfaces.
 
 ## Scope
+- This rule is part of the high-risk workflow. Trivial and standard work does not create `design.md` or task-local `design/` artifacts.
 - Single-project design: `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/design.md` and optional task-local `design/`.
 - Cross-project design: `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/design.md`.
 - Required long-lived boundary sync in `docs/modules/<module>.md`.
 - Project-rule-required updates to global architecture docs under `docs/architecture/`.
 
 ## Required Metadata
-- `module`
-- `version`
+- `task_manifest: task.yaml`
 - `status`
-- `approved_by`
-- `approved_at`
+- Do not repeat `module`, `version`, `task_name`, or `submodule`; canonical identity comes from `task.yaml`.
 
 ## Required Content
+- Reference `Risk profile: ./risk-profile.yaml`; for every applicable task-level risk, complete its concrete evidence paths and `required_checks` there, and do not copy a Trigger Matrix into `design.md`.
 - Design scope, useful context, and the smallest sufficient overall approach.
 - A top-down layered design decomposition from the whole affected module to submodules, nested submodules, and file-level modules.
 - A design document index that names each level's independent design document; child level documents live under the parent module document directory's `design/` directory and are named after the child submodule.
@@ -27,17 +27,13 @@
 - State/data ownership only for persistent data or shared state affected by the task.
 - Direct change mapping with stable `change_id` values, a concrete `target_module`, and concrete `Scope Paths`.
 - File-level modules to create or modify, ordered by same-level dependency for implementation.
-- Implementation ordering constraints, material design notes, risks, rollback notes, and `## Approval Record`.
+- Implementation ordering constraints, material design notes, risks, and rollback notes.
 
 ## Guardrails
 - Design implements approved proposal intent without changing scope.
-- Design tasks deliver `status: draft`; agents MUST NOT approve their own documents.
-- Approval requires explicit user approval plus `## Approval Record`, or auto-pipeline approval backed by launch evidence, and MUST record `approved_content_sha256`.
-- After `status: approved`, this design is frozen for new requirements, new `change_id` values, scope expansion, success-criteria changes, downstream supplements, and implementation-scope widening; create a sibling task packet or amendment/fix packet instead of editing it.
-- Approval metadata may be updated only as part of explicit approval for this document; do not refresh the hash to make old edited approved content pass.
-- Design tasks are single-stage by default and MUST NOT edit proposal, testing, acceptance, code, tests, or another task packet unless explicitly requested.
+- Approval, packet immutability, and stage ownership follow `harness/rules/task-entry-gate-rules.md`; schema validation checks the document status only.
 - Design stays at module shape level: relationships, ownership, interfaces, external dependencies, key flows, state transitions, and implementation order. Avoid low-level implementation detail unless it affects a contract, dependency, state, or control flow.
-- Design docs MUST contain only useful content. Delete filler tables, placeholder sections, repeated proposal text, speculative extension points, idealized architecture, test planning, and facts that do not affect implementation, admission, or acceptance.
+- Design docs MUST contain only useful content. Delete filler tables, placeholder sections, repeated proposal text, speculative extension points, idealized architecture, test planning, and facts that do not affect implementation, scope binding, or acceptance.
 - Design MUST proceed top-down: whole affected project/module first, then direct submodules, nested submodules, and finally file-level modules. A lower level is not implementation-ready unless every parent level has a same-level design description and indexed child design document.
 - Each submodule or nested submodule level MUST have an independent design document under the parent module document directory's `design/` directory, with the file name based on the child submodule name, for example `design/<submodule>.md`. The parent design document MUST list the child document in `## Layered Design Document Index`.
 - Layered design documents belong to the active task's design artifact group. They describe the same task's decomposition and MUST NOT be used as a substitute for creating a sibling task packet for a new requirement or independent task.
@@ -65,15 +61,14 @@
 - The final design MUST identify every file-level module that will be created or modified. `## File-Level Implementation Sequence` MUST order those files by dependency so implementation child tasks can be created and executed in that order.
 - Existing-code designs describe current structure only where it constrains the change.
 - Large module roots with 3 or more distinct externally visible directories/files MUST model new independent features as direct submodules unless `## Design Notes` explains otherwise.
-- New task details belong in a new sibling task packet, not in older task `design/<task-seq>-<task-slug>/` directories or approved packets.
 - Human-authored design docs SHOULD stay well below 1000 lines; any doc above 1000 lines MUST be split by submodule, responsibility, validation layer, or interface boundary and the relevant document index must be updated.
 - Do not add idealized architecture, speculative features, extension points, configuration, or abstractions beyond the approved proposal.
 - New abstractions MUST match local patterns or remove real duplicated complexity, with the reason recorded in `## Design Notes`.
 - Cross-module work MUST identify every affected module.
-- Broad change buckets are not implementation admission evidence.
+- Broad change buckets are not valid implementation scope bindings.
 - Every `## Directly Mapped Change Items` row MUST name `target_module`. Single-project packets use their project module; `globals` packets use one row per affected project-level target and never use `globals` as the target.
-- `Scope Paths` in `## Directly Mapped Change Items` MUST be concrete repo-relative path prefixes or globs that cover exactly the allowed implementation area. Over-broad entries such as `src` are design findings.
-- Design MUST update `docs/architecture/` only when repo-local project rules require global architecture documentation changes. Default generated rules do not require mirrored implementation directories, proposal/design docs, or source hash bindings under `docs/architecture/`.
+- `Scope Paths` in `## Directly Mapped Change Items` are planned-impact hints only. They may be broad, may change during implementation, and never authorize or restrict repository reads or writes.
+- Design MUST update `docs/architecture/` only when repo-local project rules require global architecture documentation changes. Default generated rules do not require mirrored implementation directories or proposal/design docs under `docs/architecture/`.
 - Proposal ambiguity routes back to proposal.
 - Downstream testing or acceptance follow-up is recorded unless cross-stage synchronization is explicitly requested.
-- Before completion, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/doc-structure-check.py --version <version> --module <module> --docs design`.
+- Before completion, run `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/harness-check.py --task <packet>/task.yaml --profile completion`.
