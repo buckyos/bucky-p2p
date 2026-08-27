@@ -302,6 +302,7 @@ mod construction_tests {
     #[cfg(feature = "x509")]
     mod reverse_data_first_claim_tests {
         include!("tests/reverse_data_first_claim_tests.rs");
+        include!("tests/control_direction_priority_tests.rs");
     }
 
     struct TestCertFactory;

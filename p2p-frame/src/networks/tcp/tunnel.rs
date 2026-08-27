@@ -465,6 +465,8 @@ pub(crate) struct ReverseOpenTestSnapshot {
     pub pending_requests: usize,
     pub staged_entries: usize,
     pub data_connections: usize,
+    pub locally_created_connections: usize,
+    pub idle_connections: usize,
 }
 
 struct PendingOpenRequestGuard {
@@ -3066,6 +3068,18 @@ impl TcpTunnel {
                 .filter(|pending| pending.staged_entry.is_some())
                 .count(),
             data_connections: state.data_conns.len(),
+            locally_created_connections: state
+                .data_conns
+                .values()
+                .filter(|entry| entry.created_by_local)
+                .count(),
+            idle_connections: state
+                .data_conns
+                .values()
+                .filter(|entry| {
+                    matches!(entry.inner.lock().unwrap().state, DataConnEntryState::Idle)
+                })
+                .count(),
         }
     }
 
@@ -3535,20 +3549,7 @@ impl TcpTunnel {
         for _ in 0..4 {
             let entry = match self.find_claimable_entry(&skipped_conn_ids) {
                 Some(entry) => entry,
-                None => match self.create_data_connection(None).await {
-                    Ok(entry) => entry,
-                    Err(direct_err) => self.request_remote_data_connection().await.map_err(
-                        |reverse_err| {
-                            P2pError::new(
-                                reverse_err.code(),
-                                format!(
-                                    "direct data connection failed: {:?}; reverse data connection failed: {:?}",
-                                    direct_err, reverse_err
-                                ),
-                            )
-                        },
-                    )?,
-                },
+                None => self.create_data_connection_for_channel().await?,
             };
             let conn_id = entry.conn_id;
             match self.claim_entry(entry, kind, purpose.clone()).await {
@@ -3564,6 +3565,41 @@ impl TcpTunnel {
         Err(last_conflict.unwrap_or_else(|| {
             p2p_err!(P2pErrorCode::ErrorState, "no claimable data connection")
         }))
+    }
+
+    async fn create_data_connection_for_channel(
+        self: &Arc<Self>,
+    ) -> P2pResult<Arc<DataConnEntry>> {
+        match self.form {
+            TunnelForm::Active | TunnelForm::Proxy => {
+                match self.create_data_connection(None).await {
+                    Ok(entry) => Ok(entry),
+                    Err(local_err) => self.request_remote_data_connection().await.map_err(
+                        |peer_err| {
+                            P2pError::new(
+                                peer_err.code(),
+                                format!(
+                                    "preferred local-created data connection failed: {:?}; fallback peer-created data connection failed: {:?}",
+                                    local_err, peer_err
+                                ),
+                            )
+                        },
+                    ),
+                }
+            }
+            TunnelForm::Passive => match self.request_remote_data_connection().await {
+                Ok(entry) => Ok(entry),
+                Err(peer_err) => self.create_data_connection(None).await.map_err(|local_err| {
+                    P2pError::new(
+                        local_err.code(),
+                        format!(
+                            "preferred peer-created data connection failed: {:?}; fallback local-created data connection failed: {:?}",
+                            peer_err, local_err
+                        ),
+                    )
+                }),
+            },
+        }
     }
 
     async fn heartbeat_loop(self: Arc<Self>) {
