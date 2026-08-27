@@ -1,7 +1,6 @@
 use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
-use crate::executor::Executor;
 use crate::finder::DeviceCache;
 use crate::networks::{
     IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelRef,
@@ -23,7 +22,9 @@ use sfo_reuseport::{
 use std::io::{self, IoSliceMut};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::runtime::Handle as TokioRuntimeHandle;
@@ -35,8 +36,31 @@ const UDP_PUNCH_MAGIC: &[u8] = b"\x00#@$QUIC";
 const UDP_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 const UDP_PUNCH_ACTIVE_START_OFFSET: Duration = Duration::from_millis(250);
 const UDP_PUNCH_REVERSE_START_OFFSET: Duration = Duration::ZERO;
-const UDP_PUNCH_DEADLINE: Duration = Duration::from_secs(1);
+const UDP_PUNCH_EARLY_ERROR_WINDOW: Duration = Duration::from_secs(1);
 const QUIC_ENDPOINT_READY_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+type UdpPunchSendObserver = Arc<dyn Fn() + Send + Sync>;
+
+struct AbortOnDropTask<T> {
+    task: tokio::task::JoinHandle<T>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    fn new(task: tokio::task::JoinHandle<T>) -> Self {
+        Self { task }
+    }
+
+    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        (&mut self.task).await
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 struct SfoQuicUdpSocket {
     socket: SfoUdpSocket,
@@ -329,6 +353,8 @@ pub(crate) struct QuicTunnelListener {
     closed: AtomicBool,
     worker_count: Arc<AtomicUsize>,
     server_runtime: ServerRuntime,
+    #[cfg(test)]
+    udp_punch_send_observer: Mutex<Option<UdpPunchSendObserver>>,
 }
 
 impl QuicTunnelListener {
@@ -360,7 +386,32 @@ impl QuicTunnelListener {
             closed: AtomicBool::new(false),
             worker_count: Arc::new(AtomicUsize::new(0)),
             server_runtime,
+            #[cfg(test)]
+            udp_punch_send_observer: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    fn set_udp_punch_send_observer(&self, observer: Option<UdpPunchSendObserver>) {
+        *self.udp_punch_send_observer.lock().unwrap() = observer;
+    }
+
+    async fn send_udp_punch_packet(
+        &self,
+        socket: &SfoUdpSocket,
+        remote: std::net::SocketAddr,
+        payload: &[u8],
+    ) -> Result<(), SfoReuseportError> {
+        #[cfg(test)]
+        {
+            let observer = self.udp_punch_send_observer.lock().unwrap().clone();
+            if let Some(observer) = observer {
+                observer();
+                return Ok(());
+            }
+        }
+
+        try_send_udp_punch_packet(socket, remote, payload).await
     }
 
     pub(crate) fn local(&self) -> Endpoint {
@@ -419,43 +470,51 @@ impl QuicTunnelListener {
             worker_index,
             remote
         );
-        endpoint
-            .runtime
-            .spawn(async move {
-                connect_with_ep(
-                    endpoint.endpoint,
-                    local_identity_ref,
-                    cert_factory,
-                    remote_identity_id,
-                    remote_name,
-                    remote,
-                    congestion_algorithm,
-                    timeout,
-                    idle_timeout,
-                )
-                .await
-            })
+        AbortOnDropTask::new(endpoint.runtime.spawn(async move {
+            connect_with_ep(
+                endpoint.endpoint,
+                local_identity_ref,
+                cert_factory,
+                remote_identity_id,
+                remote_name,
+                remote,
+                congestion_algorithm,
+                timeout,
+                idle_timeout,
+            )
             .await
-            .map_err(|err| {
-                p2p_err!(
-                    P2pErrorCode::ErrorState,
-                    "quic endpoint worker connect task failed: {}",
-                    err
-                )
-            })?
+        }))
+        .join()
+        .await
+        .map_err(|err| {
+            p2p_err!(
+                P2pErrorCode::ErrorState,
+                "quic endpoint worker connect task failed: {}",
+                err
+            )
+        })?
     }
 
-    pub(crate) fn start_udp_punch_burst(
+    pub(crate) async fn run_udp_punch_burst(
         &self,
         remote: Endpoint,
         intent: TunnelConnectIntent,
+        started_at: std::time::Instant,
         max_duration: Duration,
     ) {
         if !udp_punch_enabled_for_endpoint(&remote) {
+            log::trace!(
+                "quic udp punch stopped remote={} reason=candidate_policy",
+                remote
+            );
             return;
         }
-        let offsets = udp_punch_offsets_for_deadline(intent, max_duration);
-        if offsets.is_empty() {
+        let mut next_offset = udp_punch_start_offset(intent);
+        if next_offset > max_duration {
+            log::trace!(
+                "quic udp punch stopped remote={} reason=deadline_before_first_send",
+                remote
+            );
             return;
         }
         let punch_socket = {
@@ -464,33 +523,96 @@ impl QuicTunnelListener {
         };
         let Some(punch_socket) = punch_socket else {
             log::trace!(
-                "quic udp punch skipped remote={} because sender missing",
+                "quic udp punch stopped remote={} reason=sender_missing",
                 remote
             );
             return;
         };
         let payload = udp_punch_payload(intent);
-        Executor::spawn_ok(async move {
-            let mut last_offset = Duration::ZERO;
-            for (index, offset) in offsets.into_iter().enumerate() {
-                let sleep_duration = offset.saturating_sub(last_offset);
-                if !sleep_duration.is_zero() {
-                    runtime::sleep(sleep_duration).await;
-                }
-                if let Err(err) =
-                    try_send_udp_punch_packet(&punch_socket, *remote.addr(), payload.as_slice())
-                        .await
-                {
-                    log::trace!(
-                        "quic udp punch send failed remote={} index={} error={}",
-                        remote,
-                        index,
-                        err
-                    );
-                }
-                last_offset = offset;
+        let mut index = 0usize;
+        loop {
+            let elapsed = started_at.elapsed();
+            if elapsed > max_duration {
+                log::trace!("quic udp punch stopped remote={} reason=deadline", remote);
+                return;
             }
-        });
+            let wait_duration = next_offset.saturating_sub(elapsed);
+            if !wait_duration.is_zero() {
+                let closed = self.close_notify.notified();
+                tokio::pin!(closed);
+                if self.closed.load(Ordering::SeqCst) {
+                    log::trace!(
+                        "quic udp punch stopped remote={} reason=listener_close",
+                        remote
+                    );
+                    return;
+                }
+                tokio::select! {
+                    _ = runtime::sleep(wait_duration) => {}
+                    _ = &mut closed => {
+                        log::trace!(
+                            "quic udp punch stopped remote={} reason=listener_close",
+                            remote
+                        );
+                        return;
+                    }
+                }
+            }
+
+            if self.closed.load(Ordering::SeqCst) {
+                log::trace!(
+                    "quic udp punch stopped remote={} reason=listener_close",
+                    remote
+                );
+                return;
+            }
+            if started_at.elapsed() > max_duration {
+                log::trace!("quic udp punch stopped remote={} reason=deadline", remote);
+                return;
+            }
+
+            let closed = self.close_notify.notified();
+            tokio::pin!(closed);
+            if self.closed.load(Ordering::SeqCst) {
+                log::trace!(
+                    "quic udp punch stopped remote={} reason=listener_close",
+                    remote
+                );
+                return;
+            }
+            tokio::select! {
+                result = self.send_udp_punch_packet(
+                    &punch_socket,
+                    *remote.addr(),
+                    payload.as_slice(),
+                ) => {
+                    if let Err(err) = result {
+                        log::trace!(
+                            "quic udp punch send failed remote={} index={} error={}",
+                            remote,
+                            index,
+                            err
+                        );
+                    }
+                }
+                _ = &mut closed => {
+                    log::trace!(
+                        "quic udp punch stopped remote={} reason=listener_close",
+                        remote
+                    );
+                    return;
+                }
+            }
+
+            let Some(offset) =
+                udp_punch_next_offset(next_offset, started_at.elapsed(), max_duration)
+            else {
+                log::trace!("quic udp punch stopped remote={} reason=deadline", remote);
+                return;
+            };
+            next_offset = offset;
+            index += 1;
+        }
     }
 
     pub(crate) fn close(&self) {
@@ -779,16 +901,36 @@ fn udp_punch_start_offset(intent: TunnelConnectIntent) -> Duration {
     }
 }
 
+fn udp_punch_next_offset(
+    current_offset: Duration,
+    elapsed: Duration,
+    max_duration: Duration,
+) -> Option<Duration> {
+    let regular_next = current_offset.checked_add(UDP_PUNCH_INTERVAL)?;
+    let next_offset = if regular_next > elapsed {
+        regular_next
+    } else {
+        let earliest_next = elapsed.checked_add(UDP_PUNCH_INTERVAL)?;
+        let overdue = earliest_next.checked_sub(regular_next)?;
+        let interval_nanos = UDP_PUNCH_INTERVAL.as_nanos();
+        let overdue_nanos = overdue.as_nanos();
+        let intervals_to_skip = 1 + (overdue_nanos - 1) / interval_nanos;
+        let intervals_to_skip = u32::try_from(intervals_to_skip).ok()?;
+        regular_next.checked_add(UDP_PUNCH_INTERVAL.checked_mul(intervals_to_skip)?)?
+    };
+    (next_offset <= max_duration).then_some(next_offset)
+}
+
 pub(crate) fn udp_punch_burst_window(intent: TunnelConnectIntent) -> Duration {
     let _ = intent;
-    UDP_PUNCH_DEADLINE
+    UDP_PUNCH_EARLY_ERROR_WINDOW
 }
 
 fn udp_punch_offsets_for_deadline(
     intent: TunnelConnectIntent,
     max_duration: Duration,
 ) -> Vec<Duration> {
-    let deadline = max_duration.min(UDP_PUNCH_DEADLINE);
+    let deadline = max_duration;
     let start = udp_punch_start_offset(intent);
     if start > deadline {
         return Vec::new();
@@ -1067,56 +1209,27 @@ mod udp_punch_tests {
 
         assert_eq!(udp_punch_burst_window(active), Duration::from_secs(1));
         assert_eq!(udp_punch_burst_window(reverse), Duration::from_secs(1));
-        assert_eq!(
-            udp_punch_offsets_for_deadline(active, Duration::from_secs(3)),
-            vec![
-                Duration::from_millis(250),
-                Duration::from_millis(300),
-                Duration::from_millis(350),
-                Duration::from_millis(400),
-                Duration::from_millis(450),
-                Duration::from_millis(500),
-                Duration::from_millis(550),
-                Duration::from_millis(600),
-                Duration::from_millis(650),
-                Duration::from_millis(700),
-                Duration::from_millis(750),
-                Duration::from_millis(800),
-                Duration::from_millis(850),
-                Duration::from_millis(900),
-                Duration::from_millis(950),
-                Duration::from_millis(1000),
-            ]
+        let active_offsets = udp_punch_offsets_for_deadline(active, Duration::from_secs(3));
+        assert_eq!(active_offsets.first(), Some(&Duration::from_millis(250)));
+        assert_eq!(active_offsets.last(), Some(&Duration::from_secs(3)));
+        assert_eq!(active_offsets.len(), 56);
+        assert!(
+            active_offsets
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == Duration::from_millis(50))
         );
         assert_eq!(
             udp_punch_offsets_for_deadline(active, Duration::from_millis(300)),
             vec![Duration::from_millis(250), Duration::from_millis(300)]
         );
-        assert_eq!(
-            udp_punch_offsets_for_deadline(reverse, Duration::from_secs(3)),
-            vec![
-                Duration::from_millis(0),
-                Duration::from_millis(50),
-                Duration::from_millis(100),
-                Duration::from_millis(150),
-                Duration::from_millis(200),
-                Duration::from_millis(250),
-                Duration::from_millis(300),
-                Duration::from_millis(350),
-                Duration::from_millis(400),
-                Duration::from_millis(450),
-                Duration::from_millis(500),
-                Duration::from_millis(550),
-                Duration::from_millis(600),
-                Duration::from_millis(650),
-                Duration::from_millis(700),
-                Duration::from_millis(750),
-                Duration::from_millis(800),
-                Duration::from_millis(850),
-                Duration::from_millis(900),
-                Duration::from_millis(950),
-                Duration::from_millis(1000),
-            ]
+        let reverse_offsets = udp_punch_offsets_for_deadline(reverse, Duration::from_secs(3));
+        assert_eq!(reverse_offsets.first(), Some(&Duration::ZERO));
+        assert_eq!(reverse_offsets.last(), Some(&Duration::from_secs(3)));
+        assert_eq!(reverse_offsets.len(), 61);
+        assert!(
+            reverse_offsets
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == Duration::from_millis(50))
         );
         assert_eq!(
             udp_punch_offsets_for_deadline(reverse, Duration::from_millis(100)),

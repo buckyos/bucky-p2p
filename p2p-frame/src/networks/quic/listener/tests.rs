@@ -7,6 +7,7 @@ use crate::x509::{
     X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity,
 };
 use sfo_reuseport::ServerRuntimeConfig;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Barrier, Once};
 
 static TLS_INIT: Once = Once::new();
@@ -52,6 +53,275 @@ fn new_network() -> QuicTunnelNetwork {
         Duration::from_secs(10),
         ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap(),
     )
+}
+
+fn punch_remote() -> Endpoint {
+    let mut remote = Endpoint::from((
+        Protocol::Quic,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 49152)),
+    ));
+    remote.set_area(EndpointArea::ServerReflexive);
+    remote
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn udp_punch_missed_tick_keeps_normal_grid_and_intent_offsets() {
+    let active = TunnelConnectIntent::active_logical(crate::types::TunnelId::from(703));
+    let reverse = TunnelConnectIntent::reverse_logical(crate::types::TunnelId::from(704));
+
+    assert_eq!(udp_punch_start_offset(active), Duration::from_millis(250));
+    assert_eq!(udp_punch_start_offset(reverse), Duration::ZERO);
+    assert_eq!(
+        udp_punch_next_offset(
+            Duration::from_millis(250),
+            Duration::from_millis(260),
+            Duration::from_secs(1),
+        ),
+        Some(Duration::from_millis(300))
+    );
+}
+
+#[test]
+fn udp_punch_missed_tick_skips_delayed_history_without_catch_up() {
+    assert_eq!(
+        udp_punch_next_offset(
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        ),
+        Some(Duration::from_millis(5050))
+    );
+    assert_eq!(
+        udp_punch_next_offset(
+            Duration::from_millis(50),
+            Duration::from_millis(5001),
+            Duration::from_secs(10),
+        ),
+        Some(Duration::from_millis(5100))
+    );
+    assert_eq!(
+        udp_punch_next_offset(
+            Duration::from_millis(5050),
+            Duration::from_millis(5050),
+            Duration::from_secs(10),
+        ),
+        Some(Duration::from_millis(5100))
+    );
+}
+
+#[test]
+fn udp_punch_missed_tick_stops_at_deadline_and_on_duration_overflow() {
+    assert_eq!(
+        udp_punch_next_offset(
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        ),
+        None
+    );
+    assert_eq!(
+        udp_punch_next_offset(Duration::MAX, Duration::MAX, Duration::MAX),
+        None
+    );
+    assert_eq!(
+        udp_punch_next_offset(Duration::ZERO, Duration::MAX, Duration::MAX),
+        None
+    );
+    assert_eq!(
+        udp_punch_next_offset(
+            Duration::ZERO,
+            Duration::from_secs(60 * 60 * 24 * 365 * 7),
+            Duration::MAX,
+        ),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_punch_runtime_skips_missed_ticks_for_active_and_reverse() {
+    let intents = [
+        (
+            "active",
+            TunnelConnectIntent::active_logical(crate::types::TunnelId::from(705)),
+        ),
+        (
+            "reverse",
+            TunnelConnectIntent::reverse_logical(crate::types::TunnelId::from(706)),
+        ),
+    ];
+    for (intent_name, intent) in intents {
+        let listener = new_listener();
+        listener
+            .bind(
+                Endpoint::from((Protocol::Quic, "127.0.0.1:0".parse().unwrap())),
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        listener.start().await.unwrap();
+
+        let send_times = Arc::new(Mutex::new(Vec::new()));
+        let observed_send_times = send_times.clone();
+        let send_notify = Arc::new(Notify::new());
+        let observed_send_notify = send_notify.clone();
+        listener.set_udp_punch_send_observer(Some(Arc::new(move || {
+            observed_send_times
+                .lock()
+                .unwrap()
+                .push(std::time::Instant::now());
+            observed_send_notify.notify_one();
+        })));
+
+        let started_at = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .unwrap();
+        let punch_listener = listener.clone();
+        let mut punch = tokio::spawn(async move {
+            punch_listener
+                .run_udp_punch_burst(
+                    punch_remote(),
+                    intent,
+                    started_at,
+                    Duration::from_secs(10),
+                )
+                .await;
+        });
+        let observed_three = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if send_times.lock().unwrap().len() >= 3 {
+                    break;
+                }
+                send_notify.notified().await;
+            }
+        })
+        .await;
+
+        listener.close();
+        let punch_result = match tokio::time::timeout(Duration::from_secs(1), &mut punch).await {
+            Ok(result) => result,
+            Err(_) => {
+                punch.abort();
+                punch.await
+            }
+        };
+        listener.set_udp_punch_send_observer(None);
+
+        assert!(
+            observed_three.is_ok(),
+            "{intent_name} punch must produce three observed sends"
+        );
+        assert!(
+            punch_result.is_ok(),
+            "{intent_name} punch task must stop after listener close"
+        );
+        let send_times = send_times.lock().unwrap();
+        assert!(send_times.len() >= 3);
+        for send_pair in send_times[..3].windows(2) {
+            assert!(
+                send_pair[1].duration_since(send_pair[0]) >= Duration::from_millis(25),
+                "{intent_name} punch must not replay missed ticks back-to-back"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_punch_quic_nat_listener_close_wakes_full_deadline_future() {
+    let listener = new_listener();
+    listener
+        .bind(
+            Endpoint::from((Protocol::Quic, "127.0.0.1:0".parse().unwrap())),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    listener.start().await.unwrap();
+
+    let punch_listener = listener.clone();
+    let punch = tokio::spawn(async move {
+        punch_listener
+            .run_udp_punch_burst(
+                punch_remote(),
+                TunnelConnectIntent::reverse_logical(crate::types::TunnelId::from(701)),
+                std::time::Instant::now(),
+                Duration::from_secs(10),
+            )
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    listener.close();
+
+    tokio::time::timeout(Duration::from_secs(1), punch)
+        .await
+        .expect("listener close must wake punch before its ten-second deadline")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_punch_quic_nat_ineligible_and_missing_sender_paths_finish_without_background_work() {
+    let listener = new_listener();
+    let active = TunnelConnectIntent::active_logical(crate::types::TunnelId::from(702));
+    let loopback = Endpoint::from((Protocol::Quic, "127.0.0.1:49153".parse().unwrap()));
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        listener.run_udp_punch_burst(
+            loopback,
+            active,
+            std::time::Instant::now(),
+            Duration::from_secs(10),
+        ),
+    )
+    .await
+    .expect("an ineligible candidate must not start punch work");
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        listener.run_udp_punch_burst(
+            punch_remote(),
+            active,
+            std::time::Instant::now(),
+            Duration::from_secs(10),
+        ),
+    )
+    .await
+    .expect("a listener without a registered source socket must not start punch work");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_punch_quic_nat_connect_worker_task_is_aborted_with_owner_future() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let task_dropped = dropped.clone();
+    let worker = tokio::spawn(async move {
+        let _drop_flag = DropFlag(task_dropped);
+        std::future::pending::<()>().await;
+    });
+    let owner = tokio::spawn(AbortOnDropTask::new(worker).join());
+    tokio::task::yield_now().await;
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+
+    for _ in 0..20 {
+        if dropped.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "dropping the connect owner must abort its worker-runtime Quinn task"
+    );
 }
 
 #[test]
