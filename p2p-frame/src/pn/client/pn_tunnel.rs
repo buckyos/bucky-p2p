@@ -13,6 +13,7 @@ use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::control_stream::{
     ControlDataSender, ControlDataSenderFuture, ControlStreamRuntime,
+    IncomingControlStreamPrepare,
 };
 use crate::networks::{
     IncomingControlStreamCallback, IncomingDatagramCallback, IncomingStreamCallback,
@@ -190,6 +191,7 @@ enum PnControlCmd {
 enum PnTunnelLifecycleStatus {
     OpeningControl,
     Open,
+    Retired,
     Closing,
     Closed,
 }
@@ -961,6 +963,20 @@ impl PnTunnel {
         Ok(PnPendingChannel::new(self.self_weak.clone()))
     }
 
+    fn ensure_listener_registration_allowed(&self) -> P2pResult<()> {
+        let status = self.lifecycle.lock().unwrap().status;
+        if matches!(
+            status,
+            PnTunnelLifecycleStatus::Retired
+                | PnTunnelLifecycleStatus::Closing
+                | PnTunnelLifecycleStatus::Closed
+        ) {
+            Err(p2p_err!(P2pErrorCode::Interrupted, "pn tunnel closed"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn pending_to_active_channel(&self) -> P2pResult<Arc<PnChannelLease>> {
         let (refresh, result) = {
             let mut state = self.lifecycle.lock().unwrap();
@@ -1502,7 +1518,9 @@ impl Tunnel for PnTunnel {
         match self.lifecycle.lock().unwrap().status {
             PnTunnelLifecycleStatus::OpeningControl => TunnelState::Connecting,
             PnTunnelLifecycleStatus::Open => TunnelState::Connected,
-            PnTunnelLifecycleStatus::Closing | PnTunnelLifecycleStatus::Closed => {
+            PnTunnelLifecycleStatus::Retired
+            | PnTunnelLifecycleStatus::Closing
+            | PnTunnelLifecycleStatus::Closed => {
                 TunnelState::Closed
             }
         }
@@ -1529,11 +1547,31 @@ impl Tunnel for PnTunnel {
         Ok(())
     }
 
+    fn try_retire_idle(&self, now: Instant, idle_timeout: Duration) -> bool {
+        let mut state = self.lifecycle.lock().unwrap();
+        let idle = state.status == PnTunnelLifecycleStatus::Open
+            && state.close_reason.is_none()
+            && state.total_channels() == 0
+            && state
+                .zero_since
+                .and_then(|zero_since| now.checked_duration_since(zero_since))
+                .map(|elapsed| elapsed > idle_timeout)
+                .unwrap_or(false);
+        if !idle {
+            return false;
+        }
+        state.status = PnTunnelLifecycleStatus::Retired;
+        state.zero_since = None;
+        state.generation = state.generation.wrapping_add(1);
+        true
+    }
+
     async fn listen_stream(
         &self,
         vports: ListenVPortsRef,
         callback: IncomingStreamCallback,
     ) -> P2pResult<()> {
+        self.ensure_listener_registration_allowed()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "pn tunnel closed"));
         }
@@ -1555,6 +1593,7 @@ impl Tunnel for PnTunnel {
         vports: ListenVPortsRef,
         callback: IncomingDatagramCallback,
     ) -> P2pResult<()> {
+        self.ensure_listener_registration_allowed()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "pn tunnel closed"));
         }
@@ -1576,10 +1615,23 @@ impl Tunnel for PnTunnel {
         purposes: ListenVPortsRef,
         callback: IncomingControlStreamCallback,
     ) -> P2pResult<()> {
+        self.ensure_listener_registration_allowed()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "pn tunnel closed"));
         }
-        self.control_streams.listen(purposes, callback).await
+        let weak = self.self_weak.clone();
+        let prepare: IncomingControlStreamPrepare = Arc::new(move |(purpose, read, write)| {
+            let tunnel = weak
+                .upgrade()
+                .ok_or_else(|| p2p_err!(P2pErrorCode::Interrupted, "pn tunnel dropped"))?;
+            let pending = tunnel.begin_pending_channel()?;
+            let lease = pending.into_active(&tunnel)?;
+            let (read, write) = tunnel.wrap_stream_with_lease(read, write, lease);
+            Ok((purpose, read, write))
+        });
+        self.control_streams
+            .listen_with_prepare(purposes, callback, Some(prepare))
+            .await
     }
 
     async fn open_stream(
@@ -1672,10 +1724,10 @@ impl Tunnel for PnTunnel {
         &self,
         purpose: TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
-        if self.is_closed() {
-            return Err(p2p_err!(P2pErrorCode::Interrupted, "pn tunnel closed"));
-        }
-        self.control_streams.open(purpose).await
+        let pending = self.begin_pending_channel()?;
+        let (read, write) = self.control_streams.open(purpose).await?;
+        let lease = pending.into_active(self)?;
+        Ok(self.wrap_stream_with_lease(read, write, lease))
     }
 }
 
@@ -2253,6 +2305,48 @@ mod tests {
         assert_eq!(lifecycle_status(&tunnel), PnTunnelLifecycleStatus::Open);
         let pending = tunnel.begin_pending_channel().unwrap();
         drop(pending);
+    }
+
+    #[tokio::test]
+    async fn manager_idle_retirement_uses_pn_channel_lifecycle_atomically() {
+        let local_identity: P2pIdentityRef = Arc::new(FakeTlsIdentity::new(vec![32; 32]));
+        let tunnel = PnTunnel::new_active(
+            TunnelId::from(59),
+            TunnelCandidateId::from(59),
+            local_identity.get_id(),
+            test_p2p_id(33),
+            PnShared::new_local(local_identity),
+            PnProxyStreamSecurityMode::Disabled,
+        );
+        tunnel.mark_control_ready();
+
+        let pending = tunnel.begin_pending_channel().unwrap();
+        assert!(!tunnel.try_retire_idle(
+            Instant::now() + Duration::from_secs(60),
+            Duration::ZERO,
+        ));
+        drop(pending);
+
+        let zero_since = Instant::now();
+        tunnel.lifecycle.lock().unwrap().zero_since = Some(zero_since);
+        let timeout = Duration::from_secs(30);
+        assert!(!tunnel.try_retire_idle(zero_since + timeout, timeout));
+        assert!(tunnel.try_retire_idle(
+            zero_since + timeout + Duration::from_nanos(1),
+            timeout,
+        ));
+        assert_eq!(lifecycle_status(&tunnel), PnTunnelLifecycleStatus::Retired);
+        assert_eq!(tunnel.state(), TunnelState::Closed);
+        assert_eq!(
+            tunnel.begin_pending_channel().err().unwrap().code(),
+            P2pErrorCode::ErrorState
+        );
+
+        tunnel.close().unwrap();
+        assert!(matches!(
+            lifecycle_status(&tunnel),
+            PnTunnelLifecycleStatus::Closing | PnTunnelLifecycleStatus::Closed
+        ));
     }
 
     #[tokio::test]

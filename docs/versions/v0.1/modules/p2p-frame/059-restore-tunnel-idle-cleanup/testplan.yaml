@@ -1,0 +1,91 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/stack.rs", "p2p-frame/src/networks/tunnel.rs", "p2p-frame/src/networks/control_stream.rs", "p2p-frame/src/networks/tcp/tunnel.rs", "p2p-frame/src/networks/tcp/network.rs", "p2p-frame/src/networks/quic/tunnel.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/pn/client/pn_tunnel.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/unit/tunnel/idle_cleanup_tests.rs"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: tunnel-idle-default-method-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile existing Tunnel implementations against the additive default lifecycle hook
+      change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 确定性覆盖 Tunnel-owned activity 状态机、严格 timeout 边界、pending/handle 生命周期、控制流 ACK 顺序和 PN 原子退役。
+    test_targets:
+      - p2p-frame/src/networks/tunnel.rs
+      - p2p-frame/src/networks/control_stream.rs
+      - p2p-frame/src/pn/client/pn_tunnel.rs
+      - p2p-frame/tests/unit/tunnel/idle_cleanup_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 直接控制 Instant 与 tunnel-owned activity 状态，不等待 60 秒 housekeeping 周期。
+    steps:
+      - id: tunnel-idle-activity-unit
+        name: Run shared tunnel activity lifecycle tests
+        change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "activity_tests", "--", "--test-threads=1", "--nocapture"]
+      - id: tunnel-idle-control-order-unit
+        name: Prove incoming control activity is acquired before success response
+        change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "activity_order_tests", "--", "--nocapture"]
+      - id: tunnel-idle-pn-lifecycle-unit
+        name: Prove PN manager retirement shares the existing channel lifecycle lock
+        change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "manager_idle_retirement_uses_pn_channel_lifecycle_atomically", "--", "--nocapture"]
+  dv:
+    mode: enabled
+    summary: 通过实际 TunnelManager 注册、选择、cleanup 和 proxy-upgrade state 路径验证委托式原子淘汰、custom opt-out、原始 Arc、精确候选隔离与锁外 close，并运行 TCP/QUIC/PN 真实 loopback channel 回归。
+    test_targets:
+      - p2p-frame/src/networks/tcp/tunnel.rs
+      - p2p-frame/src/networks/tcp/network.rs
+      - p2p-frame/src/networks/quic/tunnel.rs
+      - p2p-frame/src/networks/quic/network.rs
+      - p2p-frame/src/pn/client/pn_tunnel.rs
+      - p2p-frame/tests/unit/tunnel/idle_cleanup_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - mock Tunnel 只控制原子 idle 判定，manager candidate map、cleanup、原始 Arc identity 与 proxy reconciliation 均走生产实现。
+    steps:
+      - id: tunnel-idle-manager-dv
+        name: Run exact manager cleanup and candidate topology regressions
+        change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "idle_cleanup_tests", "--", "--test-threads=1", "--nocapture"]
+      - id: tunnel-manager-compatibility-dv
+        name: Run the full existing TunnelManager regression suite
+        change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "tunnel::tunnel_manager::tests", "--", "--test-threads=1"]
+      - id: tunnel-idle-builtins-dv
+        name: Run all crate-local TCP QUIC PN and manager regressions with x509
+        change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "--", "--test-threads=1"]
+  integration:
+    mode: disabled
+    summary: 本任务改变 crate 内 Tunnel 生命周期契约但不改变 wire contract、stack 构造签名或部署接口；本地 loopback 不冒充公网或部署环境证据。
+    change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+    reason: stack.rs 继续把同一 idle_timeout 传给 TunnelManager；新增 trait 方法有默认实现，受影响 crate 内消费者由 x509 all-target compile 覆盖，TCP/QUIC/PN loopback 与生产 cleanup 调用点在 DV 中验证。
+    test_targets: []
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes: []
+    steps: []

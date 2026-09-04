@@ -6,8 +6,11 @@ use crate::types::{TunnelCandidateId, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFrom};
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 pub type TunnelStreamRead = Pin<Box<dyn runtime::AsyncRead + Send + Unpin + 'static>>;
 pub type TunnelStreamWrite = Pin<Box<dyn runtime::AsyncWrite + Send + Unpin + 'static>>;
@@ -260,6 +263,302 @@ pub enum TunnelState {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TunnelActivityLifecycle {
+    Live,
+    Retired,
+}
+
+struct TunnelActivityState {
+    lifecycle: TunnelActivityLifecycle,
+    pending_open_count: usize,
+    work_instance_num: usize,
+    latest_active_at: Instant,
+}
+
+pub(crate) struct TunnelActivity {
+    state: Mutex<TunnelActivityState>,
+}
+
+impl TunnelActivity {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(TunnelActivityState {
+                lifecycle: TunnelActivityLifecycle::Live,
+                pending_open_count: 0,
+                work_instance_num: 0,
+                latest_active_at: Instant::now(),
+            }),
+        })
+    }
+
+    fn interrupted_error() -> P2pError {
+        P2pError::new(
+            P2pErrorCode::Interrupted,
+            "tunnel candidate retired".to_owned(),
+        )
+    }
+
+    pub(crate) fn ensure_live(&self) -> P2pResult<()> {
+        if self.state.lock().unwrap().lifecycle == TunnelActivityLifecycle::Live {
+            Ok(())
+        } else {
+            Err(Self::interrupted_error())
+        }
+    }
+
+    pub(crate) fn note_activity(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.lifecycle == TunnelActivityLifecycle::Live {
+            state.latest_active_at = Instant::now();
+        }
+    }
+
+    pub(crate) fn begin_pending(self: &Arc<Self>) -> P2pResult<PendingTunnelActivity> {
+        let mut state = self.state.lock().unwrap();
+        if state.lifecycle == TunnelActivityLifecycle::Retired {
+            return Err(Self::interrupted_error());
+        }
+        state.pending_open_count += 1;
+        state.latest_active_at = Instant::now();
+        Ok(PendingTunnelActivity {
+            activity: self.clone(),
+            active: true,
+        })
+    }
+
+    fn acquire_work_instances(
+        self: &Arc<Self>,
+        work_instance_num: usize,
+    ) -> P2pResult<Vec<TunnelWorkActivity>> {
+        let mut state = self.state.lock().unwrap();
+        if state.lifecycle == TunnelActivityLifecycle::Retired {
+            return Err(Self::interrupted_error());
+        }
+        state.work_instance_num += work_instance_num;
+        state.latest_active_at = Instant::now();
+        Ok((0..work_instance_num)
+            .map(|_| TunnelWorkActivity {
+                activity: self.clone(),
+                active: true,
+            })
+            .collect())
+    }
+
+    pub(crate) fn track_stream_result(
+        self: &Arc<Self>,
+        result: P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)>,
+    ) -> P2pResult<(TunnelPurpose, TunnelStreamRead, TunnelStreamWrite)> {
+        match result {
+            Ok((purpose, read, write)) => {
+                let mut leases = self.acquire_work_instances(2)?;
+                let write_lease = leases.pop().unwrap();
+                let read_lease = leases.pop().unwrap();
+                Ok((
+                    purpose,
+                    Self::tracked_read(read, read_lease),
+                    Self::tracked_write(write, write_lease),
+                ))
+            }
+            Err(err) => {
+                self.note_activity();
+                Err(err)
+            }
+        }
+    }
+
+    pub(crate) fn track_datagram_result(
+        self: &Arc<Self>,
+        result: P2pResult<(TunnelPurpose, TunnelDatagramRead)>,
+    ) -> P2pResult<(TunnelPurpose, TunnelDatagramRead)> {
+        match result {
+            Ok((purpose, read)) => {
+                let mut leases = self.acquire_work_instances(1)?;
+                Ok((purpose, Self::tracked_read(read, leases.pop().unwrap())))
+            }
+            Err(err) => {
+                self.note_activity();
+                Err(err)
+            }
+        }
+    }
+
+    pub(crate) fn try_retire_idle(&self, now: Instant, idle_timeout: Duration) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.lifecycle != TunnelActivityLifecycle::Live
+            || state.pending_open_count != 0
+            || state.work_instance_num != 0
+            || now
+                .checked_duration_since(state.latest_active_at)
+                .map(|elapsed| elapsed <= idle_timeout)
+                .unwrap_or(true)
+        {
+            return false;
+        }
+        state.lifecycle = TunnelActivityLifecycle::Retired;
+        true
+    }
+
+    pub(crate) fn retire(&self) {
+        self.state.lock().unwrap().lifecycle = TunnelActivityLifecycle::Retired;
+    }
+
+    fn tracked_read(read: TunnelStreamRead, lease: TunnelWorkActivity) -> TunnelStreamRead {
+        Box::pin(ActivityTrackedRead {
+            inner: read,
+            _lease: lease,
+        })
+    }
+
+    fn tracked_write(write: TunnelStreamWrite, lease: TunnelWorkActivity) -> TunnelStreamWrite {
+        Box::pin(ActivityTrackedWrite {
+            inner: write,
+            _lease: lease,
+        })
+    }
+}
+
+pub(crate) struct PendingTunnelActivity {
+    activity: Arc<TunnelActivity>,
+    active: bool,
+}
+
+impl PendingTunnelActivity {
+    pub(crate) fn promote_stream(
+        self,
+        read: TunnelStreamRead,
+        write: TunnelStreamWrite,
+    ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let mut leases = self.promote(2)?;
+        let write_lease = leases.pop().unwrap();
+        let read_lease = leases.pop().unwrap();
+        Ok((
+            TunnelActivity::tracked_read(read, read_lease),
+            TunnelActivity::tracked_write(write, write_lease),
+        ))
+    }
+
+    pub(crate) fn promote_datagram(
+        self,
+        write: TunnelDatagramWrite,
+    ) -> P2pResult<TunnelDatagramWrite> {
+        let mut leases = self.promote(1)?;
+        Ok(TunnelActivity::tracked_write(write, leases.pop().unwrap()))
+    }
+
+    pub(crate) fn promote_datagram_read(
+        self,
+        read: TunnelDatagramRead,
+    ) -> P2pResult<TunnelDatagramRead> {
+        let mut leases = self.promote(1)?;
+        Ok(TunnelActivity::tracked_read(read, leases.pop().unwrap()))
+    }
+
+    fn promote(mut self, work_instance_num: usize) -> P2pResult<Vec<TunnelWorkActivity>> {
+        let mut state = self.activity.state.lock().unwrap();
+        debug_assert!(state.pending_open_count > 0);
+        if state.pending_open_count > 0 {
+            state.pending_open_count -= 1;
+        }
+        self.active = false;
+        if state.lifecycle == TunnelActivityLifecycle::Retired {
+            return Err(TunnelActivity::interrupted_error());
+        }
+        state.work_instance_num += work_instance_num;
+        state.latest_active_at = Instant::now();
+        Ok((0..work_instance_num)
+            .map(|_| TunnelWorkActivity {
+                activity: self.activity.clone(),
+                active: true,
+            })
+            .collect())
+    }
+}
+
+impl Drop for PendingTunnelActivity {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self.activity.state.lock().unwrap();
+        debug_assert!(state.pending_open_count > 0);
+        if state.pending_open_count > 0 {
+            state.pending_open_count -= 1;
+        }
+        state.latest_active_at = Instant::now();
+    }
+}
+
+struct TunnelWorkActivity {
+    activity: Arc<TunnelActivity>,
+    active: bool,
+}
+
+impl Drop for TunnelWorkActivity {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self.activity.state.lock().unwrap();
+        debug_assert!(state.work_instance_num > 0);
+        if state.work_instance_num > 0 {
+            state.work_instance_num -= 1;
+        }
+        state.latest_active_at = Instant::now();
+        self.active = false;
+    }
+}
+
+struct ActivityTrackedRead {
+    inner: TunnelStreamRead,
+    _lease: TunnelWorkActivity,
+}
+
+impl runtime::AsyncRead for ActivityTrackedRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut runtime::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.inner.as_mut().poll_read(cx, buf)
+    }
+}
+
+struct ActivityTrackedWrite {
+    inner: TunnelStreamWrite,
+    _lease: TunnelWorkActivity,
+}
+
+impl runtime::AsyncWrite for ActivityTrackedWrite {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.inner.as_mut().poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.inner.as_mut().poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.inner.as_mut().poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.inner.as_mut().poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Tunnel: Send + Sync + 'static {
     fn tunnel_id(&self) -> TunnelId;
@@ -279,6 +578,10 @@ pub trait Tunnel: Send + Sync + 'static {
 
     fn close(&self) -> P2pResult<()> {
         Ok(())
+    }
+
+    fn try_retire_idle(&self, _now: Instant, _idle_timeout: Duration) -> bool {
+        false
     }
 
     async fn listen_stream(
@@ -320,3 +623,66 @@ pub trait Tunnel: Send + Sync + 'static {
 }
 
 pub type TunnelRef = Arc<dyn Tunnel>;
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    fn stream_handles() -> (TunnelStreamRead, TunnelStreamWrite) {
+        let (stream, _peer) = tokio::io::duplex(64);
+        let (read, write) = tokio::io::split(stream);
+        (Box::pin(read), Box::pin(write))
+    }
+
+    #[test]
+    fn idle_retirement_uses_strict_timeout_boundary() {
+        let activity = TunnelActivity::new();
+        let timeout = Duration::from_secs(30);
+        let base = Instant::now();
+        activity.state.lock().unwrap().latest_active_at = base;
+
+        assert!(!activity.try_retire_idle(base + timeout, timeout));
+        assert!(activity.try_retire_idle(
+            base + timeout + Duration::from_nanos(1),
+            timeout
+        ));
+    }
+
+    #[test]
+    fn pending_and_each_live_half_block_idle_retirement() {
+        let activity = TunnelActivity::new();
+        let pending = activity.begin_pending().unwrap();
+        let now = Instant::now() + Duration::from_secs(60);
+        assert!(!activity.try_retire_idle(now, Duration::ZERO));
+
+        let (read, write) = stream_handles();
+        let (read, write) = pending.promote_stream(read, write).unwrap();
+        assert!(!activity.try_retire_idle(now, Duration::ZERO));
+        drop(read);
+        assert!(!activity.try_retire_idle(now, Duration::ZERO));
+
+        let before_final_drop = Instant::now();
+        drop(write);
+        let latest_active_at = activity.state.lock().unwrap().latest_active_at;
+        assert!(latest_active_at >= before_final_drop);
+        assert!(!activity.try_retire_idle(latest_active_at, Duration::ZERO));
+        assert!(activity.try_retire_idle(
+            latest_active_at + Duration::from_nanos(1),
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn retired_tunnel_rejects_pending_promotion() {
+        let activity = TunnelActivity::new();
+        let pending = activity.begin_pending().unwrap();
+        activity.retire();
+        let (read, write) = stream_handles();
+
+        let err = pending.promote_stream(read, write).err().unwrap();
+        assert_eq!(err.code(), P2pErrorCode::Interrupted);
+        let state = activity.state.lock().unwrap();
+        assert_eq!(state.pending_open_count, 0);
+        assert_eq!(state.work_instance_num, 0);
+    }
+}

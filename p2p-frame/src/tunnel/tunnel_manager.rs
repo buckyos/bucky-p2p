@@ -3356,19 +3356,24 @@ impl TunnelManager {
             .unwrap_or(false)
     }
 
-    async fn cleanup_closed_tunnels(&self, _idle_timeout: Duration) {
+    async fn cleanup_closed_tunnels(&self, idle_timeout: Duration) {
         let mut removed = Vec::new();
+        let now = Instant::now();
         let notify_proxy_upgrade = {
             let mut tunnels = self.tunnels.write().unwrap();
             let mut state = self.state.lock().unwrap();
             let mut notify_proxy_upgrade = false;
             tunnels.retain(|remote_id, entries| {
                 entries.retain(|entry| {
-                    let keep = is_tunnel_available(entry.tunnel.as_ref());
-                    if !keep {
+                    let unavailable = !is_tunnel_available(entry.tunnel.as_ref());
+                    let idle_retired = !unavailable
+                        && entry.tunnel.try_retire_idle(now, idle_timeout);
+                    if unavailable || idle_retired {
                         removed.push(entry.tunnel.clone());
+                        false
+                    } else {
+                        true
                     }
-                    keep
                 });
                 notify_proxy_upgrade |= self.reconcile_proxy_upgrade_state(
                     &mut state,
@@ -3383,7 +3388,16 @@ impl TunnelManager {
             self.proxy_upgrade_notify.notify_one();
         }
         for tunnel in removed {
-            let _ = tunnel.close();
+            if let Err(err) = tunnel.close() {
+                log::warn!(
+                    "idle cleanup close failed remote={} tunnel_id={:?} candidate_id={:?} code={:?} msg={}",
+                    tunnel.remote_id(),
+                    tunnel.tunnel_id(),
+                    tunnel.candidate_id(),
+                    err.code(),
+                    err.msg()
+                );
+            }
         }
     }
 }
@@ -4095,6 +4109,9 @@ mod tests {
 
     #[path = "../../../../tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs"]
     mod proxy_upgrade_lifecycle_tests;
+
+    #[path = "../../../../tests/unit/tunnel/idle_cleanup_tests.rs"]
+    mod idle_cleanup_tests;
 
     static TLS_INIT: Once = Once::new();
     static TEST_TUNNEL_ID_SEQ: AtomicUsize = AtomicUsize::new(1);

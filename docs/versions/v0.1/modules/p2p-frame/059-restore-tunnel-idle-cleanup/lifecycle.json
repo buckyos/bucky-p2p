@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/059-restore-tunnel-idle-cleanup/proposal.md": "50366a89f9bb2c8d05e4bed3bfa32f8d53fc78397028387b0fbbad6961cd32ca"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "6f86034f7e3becfec20e7a58bf4ca1e439f84d5cc7d9206bba2b7623ac32ddd5"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

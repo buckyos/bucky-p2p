@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-restore-tunnel-idle-cleanup"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["pipeline/plan.md#acceptance-baseline", "pipeline/plan.md#exported-interfaces", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["P2pStackConfig idle_timeout getter setter default and TunnelManager constructor signature remain unchanged", "Tunnel gains only a backward-compatible default idle-retirement method and transport wire behavior remains unchanged", "manager-visible tunnel identity remains the original exact transport Arc", "custom Tunnel implementations that do not opt in are never manager-idle-retired"]
+  data:
+    applies: false
+    evidence: 不改变持久数据、序列化布局、缓存键、迁移或磁盘状态。
+    required_checks: []
+  security:
+    applies: false
+    evidence: 不改变认证、授权、TLS、身份、签名、endpoint 信任或协议输入边界。
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: ["pipeline/plan.md#state-ownership", "pipeline/plan.md#failure-flows", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["idle zero-work candidate is retired only after strict elapsed greater-than timeout", "TCP QUIC and PN own their manager-idle activity state", "pending open and every live read or write work instance prevent idle retirement", "open callback and cleanup races have one atomic winner and never expose a retired successful channel", "exact candidate removal preserves remaining candidates and proxy-upgrade reconciliation", "transport close runs outside manager locks", "PN independent idle timeout remains distinct and operational"]
+  build:
+    applies: false
+    evidence: 不改变依赖、feature、构建图、产物、production default、发布或部署配置。
+    required_checks: []
+  ui:
+    applies: false
+    evidence: 不涉及 UI、导航、无障碍、本地化或用户交互流程。
+    required_checks: []
+  harness:
+    applies: false
+    evidence: 仅消费现有 Harness auto-pipeline、测试入口和验收机制，不改变规则、checker 或测试基础设施语义。
+    required_checks: []

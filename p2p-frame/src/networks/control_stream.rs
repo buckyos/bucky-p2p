@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::networks::{
-    IncomingControlStreamCallback, ListenVPortsRef, TunnelCommandResult, TunnelPurpose,
-    TunnelStreamRead, TunnelStreamWrite,
+    IncomingControlStream, IncomingControlStreamCallback, ListenVPortsRef, TunnelCommandResult,
+    TunnelPurpose, TunnelStreamRead, TunnelStreamWrite,
 };
 use crate::runtime;
 
@@ -30,6 +30,8 @@ pub(crate) trait ControlDataSender: Send + Sync + 'static {
 }
 
 pub(crate) type ControlDataSenderRef = Arc<dyn ControlDataSender>;
+pub(crate) type IncomingControlStreamPrepare =
+    Arc<dyn Fn(IncomingControlStream) -> P2pResult<IncomingControlStream> + Send + Sync>;
 
 impl ControlDataSender for mpsc::Sender<Vec<u8>> {
     fn send(&self, payload: Vec<u8>) -> ControlDataSenderFuture {
@@ -103,7 +105,13 @@ struct ControlStreamRuntimeInner {
     sender: ControlDataSenderRef,
     streams: Mutex<HashMap<u32, mpsc::Sender<InboundItem>>>,
     pending_opens: Mutex<HashMap<u32, PendingOpen>>,
-    listener: RwLock<Option<(ListenVPortsRef, IncomingControlStreamCallback)>>,
+    listener: RwLock<
+        Option<(
+            ListenVPortsRef,
+            IncomingControlStreamCallback,
+            Option<IncomingControlStreamPrepare>,
+        )>,
+    >,
     next_stream_id: AtomicU32,
     local_stream_id_parity: u32,
     closed: AtomicBool,
@@ -151,8 +159,17 @@ impl ControlStreamRuntime {
         purposes: ListenVPortsRef,
         callback: IncomingControlStreamCallback,
     ) -> P2pResult<()> {
+        self.listen_with_prepare(purposes, callback, None).await
+    }
+
+    pub(crate) async fn listen_with_prepare(
+        &self,
+        purposes: ListenVPortsRef,
+        callback: IncomingControlStreamCallback,
+        prepare: Option<IncomingControlStreamPrepare>,
+    ) -> P2pResult<()> {
         self.check_open()?;
-        *self.inner.listener.write().unwrap() = Some((purposes, callback));
+        *self.inner.listener.write().unwrap() = Some((purposes, callback, prepare));
         Ok(())
     }
 
@@ -280,7 +297,7 @@ impl ControlStreamRuntime {
             return Ok(());
         }
         let listener = self.inner.listener.read().unwrap().clone();
-        let Some((purposes, callback)) = listener else {
+        let Some((purposes, callback, prepare)) = listener else {
             self.send_frame(ControlStreamFrame::OpenResp {
                 stream_id,
                 result: TunnelCommandResult::ListenerClosed,
@@ -314,19 +331,32 @@ impl ControlStreamRuntime {
             .await?;
             return Ok(());
         }
-        self.send_frame(ControlStreamFrame::OpenResp {
-            stream_id,
-            result: TunnelCommandResult::Success,
-        })
-        .await?;
         let read: TunnelStreamRead = Box::pin(ControlStreamRead::new(rx));
         let write: TunnelStreamWrite = Box::pin(ControlStreamWrite::new(
             stream_id,
             self.inner.clone(),
         ));
-        runtime::task::spawn(async move {
-            callback(Ok((purpose, read, write))).await;
-        });
+        let prepared = if let Some(prepare) = prepare {
+            prepare((purpose, read, write))
+        } else {
+            Ok((purpose, read, write))
+        };
+        let (result, callback_future) = match prepared {
+            Ok(stream) => (
+                TunnelCommandResult::Success,
+                callback(Ok(stream)),
+            ),
+            Err(err) => {
+                self.inner.streams.lock().unwrap().remove(&stream_id);
+                (TunnelCommandResult::Retired, callback(Err(err)))
+            }
+        };
+        self.send_frame(ControlStreamFrame::OpenResp {
+            stream_id,
+            result,
+        })
+        .await?;
+        runtime::task::spawn(callback_future);
         Ok(())
     }
 
@@ -683,3 +713,108 @@ impl tokio::io::AsyncWrite for ControlStreamWrite {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod activity_order_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU8;
+
+    struct CallbackOrderedSender {
+        callback_started: Arc<AtomicBool>,
+    }
+
+    struct ResultCaptureSender {
+        result: Arc<AtomicU8>,
+    }
+
+    impl ControlDataSender for ResultCaptureSender {
+        fn send(&self, payload: Vec<u8>) -> ControlDataSenderFuture {
+            let result = self.result.clone();
+            Box::pin(async move {
+                let frame = ControlStreamFrame::clone_from_slice(payload.as_slice())
+                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+                if let ControlStreamFrame::OpenResp {
+                    result: response, ..
+                } = frame
+                {
+                    result.store(response as u8, Ordering::SeqCst);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    impl ControlDataSender for CallbackOrderedSender {
+        fn send(&self, _payload: Vec<u8>) -> ControlDataSenderFuture {
+            let callback_started = self.callback_started.clone();
+            Box::pin(async move {
+                assert!(callback_started.load(Ordering::SeqCst));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_callback_acquires_ownership_before_success_response() {
+        let callback_started = Arc::new(AtomicBool::new(false));
+        let runtime = ControlStreamRuntime::new(
+            true,
+            Arc::new(CallbackOrderedSender {
+                callback_started: callback_started.clone(),
+            }),
+        );
+        runtime
+            .listen(
+                crate::networks::allow_all_listen_vports(),
+                Arc::new(move |_result| {
+                    callback_started.store(true, Ordering::SeqCst);
+                    Box::pin(async {})
+                }),
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .handle_open(2, TunnelPurpose::from_bytes(vec![1]))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_incoming_ownership_returns_retired_without_exposing_stream() {
+        let response = Arc::new(AtomicU8::new(TunnelCommandResult::Success as u8));
+        let callback_rejected = Arc::new(AtomicBool::new(false));
+        let runtime = ControlStreamRuntime::new(
+            true,
+            Arc::new(ResultCaptureSender {
+                result: response.clone(),
+            }),
+        );
+        let callback_rejected_for_callback = callback_rejected.clone();
+        runtime
+            .listen_with_prepare(
+                crate::networks::allow_all_listen_vports(),
+                Arc::new(move |result| {
+                    callback_rejected_for_callback.store(result.is_err(), Ordering::SeqCst);
+                    Box::pin(async {})
+                }),
+                Some(Arc::new(|_stream| {
+                    Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel retired"))
+                })),
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .handle_open(2, TunnelPurpose::from_bytes(vec![1]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.load(Ordering::SeqCst),
+            TunnelCommandResult::Retired as u8
+        );
+        assert!(callback_rejected.load(Ordering::SeqCst));
+        assert!(runtime.inner.streams.lock().unwrap().is_empty());
+    }
+}

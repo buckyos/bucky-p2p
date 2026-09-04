@@ -1220,6 +1220,9 @@ mod tests {
         let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
 
         assert_eq!(purpose, purpose_of(1001));
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(!accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         write.write_all(b"ping").await.unwrap();
         write.shutdown().await.unwrap();
@@ -1232,6 +1235,13 @@ mod tests {
         let mut reply = Vec::new();
         read.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"pong");
+
+        drop(read);
+        drop(write);
+        drop(peer_read);
+        drop(peer_write);
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();
@@ -1252,6 +1262,9 @@ mod tests {
         let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
 
         assert_eq!(purpose, purpose_of(1050));
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(!accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         write.write_all(b"control-ping").await.unwrap();
         write.shutdown().await.unwrap();
@@ -1264,6 +1277,13 @@ mod tests {
         let mut reply = Vec::new();
         read.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"control-pong");
+
+        drop(read);
+        drop(write);
+        drop(peer_read);
+        drop(peer_write);
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();
@@ -1313,12 +1333,20 @@ mod tests {
         let (purpose, mut peer_read) = accepted_datagram.unwrap();
 
         assert_eq!(purpose, purpose_of(2002));
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(!accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         writer.write_all(b"hello").await.unwrap();
         writer.shutdown().await.unwrap();
         let mut buf = Vec::new();
         peer_read.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello");
+
+        drop(writer);
+        drop(peer_read);
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();
@@ -1329,12 +1357,16 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        let result = timeout(
-            Duration::from_millis(200),
-            opened.open_stream(purpose_of(6001)),
-        )
-        .await;
-        assert!(result.is_err());
+        let open = tokio::spawn({
+            let opened = opened.clone();
+            async move { opened.open_stream(purpose_of(6001)).await }
+        });
+        crate::runtime::sleep(Duration::from_millis(50)).await;
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        open.abort();
+        assert!(matches!(open.await, Err(err) if err.is_cancelled()));
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();

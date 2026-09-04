@@ -18,7 +18,7 @@ use crate::types::{TunnelCandidateId, TunnelIdGenerator};
 use sfo_reuseport::ServerRuntime;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct TcpTunnelNetwork {
     listeners: Mutex<Vec<Arc<TcpTunnelListener>>>,
@@ -693,6 +693,9 @@ mod tests {
         let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
 
         assert_eq!(purpose, purpose_of(3101));
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(!accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         write.write_all(b"ping").await.unwrap();
         let mut buf = [0u8; 4];
@@ -713,6 +716,13 @@ mod tests {
         let mut passive_tail = Vec::new();
         peer_read.read_to_end(&mut passive_tail).await.unwrap();
         assert!(passive_tail.is_empty());
+
+        drop(read);
+        drop(write);
+        drop(peer_read);
+        drop(peer_write);
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();
@@ -776,12 +786,20 @@ mod tests {
         let (purpose, mut peer_read) = accepted_datagram.unwrap();
 
         assert_eq!(purpose, purpose_of(3202));
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(!accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         writer.write_all(b"hello").await.unwrap();
         writer.shutdown().await.unwrap();
         let mut buf = Vec::new();
         peer_read.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello");
+
+        drop(writer);
+        drop(peer_read);
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();
@@ -802,6 +820,9 @@ mod tests {
         let (purpose, mut peer_read, mut peer_write) = accepted_stream.unwrap();
 
         assert_eq!(purpose, purpose_of(3252));
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(!accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         write.write_all(b"control-ping").await.unwrap();
         let mut buf = [0u8; 12];
@@ -815,6 +836,13 @@ mod tests {
 
         write.shutdown().await.unwrap();
         peer_write.shutdown().await.unwrap();
+
+        drop(read);
+        drop(write);
+        drop(peer_read);
+        drop(peer_write);
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        assert!(accepted.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();
@@ -840,12 +868,16 @@ mod tests {
         let pair = setup_network_pair().await;
         let (opened, accepted) = pair.connect().await;
 
-        let result = timeout(
-            Duration::from_millis(200),
-            opened.open_stream(purpose_of(3404)),
-        )
-        .await;
-        assert!(result.is_err());
+        let open = tokio::spawn({
+            let opened = opened.clone();
+            async move { opened.open_stream(purpose_of(3404)).await }
+        });
+        runtime::sleep(Duration::from_millis(50)).await;
+        let retirement_probe = Instant::now() + Duration::from_secs(3600);
+        assert!(!opened.try_retire_idle(retirement_probe, Duration::ZERO));
+        open.abort();
+        assert!(matches!(open.await, Err(err) if err.is_cancelled()));
+        assert!(opened.try_retire_idle(retirement_probe, Duration::ZERO));
 
         opened.close().unwrap();
         accepted.close().unwrap();

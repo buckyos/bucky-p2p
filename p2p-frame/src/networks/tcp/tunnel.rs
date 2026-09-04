@@ -11,11 +11,13 @@ use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::executor::Executor;
 use crate::networks::control_stream::{
     ControlDataSender, ControlDataSenderFuture, ControlStreamRuntime,
+    IncomingControlStreamPrepare,
 };
 use crate::networks::{
     IncomingControlStreamCallback, IncomingDatagramCallback, IncomingStreamCallback,
-    ListenVPortsRef, Tunnel, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm, TunnelPurpose,
-    TunnelState, TunnelStreamRead, TunnelStreamWrite,
+    ListenVPortsRef, PendingTunnelActivity, Tunnel, TunnelActivity, TunnelDatagramRead,
+    TunnelDatagramWrite, TunnelForm, TunnelPurpose, TunnelState, TunnelStreamRead,
+    TunnelStreamWrite,
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime;
@@ -401,6 +403,7 @@ pub(crate) struct TcpTunnel {
     connector: TcpTunnelConnector,
     self_weak: Mutex<Weak<TcpTunnel>>,
     state: Mutex<TcpTunnelState>,
+    activity: Arc<TunnelActivity>,
     closed: AtomicBool,
     next_conn_seq: AtomicU32,
     next_channel_seq: AtomicU32,
@@ -841,6 +844,7 @@ impl TcpTunnel {
                 pending_open_requests: HashMap::new(),
                 pending_claims: HashMap::new(),
             }),
+            activity: TunnelActivity::new(),
             closed: AtomicBool::new(false),
             next_conn_seq: AtomicU32::new(1),
             next_channel_seq: AtomicU32::new(1),
@@ -940,6 +944,7 @@ impl TcpTunnel {
             }
         };
         if should_notify {
+            self.activity.note_activity();
             self.connected_notify.notify_waiters();
         }
     }
@@ -963,6 +968,7 @@ impl TcpTunnel {
     }
 
     fn close_local(&self, phase: LocalTunnelPhase, reason: P2pErrorCode) -> bool {
+        self.activity.retire();
         if self.closed.swap(true, Ordering::SeqCst) {
             return false;
         }
@@ -2842,6 +2848,7 @@ impl TcpTunnel {
     }
 
     async fn handle_claim_req(self: &Arc<Self>, req: ClaimConnReq) -> P2pResult<()> {
+        let pending_activity = self.activity.begin_pending()?;
         let processing = self.process_claim_req(req).await?;
         if let Some(local_channel_id) = processing.local_conflict_channel {
             self.send_pending_claim_result(
@@ -2850,12 +2857,17 @@ impl TcpTunnel {
             );
         }
         if let Some((kind, accepted)) = processing.accepted {
-            self.enqueue_accepted(kind, accepted)?;
+            self.enqueue_accepted(kind, accepted, pending_activity)?;
         }
         self.send_control(&processing.response).await
     }
 
-    fn enqueue_accepted(&self, kind: TcpChannelKind, accepted: AcceptedChannel) -> P2pResult<()> {
+    fn enqueue_accepted(
+        &self,
+        kind: TcpChannelKind,
+        accepted: AcceptedChannel,
+        pending_activity: PendingTunnelActivity,
+    ) -> P2pResult<()> {
         self.release_accept_slot(kind);
         if self.is_closed() {
             return Ok(());
@@ -2867,9 +2879,8 @@ impl TcpTunnel {
                     return Ok(());
                 };
                 let (read, write) = self.make_stream_channel(accepted.lease);
-                Executor::spawn_ok(async move {
-                    callback(Ok((accepted.purpose, read, write))).await;
-                });
+                let (read, write) = pending_activity.promote_stream(read, write)?;
+                Executor::spawn_ok(callback(Ok((accepted.purpose, read, write))));
                 Ok(())
             }
             TcpChannelKind::Datagram => {
@@ -2877,9 +2888,8 @@ impl TcpTunnel {
                     return Ok(());
                 };
                 let read = self.make_datagram_read(accepted.lease);
-                Executor::spawn_ok(async move {
-                    callback(Ok((accepted.purpose, read))).await;
-                });
+                let read = pending_activity.promote_datagram_read(read)?;
+                Executor::spawn_ok(callback(Ok((accepted.purpose, read))));
                 Ok(())
             }
         }
@@ -3696,11 +3706,16 @@ impl Tunnel for TcpTunnel {
         Ok(())
     }
 
+    fn try_retire_idle(&self, now: Instant, idle_timeout: Duration) -> bool {
+        self.activity.try_retire_idle(now, idle_timeout)
+    }
+
     async fn listen_stream(
         &self,
         vports: ListenVPortsRef,
         callback: IncomingStreamCallback,
     ) -> P2pResult<()> {
+        self.activity.ensure_live()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
         }
@@ -3715,6 +3730,7 @@ impl Tunnel for TcpTunnel {
         vports: ListenVPortsRef,
         callback: IncomingDatagramCallback,
     ) -> P2pResult<()> {
+        self.activity.ensure_live()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
         }
@@ -3729,16 +3745,23 @@ impl Tunnel for TcpTunnel {
         purposes: ListenVPortsRef,
         callback: IncomingControlStreamCallback,
     ) -> P2pResult<()> {
+        self.activity.ensure_live()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
         }
-        self.control_streams.listen(purposes, callback).await
+        let activity = self.activity.clone();
+        let prepare: IncomingControlStreamPrepare =
+            Arc::new(move |stream| activity.track_stream_result(Ok(stream)));
+        self.control_streams
+            .listen_with_prepare(purposes, callback, Some(prepare))
+            .await
     }
 
     async fn open_stream(
         &self,
         purpose: TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let pending = self.activity.begin_pending()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
         }
@@ -3749,10 +3772,12 @@ impl Tunnel for TcpTunnel {
             .upgrade()
             .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "tunnel dropped"))?;
         let lease = this.open_channel(TcpChannelKind::Stream, purpose).await?;
-        Ok(self.make_stream_channel(lease))
+        let (read, write) = self.make_stream_channel(lease);
+        pending.promote_stream(read, write)
     }
 
     async fn open_datagram(&self, purpose: TunnelPurpose) -> P2pResult<TunnelDatagramWrite> {
+        let pending = self.activity.begin_pending()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
         }
@@ -3763,17 +3788,19 @@ impl Tunnel for TcpTunnel {
             .upgrade()
             .ok_or_else(|| p2p_err!(P2pErrorCode::ErrorState, "tunnel dropped"))?;
         let lease = this.open_channel(TcpChannelKind::Datagram, purpose).await?;
-        Ok(self.make_datagram_write(lease))
+        pending.promote_datagram(self.make_datagram_write(lease))
     }
 
     async fn open_control_stream(
         &self,
         purpose: TunnelPurpose,
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
+        let pending = self.activity.begin_pending()?;
         if self.is_closed() {
             return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel closed"));
         }
-        self.control_streams.open(purpose).await
+        let (read, write) = self.control_streams.open(purpose).await?;
+        pending.promote_stream(read, write)
     }
 }
 
