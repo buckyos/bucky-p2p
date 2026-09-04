@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: high-risk
+version: v0.1
+packet_module: p2p-frame
+task_name: 035-single-ttp-runtime-sn-demux
+stage: proposal
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+proposal: proposal.md
+completion_report:
+change_record:
+design:
+testing:
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+changed_paths_file: .harness/evidence/v0.1/stage-scope/035-single-ttp-runtime-sn-demux.paths
+baseline_manifest:
+changes:
+  - id: shared_ttp_runtime_sn_purpose_demux
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/ttp/**", "p2p-frame/src/sn/**"]
+    changed_paths_file:
+  - id: ttp_incoming_subscription_lifecycle
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/networks/net_manager.rs", "p2p-frame/src/ttp/**"]
+    changed_paths_file:

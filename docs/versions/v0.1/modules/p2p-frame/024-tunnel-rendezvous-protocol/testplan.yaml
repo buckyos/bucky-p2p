@@ -1,0 +1,103 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 024-tunnel-rendezvous-protocol
+submodule: 024-tunnel-rendezvous-protocol
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/protocol/common.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/nat_probe.rs", "p2p-frame/src/networks/network.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/rendezvous_state.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/tunnel/nat_connect_plan.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/tunnel_rendezvous_protocol.rs", "p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs", "p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/rendezvous_state_tests.rs", "p2p-frame/tests/unit/sn_tests/inter_sn_rendezvous_tests.rs", "p2p-frame/tests/unit/tunnel/nat_connect_plan/rendezvous_tests.rs", "p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs", "docs/versions/v0.1/modules/p2p-frame/024-tunnel-rendezvous-protocol/proposal.md", "docs/versions/v0.1/modules/p2p-frame/024-tunnel-rendezvous-protocol/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: the protocol and defaulted trait additions are backward-compatible with no crate-root or build-surface change; compile closure remains an explicit task integration step
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Validate the independent wire contract, exact business bodies, action domains, endpoint invariants, bounded state and deterministic NAT-plan mapping.
+    test_targets:
+      - p2p-frame/tests/tunnel_rendezvous_protocol.rs
+      - p2p-frame/tests/unit/sn_tests/service/service/rendezvous_state_tests.rs
+      - p2p-frame/tests/unit/tunnel/nat_connect_plan/rendezvous_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Protocol endpoints use documentation IPv4 space so trust-boundary validation is exercised without external traffic.
+    steps:
+      - id: rendezvous-wire-contract-unit
+        name: Run independent command codec operation endpoint digest and response-shape cases
+        change_ids: ["sn_tunnel_rendezvous_wire_contract", "sn_tunnel_rendezvous_action_modes", "sn_tunnel_rendezvous_endpoint_ownership", "sn_tunnel_rendezvous_security"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "tunnel_rendezvous_protocol", "--", "--test-threads=1"]
+      - id: rendezvous-state-unit
+        name: Run idempotency conflict terminal expiry pair total and rolling-rate capacity cases
+        change_ids: ["sn_tunnel_rendezvous_lifecycle", "sn_tunnel_rendezvous_security"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::rendezvous_state_", "--", "--test-threads=1"]
+      - id: rendezvous-plan-unit
+        name: Run all four target operations legacy exclusion and symmetric-symmetric owner-prediction mapping
+        change_ids: ["sn_tunnel_rendezvous_action_modes", "sn_tunnel_rendezvous_endpoint_ownership", "tunnel_manager_rendezvous_integration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::nat_connect_plan::tests::", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise the listener-owned UDP prediction lifecycle and a real same-SN two-client request response idempotency terminal and ownership flow.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs
+      - p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - UDP reflectors and SN/client stacks are real in-process loopback services.
+        - Public double-symmetric NAT remains an environment-only residual gap and is not simulated as public proof.
+    steps:
+      - id: rendezvous-listener-socket-dv
+        name: Prove PNAT observation prediction and close invalidation use the bound QUIC listener socket and generation
+        change_ids: ["sn_tunnel_rendezvous_endpoint_ownership", "quic_rendezvous_socket_binding", "sn_tunnel_rendezvous_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::listener::udp_punch_tests::lifecycle_regression::rendezvous_", "--", "--test-threads=1"]
+      - id: rendezvous-same-sn-dv
+        name: Prove target action arm precedes response duplicate replay is side-effect free terminal reaches target and third-party endpoints fail closed
+        change_ids: ["sn_tunnel_rendezvous_wire_contract", "sn_tunnel_rendezvous_endpoint_ownership", "sn_tunnel_rendezvous_lifecycle", "sn_tunnel_rendezvous_security", "tunnel_manager_rendezvous_integration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_same_sn_tests::same_sn_rendezvous_arms_target_before_response_and_terminal_blocks_replay", "--", "--exact", "--test-threads=1"]
+      - id: rendezvous-collision-dv
+        name: Prove duplicate rejection stable peer-order collision winner and displaced owner cancellation
+        change_ids: ["sn_tunnel_rendezvous_lifecycle", "sn_tunnel_rendezvous_security", "tunnel_manager_rendezvous_integration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::rendezvous_collision_uses_stable_peer_order_and_cancels_displaced_owner", "--", "--exact", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Verify cross-SN relay semantics, serial legacy/proxy fallback, predicted candidate use and repository consumer compilation.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/inter_sn_rendezvous_tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+      - p2p-frame
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Cross-SN dispatch uses the real inter-SN request/response dispatcher with a deterministic peer double.
+        - Compile closure is compile-only and does not broaden the task runtime suite.
+    steps:
+      - id: rendezvous-inter-sn-integration
+        name: Prove unchanged request response and complete-cancel semantics across the inter-SN dispatch boundary
+        change_ids: ["sn_tunnel_rendezvous_wire_contract", "sn_tunnel_rendezvous_lifecycle", "sn_tunnel_rendezvous_security"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::inter_sn::tests::inter_sn_rendezvous_", "--", "--test-threads=1"]
+      - id: rendezvous-fallback-integration
+        name: Prove failed or unavailable rendezvous remains serial with legacy SN call and proxy fallback
+        change_ids: ["sn_tunnel_rendezvous_action_modes", "sn_tunnel_rendezvous_lifecycle", "tunnel_manager_rendezvous_integration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::nat_action_failure_reaches_proxy_fallback_even_when_sn_call_fails", "--", "--exact", "--test-threads=1"]
+      - id: rendezvous-predicted-connect-integration
+        name: Prove owner-generated predicted candidate success and bounded miss fallback through TunnelManager
+        change_ids: ["sn_tunnel_rendezvous_endpoint_ownership", "quic_rendezvous_socket_binding", "tunnel_manager_rendezvous_integration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::predicted_connect_hit_succeeds_and_all_misses_fall_back_to_proxy", "--", "--exact", "--test-threads=1"]
+      - id: rendezvous-repository-compile-integration
+        name: Compile all p2p-frame targets and backward-compatible trait consumers without running the broad suite
+        change_ids: ["sn_tunnel_rendezvous_wire_contract", "sn_tunnel_rendezvous_action_modes", "sn_tunnel_rendezvous_endpoint_ownership", "quic_rendezvous_socket_binding", "sn_tunnel_rendezvous_lifecycle", "sn_tunnel_rendezvous_security", "tunnel_manager_rendezvous_integration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets", "--features", "x509"]

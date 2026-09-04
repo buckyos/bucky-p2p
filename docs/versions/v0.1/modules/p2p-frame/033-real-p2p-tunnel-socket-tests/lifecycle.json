@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "design": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/033-real-p2p-tunnel-socket-tests/design.md": "2a1fbb87da5c5c2f5b9a793d16c54f35d41e02bd5262329e6f70b1085313f746",
+        "docs/versions/v0.1/modules/p2p-frame/033-real-p2p-tunnel-socket-tests/risk-profile.yaml": "02d62bf356e8ab7d256270821ac9da37601feaa7454bfd8d01a6f70e3560fc92"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "244f6191933ccb2ffb88c4b3b4d8acb9bea043f76dc91f9ec5ca279fb09f696e"
+    },
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/033-real-p2p-tunnel-socket-tests/proposal.md": "5d2749cc1eb94cb1d3139260ddc64b399a7a1466c5629845ebb0ddfa2acf4f07"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "244f6191933ccb2ffb88c4b3b4d8acb9bea043f76dc91f9ec5ca279fb09f696e"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

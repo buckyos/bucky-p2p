@@ -1,0 +1,92 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/service/service.rs", "p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs", "p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs", "p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs", "docs/versions/v0.1/modules/p2p-frame/053-sanitize-sn-reported-endpoints/proposal.md", "docs/versions/v0.1/modules/p2p-frame/053-sanitize-sn-reported-endpoints/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The fix changes a private SN trust boundary without changing the public API, wire format, crate-root exports, build surface, or documentation examples; authenticated control-socket behavior is exercised below.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise every ReportSn endpoint sanitizer address, transport, normalization, deduplication, and count-budget branch at the private service boundary.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Retained IPv4 private/link-local and IPv6 unique-local/unicast-link-local endpoints are explicitly checked for server-normalized Lan area.
+        - Only an exact-observed non-LAN IPv4 is retained as Wan; loopback, unspecified, multicast, broadcast, unrelated public IPv4, global IPv6, Ext, and zero-port entries are removed.
+        - The 33-entry case proves the private 32-entry limit fails instead of order-dependent truncation.
+        - Red-green evidence is source-derived because reverting the shared dirty service file would overwrite unrelated in-flight task 052 work: the prior helper admitted every report entry and the prior ownership helper trusted cached report/certificate IPs, while the new regression sends that exact sequence and now passes.
+    steps:
+      - id: reported-endpoint-sanitizer-unit
+        name: Run ReportSn endpoint sanitizer domains normalization deduplication and budget cases
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::reported_endpoint_sanitizer", "--", "--test-threads=1"]
+      - id: exact-command-tunnel-owner-unit
+        name: Reject cached certificate and alternate same-peer tunnel authority
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::rendezvous_initiator_ownership_requires_the_exact_current_command_tunnel", "--", "--exact", "--test-threads=1", "--nocapture"]
+  dv:
+    mode: enabled
+    summary: Exercise report retention and request admission through real authenticated same-SN client command tunnels and target callbacks.
+    test_targets:
+      - p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The malicious client sends a custom ReportSn over its active authenticated control tunnel; a second client queries the cache and the target callback observes whether any action was delivered.
+        - The test-real-socket-matrix feature is used only to admit controlled loopback observation as rendezvous input for the exact-IP positive case; it is not public-NAT evidence.
+        - Empty WaitIncoming remains a real target-callback success path.
+    steps:
+      - id: forged-report-same-sn-dv
+        name: Reject a reported third-party public IP before same-SN target action
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_same_sn_tests::same_sn_rendezvous_rejects_third_party_endpoints_and_returns_generic_failure", "--", "--exact", "--test-threads=1"]
+      - id: report-budget-cache-atomicity-dv
+        name: Preserve the prior cache when an authenticated ReportSn exceeds the endpoint budget
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_same_sn_tests::over_budget_report_does_not_replace_previously_cached_endpoints", "--", "--exact", "--test-threads=1"]
+      - id: current-tunnel-ip-and-mixed-list-dv
+        name: Accept the exact current observed IP with another port and reject a mixed-IP list atomically
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--lib", "sn::tests::sn_same_sn_tests::same_sn_rendezvous_accepts_only_current_control_tunnel_ip_with_any_port", "--", "--exact", "--test-threads=1"]
+      - id: empty-wait-incoming-compatibility-dv
+        name: Preserve empty WaitIncoming callback ordering success and deduplication
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_same_sn_tests::same_sn_rendezvous_arms_target_before_success_and_deduplicates", "--", "--exact", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Preserve positive production inter-SN routing and prove the authenticated source SN rejects a forged report-derived rendezvous before relay and target action.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The fixture uses a real owner directory, SN A and SN B, authenticated source and target control tunnels, and a real target listener; no mock handler or cyfs-p2p-test evidence is used.
+        - Local loopback sockets validate routing and authorization order only; deployed multi-SN and public-NAT behavior remains outside this evidence.
+    steps:
+      - id: cross-sn-positive-routing-integration
+        name: Preserve production inter-SN query and empty WaitIncoming routing
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "real_p2p_tunnel_flow", "--features", "x509", "collision_cross_sn::production_ttp_cross_sn_query_and_rendezvous_arm_target_action", "--", "--exact", "--test-threads=1", "--nocapture"]
+      - id: forged-report-cross-sn-integration
+        name: Reject the forged endpoint at source SN before production inter-SN relay
+        change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "real_p2p_tunnel_flow", "--features", "x509", "collision_cross_sn::production_cross_sn_rejects_forged_report_before_target_action", "--", "--exact", "--test-threads=1", "--nocapture"]

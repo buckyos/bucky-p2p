@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/054-fallback-rendezvous-to-legacy/proposal.md": "922aeb79f538da98e231394b6babc1768023e9d4ed24f7b160fba62684d4626c"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "05554f6c09b6690fc28a4ae9c2ee8cff71c5faec086d85364990bd963ea1baed"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

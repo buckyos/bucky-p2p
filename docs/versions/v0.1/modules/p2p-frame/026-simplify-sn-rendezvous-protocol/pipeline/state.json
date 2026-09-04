@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "c53225787bb486b5d773a70d76129c13c57fc58e1b22267c6b7734c28d501edc",
+  "tasks": {
+    "D-1": {"status": "complete"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-PROTOCOL-1": {"status": "complete"},
+    "I-SOCKET-1": {"status": "complete"},
+    "I-SN-STATE-1": {"status": "complete"},
+    "I-CLIENT-1": {"status": "complete"},
+    "I-INTER-SN-1": {"status": "complete"},
+    "I-SN-SERVICE-1": {"status": "complete"},
+    "I-TUNNEL-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {"wave": 1, "tasks": ["D-1"], "serialization_reasons": {"D-1": "parent owns and validates the single admission-bound plan after parallel read-only protocol and lifecycle review"}}
+      ,{"wave": 2, "tasks": ["I-PROTOCOL-1", "I-SOCKET-1"], "serialization_reasons": {"I-PROTOCOL-1": "dependency-ready protocol scope is disjoint from socket scope", "I-SOCKET-1": "dependency-ready socket scope is disjoint from protocol scope"}}
+      ,{"wave": 3, "tasks": ["I-SN-STATE-1", "I-CLIENT-1", "I-INTER-SN-1"], "serialization_reasons": {"I-SN-STATE-1": "depends only on completed protocol and owns a disjoint file", "I-CLIENT-1": "depends only on completed protocol and owns a disjoint file", "I-INTER-SN-1": "depends only on completed protocol and owns a disjoint file"}}
+      ,{"wave": 4, "tasks": ["I-SN-SERVICE-1"], "serialization_reasons": {"I-SN-SERVICE-1": "explicitly depends on completed state, client and inter-SN interfaces"}}
+      ,{"wave": 5, "tasks": ["I-TUNNEL-1", "I-1"], "serialization_reasons": {"I-TUNNEL-1": "depends on the completed socket, client and SN service contracts and owns the final production consumer file", "I-1": "parent implementation closes only after all file tasks complete"}}
+      ,{"wave": 6, "tasks": ["T-1"], "serialization_reasons": {"T-1": "post-implementation testing derives from the completed production implementation"}}
+      ,{"wave": 7, "tasks": ["A-1"], "serialization_reasons": {"A-1": "independent falsification starts only after the successful task-scoped test artifact exists"}}
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "simplify_sn_rendezvous_wire_contract",
+      "validation_id": "V-SSRP-CONTRACT",
+      "testplan_level": "integration",
+      "testplan_step_id": "simplified-rendezvous-two-sn-integration",
+      "evidence": "Exact flat codecs and removed-symbol closure, live-only prediction sharing, authenticated same-SN and two-SN target delivery, current-generation validation, drop-safe owner cleanup, direction-aware collision handoff, real tunnel registration, mixed-version rejection and serial fallback are automated by the task testplan.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"normal","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"boundary","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"negative","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"error","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"compatibility","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"lifecycle","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"simplify_sn_rendezvous_wire_contract","case_type":"cross-module","required":"yes","validation_id":"V-SSRP-CONTRACT","level":"integration","status":"covered","gap_manual_reason":""}
+  ],
+  "testing_design_element_coverage": [
+    {"element_type":"parameter-domain","design_source":"Exported Interfaces and exact flat field tables","validation_ids":["V-SSRP-CONTRACT"],"level":"unit","status":"covered","gap_manual_reason":""},
+    {"element_type":"state-transition","design_source":"State Ownership and prediction-free completed disposition","validation_ids":["V-SSRP-CONTRACT"],"level":"unit,dv","status":"covered","gap_manual_reason":""},
+    {"element_type":"failure-path","design_source":"Failure Flows and legacy or PN fallback","validation_ids":["V-SSRP-CONTRACT"],"level":"dv,integration","status":"covered","gap_manual_reason":""},
+    {"element_type":"error-handling","design_source":"compact result and strict malformed input handling","validation_ids":["V-SSRP-CONTRACT"],"level":"unit,integration","status":"covered","gap_manual_reason":""},
+    {"element_type":"invariant","design_source":"authenticated identity endpoint ownership and registered-tunnel success","validation_ids":["V-SSRP-CONTRACT"],"level":"unit,dv,integration","status":"covered","gap_manual_reason":""},
+    {"element_type":"concurrency","design_source":"live duplicate sharing cancellation guard and direction-aware collision handoff","validation_ids":["V-SSRP-CONTRACT"],"level":"unit,dv","status":"covered","gap_manual_reason":""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260831T154432Z-p2p-frame+026-simplify-sn-rendezvous-protocol-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {"issue_id":"F-SSRP-001","owning_stage":"design","count":1,"target_task":"D-1,I-SN-STATE-1","reason":"acceptance found that the plan and state cache the complete prediction response despite the proposal requiring request-scoped non-cacheable endpoints","expected_fix_output":"design and implement live-only prediction sharing with prediction-free completed state, then replace replay tests and regenerate evidence"},
+    {"issue_id":"F-SSRP-002","owning_stage":"implementation","count":1,"target_task":"I-TUNNEL-1","reason":"acceptance found that dropping the initiator future bypasses explicit owner and waiter cleanup","expected_fix_output":"add scope-bound cancellation cleanup and a future-drop regression before regenerating evidence"},
+    {"issue_id":"F-SSRP-003","owning_stage":"implementation","count":1,"target_task":"I-TUNNEL-1","reason":"acceptance found equal-id opposite-direction collisions bypass stable ordering and displaced outbound work starts legacy fallback beside the incoming winner","expected_fix_output":"make duplicate detection direction-aware and hand the loser to the winner result before any fallback"},
+    {"issue_id":"F-SSRP-004","owning_stage":"testing","count":1,"target_task":"T-1","reason":"acceptance found cached-prediction replay was asserted while future-drop, equal-id collision, winner/fallback ordering, real cross-SN delivery and real tunnel convergence were absent","expected_fix_output":"replace invalid assertions and add the missing lifecycle and integration falsification cases"},
+    {"issue_id":"F-SSRP-005","owning_stage":"implementation","count":1,"target_task":"I-TUNNEL-1,T-1","reason":"acceptance found stale same-tuple guards and target tasks could cancel, complete or attach against a replacement owner","expected_fix_output":"bind install, attach, complete and cancel to a local unique owner token and prove stale operations cannot affect the winner"},
+    {"issue_id":"F-SSRP-006","owning_stage":"testing","count":1,"target_task":"T-1","reason":"acceptance found no combined same-tuple replacement case that drops or completes the displaced owner while the winner remains live","expected_fix_output":"exercise stale guard drop, stale completion and stale attach against a live replacement owner and regenerate unified evidence"}
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/026-simplify-sn-rendezvous-protocol/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

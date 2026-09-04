@@ -1,15 +1,17 @@
 ---
-module: example-module
-task_name: 001-example-task
-submodule: 001-example-task
-version: v0.1
+task_manifest: task.yaml
 status: draft
-approved_by:
-approved_at:
-approved_content_sha256:
 ---
 
 # [Module Name] Proposal
+
+Risk profile: not-created (replace with ./risk-profile.yaml only after high-risk confirmation)
+
+## Workflow Tier Judgment
+- Proposed tier: <trivial | standard | high-risk>
+- Final tier: pending
+- Tier rationale / triggered boundaries:
+- Proposal and tier confirmation:
 
 ## Background and Goal
 <!-- What problem is being solved and why now -->
@@ -34,9 +36,3 @@ approved_content_sha256:
 
 ## Risks
 <!-- High-risk changes, shared contracts, security or migration impact -->
-
-## Approval Record
-<!-- Fill only when the user explicitly approves this document. Agents MUST NOT fill this section or set `status: approved` on their own initiative. `approver` must match front matter `approved_by`; `user_statement` must quote the user's approval instruction verbatim. The same edit must record front matter `approved_content_sha256` from `schema-check.py --print-approval-hash <this-file>`; later content edits invalidate approval and require a sibling amendment/fix task. -->
-- approver:
-- approval_date:
-- user_statement: ""

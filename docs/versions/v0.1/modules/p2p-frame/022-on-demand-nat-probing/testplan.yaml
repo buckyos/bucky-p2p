@@ -1,0 +1,128 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 022-on-demand-nat-probing
+submodule: 022-on-demand-nat-probing
+api_impact:
+  public_api: migration-required
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/service/mod.rs", "p2p-frame/src/sn/service/nat_probe_scheduler.rs", "p2p-frame/src/sn/service/peer_manager.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs", "p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs", "p2p-frame/tests/unit/sn_tests/service/reported_net_profile_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs", "p2p-frame/tests/nat_profile_public_api.rs", "cyfs-p2p", "sn-miner-rust", "docs/versions/v0.1/modules/p2p-frame/022-on-demand-nat-probing/proposal.md", "docs/versions/v0.1/modules/p2p-frame/022-on-demand-nat-probing/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: nat-probe-public-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile an external p2p-frame public API consumer after struct migration
+      change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--test", "nat_profile_public_api", "--no-run"]
+    - id: nat-probe-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify migrated repository consumers contain no unhandled task symbols
+      change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+      run: ["python3", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "022-on-demand-nat-probing"]
+    - id: nat-probe-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile p2p-frame cyfs-p2p and sn-miner consumers and all targets
+      change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+      run: ["cargo", "test", "-p", "p2p-frame", "-p", "cyfs-p2p", "-p", "sn-miner", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify server-owned fake-time scheduling, negotiated capability, global capacity, exact QUIC authority and maintenance, client online/directive gates, optional wire correlation, peer publication ownership, and mixed-version fallback.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs
+      - p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs
+      - p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs
+      - p2p-frame/tests/unit/sn_tests/service/reported_net_profile_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Scheduler time is injected as bucky-time microseconds; the suite does not wait two wall-clock hours.
+        - Client tests validate before any UDP operation that the authenticated active tunnel is QUIC and the endpoint set is bounded, distinct, IPv4, same-IP UDP.
+        - Wire tests retain legacy base and task-020 optional fields while appending negotiated capability/result and directive correlation tails.
+    steps:
+      - id: nat-probe-scheduler-unit
+        name: Run event demand timeout correlation capability capacity maintenance multi-tunnel and exact two-hour state transitions
+        change_ids: ["sn_nat_probe_trigger_policy", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::service::service::tests::nat_probe_scheduler"]
+      - id: nat-probe-client-gate-unit
+        name: Run online-before-probe QUIC identity deadline replay and endpoint validation gates
+        change_ids: ["sn_nat_probe_directive_protocol", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::client::sn_service::tests::nat_probe_directive"]
+      - id: nat-probe-wire-unit
+        name: Run additive directive result legacy and malformed compatibility codecs
+        change_ids: ["sn_nat_probe_directive_protocol"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::protocol::sn::nat_type_wire_tests"]
+      - id: nat-probe-peer-cache-unit
+        name: Run registration refresh explicit publication invalidation and old-TTL reuse tests
+        change_ids: ["nat_profile_server_owned_validity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::service::peer_manager::tests"]
+  dv:
+    mode: enabled
+    summary: Exercise real in-process QUIC and TCP registrations, online-before-probe behavior, same-socket UDP probing, correlated result failure, a forced real two-hour deadline, legacy capability fallback, query and call paths without a client TTL trigger.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+      - p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The existing flow starts an in-process SN with two real UDP reflector ports and cold clients.
+        - Loopback proves protocol ownership and correlation; public NAT diversity remains environment-dependent.
+    steps:
+      - id: nat-probe-quic-flow-dv
+        name: Run first QUIC report directive real UDP probe result query and exact call snapshot
+        change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::first_query_returns_remote_profile_and_call_forwards_exact_snapshot", "--", "--exact"]
+      - id: nat-probe-runtime-dv
+        name: Run the fixed-packet same-socket real UDP reflector regressions
+        change_ids: ["sn_nat_probe_directive_protocol", "sn_nat_probe_quic_eligibility"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::nat_probe::tests"]
+      - id: nat-probe-online-dv
+        name: Prove initial UDP work and failed result report do not gate client online state
+        change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "sn_nat_probe_quic_eligibility"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::initial_probe_and_result_report_failure_do_not_gate_online", "--", "--exact"]
+      - id: nat-probe-tcp-zero-dv
+        name: Prove a real TCP-only registration stays online with Unknown and executes no directive
+        change_ids: ["sn_nat_probe_trigger_policy", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::tcp_only_registration_never_receives_or_executes_probe", "--", "--exact"]
+      - id: nat-probe-periodic-dv
+        name: Force a real periodic deadline and prove exactly one directive UDP probe and correlated completion
+        change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::periodic_deadline_issues_exactly_one_real_probe_directive", "--", "--exact"]
+      - id: nat-probe-legacy-capability-dv
+        name: Prove a legacy QUIC client without control capability receives no directive after demand
+        change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::legacy_quic_client_without_capability_never_receives_demand_directive", "--", "--exact"]
+  integration:
+    mode: enabled
+    summary: Run the full SN command suite and repository compile closure to cover report query call reconnect TCP QUIC timeouts and migrated consumers.
+    test_targets:
+      - p2p-frame/src/sn/tests.rs
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+      - cyfs-p2p
+      - sn-miner-rust
+    preconditions:
+      tools: ["cargo", "python3"]
+      env: []
+      services: []
+      notes:
+        - Full SN tests retain TCP-only online, QUIC profile flow, late response, timeout, query/call and command-matrix regressions.
+        - Repository compile closure detects every required public struct-literal migration.
+    steps:
+      - id: sn-command-regression-integration
+        name: Run complete SN client server command and profile regressions
+        change_ids: ["sn_nat_probe_trigger_policy", "sn_nat_probe_directive_protocol", "nat_profile_server_owned_validity", "sn_nat_probe_quic_eligibility", "sn_nat_probe_two_hour_schedule"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests"]

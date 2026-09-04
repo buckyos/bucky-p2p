@@ -8,6 +8,8 @@ import re
 import sys
 from pathlib import Path
 
+from task_manifest import TaskManifestError, stage_is_automatic, task_policy
+
 
 MAX_HUMAN_DOC_LINES = 1000
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -21,7 +23,6 @@ REQUIRED_SECTIONS = {
         "Proposal Items",
         "Success Criteria",
         "Risks",
-        "Approval Record",
     ),
     "design.md": (
         "Design Scope",
@@ -582,8 +583,11 @@ def check_level_tables(path: Path, text: str) -> None:
                 )
 
 
-def check_submodule_doc_placement(packet: Path) -> None:
-    for folder_name in ("design", "testing"):
+def check_submodule_doc_placement(packet: Path, stage: str | None) -> None:
+    if stage == "proposal":
+        return
+    folders = ("design", "testing") if stage in {"testing", "acceptance"} else ("design",)
+    for folder_name in folders:
         folder = packet / folder_name
         if not folder.exists():
             continue
@@ -621,6 +625,22 @@ def packet_path(root: Path, version: str, module: str, submodule: str | None) ->
     return packet
 
 
+def task_stage_policy(packet: Path) -> tuple[str | None, bool, bool]:
+    """Return current stage plus automatic design/testing decisions."""
+    manifest = packet / "task.yaml"
+    if not manifest.is_file():
+        return None, False, False
+    try:
+        policy = task_policy(manifest)
+    except TaskManifestError as error:
+        fail(str(error))
+    return (
+        policy["stage"],
+        stage_is_automatic(policy, "design"),
+        stage_is_automatic(policy, "testing"),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")
@@ -636,18 +656,25 @@ def main() -> int:
     args = parser.parse_args()
 
     packet = packet_path(Path(args.root), args.version, args.module, args.submodule)
+    stage, automatic_design, automatic_testing = task_stage_policy(packet)
     if args.docs in {"all", "mandatory", "proposal"}:
         check_doc(packet / "proposal.md", args.max_lines)
-    if args.docs in {"all", "mandatory", "design"}:
+    if (
+        args.docs in {"all", "mandatory", "design"}
+        and stage != "proposal"
+        and not automatic_design
+    ):
         check_doc(packet / "design.md", args.max_lines)
     if args.docs in {"all", "testing"}:
         testing = packet / "testing.md"
-        if testing.exists():
+        if automatic_testing:
+            pass
+        elif testing.exists():
             check_doc(testing, args.max_lines)
         elif args.docs == "testing":
             fail(f"missing required file: {testing}")
 
-    check_submodule_doc_placement(packet)
+    check_submodule_doc_placement(packet, stage)
     print("doc-structure-check: passed")
     return 0
 

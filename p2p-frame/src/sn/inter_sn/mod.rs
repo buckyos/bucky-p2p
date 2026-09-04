@@ -1,5 +1,6 @@
 use crate::endpoint::Endpoint;
 use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::nat_type::NatProfile;
 use crate::networks::{TunnelPurpose, TunnelStreamRead, TunnelStreamWrite, ValidateResult};
 use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId};
 use crate::sn::directory::{
@@ -8,8 +9,9 @@ use crate::sn::directory::{
     OwnerSessionReplicationResponse, OwnerVoteRequest, OwnerVoteResponse, ServingLease,
 };
 use crate::sn::protocol::{
-    InterSnCommandCode, SnCall, SnDetailQuery, SnDetailResp, SnOwnerHeartbeat, SnPublishLease,
-    SnQueryLease, SnQueryLeaseResp, SnRelayCall,
+    InterSnCommandCode, SN_TUNNEL_RENDEZVOUS_CMD_VERSION, SnCall, SnDetailQuery, SnDetailResp,
+    SnOwnerHeartbeat, SnPublishLease, SnQueryLease, SnQueryLeaseResp, SnRelayCall,
+    SnTunnelRendezvousNotify, SnTunnelRendezvousResp,
 };
 use crate::sn::types::{OwnerCmdPkgLen, SnTunnelRead, SnTunnelWrite};
 use crate::ttp::{TtpConnector, TtpNodeRef, TtpPortListener, TtpTarget};
@@ -54,6 +56,7 @@ pub enum InterSnCommand {
     QueryLease,
     QueryDetail,
     RelayCall,
+    RelayRendezvous,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,6 +112,8 @@ pub async fn require_accept(result: ValidateResult, operation: &str) -> P2pResul
 pub struct ServingPeerDetail {
     pub peer_info: EncodedP2pIdentityCert,
     pub endpoints: Vec<Endpoint>,
+    pub net_profile: Option<NatProfile>,
+    pub target_protocol_version: Option<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,6 +133,7 @@ pub enum InterSnRequest {
     QueryLease(SnQueryLease),
     QueryDetail(SnDetailQuery),
     RelayCall(SnRelayCall),
+    RelayRendezvous(P2pId, SnTunnelRendezvousNotify),
 }
 
 #[derive(Clone, Debug, RawEncode, RawDecode)]
@@ -141,6 +147,7 @@ pub enum InterSnResponse {
     Leases(SnQueryLeaseResp),
     Detail(SnDetailResp),
     Relay(RelayCallResponse),
+    Rendezvous(SnTunnelRendezvousResp),
     Error(InterSnError),
 }
 
@@ -256,6 +263,18 @@ pub trait InterSnPeer: Send + Sync + 'static {
         Err(p2p_err!(
             P2pErrorCode::NotSupport,
             "inter-sn peer does not support serving relay call"
+        ))
+    }
+
+    async fn relay_rendezvous_from_sn(
+        &self,
+        _remote_sn_id: P2pId,
+        _target_peer_id: P2pId,
+        _notify: SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "inter-sn peer does not support rendezvous relay"
         ))
     }
 }
@@ -456,6 +475,8 @@ impl TtpInterSnClient {
                 Ok(resp.peer_info.map(|peer_info| ServingPeerDetail {
                     peer_info,
                     endpoints: resp.end_point_array,
+                    net_profile: resp.net_profile,
+                    target_protocol_version: resp.target_protocol_version,
                 }))
             }
             InterSnResponse::Error(err) => Err(err.into()),
@@ -490,6 +511,28 @@ impl TtpInterSnClient {
         }
     }
 
+    pub async fn relay_rendezvous_to_sn(
+        &self,
+        remote_sn_id: &P2pId,
+        target_peer_id: P2pId,
+        notify: SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        match self
+            .request(
+                remote_sn_id,
+                InterSnRequest::RelayRendezvous(target_peer_id, notify),
+            )
+            .await?
+        {
+            InterSnResponse::Rendezvous(response) => Ok(response),
+            InterSnResponse::Error(err) => Err(err.into()),
+            _ => Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "unexpected inter-sn rendezvous response"
+            )),
+        }
+    }
+
     async fn request(
         &self,
         remote_sn_id: &P2pId,
@@ -497,6 +540,11 @@ impl TtpInterSnClient {
     ) -> P2pResult<InterSnResponse> {
         self.target(remote_sn_id)?;
         let command = inter_sn_command_code(&request);
+        let version = if command == InterSnCommandCode::RelayRendezvousV2 {
+            SN_TUNNEL_RENDEZVOUS_CMD_VERSION
+        } else {
+            INTER_SN_CMD_VERSION
+        };
         let request = request
             .to_vec()
             .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
@@ -505,7 +553,7 @@ impl TtpInterSnClient {
             .send_with_resp(
                 &PeerId::from(remote_sn_id.as_slice()),
                 command,
-                INTER_SN_CMD_VERSION,
+                version,
                 request.as_slice(),
                 INTER_SN_CMD_TIMEOUT,
             )
@@ -514,8 +562,15 @@ impl TtpInterSnClient {
             .into_bytes()
             .await
             .map_err(cmd_to_p2p_err)?;
-        InterSnResponse::clone_from_slice(response.as_slice())
-            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))
+        let (response, remainder) = InterSnResponse::raw_decode(response.as_slice())
+            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        if !remainder.is_empty() {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "inter-sn response contains trailing bytes"
+            ));
+        }
+        Ok(response)
     }
 }
 
@@ -569,6 +624,7 @@ fn inter_sn_command_code(request: &InterSnRequest) -> InterSnCommandCode {
         InterSnRequest::QueryLease(_) => InterSnCommandCode::QueryLease,
         InterSnRequest::QueryDetail(_) => InterSnCommandCode::QueryDetail,
         InterSnRequest::RelayCall(_) => InterSnCommandCode::RelayCall,
+        InterSnRequest::RelayRendezvous(_, _) => InterSnCommandCode::RelayRendezvousV2,
     }
 }
 
@@ -683,6 +739,7 @@ fn register_owner_cmd_handlers(
         InterSnCommandCode::QueryLease,
         InterSnCommandCode::QueryDetail,
         InterSnCommandCode::RelayCall,
+        InterSnCommandCode::RelayRendezvousV2,
     ] {
         let peer = peer.clone();
         cmd_node_service.register_cmd_handler(
@@ -708,16 +765,32 @@ async fn handle_owner_cmd(
     header: CmdHeader<OwnerCmdPkgLen, InterSnCommandCode>,
     body: &mut CmdBody,
 ) -> CmdResult<Option<CmdBody>> {
-    let request = InterSnRequest::clone_from_slice(
-        body.read_all()
-            .await
-            .map_err(into_cmd_err!(CmdErrorCode::Failed, "read owner cmd failed"))?
-            .as_slice(),
-    )
-    .map_err(into_cmd_err!(
-        CmdErrorCode::Failed,
-        "decode owner cmd failed"
-    ))?;
+    let expected_version = if header.cmd_code() == InterSnCommandCode::RelayRendezvousV2 {
+        SN_TUNNEL_RENDEZVOUS_CMD_VERSION
+    } else {
+        INTER_SN_CMD_VERSION
+    };
+    if header.version() != expected_version {
+        return Err(cmd_err!(
+            CmdErrorCode::InvalidParam,
+            "unsupported inter-sn command version {} for {:?}",
+            header.version(),
+            header.cmd_code()
+        ));
+    }
+    let bytes = body
+        .read_all()
+        .await
+        .map_err(into_cmd_err!(CmdErrorCode::Failed, "read owner cmd failed"))?;
+    let (request, remainder) = InterSnRequest::raw_decode(bytes.as_slice()).map_err(
+        into_cmd_err!(CmdErrorCode::Failed, "decode owner cmd failed"),
+    )?;
+    if !remainder.is_empty() {
+        return Err(cmd_err!(
+            CmdErrorCode::InvalidParam,
+            "inter-sn request contains trailing bytes"
+        ));
+    }
     let response = dispatch_owner_cmd(peer, remote_sn_id, header.cmd_code(), request).await;
     let response = response.to_vec().map_err(into_cmd_err!(
         CmdErrorCode::Failed,
@@ -769,18 +842,34 @@ async fn dispatch_owner_cmd(
             .query_detail_from_sn(remote_sn_id, query.peer_id)
             .await
             .map(|detail| {
-                let (peer_info, end_point_array) = detail
-                    .map(|detail| (Some(detail.peer_info), detail.endpoints))
-                    .unwrap_or((None, Vec::new()));
+                let (peer_info, end_point_array, net_profile, target_protocol_version) = detail
+                    .map(|detail| {
+                        (
+                            Some(detail.peer_info),
+                            detail.endpoints,
+                            detail.net_profile,
+                            detail.target_protocol_version,
+                        )
+                    })
+                    .unwrap_or((None, Vec::new(), None, None));
                 InterSnResponse::Detail(SnDetailResp {
                     peer_info,
                     end_point_array,
+                    net_profile,
+                    target_protocol_version,
                 })
             }),
         (InterSnCommandCode::RelayCall, InterSnRequest::RelayCall(relay)) => peer
             .relay_call_from_sn(remote_sn_id, relay.call)
             .await
             .map(|outcome| InterSnResponse::Relay(outcome.into())),
+        (
+            InterSnCommandCode::RelayRendezvousV2,
+            InterSnRequest::RelayRendezvous(target_peer_id, notify),
+        ) => peer
+            .relay_rendezvous_from_sn(remote_sn_id, target_peer_id, notify)
+            .await
+            .map(InterSnResponse::Rendezvous),
         _ => Err(p2p_err!(
             P2pErrorCode::InvalidData,
             "inter-sn command code and payload mismatch"
@@ -1046,6 +1135,11 @@ mod tests {
             &[(remote_sn_id, lease)]
         );
     }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/unit/sn_tests/inter_sn_profile_tests.rs"
+    ));
 
     #[tokio::test]
     async fn sn_owner_network_ttp_command_dispatches_election_payloads() {

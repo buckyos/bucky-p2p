@@ -1,6 +1,7 @@
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::P2pResult;
 use crate::executor::Executor;
+use crate::nat_type::{NatMappingObservation, NatProfile};
 use crate::p2p_identity::{P2pId, P2pIdentityCertRef};
 use crate::runtime;
 use crate::types::{Timestamp, TunnelId, TunnelIdGenerator};
@@ -33,11 +34,13 @@ pub struct FoundPeer {
 #[derive(Clone)]
 pub struct CachedPeerInfo {
     pub desc: P2pIdentityCertRef,
+    pub protocol_version: Option<u8>,
     pub map_ports: Vec<(Protocol, u16)>,
     pub last_send_time: Timestamp,
     pub last_call_time: Timestamp,
     pub local_eps: Vec<Endpoint>,
     pub is_wan: bool,
+    pub net_profile: NatProfile,
     // pub call_peers: HashMap<DeviceId, TempSeq>, // <peerid, last_call_seq>
     // pub receipt: SnServiceReceipt,
     // pub last_receipt_request_time: ReceiptRequestTime,
@@ -67,6 +70,7 @@ impl CachedPeerInfo {
         CachedPeerInfo {
             is_wan: has_wan_endpoint(&desc),
             desc,
+            protocol_version: None,
             map_ports: vec![],
             last_send_time: send_time,
             last_call_time: 0,
@@ -74,6 +78,7 @@ impl CachedPeerInfo {
             // receipt: Default::default(),
             // last_receipt_request_time: ReceiptRequestTime::None,
             local_eps: Vec::new(),
+            net_profile: NatProfile::unknown(),
         }
     }
 
@@ -160,6 +165,7 @@ impl PeerManager {
         &self,
         device_id: &P2pId,
         device: &Option<P2pIdentityCertRef>,
+        protocol_version: u8,
         map_ports: Vec<(Protocol, u16)>,
         local_eps: &Vec<Endpoint>,
     ) {
@@ -168,8 +174,34 @@ impl PeerManager {
             if let Some(device) = device {
                 let _ = peer.update_desc(device);
             }
+            peer.protocol_version = Some(protocol_version);
             peer.map_ports = map_ports;
             peer.update_local_eps(local_eps);
+        } else if let Some(device) = device {
+            let mut peer = CachedPeerInfo::new(device.clone(), bucky_time_now());
+            peer.protocol_version = Some(protocol_version);
+            peer.map_ports = map_ports;
+            peer.update_local_eps(local_eps);
+            device_conn_map.insert(device_id.clone(), peer);
+        }
+    }
+
+    pub fn add_or_update_peer_with_profile(
+        &self,
+        device_id: &P2pId,
+        device: &Option<P2pIdentityCertRef>,
+        map_ports: Vec<(Protocol, u16)>,
+        local_eps: &Vec<Endpoint>,
+        net_profile: NatProfile,
+    ) {
+        let mut device_conn_map = self.device_conn_map.lock().unwrap();
+        if let Some(peer) = device_conn_map.get_mut(device_id) {
+            if let Some(device) = device {
+                let _ = peer.update_desc(device);
+            }
+            peer.map_ports = map_ports;
+            peer.update_local_eps(local_eps);
+            peer.net_profile = net_profile;
         } else {
             if device.is_none() {
                 return;
@@ -178,6 +210,7 @@ impl PeerManager {
             let mut peer = CachedPeerInfo::new(device.clone().unwrap(), bucky_time_now());
             peer.map_ports = map_ports;
             peer.update_local_eps(local_eps);
+            peer.net_profile = net_profile;
             device_conn_map.insert(device_id.clone(), peer);
         }
     }
@@ -188,6 +221,26 @@ impl PeerManager {
             .unwrap()
             .get(id)
             .map(|v| v.clone())
+    }
+
+    pub fn set_net_profile(&self, id: &P2pId, profile: NatProfile) -> bool {
+        let mut device_conn_map = self.device_conn_map.lock().unwrap();
+        let Some(peer) = device_conn_map.get_mut(id) else {
+            return false;
+        };
+        peer.net_profile = profile;
+        true
+    }
+
+    pub fn invalidate_net_profile(&self, id: &P2pId) -> bool {
+        self.set_net_profile(id, NatProfile::unknown())
+    }
+}
+
+impl CachedPeerInfo {
+    pub fn fresh_net_profile(&self, now: Timestamp) -> Option<NatProfile> {
+        (self.net_profile.mapping_at(now) != NatMappingObservation::Unknown)
+            .then(|| self.net_profile.clone())
     }
 }
 
@@ -333,6 +386,7 @@ mod tests {
         mgr.add_or_update_peer(
             &remote_id,
             &none_device,
+            0,
             vec![(Protocol::Tcp, 1234)],
             &local_eps,
         );
@@ -351,6 +405,7 @@ mod tests {
         mgr.add_or_update_peer(
             &remote_id,
             &some_device,
+            0,
             vec![(Protocol::Quic, 6001)],
             &local_eps1,
         );
@@ -365,6 +420,7 @@ mod tests {
         mgr.add_or_update_peer(
             &remote_id,
             &none_device,
+            0,
             vec![(Protocol::Tcp, 6002)],
             &local_eps2,
         );
@@ -380,6 +436,7 @@ mod tests {
         mgr.add_or_update_peer(
             &remote_id,
             &some_device2,
+            0,
             vec![(Protocol::Tcp, 6003)],
             &local_eps3,
         );
@@ -401,5 +458,19 @@ mod tests {
 
         mgr.remove_peer(remote_id.clone());
         assert!(mgr.find_peer(&remote_id).is_none());
+    }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/unit/sn_tests/service/reported_net_profile_tests.rs"
+    ));
+
+    mod reported_protocol_version_tests {
+        use super::*;
+
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/unit/sn_tests/service/reported_protocol_version_tests.rs"
+        ));
     }
 }

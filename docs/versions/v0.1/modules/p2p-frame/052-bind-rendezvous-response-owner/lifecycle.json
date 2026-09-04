@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "acceptance": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/052-bind-rendezvous-response-owner/acceptance-report.md": "8d370476d971cb8d74bca7cbec18c539597c139284487c65a6f74b4d595cde9f"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "2a76aafee91044c1dc52ec95dc7c84618bcd99cb8f2c93cee6af0565751aed5a"
+    },
+    "design": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/052-bind-rendezvous-response-owner/design.md": "1918d48f24be8490e24251bfabb38f0e7ee027348abc79224786e20cedb3ee79",
+        "docs/versions/v0.1/modules/p2p-frame/052-bind-rendezvous-response-owner/risk-profile.yaml": "8c620d232a3fbec6af8f57decec248e6f002a512ba805a0fe4042b34e412b390"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "2a76aafee91044c1dc52ec95dc7c84618bcd99cb8f2c93cee6af0565751aed5a"
+    },
+    "implementation": {
+      "inputs": {},
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "2a76aafee91044c1dc52ec95dc7c84618bcd99cb8f2c93cee6af0565751aed5a"
+    },
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/052-bind-rendezvous-response-owner/proposal.md": "0c26f69b6e0253b4066b3d99211473ecf2b076472b920d63f4ecf9c03cbf004e"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "2a76aafee91044c1dc52ec95dc7c84618bcd99cb8f2c93cee6af0565751aed5a"
+    },
+    "testing": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/052-bind-rendezvous-response-owner/testing.md": "140eb641321b6a016bf51bbdaa7063e4c3daa842b73cee17c95a3ba9f662d483",
+        "docs/versions/v0.1/modules/p2p-frame/052-bind-rendezvous-response-owner/testplan.yaml": "0361864149376caef1ed3b23a7bf74b3701bae9b846dbb9cbacec0dd2bdc14a2"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "2a76aafee91044c1dc52ec95dc7c84618bcd99cb8f2c93cee6af0565751aed5a",
+      "test_run": ".harness/test-results/test-runs/20260904T050049Z-p2p-frame+052-bind-rendezvous-response-owner-all.json",
+      "test_run_sha256": "16d1b05473326679ca51f5ff8c18fe91f30baae3067b0c70d986b30e02c9eaf6"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

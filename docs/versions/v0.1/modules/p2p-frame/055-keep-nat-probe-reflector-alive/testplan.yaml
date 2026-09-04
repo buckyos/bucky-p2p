@@ -1,0 +1,62 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/nat_probe.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs", "p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs"]
+contract_checks:
+  mode: disabled
+  reason: NatProbeReflector::run 的公共签名、导出路径、wire format 和 build surface 均未改变；现有 service 与 crate 内调用方由 x509 lib 编译覆盖。
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 直接覆盖 NatProbeReflector::run 的发送失败和后续发送成功分支，并校验不重试失败数据报。
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 确定性 fail-next-send 注入在实际 send_response 边界产生一次 io::Error，避免依赖平台特定 ENOBUFS 条件。
+    steps:
+      - id: nat-probe-send-recovery-unit
+        name: Run the exact reflector send failure recovery branch regression
+        change_ids: ["CHG-keep-nat-probe-reflector-alive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "reflector_survives_one_udp_send_failure_without_retrying_it", "--", "--test-threads=1", "--nocapture"]
+  dv:
+    mode: enabled
+    summary: 使用同一真实 loopback socket 用例验证 reflector task/socket 的失败后存活与下一请求完整签名响应。
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 此用例同时是最低层分支回归和单模块真实 socket 生命周期验证；重复 argv 由统一 runner 去重并保留两个注册来源。
+    steps:
+      - id: nat-probe-send-recovery-dv
+        name: Run the real socket reflector lifecycle after one send failure
+        change_ids: ["CHG-keep-nat-probe-reflector-alive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "reflector_survives_one_udp_send_failure_without_retrying_it", "--", "--test-threads=1", "--nocapture"]
+  integration:
+    mode: disabled
+    summary: 本任务不改变 SN service 调用接口、跨模块数据流或 wire contract；本机用例不冒充公网故障证据。
+    change_ids: ["CHG-keep-nat-probe-reflector-alive"]
+    reason: service 仍以原签名启动同一公开 run future，生产调用点未修改；受影响 crate 内消费者会随 x509 lib test 编译，暂无新的跨模块 success/failure contract 需要集成测试。
+    test_targets: []
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes: []
+    steps: []

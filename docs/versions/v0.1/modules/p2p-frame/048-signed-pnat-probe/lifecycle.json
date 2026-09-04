@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/048-signed-pnat-probe/proposal.md": "88928b11252854debc2b090a9b20dc2cd31dbb45b45ef78b596b64d1a68476ce"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "56a191e11d49b3c18d7cb097eff126495b01190e3efa445d288c00371ea864c5"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

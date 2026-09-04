@@ -1,0 +1,133 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+version: v0.1
+module: globals
+task_name: 031-allow-harness-tooling-implementation-scope
+submodule: 031-allow-harness-tooling-implementation-scope
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["harness/rules/task-entry-gate-rules.md", "harness/rules/implementation-rules.md", "harness/scripts/stage-scope-check.py", "harness/tests/test_stage_scope_harness_tooling.py", "docs/versions/v0.1/modules/globals/031-allow-harness-tooling-implementation-scope/proposal.md", "docs/versions/v0.1/modules/globals/031-allow-harness-tooling-implementation-scope/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task preserves the stage-scope CLI and changes no public product API, crate-root export, build surface, or documentation example; the enabled task steps directly exercise the repository-local Harness compatibility boundary.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise syntax and every implementation-classifier predicate, including real task existence, concrete target existence, and exact change-to-target ownership.
+    test_targets:
+      - harness/scripts/stage-scope-check.py
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - Negative cases use a subprocess wrapper that succeeds only when stage-scope-check.py returns non-zero.
+    steps:
+      - id: stage-scope-py-compile
+        name: Compile the updated stage-scope checker
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-m", "py_compile", "harness/scripts/stage-scope-check.py"]
+      - id: stage-scope-harness-tooling-unittest
+        name: Run isolated mutation-sensitive Harness-tooling binding tests
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-m", "unittest", "discover", "-s", "harness/tests", "-p", "test_stage_scope_harness_tooling.py", "-v"]
+      - id: globals-p2p-frame-harness-script-positive
+        name: Accept a Harness script for a globals sibling task bound to p2p-frame
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "harness/scripts/stage-scope-check.py", "--stage", "implementation", "--version", "v0.1", "--module", "globals", "--submodule", "031-allow-harness-tooling-implementation-scope", "--target-module", "p2p-frame", "--change-id", "define_harness_tooling_implementation_artifacts", "--changed-path", "harness/scripts/stage-scope-check.py"]
+      - id: globals-cyfs-p2p-harness-script-positive
+        name: Accept a Harness script for the same globals sibling task bound to cyfs-p2p
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "harness/scripts/stage-scope-check.py", "--stage", "implementation", "--version", "v0.1", "--module", "globals", "--submodule", "031-allow-harness-tooling-implementation-scope", "--target-module", "cyfs-p2p", "--change-id", "enforce_globals_harness_tooling_scope", "--changed-path", "harness/scripts/stage-scope-check.py"]
+      - id: non-globals-harness-script-negative
+        name: Reject a Harness script from a project-module packet
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','p2p-frame','--submodule','031-allow-harness-tooling-implementation-scope','--target-module','p2p-frame','--change-id','enforce_globals_harness_tooling_scope','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: invalid-sibling-harness-script-negative
+        name: Reject a Harness script when the globals submodule is not a canonical sibling task
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','invalid-task-name','--target-module','p2p-frame','--change-id','enforce_globals_harness_tooling_scope','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: nonexistent-sibling-harness-script-negative
+        name: Reject a syntactically valid globals sibling task that does not exist
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','999-nonexistent-harness-task','--target-module','p2p-frame','--change-id','define_harness_tooling_implementation_artifacts','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: nonexistent-target-module-negative
+        name: Reject the real globals sibling task when its concrete target module does not exist
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--target-module','not-a-real-module','--change-id','define_harness_tooling_implementation_artifacts','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: unbound-change-id-negative
+        name: Reject the real globals and cyfs-p2p binding when the change id is not owned by the task
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--target-module','cyfs-p2p','--change-id','totally_unbound_change','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: wrong-existing-target-negative
+        name: Reject a real change id when paired with the wrong existing target module
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--target-module','cyfs-p2p','--change-id','define_harness_tooling_implementation_artifacts','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: mixed-target-multiple-change-negative
+        name: Reject multiple change ids when any one belongs to a different target module
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--target-module','p2p-frame','--change-id','define_harness_tooling_implementation_artifacts','--change-id','enforce_globals_harness_tooling_scope','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+
+  dv:
+    mode: enabled
+    summary: Exercise the intended policy isolation and prove the scripts-only exception is absent from Testing and Acceptance.
+    test_targets:
+      - harness/rules/task-entry-gate-rules.md
+      - harness/rules/implementation-rules.md
+      - harness/scripts/stage-scope-check.py
+      - harness/rules/index.yaml
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - Policy and cross-stage negatives use the same valid globals sibling identity as the positive case.
+    steps:
+      - id: globals-policy-path-negative
+        name: Reject Harness policy files during globals implementation
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','implementation','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--target-module','p2p-frame','--change-id','define_harness_tooling_implementation_artifacts','--changed-path','harness/rules/implementation-rules.md'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: testing-harness-script-negative
+        name: Reject Harness scripts as Testing-stage artifacts
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','testing','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: acceptance-harness-script-negative
+        name: Reject Harness scripts as Acceptance-stage artifacts
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "-c", "import subprocess,sys; result=subprocess.run(['python3','harness/scripts/stage-scope-check.py','--stage','acceptance','--version','v0.1','--module','globals','--submodule','031-allow-harness-tooling-implementation-scope','--changed-path','harness/scripts/stage-scope-check.py'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True); sys.exit(0 if result.returncode != 0 else 1)"]
+      - id: context-rule-index-validation
+        name: Validate generated and custom Harness rule indexes
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "harness/scripts/context.py", "--root", ".", "--validate-index"]
+
+  integration:
+    mode: enabled
+    summary: Verify that the changed classifier remains compatible with the repository-wide Harness scaffold.
+    test_targets:
+      - harness/scripts/harness-self-check.py
+      - harness/scripts/verify-workspace-harness.py
+      - harness/scripts/stage-scope-check.py
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - These checks validate repository Harness structure only and make no product-runtime claim.
+    steps:
+      - id: harness-self-check
+        name: Run the repository Harness self-check
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "harness/scripts/harness-self-check.py"]
+      - id: workspace-harness-verification
+        name: Verify the v0.1 workspace Harness structure
+        change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+        run: ["python3", "harness/scripts/verify-workspace-harness.py", "v0.1"]

@@ -1,0 +1,68 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 008-pn-traffic-disconnect-retention
+submodule: 008-pn-traffic-disconnect-retention
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs", "docs/versions/v0.1/modules/p2p-frame/008-pn-traffic-disconnect-retention/proposal.md", "docs/versions/v0.1/modules/p2p-frame/008-pn-traffic-disconnect-retention/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: pn-traffic-retention-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile all p2p-frame targets with the additive retention setter and unchanged PN traffic APIs
+      change_ids: ["pn_traffic_disconnect_retention"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Branch-level PN traffic manager coverage for zero and non-zero retention, idle observation, session counts, exact deadline cancellation/cardinality, shared snapshot baseline continuity, stale generation rejection, retained limit policy, shutdown no-op behavior, and the public setter signature.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated nested test file exercises the private single-owner state without adding inline test bodies to the production source.
+        - The public setter is bound to `fn(&PnServer, Duration)` so the additive external symbol and signature are compiler-checked without constructing unrelated transport infrastructure.
+        - Legal active/idle/reconnect/expiry transitions and cleanup validation branches are covered. Corrupt active-count state, mutex poisoning, generation exhaustion after 2^64 idle transitions, thread-spawn failure, and duplicate-deadline insertion are defensive fail-fast branches that production interfaces cannot construct; owner: testing; risk: process failure only after internal invariant violation or impossible-scale exhaustion; acceptance impact: non-blocking because all reachable transitions and recovery paths are automated.
+    steps:
+      - id: pn-traffic-retention-unit
+        name: Run PN traffic manager retention, snapshot, limiter, and lifecycle unit coverage
+        change_ids: ["pn_traffic_disconnect_retention"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_manager_tests", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Real manager worker lifecycle verifies automatic expiry without access, extreme-duration deadline saturation and capped waiting, reconnect/stale-generation ordering, future-only configuration updates, and deterministic shutdown/join behavior.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server.rs
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - These tests intentionally overlap selected unit-owned branches because the DV step runs the real background thread, condition variable, monotonic deadlines, and shutdown/join lifecycle rather than a clock or scheduler mock.
+        - Polling assertions use bounded upper limits; no test advances cleanup by performing an observation before the automatic-expiry assertion.
+    steps:
+      - id: pn-traffic-retention-dv
+        name: Run PN retention background-worker and lifecycle verification
+        change_ids: ["pn_traffic_disconnect_retention"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_retention_dv_", "--", "--nocapture"]
+
+  integration:
+    mode: disabled
+    summary: No repository neighbor consumes the new setter, idle visibility remains inside the existing p2p-frame observation API, and PN wire/cross-crate behavior is unchanged.
+    change_ids: ["pn_traffic_disconnect_retention"]
+    reason: "owner: testing; reason: repository inspection and the pipeline consumer closure found no cyfs-p2p, cyfs-p2p-test, sn-miner-rust, or desc-tool caller, while the external-positive compile step checks all p2p-frame targets and unit/DV cover positive and shutdown/zero negative semantics; risk: an out-of-repository caller may rely on immediate disappearance but retains that behavior by default; acceptance impact: non-blocking unless a repository neighbor or wire/config-file consumer is discovered."

@@ -1,0 +1,141 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+version: v0.1
+module: globals
+task_name: 030-complete-harness-scaffold-files
+submodule: 030-complete-harness-scaffold-files
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["harness/scripts/context.py", "harness/scripts/task-index.py", "harness/scripts/task_manifest.py", "docs/changes/_template.md", "docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files/proposal.md", "docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The four additive repository Harness scaffold files change no product API, crate-root export, build surface, or documentation examples; enabled task steps directly verify their repository-local interfaces and source identity.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify parsing, exact bootstrap-kit identity, required template fields, the unfinished-task index happy lifecycle, malformed/duplicate/unsafe/stale rejection, and downstream remove failure propagation.
+    test_targets:
+      - harness/scripts/context.py
+      - harness/scripts/task-index.py
+      - harness/scripts/task_manifest.py
+      - docs/changes/_template.md
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - Every task-index fixture uses TemporaryDirectory; failure wrappers also snapshot and recheck the real unfinished-task index bytes.
+        - The happy remove path copies the installed index/parser bytes with minimal success checker stubs, while failure propagation uses marker-writing non-zero stubs to prove the downstream checker was invoked before deletion.
+    steps:
+      - id: scaffold-python-compile
+        name: Compile all three installed Python scaffold tools
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-m", "py_compile", "harness/scripts/context.py", "harness/scripts/task-index.py", "harness/scripts/task_manifest.py"]
+      - id: task-manifest-parse-bound-task
+        name: Parse the canonical task 030 manifest through the installed shared parser
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import sys; from pathlib import Path; sys.path.insert(0,'harness/scripts'); from task_manifest import parse_task_manifest; task=parse_task_manifest(Path('docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files/task.yaml')); assert task['task_name']=='030-complete-harness-scaffold-files'; assert {row['id'] for row in task['changes']}=={'complete_harness_scaffold_files','validate_cross_module_harness_routing'}"]
+      - id: change-template-markdown-parse
+        name: Decode and recognize the installed standard change template as structured Markdown
+        change_ids: ["complete_harness_scaffold_files"]
+        run: ["python3", "-c", "from pathlib import Path; text=Path('docs/changes/_template.md').read_text(encoding='utf-8'); headings=[line for line in text.splitlines() if line.startswith('#')]; assert headings[0]=='# [Change Title]'; assert {'## Approach','## Risk Screen','## Verification'} <= set(headings)"]
+      - id: scaffold-bootstrap-byte-identity
+        name: Verify all four installed files are byte-identical to current bootstrap-kit sources
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "from pathlib import Path; pairs=[('harness/scripts/context.py','/root/.codex/skills/harness-engineering/assets/bootstrap-kit/harness/scripts/context.template.py'),('harness/scripts/task-index.py','/root/.codex/skills/harness-engineering/assets/bootstrap-kit/harness/scripts/task-index.template.py'),('harness/scripts/task_manifest.py','/root/.codex/skills/harness-engineering/assets/bootstrap-kit/harness/scripts/task_manifest.py'),('docs/changes/_template.md','/root/.codex/skills/harness-engineering/assets/bootstrap-kit/docs/changes/change.template.md')]; mismatches=[left for left,right in pairs if Path(left).read_bytes()!=Path(right).read_bytes()]; assert not mismatches, mismatches"]
+      - id: change-template-required-fields
+        name: Verify the standard change template retains every required field and section
+        change_ids: ["complete_harness_scaffold_files"]
+        run: ["python3", "-c", "from pathlib import Path; text=Path('docs/changes/_template.md').read_text(encoding='utf-8'); required=['# [Change Title]','- Status:','- Owner module:','- Task manifest:','- Approved proposal:','- Affected paths:','- Explicit tier override:','- Expanded high-risk packet:','## Approach','## Risk Screen','## Verification','- Targeted check:','- Result:','- Residual risk or follow-up:']; missing=[item for item in required if item not in text]; assert not missing, missing"]
+      - id: task-index-isolated-lifecycle
+        name: Run init add list contains validate remove lifecycle against a temporary root
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,shutil,subprocess,sys,tempfile; from pathlib import Path; temp=tempfile.TemporaryDirectory(); root=Path(temp.name); scripts=root/'harness'/'scripts'; scripts.mkdir(parents=True); shutil.copy2('harness/scripts/task-index.py',scripts/'task-index.py'); shutil.copy2('harness/scripts/task_manifest.py',scripts/'task_manifest.py'); (scripts/'acceptance-report-check.py').write_text('raise SystemExit(0)',encoding='utf-8'); (scripts/'lifecycle-check.py').write_text('raise SystemExit(0)',encoding='utf-8'); packet=root/'docs'/'versions'/'v0.1'/'modules'/'globals'/'001-temp-task'; packet.mkdir(parents=True); manifest=packet/'task.yaml'; manifest.write_text(chr(10).join(['schema_version: 1','workflow_tier: high-risk','version: v0.1','packet_module: globals','task_name: 001-temp-task','stage: proposal','mode: auto-pipeline','auto_pipeline_start_stage: design','changes:','  - id: temp_change','    target_module: p2p-frame','    scope_paths: [\"harness/scripts/context.py\"]','']),encoding='utf-8'); (packet/'proposal.md').write_text(chr(10).join(['---','status: approved','---','- Final tier: high-risk','']),encoding='utf-8'); (packet/'acceptance-report.md').write_text('- Accepted / rejected / needs changes: accepted',encoding='utf-8'); script=scripts/'task-index.py'; task='docs/versions/v0.1/modules/globals/001-temp-task/task.yaml'; run=lambda *args: subprocess.run([sys.executable,str(script),'--root',str(root),*args],capture_output=True,text=True); checks=[]; checks.append(run('init','--version','v0.1')); checks.append(run('add','--task',task)); listed=run('list','--version','v0.1','--module','globals','--json'); checks.append(listed); payload=json.loads(listed.stdout); assert [row['task_id'] for row in payload['tasks']]==['001-temp-task']; checks.append(run('contains','--task',task)); checks.append(run('validate','--version','v0.1')); checks.append(run('remove','--task',task)); checks.append(run('validate','--version','v0.1')); final=run('list','--version','v0.1','--json'); checks.append(final); assert json.loads(final.stdout)['tasks']==[]; failed=[(result.returncode,result.stdout,result.stderr) for result in checks if result.returncode!=0]; assert not failed, failed; temp.cleanup()"]
+      - id: task-index-malformed-negative
+        name: Reject malformed unfinished-task index JSON without touching the real index
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import subprocess,tempfile; from pathlib import Path; real=Path('.harness/tasks/v0.1/tasks.json'); before=real.read_bytes(); temp=tempfile.TemporaryDirectory(); root=Path(temp.name); index=root/'.harness'/'tasks'/'v0.1'/'tasks.json'; index.parent.mkdir(parents=True); index.write_text('{malformed',encoding='utf-8'); result=subprocess.run(['python3','harness/scripts/task-index.py','--root',str(root),'validate','--version','v0.1'],capture_output=True,text=True); assert result.returncode!=0,(result.stdout,result.stderr); assert real.read_bytes()==before; temp.cleanup()"]
+      - id: task-index-duplicate-negative
+        name: Reject duplicate canonical task entries without touching the real index
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,subprocess,tempfile; from pathlib import Path; real=Path('.harness/tasks/v0.1/tasks.json'); before=real.read_bytes(); temp=tempfile.TemporaryDirectory(); root=Path(temp.name); packet=root/'docs'/'versions'/'v0.1'/'modules'/'globals'/'001-temp-task'; packet.mkdir(parents=True); manifest=packet/'task.yaml'; manifest.write_text(chr(10).join(['schema_version: 1','workflow_tier: pending','version: v0.1','packet_module: globals','task_name: 001-temp-task','changes:','  - id: temp_change','    target_module: p2p-frame','']),encoding='utf-8'); (packet/'proposal.md').write_text('# proposal',encoding='utf-8'); relative='docs/versions/v0.1/modules/globals/001-temp-task/task.yaml'; entry={'task_id':'001-temp-task','task_manifest':relative}; index=root/'.harness'/'tasks'/'v0.1'/'tasks.json'; index.parent.mkdir(parents=True); index.write_text(json.dumps({'schema_version':1,'version':'v0.1','tasks':[entry,entry]}),encoding='utf-8'); result=subprocess.run(['python3','harness/scripts/task-index.py','--root',str(root),'validate','--version','v0.1'],capture_output=True,text=True); assert result.returncode!=0,(result.stdout,result.stderr); assert real.read_bytes()==before; temp.cleanup()"]
+      - id: task-index-unsafe-stale-negative
+        name: Reject unsafe and stale task manifest entries without touching the real index
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,subprocess,tempfile; from pathlib import Path; real=Path('.harness/tasks/v0.1/tasks.json'); before=real.read_bytes(); temp=tempfile.TemporaryDirectory(); root=Path(temp.name); index=root/'.harness'/'tasks'/'v0.1'/'tasks.json'; index.parent.mkdir(parents=True); entries=[{'task_id':'001-temp-task','task_manifest':'../escape/task.yaml'},{'task_id':'001-temp-task','task_manifest':'docs/versions/v0.1/modules/globals/001-temp-task/task.yaml'}]; results=[]; base={'schema_version':1,'version':'v0.1'}; [(index.write_text(json.dumps({**base,'tasks':[entry]}),encoding='utf-8'),results.append(subprocess.run(['python3','harness/scripts/task-index.py','--root',str(root),'validate','--version','v0.1'],capture_output=True,text=True))) for entry in entries]; assert all(result.returncode!=0 for result in results),[(result.stdout,result.stderr) for result in results]; assert real.read_bytes()==before; temp.cleanup()"]
+      - id: task-index-remove-failure-propagation
+        name: Prove acceptance and lifecycle checker failures are invoked and prevent index removal
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,shutil,subprocess,sys,tempfile; from pathlib import Path; real=Path('.harness/tasks/v0.1/tasks.json'); before=real.read_bytes(); temp=tempfile.TemporaryDirectory(); root=Path(temp.name); scripts=root/'harness'/'scripts'; scripts.mkdir(parents=True); shutil.copy2('harness/scripts/task-index.py',scripts/'task-index.py'); shutil.copy2('harness/scripts/task_manifest.py',scripts/'task_manifest.py'); acceptance=scripts/'acceptance-report-check.py'; lifecycle=scripts/'lifecycle-check.py'; acceptance.write_text(\"import sys; from pathlib import Path; Path(__file__).with_name('acceptance.marker').write_text('called'); raise SystemExit(7)\",encoding='utf-8'); lifecycle.write_text(\"import sys; from pathlib import Path; Path(__file__).with_name('lifecycle.marker').write_text('called'); raise SystemExit(9)\",encoding='utf-8'); packet=root/'docs'/'versions'/'v0.1'/'modules'/'globals'/'001-temp-task'; packet.mkdir(parents=True); manifest=packet/'task.yaml'; manifest.write_text(chr(10).join(['schema_version: 1','workflow_tier: high-risk','version: v0.1','packet_module: globals','task_name: 001-temp-task','stage: proposal','mode: auto-pipeline','auto_pipeline_start_stage: design','changes:','  - id: temp_change','    target_module: p2p-frame','']),encoding='utf-8'); (packet/'proposal.md').write_text(chr(10).join(['---','status: approved','---','- Final tier: high-risk','']),encoding='utf-8'); (packet/'acceptance-report.md').write_text('- Accepted / rejected / needs changes: accepted',encoding='utf-8'); script=scripts/'task-index.py'; task='docs/versions/v0.1/modules/globals/001-temp-task/task.yaml'; run=lambda *args: subprocess.run([sys.executable,str(script),'--root',str(root),*args],capture_output=True,text=True); assert run('init','--version','v0.1').returncode==0; assert run('add','--task',task).returncode==0; first=run('remove','--task',task); assert first.returncode!=0,(first.stdout,first.stderr); assert (scripts/'acceptance.marker').is_file(); assert not (scripts/'lifecycle.marker').exists(); assert run('contains','--task',task).returncode==0; acceptance.write_text('raise SystemExit(0)',encoding='utf-8'); second=run('remove','--task',task); assert second.returncode!=0,(second.stdout,second.stderr); assert (scripts/'lifecycle.marker').is_file(); assert run('contains','--task',task).returncode==0; listed=run('list','--version','v0.1','--json'); assert listed.returncode==0; assert [row['task_id'] for row in json.loads(listed.stdout)['tasks']]==['001-temp-task']; assert real.read_bytes()==before; temp.cleanup()"]
+
+  dv:
+    mode: enabled
+    summary: Verify generated/custom rule indexes and compare manual versus auto-pipeline Testing routes for both concrete consumer modules.
+    test_targets:
+      - harness/scripts/context.py
+      - harness/rules/index.yaml
+      - harness/custom-rules/index.yaml
+      - docs/modules/p2p-frame.md
+      - docs/modules/cyfs-p2p.md
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - Routing assertions inspect only Harness context paths and make no claim about either product module's runtime.
+    steps:
+      - id: context-index-validation
+        name: Validate generated and custom Harness rule indexes
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "harness/scripts/context.py", "--root", ".", "--validate-index"]
+      - id: p2p-frame-manual-testing-route
+        name: Verify p2p-frame manual Testing route uses packet and module context without pipeline plan
+        change_ids: ["validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,subprocess; packet='docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files'; out=subprocess.check_output(['python3','harness/scripts/context.py','--root','.','--workflow-tier','high-risk','--stage','testing','--mode','manual','--packet',packet,'--module','p2p-frame','--changed-path','harness/scripts/context.py','--format','json'],text=True); data=json.loads(out); paths={row['path'] for row in data['context']}; assert data['mode']=='manual'; assert 'docs/modules/p2p-frame.md' in paths; assert packet+'/proposal.md' in paths; assert packet+'/testplan.yaml' in paths; assert packet+'/pipeline/plan.md' not in paths"]
+      - id: p2p-frame-auto-testing-route
+        name: Verify p2p-frame auto Testing route includes the pipeline plan and omits Testing Markdown
+        change_ids: ["validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,subprocess; packet='docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files'; out=subprocess.check_output(['python3','harness/scripts/context.py','--root','.','--workflow-tier','high-risk','--stage','testing','--mode','auto-pipeline','--auto-pipeline-start-stage','design','--packet',packet,'--module','p2p-frame','--changed-path','harness/scripts/context.py','--format','json'],text=True); data=json.loads(out); paths={row['path'] for row in data['context']}; assert data['mode']=='auto-pipeline'; assert 'docs/modules/p2p-frame.md' in paths; assert packet+'/pipeline/plan.md' in paths; assert packet+'/testplan.yaml' in paths; assert packet+'/testing.md' not in paths"]
+      - id: cyfs-p2p-manual-testing-route
+        name: Verify cyfs-p2p manual Testing route uses packet and module context without pipeline plan
+        change_ids: ["validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,subprocess; packet='docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files'; out=subprocess.check_output(['python3','harness/scripts/context.py','--root','.','--workflow-tier','high-risk','--stage','testing','--mode','manual','--packet',packet,'--module','cyfs-p2p','--changed-path','harness/scripts/context.py','--format','json'],text=True); data=json.loads(out); paths={row['path'] for row in data['context']}; assert data['mode']=='manual'; assert 'docs/modules/cyfs-p2p.md' in paths; assert packet+'/proposal.md' in paths; assert packet+'/testplan.yaml' in paths; assert packet+'/pipeline/plan.md' not in paths"]
+      - id: cyfs-p2p-auto-testing-route
+        name: Verify cyfs-p2p auto Testing route includes the pipeline plan and omits Testing Markdown
+        change_ids: ["validate_cross_module_harness_routing"]
+        run: ["python3", "-c", "import json,subprocess; packet='docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files'; out=subprocess.check_output(['python3','harness/scripts/context.py','--root','.','--workflow-tier','high-risk','--stage','testing','--mode','auto-pipeline','--auto-pipeline-start-stage','design','--packet',packet,'--module','cyfs-p2p','--changed-path','harness/scripts/context.py','--format','json'],text=True); data=json.loads(out); paths={row['path'] for row in data['context']}; assert data['mode']=='auto-pipeline'; assert 'docs/modules/cyfs-p2p.md' in paths; assert packet+'/pipeline/plan.md' in paths; assert packet+'/testplan.yaml' in paths; assert packet+'/testing.md' not in paths"]
+
+  integration:
+    mode: enabled
+    summary: Verify the installed scaffold closes the repository-wide missing-path checks without exercising product runtime.
+    test_targets:
+      - harness/scripts/harness-self-check.py
+      - harness/scripts/verify-workspace-harness.py
+      - harness/scripts/context.py
+      - harness/scripts/task-index.py
+      - harness/scripts/task_manifest.py
+      - docs/changes/_template.md
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes:
+        - These commands validate Harness structure only; no product test or deployed-environment evidence is claimed.
+    steps:
+      - id: harness-self-check
+        name: Run repository Harness self-check with the four installed scaffold files
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "harness/scripts/harness-self-check.py"]
+      - id: workspace-harness-verification
+        name: Verify the v0.1 workspace Harness structure
+        change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+        run: ["python3", "harness/scripts/verify-workspace-harness.py", "v0.1"]

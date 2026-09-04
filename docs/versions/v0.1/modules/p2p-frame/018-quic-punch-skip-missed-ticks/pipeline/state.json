@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "b3cf6e9fe5c8aaa4f65580cfc5f72074cae6c4a6ea05761a4c1dee0ef1bc2166",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-QUIC-TICK-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "the root executor produced the single shared pipeline design mapping because the user did not explicitly request sub-agent delegation"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-QUIC-TICK-1"],
+        "serialization_reasons": {
+          "I-1": "the root executor completed the admitted implementation parent under the active no-delegation policy",
+          "I-QUIC-TICK-1": "the only production child starts after D-1 and owns the admitted listener scheduling delta"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing started only after the admitted listener scheduler and implementation scope evidence were complete; the root executor owns the dedicated test file, shared testplan, and state evidence"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "acceptance started only after current implementation, testing metadata, testing scope, and the regenerated successful task artifact were complete; the root reviewer performed a fresh falsification audit under the active no-delegation policy"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "quic_punch_skip_missed_ticks",
+      "validation_id": "V-QUIC-PUNCH-MISSED-TICKS",
+      "testplan_level": "unit",
+      "testplan_step_id": "quic-punch-missed-tick-unit",
+      "evidence": "Dedicated tests prove normal active/reverse grid preservation, exact and partial overdue advancement, direct five-second recovery to 5050ms instead of historical 50ms increments, the next 5100ms grid tick, deadline rejection, current/elapsed Duration overflow, and interval-count overflow; task integration retains existing QUIC TunnelNetwork success and failure semantics.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "normal", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "boundary", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "negative", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "error", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "compatibility", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "lifecycle", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_skip_missed_ticks", "case_type": "cross-module", "required": "yes", "validation_id": "V-QUIC-PUNCH-MISSED-TICKS", "level": "integration", "status": "covered", "gap_manual_reason": ""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260827T095542Z-p2p-frame+018-quic-punch-skip-missed-ticks-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/018-quic-punch-skip-missed-ticks/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

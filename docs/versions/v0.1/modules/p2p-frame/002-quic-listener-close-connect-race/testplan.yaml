@@ -1,0 +1,68 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 002-quic-listener-close-connect-race
+submodule: 002-quic-listener-close-connect-race
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Locked worker-endpoint availability guard normal, empty, closed, and error-priority branches.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The guard is exercised at the lowest level for every changed availability branch.
+        - Pre-fix executable red evidence was not preserved because repository policy requires tests after implementation and the pre-fix code had no fallible guard seam; the reviewed `first().unwrap()` and `random_range(0..0)` operations are the recorded red-path evidence.
+    steps:
+      - id: quic-listener-endpoint-guard-unit
+        name: Run worker endpoint availability guard regression
+        change_ids: ["quic_listener_close_connect_race"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::quic::listener::udp_punch_tests::lifecycle_regression::worker_endpoint_guard_distinguishes_empty_and_closed_with_closed_priority", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Real listener worker startup followed by concurrent bound-local reads, active connects, and close.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Uses a real one-worker ServerRuntime and loopback QUIC listener inside the p2p-frame boundary.
+    steps:
+      - id: quic-listener-close-race-dv
+        name: Run concurrent listener close and endpoint-read regression
+        change_ids: ["quic_listener_close_connect_race"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::quic::listener::udp_punch_tests::lifecycle_regression::close_and_bound_local_race_returns_errors_without_panicking", "--", "--nocapture"]
+      - id: quic-listener-active-connect-close-race-dv
+        name: Run concurrent active connect and listener close regression
+        change_ids: ["quic_listener_close_connect_race"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::quic::listener::udp_punch_tests::lifecycle_regression::active_connect_and_close_race_returns_errors_without_panicking", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: QUIC TunnelNetwork listener info and close behavior remain compatible without requiring a remote handshake.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener/tests.rs
+      - p2p-frame/src/networks/quic/network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The focused case proves normal listener metadata and closed-listener removal through the unchanged TunnelNetwork contract.
+    steps:
+      - id: quic-listener-network-integration
+        name: Run QUIC network listener information and close contract
+        change_ids: ["quic_listener_close_connect_race"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::quic::listener::udp_punch_tests::lifecycle_regression::network_listener_info_and_close_remain_compatible", "--", "--nocapture"]

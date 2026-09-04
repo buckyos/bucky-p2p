@@ -1,0 +1,118 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 026-simplify-sn-rendezvous-protocol
+submodule: 026-simplify-sn-rendezvous-protocol
+api_impact:
+  public_api: breaking
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/protocol/common.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/networks/network.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/rendezvous_state.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/tunnel_rendezvous_protocol.rs", "p2p-frame/tests/removed_rendezvous_api_check.py", "p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs", "p2p-frame/tests/unit/sn_tests/inter_sn_rendezvous_tests.rs", "p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/rendezvous_state_tests.rs", "p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: simplified-rendezvous-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile the external-style flat rendezvous protocol consumer
+      change_ids: ["simplify_sn_rendezvous_wire_contract"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--test", "tunnel_rendezvous_protocol", "--no-run"]
+    - id: simplified-rendezvous-external-negative
+      kind: external-negative
+      assertion: old-path-rejected-for-removed-symbol
+      name: Prove removed envelope and terminal APIs fail for the expected compiler symbols
+      change_ids: ["simplify_sn_rendezvous_wire_contract"]
+      run: ["python3", "p2p-frame/tests/removed_rendezvous_api_check.py"]
+    - id: simplified-rendezvous-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify repository producers and consumers no longer reference the removed wire family
+      change_ids: ["simplify_sn_rendezvous_wire_contract"]
+      run: ["python3", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "026-simplify-sn-rendezvous-protocol"]
+    - id: simplified-rendezvous-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile every p2p-frame target after the breaking coordinated migration
+      change_ids: ["simplify_sn_rendezvous_wire_contract"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets", "--features", "x509"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Validate exact flat codecs, malformed boundaries, compact results and bounded correlation state.
+    test_targets:
+      - p2p-frame/tests/tunnel_rendezvous_protocol.rs
+      - p2p-frame/tests/unit/sn_tests/service/service/rendezvous_state_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Documentation IPv4 ranges exercise server-reflexive validation without external traffic.
+    steps:
+      - id: simplified-rendezvous-wire-unit
+        name: Run flat field layout codec version command result and malformed boundary cases
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "tunnel_rendezvous_protocol", "--", "--test-threads=1"]
+      - id: simplified-rendezvous-state-unit
+        name: Run authenticated-key duplicate conflict expiry capacity and cleanup state cases
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_state_", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise current-listener prediction validation, same-SN authentication and owner-bound local cleanup.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs
+      - p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - SN and UDP reflector paths use real in-process loopback services and run serially because they bind fixed ports.
+        - Public double-symmetric NAT remains an environment-only residual gap.
+    steps:
+      - id: simplified-rendezvous-listener-dv
+        name: Prove prediction generation open-state expiry and listener replacement validation
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::listener::udp_punch_tests::lifecycle_regression::rendezvous_", "--", "--test-threads=1"]
+      - id: simplified-rendezvous-same-sn-dv
+        name: Prove authenticated same-SN action-before-response duplicate sharing and endpoint rejection
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_same_sn_tests::same_sn_rendezvous_", "--", "--test-threads=1"]
+      - id: simplified-rendezvous-owner-dv
+        name: Prove sequence-tunnel collision prediction validation timeout and owner cleanup
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::rendezvous_", "--", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Verify explicit-target inter-SN relay, real two-SN target delivery, mixed-version rejection and serial legacy or PN fallback.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/inter_sn_rendezvous_tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+      - p2p-frame
+    preconditions:
+      tools: ["cargo", "python3"]
+      env: []
+      services: []
+      notes:
+        - Cross-SN coverage combines the real request-response mapper with two SnService instances and a real target command transport.
+        - Repository closure is compile-only and does not run unrelated runtime suites.
+    steps:
+      - id: simplified-rendezvous-inter-sn-integration
+        name: Prove explicit-target flat relay and malformed version sequence and payload rejection
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::inter_sn::tests::inter_sn_rendezvous_", "--", "--test-threads=1"]
+      - id: simplified-rendezvous-two-sn-integration
+        name: Prove two SN services relay to a target over the real command transport
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::cross_sn_rendezvous_", "--", "--test-threads=1"]
+      - id: simplified-rendezvous-fallback-integration
+        name: Prove failed rendezvous remains serial with legacy SN call and PN fallback
+        change_ids: ["simplify_sn_rendezvous_wire_contract"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::nat_action_failure_reaches_proxy_fallback_even_when_sn_call_fails", "--", "--exact", "--test-threads=1"]

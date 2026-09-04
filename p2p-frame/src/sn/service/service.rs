@@ -1,5 +1,12 @@
-use super::{call_stub::CallStub, peer_manager::PeerManager};
-use crate::endpoint::{Endpoint, EndpointArea, Protocol, endpoints_to_string};
+use super::{
+    call_stub::CallStub,
+    nat_probe_scheduler::{NatProbeAuthorityRemovalReason, NatProbeScheduler},
+    peer_manager::PeerManager,
+    rendezvous_state::{RendezvousBegin, RendezvousState},
+};
+use crate::endpoint::{
+    Endpoint, EndpointArea, Protocol, endpoints_to_string, is_non_lan_ipv4_addr,
+};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
 use crate::finder::{DeviceCache, DeviceCacheConfig};
@@ -10,6 +17,7 @@ use crate::networks::{
 use crate::p2p_identity::{
     EncodedP2pIdentityCert, P2pId, P2pIdentityCertFactoryRef, P2pIdentityFactoryRef, P2pIdentityRef,
 };
+use crate::runtime;
 use crate::sn::directory::{
     OwnerDirectoryClientRef, OwnerMembership, ServingLease, StaticOwnerDirectoryClient,
     noop_owner_directory_client,
@@ -18,6 +26,9 @@ use crate::sn::inter_sn::{
     InterSnCommand, InterSnCommandContext, InterSnConnectionContext, InterSnPeer, RelayCallOutcome,
     ServingPeerDetail, SnInterServiceValidatorRef, TtpInterSnClient, TtpInterSnClientRef,
     allow_all_sn_inter_service_validator, require_accept,
+};
+use crate::sn::nat_probe::{
+    MAX_NAT_PROBE_ENDPOINTS, NatProbeReflector, NatProbeSigningContext,
 };
 use crate::sn::protocol::{v0::*, *};
 use crate::sn::service::peer_manager::PeerManagerRef;
@@ -30,11 +41,15 @@ use crate::types::{SequenceGenerator, Timestamp, TunnelId};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use log::*;
-use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
-use sfo_cmd_server::server::{CmdServer, CmdTunnelService, DefaultCmdServerService};
+use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
+use sfo_cmd_server::server::{
+    CmdServer, CmdServerEventListener, CmdTunnelService, DefaultCmdServerService,
+};
 use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
 use sfo_reuseport::ServerRuntime;
 use std::{
+    collections::HashSet,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
         Arc, Mutex,
         atomic::{self, AtomicBool},
@@ -52,6 +67,9 @@ type SnCmdService = DefaultCmdServerService<(), SnTunnelRead, SnTunnelWrite, SnC
 pub type SnCmdServiceRef = Arc<SnCmdService>;
 pub type SnServiceRef = Arc<SnService>;
 pub type SnServerRef = Arc<SnServer>;
+
+const NAT_PROBE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_REPORTED_LOCAL_ENDPOINTS: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct SnConnectionValidateContext {
@@ -79,6 +97,105 @@ pub fn allow_all_sn_connection_validator() -> SnConnectionValidatorRef {
     Arc::new(AllowAllSnConnectionValidator)
 }
 
+#[async_trait::async_trait]
+trait SnInterClient: Send + Sync + 'static {
+    async fn query_detail_from_sn(
+        &self,
+        remote_sn_id: &P2pId,
+        peer_id: P2pId,
+    ) -> P2pResult<Option<ServingPeerDetail>>;
+
+    async fn relay_call_to_sn(
+        &self,
+        remote_sn_id: &P2pId,
+        call_req: SnCall,
+    ) -> P2pResult<RelayCallOutcome>;
+
+    async fn relay_rendezvous_to_sn(
+        &self,
+        _remote_sn_id: &P2pId,
+        _target_peer_id: P2pId,
+        _notify: SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "inter-SN rendezvous is not supported"
+        ))
+    }
+}
+
+type SnInterClientRef = Arc<dyn SnInterClient>;
+
+struct RemotePeerDetails {
+    details: Vec<ServingPeerDetail>,
+    target_protocol_version: Option<u8>,
+}
+
+struct RendezvousLeaderGuard<'a> {
+    state: &'a Mutex<RendezvousState>,
+    authenticated_initiator: P2pId,
+    request: SnTunnelRendezvous,
+    armed: bool,
+}
+
+impl<'a> RendezvousLeaderGuard<'a> {
+    fn new(
+        state: &'a Mutex<RendezvousState>,
+        authenticated_initiator: &P2pId,
+        request: &SnTunnelRendezvous,
+    ) -> Self {
+        Self {
+            state,
+            authenticated_initiator: authenticated_initiator.clone(),
+            request: request.clone(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RendezvousLeaderGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state
+                .lock()
+                .unwrap()
+                .fail_unanswered(&self.authenticated_initiator, &self.request);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SnInterClient for TtpInterSnClient {
+    async fn query_detail_from_sn(
+        &self,
+        remote_sn_id: &P2pId,
+        peer_id: P2pId,
+    ) -> P2pResult<Option<ServingPeerDetail>> {
+        TtpInterSnClient::query_detail_from_sn(self, remote_sn_id, peer_id).await
+    }
+
+    async fn relay_call_to_sn(
+        &self,
+        remote_sn_id: &P2pId,
+        call_req: SnCall,
+    ) -> P2pResult<RelayCallOutcome> {
+        TtpInterSnClient::relay_call_to_sn(self, remote_sn_id, call_req).await
+    }
+
+    async fn relay_rendezvous_to_sn(
+        &self,
+        remote_sn_id: &P2pId,
+        target_peer_id: P2pId,
+        notify: SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        TtpInterSnClient::relay_rendezvous_to_sn(self, remote_sn_id, target_peer_id, notify).await
+    }
+}
+
 pub struct SnService {
     seq_generator: Arc<SequenceGenerator>,
     peer_mgr: PeerManagerRef,
@@ -87,9 +204,12 @@ pub struct SnService {
     cmd_server: SnCmdServiceRef,
     connection_validator: SnConnectionValidatorRef,
     inter_service_validator: SnInterServiceValidatorRef,
-    inter_sn_client: Mutex<Option<TtpInterSnClientRef>>,
+    inter_sn_client: Mutex<Option<SnInterClientRef>>,
     owner_client: OwnerDirectoryClientRef,
     local_sn_id: Option<P2pId>,
+    local_identity: Mutex<Option<P2pIdentityRef>>,
+    nat_probe_scheduler: Mutex<NatProbeScheduler>,
+    rendezvous_state: Mutex<RendezvousState>,
     cmd_version: u8,
 }
 
@@ -116,6 +236,25 @@ impl SnService {
         inter_sn_client: Option<TtpInterSnClientRef>,
         local_sn_id: Option<P2pId>,
     ) -> SnServiceRef {
+        Self::new_with_inter_sn_client(
+            cert_factory,
+            connection_validator,
+            inter_service_validator,
+            owner_client,
+            inter_sn_client.map(|client| client as SnInterClientRef),
+            local_sn_id,
+        )
+    }
+
+    fn new_with_inter_sn_client(
+        cert_factory: P2pIdentityCertFactoryRef,
+        connection_validator: SnConnectionValidatorRef,
+        inter_service_validator: SnInterServiceValidatorRef,
+        owner_client: OwnerDirectoryClientRef,
+        inter_sn_client: Option<SnInterClientRef>,
+        local_sn_id: Option<P2pId>,
+    ) -> SnServiceRef {
+        let scheduler_sn_id = local_sn_id.clone().unwrap_or_default();
         let service = Arc::new(SnService {
             seq_generator: Arc::new(SequenceGenerator::new()),
             peer_mgr: PeerManager::new(),
@@ -127,10 +266,39 @@ impl SnService {
             owner_client,
             inter_sn_client: Mutex::new(inter_sn_client),
             local_sn_id,
+            local_identity: Mutex::new(None),
+            nat_probe_scheduler: Mutex::new(NatProbeScheduler::new(scheduler_sn_id)),
+            rendezvous_state: Mutex::new(RendezvousState::new()),
             cmd_version: 0,
         });
         service.register_sn_cmd_handler();
         service
+            .cmd_server
+            .attach_event_listener(service.clone() as Arc<dyn CmdServerEventListener>);
+        service
+    }
+
+    #[cfg(test)]
+    fn new_with_test_inter_sn_client(
+        cert_factory: P2pIdentityCertFactoryRef,
+        connection_validator: SnConnectionValidatorRef,
+        inter_service_validator: SnInterServiceValidatorRef,
+        owner_client: OwnerDirectoryClientRef,
+        inter_sn_client: SnInterClientRef,
+        local_sn_id: P2pId,
+    ) -> SnServiceRef {
+        Self::new_with_inter_sn_client(
+            cert_factory,
+            connection_validator,
+            inter_service_validator,
+            owner_client,
+            Some(inter_sn_client),
+            Some(local_sn_id),
+        )
+    }
+
+    fn set_local_identity(&self, local_identity: P2pIdentityRef) {
+        *self.local_identity.lock().unwrap() = Some(local_identity);
     }
 
     pub fn get_cmd_server(&self) -> &SnCmdServiceRef {
@@ -138,10 +306,34 @@ impl SnService {
     }
 
     pub fn set_inter_sn_client(&self, inter_sn_client: Option<TtpInterSnClientRef>) {
-        *self.inter_sn_client.lock().unwrap() = inter_sn_client;
+        *self.inter_sn_client.lock().unwrap() =
+            inter_sn_client.map(|client| client as SnInterClientRef);
     }
 
-    fn inter_sn_client(&self) -> Option<TtpInterSnClientRef> {
+    pub fn set_nat_probe_endpoints(&self, endpoints: Vec<Endpoint>) {
+        let affected = self
+            .nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .set_endpoints(endpoints);
+        for peer_id in affected {
+            self.peer_mgr.invalidate_net_profile(&peer_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_nat_probe_period_due_for_test(
+        &self,
+        peer_id: &P2pId,
+        now: Timestamp,
+    ) -> bool {
+        self.nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .force_periodic_due(peer_id, now)
+    }
+
+    fn inter_sn_client(&self) -> Option<SnInterClientRef> {
         self.inter_sn_client.lock().unwrap().clone()
     }
 
@@ -175,13 +367,17 @@ impl SnService {
         let service = self.clone();
         self.cmd_server.register_cmd_handler(
             PackageCmdCode::SnCalledResp as u8,
-            move |_local_id: PeerId,
-                  _peer_id: PeerId,
-                  _tunnel_id: CmdTunnelId,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
+                  tunnel_id: CmdTunnelId,
                   _header: SnCmdHeader,
                   mut cmd_body: CmdBody| {
                 let service = service.clone();
                 async move {
+                    let local_id = P2pId::from(local_id.as_slice());
+                    service
+                        .observe_nat_probe_control(&local_id, &peer_id, tunnel_id)
+                        .await;
                     let called_resp =
                         SnCalledResp::clone_from_slice(cmd_body.read_all().await?.as_slice())
                             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
@@ -243,6 +439,39 @@ impl SnService {
                         ))?;
                     Ok(Some(CmdBody::from(
                         query_resp
+                            .to_vec()
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?,
+                    )))
+                }
+            },
+        );
+
+        let service = self.clone();
+        self.cmd_server.register_cmd_handler(
+            PackageCmdCode::SnTunnelRendezvous as u8,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
+                  tunnel_id: CmdTunnelId,
+                  header: SnCmdHeader,
+                  mut cmd_body: CmdBody| {
+                let service = service.clone();
+                async move {
+                    if header.version() != SN_TUNNEL_RENDEZVOUS_CMD_VERSION {
+                        return Err(cmd_err!(
+                            CmdErrorCode::InvalidParam,
+                            "unsupported SN rendezvous command version: {}",
+                            header.version()
+                        ));
+                    }
+                    let local_id = P2pId::from(local_id.as_slice());
+                    let request =
+                        SnTunnelRendezvous::clone_from_slice(cmd_body.read_all().await?.as_slice())
+                            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    let response = service
+                        .handle_rendezvous(request, &local_id, &peer_id, tunnel_id)
+                        .await;
+                    Ok(Some(CmdBody::from(
+                        response
                             .to_vec()
                             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?,
                     )))
@@ -362,6 +591,53 @@ impl SnService {
         *endpoints = unique;
     }
 
+    fn sanitize_reported_endpoints(
+        endpoints: &[Endpoint],
+        observed_tunnel: Option<&Endpoint>,
+    ) -> P2pResult<Vec<Endpoint>> {
+        if endpoints.len() > MAX_REPORTED_LOCAL_ENDPOINTS {
+            return Err(p2p_err!(
+                P2pErrorCode::OutOfLimit,
+                "reported local endpoint count exceeds {}",
+                MAX_REPORTED_LOCAL_ENDPOINTS
+            ));
+        }
+
+        let observed_ip = observed_tunnel.map(|endpoint| endpoint.addr().ip());
+        let mut sanitized = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints.iter().copied() {
+            if !matches!(endpoint.protocol(), Protocol::Tcp | Protocol::Quic)
+                || endpoint.addr().port() == 0
+            {
+                continue;
+            }
+
+            let area = match endpoint.addr() {
+                SocketAddr::V4(addr)
+                    if addr.ip().is_private() || addr.ip().is_link_local() =>
+                {
+                    EndpointArea::Lan
+                }
+                SocketAddr::V6(addr)
+                    if addr.ip().is_unique_local() || addr.ip().is_unicast_link_local() =>
+                {
+                    EndpointArea::Lan
+                }
+                addr if is_non_lan_ipv4_addr(addr)
+                    && observed_ip == Some(endpoint.addr().ip()) =>
+                {
+                    EndpointArea::Wan
+                }
+                _ => continue,
+            };
+
+            let mut endpoint = endpoint;
+            endpoint.set_area(area);
+            Self::push_unique_endpoint(&mut sanitized, endpoint);
+        }
+        Ok(sanitized)
+    }
+
     fn classify_observed_endpoint(mut endpoint: Endpoint, reported_eps: &[Endpoint]) -> Endpoint {
         if reported_eps.iter().any(|reported| {
             reported.protocol() == endpoint.protocol() && reported.addr() == endpoint.addr()
@@ -417,6 +693,11 @@ impl SnService {
     }
 
     fn local_peer_detail(&self, peer_id: &P2pId) -> Option<ServingPeerDetail> {
+        let net_profile = self
+            .nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .current_profile(peer_id, bucky_time_now());
         self.peer_manager().find_peer(peer_id).and_then(|peer| {
             let mut endpoints = Self::reported_endpoints_for_peer(&peer);
             Self::dedup_endpoints(&mut endpoints);
@@ -426,6 +707,8 @@ impl SnService {
                 .map(|peer_info| ServingPeerDetail {
                     peer_info,
                     endpoints,
+                    net_profile,
+                    target_protocol_version: peer.protocol_version,
                 })
         })
     }
@@ -455,10 +738,14 @@ impl SnService {
         &self,
         local_sn_id: &P2pId,
         peer_id: &P2pId,
-    ) -> Vec<ServingPeerDetail> {
+    ) -> RemotePeerDetails {
+        let leases = self.query_serving_leases(local_sn_id, peer_id).await;
         let mut details = Vec::new();
-        for lease in self.query_serving_leases(local_sn_id, peer_id).await {
+        let mut target_protocol_version = None;
+        let mut version_is_complete = !leases.is_empty();
+        for lease in leases {
             if lease.serving_sn_id == *local_sn_id {
+                version_is_complete = false;
                 continue;
             }
             if let Some(inter_sn_client) = self.inter_sn_client() {
@@ -467,12 +754,29 @@ impl SnService {
                     .await
                 {
                     Ok(Some(detail)) => {
+                        match detail.target_protocol_version {
+                            Some(version) => match target_protocol_version {
+                                Some(expected) if expected != version => {
+                                    version_is_complete = false;
+                                }
+                                Some(_) => {}
+                                None => target_protocol_version = Some(version),
+                            },
+                            None => version_is_complete = false,
+                        }
                         details.push(detail);
                         continue;
                     }
-                    Ok(None) => continue,
-                    Err(err) if err.code() == P2pErrorCode::NotFound => {}
+                    Ok(None) => {
+                        version_is_complete = false;
+                        continue;
+                    }
+                    Err(err) if err.code() == P2pErrorCode::NotFound => {
+                        version_is_complete = false;
+                        continue;
+                    }
                     Err(err) => {
+                        version_is_complete = false;
                         warn!(
                             "query remote detail failed peer={} serving_sn={} err={:?}",
                             peer_id, lease.serving_sn_id, err
@@ -480,14 +784,21 @@ impl SnService {
                         continue;
                     }
                 }
-            } else {
-                warn!(
-                    "inter-sn detail query skipped because transport client is not configured peer={} serving_sn={}",
-                    peer_id, lease.serving_sn_id
-                );
             }
+
+            version_is_complete = false;
+            warn!(
+                "inter-sn detail query skipped because transport client is not configured peer={} serving_sn={}",
+                peer_id, lease.serving_sn_id
+            );
         }
-        details
+        if !version_is_complete {
+            target_protocol_version = None;
+        }
+        RemotePeerDetails {
+            details,
+            target_protocol_version,
+        }
     }
 
     async fn relay_call_to_serving_sn(
@@ -535,6 +846,295 @@ impl SnService {
         None
     }
 
+    async fn rendezvous_endpoints_owned_by(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
+        endpoints: &[Endpoint],
+    ) -> bool {
+        if endpoints.is_empty() {
+            return true;
+        }
+        let Some(observed_tunnel) = self.get_peer_tunnel_remote(peer_id, tunnel_id).await else {
+            return false;
+        };
+        let observed_ip = observed_tunnel.addr().ip();
+        endpoints
+            .iter()
+            .all(|endpoint| endpoint.addr().ip() == observed_ip)
+    }
+
+    async fn validate_rendezvous_response_owner(
+        &self,
+        target_peer_id: &P2pId,
+        response: &SnTunnelRendezvousResp,
+    ) -> P2pResult<()> {
+        if response.predicted_endpoint_array.is_empty() {
+            return Ok(());
+        }
+
+        let target = PeerId::from(target_peer_id.as_slice());
+        let observed_ips = self
+            .get_peer_observed_ep(&target)
+            .await
+            .into_iter()
+            .map(|endpoint| endpoint.addr().ip())
+            .collect::<HashSet<_>>();
+        if observed_ips.is_empty()
+            || response
+                .predicted_endpoint_array
+                .iter()
+                .any(|endpoint| !observed_ips.contains(&endpoint.addr().ip()))
+        {
+            return Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "rendezvous response contains an endpoint not observed for target {}",
+                target_peer_id
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn deliver_rendezvous_to_local_peer(
+        &self,
+        target_peer_id: &P2pId,
+        notify: &SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        if self.peer_manager().find_peer(target_peer_id).is_none() {
+            return Err(p2p_err!(
+                P2pErrorCode::TargetNotFound,
+                "rendezvous target is not connected to this SN"
+            ));
+        }
+        let bytes = notify
+            .to_vec()
+            .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        // The command server deliberately suppresses re-entrant QA sends from
+        // the task currently handling A -> SN. Run SN -> B QA in a distinct
+        // task while still awaiting it here so B's response remains ordered
+        // before the response returned to A.
+        let cmd_server = self.cmd_server.clone();
+        let target = PeerId::from(target_peer_id.as_slice());
+        let mut body = tokio::spawn(async move {
+            cmd_server
+                .send_with_resp(
+                    &target,
+                    PackageCmdCode::SnTunnelRendezvousNotify as u8,
+                    SN_TUNNEL_RENDEZVOUS_CMD_VERSION,
+                    bytes.as_slice(),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+        .await
+        .map_err(|err| {
+            p2p_err!(
+                P2pErrorCode::Aborted,
+                "SN rendezvous target QA task failed: {}",
+                err
+            )
+        })?
+        .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+        let response = SnTunnelRendezvousResp::clone_from_slice(
+            body.read_all()
+                .await
+                .map_err(into_p2p_err!(P2pErrorCode::IoError))?
+                .as_slice(),
+        )
+        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+        response.validate(notify.seq, notify.need_predict_endpoint)?;
+        self.validate_rendezvous_response_owner(target_peer_id, &response)
+            .await?;
+        Ok(response)
+    }
+
+    async fn relay_rendezvous_to_serving_sn(
+        &self,
+        local_sn_id: &P2pId,
+        target_peer_id: &P2pId,
+        notify: &SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        for lease in self.query_serving_leases(local_sn_id, target_peer_id).await {
+            if lease.serving_sn_id == *local_sn_id {
+                continue;
+            }
+            let Some(inter_sn_client) = self.inter_sn_client() else {
+                continue;
+            };
+            match inter_sn_client
+                .relay_rendezvous_to_sn(
+                    &lease.serving_sn_id,
+                    target_peer_id.clone(),
+                    notify.clone(),
+                )
+                .await
+            {
+                Ok(response) => {
+                    response.validate(notify.seq, notify.need_predict_endpoint)?;
+                    return Ok(response);
+                }
+                Err(err) if err.code() == P2pErrorCode::NotFound => continue,
+                Err(err) => {
+                    warn!(
+                        "event=sn_rendezvous_relay_failed seq={} target={} serving_sn={} reason={:?}",
+                        notify.seq.value(),
+                        target_peer_id,
+                        lease.serving_sn_id,
+                        err.code()
+                    );
+                }
+            }
+        }
+        Err(p2p_err!(
+            P2pErrorCode::NotFound,
+            "no serving SN accepted rendezvous target"
+        ))
+    }
+
+    async fn process_rendezvous_request(
+        &self,
+        authenticated_initiator: &P2pId,
+        request: &SnTunnelRendezvous,
+        notify: &SnTunnelRendezvousNotify,
+        local_sn_id: &P2pId,
+    ) -> SnTunnelRendezvousResp {
+        let now = bucky_time_now();
+        let begin =
+            self.rendezvous_state
+                .lock()
+                .unwrap()
+                .begin(authenticated_initiator, request, now);
+        match begin {
+            Ok(RendezvousBegin::Cached(response)) => return response,
+            Ok(RendezvousBegin::InFlight(waiter)) => {
+                return Self::await_inflight_rendezvous(request.seq, waiter).await;
+            }
+            Ok(RendezvousBegin::New) => {}
+            Err(_) => return SnTunnelRendezvousResp::failure(request.seq),
+        }
+
+        let mut leader =
+            RendezvousLeaderGuard::new(&self.rendezvous_state, authenticated_initiator, request);
+        let response = match runtime::timeout(Duration::from_secs(10), async {
+            match self
+                .deliver_rendezvous_to_local_peer(&request.to_peer_id, notify)
+                .await
+            {
+                Ok(response) => Ok(response),
+                Err(local_err) if local_err.code() == P2pErrorCode::TargetNotFound => {
+                    self.relay_rendezvous_to_serving_sn(local_sn_id, &request.to_peer_id, notify)
+                        .await
+                }
+                Err(err) => Err(err),
+            }
+        })
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
+                warn!(
+                    "event=sn_rendezvous_failed seq={} initiator={} target={} reason={:?}",
+                    request.seq.value(),
+                    authenticated_initiator,
+                    request.to_peer_id,
+                    err.code()
+                );
+                return SnTunnelRendezvousResp::failure(request.seq);
+            }
+            Err(_) => {
+                warn!(
+                    "event=sn_rendezvous_timeout seq={} initiator={} target={}",
+                    request.seq.value(),
+                    authenticated_initiator,
+                    request.to_peer_id
+                );
+                return SnTunnelRendezvousResp::failure(request.seq);
+            }
+        };
+        let cache_result = self.rendezvous_state.lock().unwrap().cache_response(
+            authenticated_initiator,
+            request,
+            response.clone(),
+            bucky_time_now(),
+        );
+        if cache_result.is_ok() {
+            leader.disarm();
+            response
+        } else {
+            SnTunnelRendezvousResp::failure(request.seq)
+        }
+    }
+
+    async fn await_inflight_rendezvous(
+        seq: crate::types::Sequence,
+        waiter: tokio::sync::oneshot::Receiver<P2pResult<SnTunnelRendezvousResp>>,
+    ) -> SnTunnelRendezvousResp {
+        match runtime::timeout(Duration::from_secs(10), waiter).await {
+            Ok(Ok(Ok(response))) => response,
+            _ => SnTunnelRendezvousResp::failure(seq),
+        }
+    }
+
+    async fn handle_rendezvous(
+        &self,
+        request: SnTunnelRendezvous,
+        local_id: &P2pId,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
+    ) -> SnTunnelRendezvousResp {
+        let failure = || SnTunnelRendezvousResp::failure(request.seq);
+        if request.validate().is_err() {
+            return failure();
+        }
+        let client_id = P2pId::from(peer_id.as_slice());
+        if client_id == request.to_peer_id {
+            return failure();
+        }
+        let client_cert = match self.client_cert_from_request_or_cache(&client_id, None) {
+            Ok(cert) => cert,
+            Err(_) => return failure(),
+        };
+        let context = match self.validate_context_from_cert(peer_id, client_cert.clone()) {
+            Ok(context) => context,
+            Err(_) => return failure(),
+        };
+        if self.validate_connection(context).await.is_err() {
+            return failure();
+        }
+        self.observe_nat_probe_control(local_id, peer_id, tunnel_id)
+            .await;
+        if !self
+            .rendezvous_endpoints_owned_by(peer_id, tunnel_id, &request.end_point_array)
+            .await
+        {
+            return failure();
+        }
+        let notify = SnTunnelRendezvousNotify {
+            seq: request.seq,
+            tunnel_id: request.tunnel_id,
+            peer_info: client_cert,
+            operation: request.operation,
+            end_point_array: request.end_point_array.clone(),
+            need_predict_endpoint: request.need_predict_endpoint,
+        };
+        if notify.validate().is_err() {
+            return failure();
+        }
+        log::info!(
+            "event=sn_rendezvous_request seq={} initiator={} target={} operation={:?} endpoint_count={} predict={}",
+            request.seq.value(),
+            client_id,
+            request.to_peer_id,
+            request.operation,
+            request.end_point_array.len(),
+            request.need_predict_endpoint
+        );
+        let local_sn_id = self.effective_local_sn_id(local_id);
+        self.process_rendezvous_request(&client_id, &request, &notify, &local_sn_id)
+            .await
+    }
+
     async fn deliver_called_to_local_peer(
         &self,
         mut call_req: SnCall,
@@ -571,6 +1171,7 @@ impl SnService {
                 payload: vec![],
                 reverse_endpoint_array: vec![],
                 active_pn_list: vec![],
+                nat_context: call_req.nat_context.clone(),
             };
 
             std::mem::swap(&mut call_req.payload, &mut called_req.payload);
@@ -607,7 +1208,7 @@ impl SnService {
         mut call_req: SnCall,
         local_id: &P2pId,
         peer_id: &PeerId,
-        _tunnel_id: CmdTunnelId,
+        tunnel_id: CmdTunnelId,
         _send_time: Timestamp,
     ) -> P2pResult<SnCallResp> {
         let client_id = P2pId::from(peer_id.as_slice());
@@ -615,7 +1216,24 @@ impl SnService {
             self.client_cert_from_request_or_cache(&client_id, call_req.peer_info.clone())?;
         self.validate_connection(self.validate_context_from_cert(peer_id, client_cert)?)
             .await?;
+        self.observe_nat_probe_control(local_id, peer_id, tunnel_id)
+            .await;
         let local_sn_id = self.effective_local_sn_id(local_id);
+        self.reconcile_nat_probe_authority(&call_req.to_peer_id)
+            .await;
+        let now = bucky_time_now();
+        if self
+            .nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .current_profile(&call_req.to_peer_id, now)
+            .is_none()
+        {
+            self.nat_probe_scheduler
+                .lock()
+                .unwrap()
+                .mark_demand(&call_req.to_peer_id, now);
+        }
 
         let from_peer_id = &call_req.from_peer_id;
         let log_key = format!(
@@ -674,6 +1292,7 @@ impl SnService {
                                     payload: vec![],
                                     reverse_endpoint_array: vec![],
                                     active_pn_list: vec![],
+                                    nat_context: call_req.nat_context.clone(),
                                 };
 
                                 std::mem::swap(&mut call_req.payload, &mut called_req.payload);
@@ -807,7 +1426,11 @@ impl SnService {
         let mut remotes = Vec::new();
         for tunnel in tunnels.iter() {
             let remote = tunnel.send.get().await.remote();
-            if remote.is_loopback() {
+            #[cfg(feature = "test-real-socket-matrix")]
+            let skip = false;
+            #[cfg(not(feature = "test-real-socket-matrix"))]
+            let skip = remote.is_loopback();
+            if skip {
                 continue;
             }
             if !remotes.contains(&remote) {
@@ -815,6 +1438,94 @@ impl SnService {
             }
         }
         remotes
+    }
+
+    async fn get_peer_tunnel_remote(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
+    ) -> Option<Endpoint> {
+        for tunnel in self.cmd_server.get_peer_tunnels(peer_id).await {
+            if tunnel.conn_id == tunnel_id {
+                return Some(tunnel.send.get().await.remote());
+            }
+        }
+        None
+    }
+
+    async fn reconcile_nat_probe_authority(&self, peer_id: &P2pId) {
+        let authority = self
+            .nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .authority_tunnel(peer_id);
+        let Some(authority) = authority else {
+            return;
+        };
+        let cmd_peer_id = PeerId::from(peer_id.as_slice());
+        let tunnels = self.cmd_server.get_peer_tunnels(&cmd_peer_id).await;
+        if tunnels.iter().any(|tunnel| tunnel.conn_id == authority) {
+            return;
+        }
+        self.nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .remove_peer(peer_id, NatProbeAuthorityRemovalReason::TunnelMissing);
+        self.peer_mgr.invalidate_net_profile(peer_id);
+    }
+
+    fn apply_nat_probe_transition(
+        &self,
+        peer_id: &P2pId,
+        transition: super::nat_probe_scheduler::ProbeTransition,
+    ) -> Option<NatProbeDirective> {
+        if let Some(profile_update) = transition.profile_update {
+            match profile_update {
+                Some(profile) => self.peer_mgr.set_net_profile(peer_id, profile),
+                None => self.peer_mgr.invalidate_net_profile(peer_id),
+            };
+        }
+        transition.directive
+    }
+
+    async fn observe_nat_probe_control(
+        &self,
+        local_id: &P2pId,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
+    ) {
+        let authenticated_peer_id = P2pId::from(peer_id.as_slice());
+        self.reconcile_nat_probe_authority(&authenticated_peer_id)
+            .await;
+        let Some(remote_endpoint) = self.get_peer_tunnel_remote(peer_id, tunnel_id).await else {
+            return;
+        };
+        let transition = {
+            let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+            scheduler.set_sn_peer_id(local_id);
+            scheduler.observe_control(
+                &authenticated_peer_id,
+                tunnel_id,
+                remote_endpoint,
+                bucky_time_now(),
+            )
+        };
+        self.apply_nat_probe_transition(&authenticated_peer_id, transition);
+    }
+
+    async fn maintain_nat_probe_state(&self) {
+        let authorities = self.nat_probe_scheduler.lock().unwrap().authorities();
+        for (peer_id, _) in authorities {
+            self.reconcile_nat_probe_authority(&peer_id).await;
+        }
+        let invalidated = self
+            .nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .expire_due(bucky_time_now());
+        for peer_id in invalidated {
+            self.peer_mgr.invalidate_net_profile(&peer_id);
+        }
     }
 
     async fn get_peer_wan_ep_with_map_port(
@@ -831,8 +1542,8 @@ impl SnService {
         &self,
         local_id: &P2pId,
         peer_id: &PeerId,
-        _tunnel_id: CmdTunnelId,
-        report_sn: ReportSn,
+        tunnel_id: CmdTunnelId,
+        mut report_sn: ReportSn,
     ) -> P2pResult<ReportSnResp> {
         self.validate_connection(self.validate_context_from_cert(
             peer_id,
@@ -845,53 +1556,117 @@ impl SnService {
         )?)
         .await?;
 
-        log::info!(
-            "report sn from {}.eps: {:?} map_port: {:?}",
-            peer_id.to_base36(),
-            report_sn.local_eps,
-            report_sn.map_ports
-        );
-        let mut reported_eps = report_sn.local_eps.clone();
-        if let Some(peer_info) = report_sn.peer_info.as_ref() {
-            let peer_desc = self.cert_factory.create(peer_info).unwrap();
-            Self::extend_unique_endpoints(&mut reported_eps, peer_desc.endpoints().as_slice());
+        let authenticated_peer_id = P2pId::from(peer_id.as_slice());
+        if let Some(from_peer_id) = report_sn.from_peer_id.as_ref() {
+            if from_peer_id != &authenticated_peer_id {
+                return Err(p2p_err!(
+                    P2pErrorCode::PermissionDenied,
+                    "sn report peer id mismatch authenticated={} reported={}",
+                    authenticated_peer_id,
+                    from_peer_id
+                ));
+            }
         }
+        let local_identity = self.local_identity.lock().unwrap().clone().ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::ErrorState,
+                "SN report service has no local identity"
+            )
+        })?;
+        let peer_info = Some(local_identity.get_identity_cert()?.get_encoded_cert()?);
+
+        log::debug!(
+            "event=sn_report_received peer_id={} tunnel_id={:?} local_endpoint_count={} map_port_count={} nat_probe_capability={:?} nat_probe_result={}",
+            peer_id.to_base36(),
+            tunnel_id,
+            report_sn.local_eps.len(),
+            report_sn.map_ports.len(),
+            report_sn.nat_probe_control_version,
+            report_sn.nat_probe_result.is_some()
+        );
+        let observed_tunnel = self.get_peer_tunnel_remote(peer_id, tunnel_id).await;
+        let reported_eps = Self::sanitize_reported_endpoints(
+            report_sn.local_eps.as_slice(),
+            observed_tunnel.as_ref(),
+        )?;
         let remote_ep = self
             .get_peer_wan_classied_ep(peer_id, reported_eps.as_slice())
             .await;
 
-        if let Some(from_peer_id) = report_sn.from_peer_id.clone() {
-            self.peer_mgr.add_or_update_peer(
-                &from_peer_id,
-                &report_sn
-                    .peer_info
-                    .map(|info| self.cert_factory.create(&info).unwrap()),
-                report_sn.map_ports,
-                &report_sn.local_eps,
-            );
+        let mut nat_probe_directive = None;
+        self.peer_mgr.add_or_update_peer(
+            &authenticated_peer_id,
+            &report_sn
+                .peer_info
+                .map(|info| self.cert_factory.create(&info).unwrap()),
+            report_sn.protocol_version,
+            report_sn.map_ports,
+            &reported_eps,
+        );
+
+        self.reconcile_nat_probe_authority(&authenticated_peer_id)
+            .await;
+        if let Some(observed_tunnel) = observed_tunnel {
+            let transition = {
+                let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+                scheduler.set_sn_peer_id(local_id);
+                scheduler.observe_capable_report(
+                    &authenticated_peer_id,
+                    tunnel_id,
+                    observed_tunnel,
+                    report_sn.nat_probe_control_version,
+                    report_sn.nat_probe_result.take(),
+                    bucky_time_now(),
+                )
+            };
+            nat_probe_directive =
+                self.apply_nat_probe_transition(&authenticated_peer_id, transition);
         }
         Ok(ReportSnResp {
             seq: report_sn.seq,
             sn_peer_id: local_id.clone(),
             result: P2pErrorCode::Ok.into_u8(),
-            peer_info: None,
+            peer_info,
             end_point_array: remote_ep,
             receipt: None,
+            nat_probe_endpoints: self
+                .nat_probe_scheduler
+                .lock()
+                .unwrap()
+                .endpoints()
+                .to_vec(),
+            nat_probe_directive,
         })
     }
 
     async fn handle_query_sn(
         &self,
         local_id: &P2pId,
-        _peer_id: &PeerId,
-        _tunnel_id: CmdTunnelId,
+        peer_id: &PeerId,
+        tunnel_id: CmdTunnelId,
         query: SnQuery,
     ) -> P2pResult<SnQueryResp> {
+        self.observe_nat_probe_control(local_id, peer_id, tunnel_id)
+            .await;
         let requester_sn_id = self.effective_local_sn_id(local_id);
+        self.reconcile_nat_probe_authority(&query.query_id).await;
+        let now = bucky_time_now();
+        let local_net_profile = self
+            .nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .current_profile(&query.query_id, now);
+        if local_net_profile.is_none() {
+            self.nat_probe_scheduler
+                .lock()
+                .unwrap()
+                .mark_demand(&query.query_id, now);
+        }
         let device_info = self.peer_mgr.find_peer(&query.query_id);
-        let mut remote_details = self
+        let remote = self
             .query_remote_details(&requester_sn_id, &query.query_id)
             .await;
+        let mut remote_details = remote.details;
         let resp = if device_info.is_some() {
             let device_info = device_info.unwrap();
             let reported_eps = Self::reported_endpoints_for_peer(&device_info);
@@ -910,6 +1685,8 @@ impl SnService {
                 seq: query.seq,
                 peer_info: Some(device_info.desc.get_encoded_cert().unwrap()),
                 end_point_array,
+                net_profile: local_net_profile,
+                target_protocol_version: device_info.protocol_version,
             }
         } else if let Some(first_detail) = remote_details.first().cloned() {
             let mut end_point_array = Vec::new();
@@ -920,12 +1697,16 @@ impl SnService {
                 seq: query.seq,
                 peer_info: Some(first_detail.peer_info),
                 end_point_array,
+                net_profile: first_detail.net_profile,
+                target_protocol_version: remote.target_protocol_version,
             }
         } else {
             SnQueryResp {
                 seq: query.seq,
                 peer_info: None,
                 end_point_array: vec![],
+                net_profile: None,
+                target_protocol_version: None,
             }
         };
 
@@ -937,6 +1718,24 @@ impl SnService {
 impl CmdTunnelService<(), SnTunnelRead, SnTunnelWrite> for SnService {
     async fn handle_tunnel(&self, tunnel: CmdTunnel<SnTunnelRead, SnTunnelWrite>) -> CmdResult<()> {
         self.cmd_server.serve_tunnel(tunnel).await
+    }
+}
+
+#[async_trait::async_trait]
+impl CmdServerEventListener for SnService {
+    async fn on_peer_connected(&self, _peer_id: &PeerId) -> CmdResult<()> {
+        Ok(())
+    }
+
+    async fn on_peer_disconnected(&self, peer_id: &PeerId) -> CmdResult<()> {
+        let peer_id = P2pId::from(peer_id.as_slice());
+        self.nat_probe_scheduler
+            .lock()
+            .unwrap()
+            .remove_peer(&peer_id, NatProbeAuthorityRemovalReason::PeerDisconnected);
+        self.rendezvous_state.lock().unwrap().remove_peer(&peer_id);
+        self.peer_mgr.remove_peer(peer_id);
+        Ok(())
     }
 }
 
@@ -954,6 +1753,7 @@ impl InterSnPeer for SnService {
         self.validate_inter_connection(&remote_sn_id).await?;
         self.validate_inter_command(&remote_sn_id, InterSnCommand::QueryDetail, &peer_id)
             .await?;
+        self.reconcile_nat_probe_authority(&peer_id).await;
         Ok(self.local_peer_detail(&peer_id))
     }
 
@@ -976,6 +1776,31 @@ impl InterSnPeer for SnService {
         self.deliver_called_to_local_peer(call_req, local_sn_id)
             .await
     }
+
+    async fn relay_rendezvous_from_sn(
+        &self,
+        remote_sn_id: P2pId,
+        target_peer_id: P2pId,
+        notify: SnTunnelRendezvousNotify,
+    ) -> P2pResult<SnTunnelRendezvousResp> {
+        self.validate_inter_connection(&remote_sn_id).await?;
+        self.validate_inter_command(
+            &remote_sn_id,
+            InterSnCommand::RelayRendezvous,
+            &target_peer_id,
+        )
+        .await?;
+        notify.validate()?;
+        let initiator = self.cert_factory.create(&notify.peer_info)?.get_id();
+        if initiator == target_peer_id {
+            return Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "rendezvous initiator and target must differ"
+            ));
+        }
+        self.deliver_rendezvous_to_local_peer(&target_peer_id, &notify)
+            .await
+    }
 }
 
 pub struct SnServer {
@@ -986,6 +1811,8 @@ pub struct SnServer {
     started: AtomicBool,
     stopped: AtomicBool,
     cmd_accept_task: Mutex<Option<crate::executor::SpawnHandle<()>>>,
+    nat_probe_ports: Vec<u16>,
+    nat_probe_tasks: Mutex<Vec<crate::executor::SpawnHandle<()>>>,
 }
 
 impl SnServer {
@@ -1000,6 +1827,8 @@ impl SnServer {
         congestion_algorithm: QuicCongestionAlgorithm,
         reuse_address: bool,
         server_runtime: ServerRuntime,
+        nat_probe_ports: Vec<u16>,
+        nat_probe_advertised_ipv4: Option<Ipv4Addr>,
     ) -> SnServerRef {
         init_tls(identity_factory);
 
@@ -1067,27 +1896,38 @@ impl SnServer {
             None,
             Some(local_identity.get_id()),
         );
+        service.set_local_identity(local_identity.clone());
+        let nat_probe_endpoints = nat_probe_advertised_ipv4
+            .map(|ip| {
+                nat_probe_ports
+                    .iter()
+                    .map(|port| {
+                        let mut endpoint = Endpoint::from((
+                            Protocol::Quic,
+                            SocketAddr::V4(SocketAddrV4::new(ip, *port)),
+                        ));
+                        endpoint.set_area(EndpointArea::Wan);
+                        endpoint
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        service.set_nat_probe_endpoints(nat_probe_endpoints);
         if owner_client_override.is_none() {
             if let Some(membership) = owner_client_membership.as_ref() {
-                match TtpNode::new(local_identity.clone(), net_manager.clone()) {
-                    Ok(ttp_node) => {
-                        match TtpInterSnClient::new(
-                            ttp_node,
-                            membership,
-                            service.clone() as Arc<dyn InterSnPeer>,
-                        )
-                        .await
-                        {
-                            Ok(inter_sn_client) => {
-                                service.set_inter_sn_client(Some(inter_sn_client));
-                            }
-                            Err(err) => {
-                                warn!("create inter-sn client failed: {:?}", err);
-                            }
-                        }
+                let ttp_node = TtpNode::new_with_runtime(ttp_server.runtime());
+                match TtpInterSnClient::new(
+                    ttp_node,
+                    membership,
+                    service.clone() as Arc<dyn InterSnPeer>,
+                )
+                .await
+                {
+                    Ok(inter_sn_client) => {
+                        service.set_inter_sn_client(Some(inter_sn_client));
                     }
                     Err(err) => {
-                        warn!("create inter-sn ttp node failed: {:?}", err);
+                        warn!("create inter-sn client failed: {:?}", err);
                     }
                 }
             }
@@ -1101,6 +1941,8 @@ impl SnServer {
             started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             cmd_accept_task: Mutex::new(None),
+            nat_probe_ports,
+            nat_probe_tasks: Mutex::new(Vec::new()),
         })
     }
 
@@ -1167,7 +2009,47 @@ impl SnServer {
             "sn server net_manager listen ready local_id={}",
             self.local_identity.get_id()
         );
+        self.start_nat_probe_reflectors().await?;
+        self.start_nat_probe_maintenance()?;
         self.start_cmd_accept_loop().await?;
+        Ok(())
+    }
+
+    async fn start_nat_probe_reflectors(&self) -> P2pResult<()> {
+        if self.nat_probe_ports.is_empty() {
+            return Ok(());
+        }
+
+        let signing_context = NatProbeSigningContext::new(self.local_identity.clone()).await?;
+        let mut reflectors = Vec::with_capacity(self.nat_probe_ports.len());
+        for port in self.nat_probe_ports.iter().copied() {
+            let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+            reflectors.push(Arc::new(
+                NatProbeReflector::bind_with_context(bind_addr, signing_context.clone()).await?,
+            ));
+        }
+
+        let mut tasks = self.nat_probe_tasks.lock().unwrap();
+        for reflector in reflectors {
+            let task = Executor::spawn_with_handle(async move {
+                if let Err(err) = reflector.run().await {
+                    warn!("NAT probe reflector stopped: {:?}", err);
+                }
+            })?;
+            tasks.push(task);
+        }
+        Ok(())
+    }
+
+    fn start_nat_probe_maintenance(&self) -> P2pResult<()> {
+        let service = self.service.clone();
+        let task = Executor::spawn_with_handle(async move {
+            loop {
+                runtime::sleep(NAT_PROBE_MAINTENANCE_INTERVAL).await;
+                service.maintain_nat_probe_state().await;
+            }
+        })?;
+        self.nat_probe_tasks.lock().unwrap().push(task);
         Ok(())
     }
 
@@ -1252,6 +2134,9 @@ impl SnServer {
         if let Some(task) = self.cmd_accept_task.lock().unwrap().take() {
             task.abort();
         }
+        for task in self.nat_probe_tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
     }
 }
 
@@ -1279,6 +2164,7 @@ pub struct SnServiceConfig {
     quic_congestion_algorithm: QuicCongestionAlgorithm,
     reuse_address: bool,
     server_runtime: ServerRuntime,
+    nat_probe_ports: Vec<u16>,
 }
 
 impl SnServiceConfig {
@@ -1299,6 +2185,7 @@ impl SnServiceConfig {
             quic_congestion_algorithm: QuicCongestionAlgorithm::Bbr,
             reuse_address: false,
             server_runtime,
+            nat_probe_ports: Vec::new(),
         }
     }
 
@@ -1343,9 +2230,31 @@ impl SnServiceConfig {
         self.server_runtime = server_runtime;
         self
     }
+
+    pub fn set_nat_probe_ports(mut self, ports: Vec<u16>) -> Self {
+        self.nat_probe_ports = ports;
+        self
+    }
+}
+
+fn unique_static_wan_ipv4(identity: &P2pIdentityRef) -> Option<Ipv4Addr> {
+    let mut addresses = identity
+        .endpoints()
+        .into_iter()
+        .filter(|endpoint| endpoint.is_static_wan())
+        .filter_map(|endpoint| match endpoint.addr() {
+            SocketAddr::V4(address) => Some(*address.ip()),
+            SocketAddr::V6(_) => None,
+        })
+        .collect::<Vec<_>>();
+    addresses.sort_unstable();
+    addresses.dedup();
+    (addresses.len() == 1).then(|| addresses[0])
 }
 
 pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef> {
+    let nat_probe_advertised_ipv4 = unique_static_wan_ipv4(&config.local_identity);
+    validate_nat_probe_config(config.nat_probe_ports.as_slice(), nat_probe_advertised_ipv4)?;
     let service = SnServer::new(
         config.local_identity,
         config.identity_factory,
@@ -1357,9 +2266,52 @@ pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef
         config.quic_congestion_algorithm,
         config.reuse_address,
         config.server_runtime,
+        config.nat_probe_ports,
+        nat_probe_advertised_ipv4,
     )
     .await;
     Ok(service)
+}
+
+fn validate_nat_probe_config(ports: &[u16], advertised_ipv4: Option<Ipv4Addr>) -> P2pResult<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    if ports.len() < 2 || ports.len() > MAX_NAT_PROBE_ENDPOINTS {
+        return Err(p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "NAT probe requires between 2 and {} ports",
+            MAX_NAT_PROBE_ENDPOINTS
+        ));
+    }
+    let mut unique = HashSet::with_capacity(ports.len());
+    if ports.iter().any(|port| *port == 0 || !unique.insert(*port)) {
+        return Err(p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "NAT probe ports must be non-zero and unique"
+        ));
+    }
+    let Some(ip) = advertised_ipv4 else {
+        return Err(p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "NAT probe ports require one advertised static-WAN IPv4"
+        ));
+    };
+    if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
+        return Err(p2p_err!(
+            P2pErrorCode::InvalidParam,
+            "NAT probe advertised IPv4 is not usable"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod nat_probe_config_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/unit/sn_tests/service/service/nat_probe_config_tests.rs"
+    ));
 }
 
 #[cfg(test)]
@@ -1396,7 +2348,10 @@ mod tests {
 
     impl P2pIdentity for DummyIdentity {
         fn get_identity_cert(&self) -> P2pResult<P2pIdentityCertRef> {
-            Err(p2p_err!(P2pErrorCode::NotSupport, "unused in test"))
+            Ok(Arc::new(TestIdentityCert {
+                id: self.id.clone(),
+                encoded: self.id.as_slice().to_vec(),
+            }))
         }
 
         fn get_id(&self) -> P2pId {
@@ -1876,12 +2831,16 @@ mod tests {
         }
     }
 
-    fn test_identity(local_ep: Endpoint) -> P2pIdentityRef {
+    fn test_identity_for_id(id: P2pId, endpoints: Vec<Endpoint>) -> P2pIdentityRef {
         Arc::new(DummyIdentity {
-            id: P2pId::from(vec![1u8; 32]),
+            id,
             name: "local-test".to_owned(),
-            endpoints: vec![local_ep],
+            endpoints,
         })
+    }
+
+    fn test_identity(local_ep: Endpoint) -> P2pIdentityRef {
+        test_identity_for_id(P2pId::from(vec![1u8; 32]), vec![local_ep])
     }
 
     fn remote_id() -> P2pId {
@@ -1903,7 +2862,9 @@ mod tests {
     }
 
     fn test_sn_service(validator: SnConnectionValidatorRef) -> SnServiceRef {
-        SnService::new(Arc::new(TestIdentityCertFactory), validator)
+        let service = SnService::new(Arc::new(TestIdentityCertFactory), validator);
+        service.set_local_identity(test_identity_for_id(test_id(9), vec![]));
+        service
     }
 
     fn test_sn_service_with_directory(
@@ -1914,14 +2875,16 @@ mod tests {
         let owner_client = membership
             .map(|membership| StaticOwnerDirectoryClient::new(membership, None))
             .unwrap_or_else(noop_owner_directory_client);
-        SnService::new_with_options(
+        let service = SnService::new_with_options(
             Arc::new(TestIdentityCertFactory),
             allow_all_sn_connection_validator(),
             inter_validator,
             owner_client,
             None,
-            Some(local_sn_id),
-        )
+            Some(local_sn_id.clone()),
+        );
+        service.set_local_identity(test_identity_for_id(local_sn_id, vec![]));
+        service
     }
 
     fn test_sn_service_with_owner_client(
@@ -1960,6 +2923,9 @@ mod tests {
             receipt: None,
             map_ports: vec![],
             local_eps: vec![],
+            net_profile: None,
+            nat_probe_control_version: Some(NAT_PROBE_CONTROL_VERSION),
+            nat_probe_result: None,
         }
     }
 
@@ -2350,6 +3316,25 @@ mod tests {
             .unwrap();
         assert_eq!(detail.peer_info, peer.as_slice().to_vec());
     }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs"
+    ));
+
+    mod protocol_version_query_tests {
+        use super::*;
+
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/unit/sn_tests/service/protocol_version_query_tests.rs"
+        ));
+    }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs"
+    ));
 
     #[tokio::test]
     async fn sn_server_wraps_sn_control_stream_into_cmd_tunnel() {

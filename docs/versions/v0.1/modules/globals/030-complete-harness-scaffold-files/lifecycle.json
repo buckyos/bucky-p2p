@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/globals/030-complete-harness-scaffold-files/proposal.md": "9a78f2cfb74da518f45704dd5fb94647e47a1b9ad0da3ee90b27a99ff5314dac"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "7c46f7b92b6cac3893e6feeea1d07ebebdf1780322ae8b30ccd36c3585e7fa51"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

@@ -1,0 +1,33 @@
+schema_version: 1
+workflow_tier: high-risk
+version: v0.1
+packet_module: p2p-frame
+task_name: 034-verify-p2p-tunnel-flow-real-sockets
+stage: proposal
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+proposal: proposal.md
+completion_report:
+change_record:
+design:
+testing:
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+changed_paths_file: .harness/evidence/v0.1/stage-scope/034-verify-p2p-tunnel-flow-real-sockets.paths
+baseline_manifest:
+changes:
+  - id: real_socket_tunnel_flow_strategy_selection
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/"]
+    changed_paths_file:
+  - id: real_socket_tunnel_flow_fallbacks
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/"]
+    changed_paths_file:
+  - id: real_socket_tunnel_flow_collision_cross_sn
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/"]
+    changed_paths_file:

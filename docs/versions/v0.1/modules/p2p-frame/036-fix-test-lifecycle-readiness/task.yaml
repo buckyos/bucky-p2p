@@ -1,0 +1,22 @@
+schema_version: 1
+workflow_tier: standard
+version: v0.1
+packet_module: p2p-frame
+task_name: 036-fix-test-lifecycle-readiness
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+proposal: proposal.md
+completion_report: completion-report.md
+change_record: docs/changes/chg-036-quic-ttp-readiness.md
+changed_paths_file: .harness/evidence/v0.1/stage-scope/036-fix-test-lifecycle-readiness.paths
+baseline_manifest: .harness/baselines/v0.1/036-fix-test-lifecycle-readiness-delivery/manifest.json
+changes:
+  - id: CHG-036-quic-owner-abort
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/networks/quic/**"]
+    changed_paths_file:
+  - id: CHG-036-ttp-readiness
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/ttp/**", "p2p-frame/src/pn/service/pn_server/tests/**"]
+    changed_paths_file:

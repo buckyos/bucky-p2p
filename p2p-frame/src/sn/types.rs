@@ -53,6 +53,7 @@ pub struct SnTunnelRead {
     prefix: Option<(Vec<u8>, usize)>,
     local: Endpoint,
     remote: Endpoint,
+    classification: SnTunnelClassification,
     local_id: P2pId,
     remote_id: P2pId,
 }
@@ -65,14 +66,35 @@ impl SnTunnelRead {
         local_id: P2pId,
         remote_id: P2pId,
     ) -> Self {
-        Self {
+        let classification = SnTunnelClassification::new(Some(local), remote);
+        Self::new_inner(
             read,
-            prefix: None,
             local,
             remote,
             local_id,
             remote_id,
-        }
+            None,
+            classification,
+        )
+    }
+
+    pub(in crate::sn) fn new_with_classification(
+        read: TunnelStreamRead,
+        local: Endpoint,
+        remote: Endpoint,
+        local_id: P2pId,
+        remote_id: P2pId,
+        classification: SnTunnelClassification,
+    ) -> Self {
+        Self::new_inner(
+            read,
+            local,
+            remote,
+            local_id,
+            remote_id,
+            None,
+            classification,
+        )
     }
 
     pub fn new_with_prefix(
@@ -83,11 +105,33 @@ impl SnTunnelRead {
         remote_id: P2pId,
         prefix: Vec<u8>,
     ) -> Self {
-        Self {
+        let classification = SnTunnelClassification::new(Some(local), remote);
+        Self::new_inner(
             read,
-            prefix: Some((prefix, 0)),
             local,
             remote,
+            local_id,
+            remote_id,
+            Some((prefix, 0)),
+            classification,
+        )
+    }
+
+    fn new_inner(
+        read: TunnelStreamRead,
+        local: Endpoint,
+        remote: Endpoint,
+        local_id: P2pId,
+        remote_id: P2pId,
+        prefix: Option<(Vec<u8>, usize)>,
+        classification: SnTunnelClassification,
+    ) -> Self {
+        Self {
+            read,
+            prefix,
+            local,
+            remote,
+            classification,
             local_id,
             remote_id,
         }
@@ -122,7 +166,7 @@ impl CmdTunnelRead<()> for SnTunnelRead {
 
 impl ClassifiedCmdTunnelRead<SnTunnelClassification, ()> for SnTunnelRead {
     fn get_classification(&self) -> SnTunnelClassification {
-        SnTunnelClassification::new(Some(self.local), self.remote)
+        self.classification.clone()
     }
 }
 

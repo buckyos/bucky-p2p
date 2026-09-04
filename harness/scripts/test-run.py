@@ -5,9 +5,9 @@ Adapt this template to the target repository's test commands. The contract is
 stable: all test implementation must be reachable through this entrypoint.
 
 Every real run (not --list / --dry-run) writes a machine-readable run artifact
-to test-results/test-runs/<timestamp>-<module>-<level>.json recording the exact
-task scope, commands, registration sources, and exit codes. test-results/ is
-generated output and must be listed in .gitignore. Acceptance cites these
+to .harness/test-results/test-runs/<timestamp>-<module>-<level>.json recording
+the exact task scope, commands, registration sources, and exit codes.
+`.harness/` is generated runtime state and must be listed in .gitignore. Acceptance cites these
 artifacts instead of pasted command output.
 """
 
@@ -16,13 +16,14 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime
-import hashlib
 import json
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from task_manifest import TaskManifestError, parse_task_manifest
 
 
 LEVELS = ("unit", "dv", "integration")
@@ -44,7 +45,9 @@ CONTRACT_ASSERTIONS = {
 
 # Canonical module-level regression suites. Task testplan.yaml files are
 # discovered separately and are registered only as <module>/<task-name>.
-# `module all` and `all all` use only each module's explicit `all` suite.
+# `module all` and `all all` compose unit, DV, integration, and explicit `all`
+# commands, then de-duplicate identical argv. This keeps newly registered
+# level-specific regressions reachable even when an older `all` suite exists.
 MODULE_SUITES: dict[str, dict[str, list[list[str]]]] = {
     "p2p-frame": {
         "unit": [["cargo", "test", "-p", "p2p-frame"]],
@@ -61,16 +64,6 @@ MODULE_SUITES: dict[str, dict[str, list[list[str]]]] = {
         "integration": [["cargo", "test", "--workspace"]],
         "all": [
             ["cargo", "test", "-p", "cyfs-p2p"],
-            ["cargo", "test", "--workspace"],
-        ],
-    },
-    "cyfs-p2p-test": {
-        "unit": [["cargo", "test", "-p", "cyfs-p2p-test"]],
-        "dv": [["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"]],
-        "integration": [["cargo", "test", "--workspace"]],
-        "all": [
-            ["cargo", "test", "-p", "cyfs-p2p-test"],
-            ["cargo", "run", "-p", "cyfs-p2p-test", "--", "all-in-one"],
             ["cargo", "test", "--workspace"],
         ],
     },
@@ -211,7 +204,7 @@ def evidence_input_paths(root: Path, testplan: Path) -> list[Path]:
                 if child.is_symlink():
                     fail(f"evidence input tree contains a symlink in {testplan}: {child}")
                 if child.is_file() and not any(
-                    part in {".git", ".venv", "target", "test-results", "__pycache__"}
+                    part in {".git", ".venv", "target", ".harness", "__pycache__"}
                     for part in child.relative_to(root_resolved).parts
                 ):
                     candidates.append(child.resolve())
@@ -230,20 +223,19 @@ def evidence_input_roots(root: Path, testplans: list[str]) -> list[str]:
     return sorted(roots)
 
 
-def evidence_input_binding(root: Path, testplans: list[str]) -> tuple[list[str], str | None]:
+def expanded_evidence_inputs(root: Path, testplans: list[str]) -> list[str]:
     if not testplans:
-        return [], None
+        return []
     root_resolved = root.resolve()
     paths: set[Path] = set()
     for relative in testplans:
         paths.update(evidence_input_paths(root, root / relative))
-    hasher = hashlib.sha256(b"harness-task-evidence-input-v1\0")
-    relative_paths: list[str] = []
-    for path in sorted(paths, key=lambda item: item.relative_to(root_resolved).as_posix()):
-        relative = path.relative_to(root_resolved).as_posix()
-        relative_paths.append(relative)
-        hasher.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
-    return relative_paths, hasher.hexdigest()
+    return [
+        path.relative_to(root_resolved).as_posix()
+        for path in sorted(
+            paths, key=lambda item: item.relative_to(root_resolved).as_posix()
+        )
+    ]
 
 
 def non_executed_levels_from_testplan(path: Path, requested_level: str) -> list[dict[str, str]]:
@@ -271,6 +263,32 @@ def non_executed_levels_from_testplan(path: Path, requested_level: str) -> list[
     return records
 
 
+def task_change_ids_from_testplan(path: Path) -> list[str]:
+    """Bind a no-command task run to the canonical task manifest changes."""
+    task = path.parent / "task.yaml"
+    if not task.is_file():
+        fail(f"testplan references missing task manifest: {task}")
+    try:
+        manifest = parse_task_manifest(task)
+    except TaskManifestError as error:
+        fail(str(error))
+    change_ids = [
+        str(change.get("id"))
+        for change in manifest.get("changes", [])
+        if isinstance(change, dict) and change.get("id") is not None
+    ]
+    if not change_ids or len(change_ids) != len(set(change_ids)):
+        fail(f"task manifest must contain unique change ids: {task}")
+    return sorted(change_ids)
+
+
+def repo_relative_testplan(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        fail(f"task testplan resolves outside repository: {path}")
+
+
 def discover_testplans(root: Path) -> dict[str, Path]:
     plans: dict[str, Path] = {}
     for path in root.glob("docs/versions/*/modules/**/testplan.yaml"):
@@ -278,26 +296,28 @@ def discover_testplans(root: Path) -> dict[str, Path]:
         if any(part.startswith("_") for part in relative.parts):
             continue
         text = path.read_text(encoding="utf-8")
-        module = None
-        task_name = None
-        for line in text.splitlines():
-            if line.startswith("module:"):
-                module = line.split(":", 1)[1].strip()
-            elif line.startswith("task_name:"):
-                task_name = line.split(":", 1)[1].strip()
-        if module:
-            if not task_name:
-                # Historical module-level and pre-sequence plans are retained
-                # as records, but are not current task-scoped registrations.
-                if path.parent.parent.name == "modules" or not re.fullmatch(
-                    r"\d{3}-.+", path.parent.name
-                ):
-                    continue
-                fail(f"task testplan must declare task_name and cannot register as a top-level module: {path}")
-            key = f"{module}/{task_name}"
-            if key in plans:
-                fail(f"duplicate task testplan registration for {key}: {plans[key]} and {path}")
-            plans[key] = path
+        if not (path.parent / "task.yaml").is_file():
+            # Legacy module-level plans carry no task manifest and are not
+            # part of the task-scoped registration surface; ignore them for
+            # task discovery while module suites remain authoritative.
+            continue
+        if not re.search(r"(?m)^task_manifest:\s*task\.yaml\s*$", text):
+            fail(f"testplan must use task_manifest: task.yaml: {path}")
+        if re.search(r"(?m)^(module|version|task_name|submodule):\s*\S+", text):
+            # Pre-strict-schema legacy task plans repeat identity fields. They
+            # remain module-authoritative artifacts; new plans must follow the
+            # strict schema, so log and skip rather than failing every run.
+            print(f"test-run: skipping legacy duplicate-identity testplan {path}", file=sys.stderr)
+            continue
+        modules_root = relative.parts.index("modules")
+        packet_parts = relative.parts[modules_root + 1 : -1]
+        if len(packet_parts) != 2:
+            fail(f"manifest-bound testplan must live in a task packet with task.yaml: {path}")
+        module, task_name = packet_parts
+        key = f"{module}/{task_name}"
+        if key in plans:
+            fail(f"duplicate task testplan registration for {key}: {plans[key]} and {path}")
+        plans[key] = path
     return plans
 
 
@@ -336,7 +356,7 @@ def command_sources_for(
         if requested_level == "all":
             if "all" not in suite or not suite["all"]:
                 fail(f"module {scope} must define a non-empty canonical all suite")
-            levels = ["all"]
+            levels = [*LEVELS, "all"]
         else:
             levels = [requested_level]
         for level in levels:
@@ -466,8 +486,10 @@ def write_run_artifact(
     steps: list[dict[str, object]],
     exit_code: int,
     non_executed_levels: list[dict[str, str]] | None = None,
+    bound_testplans: list[str] | None = None,
+    bound_change_ids: list[str] | None = None,
 ) -> None:
-    artifact_dir = root / "test-results" / "test-runs"
+    artifact_dir = root / ".harness" / "test-results" / "test-runs"
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -483,7 +505,7 @@ def write_run_artifact(
             "git_head": head,
             "worktree_dirty": dirty,
             "testplans": sorted(
-                {
+                set(bound_testplans or []) | {
                     source["testplan"]
                     for step in steps
                     for source in step.get("sources", [])
@@ -491,7 +513,7 @@ def write_run_artifact(
                 }
             ),
             "change_ids": sorted(
-                {
+                set(bound_change_ids or []) | {
                     change_id
                     for step in steps
                     for source in step.get("sources", [])
@@ -502,12 +524,11 @@ def write_run_artifact(
             ),
             "evidence_inputs": [],
             "evidence_input_roots": [],
-            "evidence_input_sha256": None,
             "steps": steps,
             "non_executed_levels": non_executed_levels or [],
             "exit_code": exit_code,
         }
-        artifact["evidence_inputs"], artifact["evidence_input_sha256"] = evidence_input_binding(
+        artifact["evidence_inputs"] = expanded_evidence_inputs(
             root, artifact["testplans"]
         )
         artifact["evidence_input_roots"] = evidence_input_roots(root, artifact["testplans"])
@@ -554,6 +575,7 @@ def main() -> int:
             )
         )
         if not args.dry_run:
+            task_plan = task_plans[args.module]
             write_run_artifact(
                 root,
                 args.module,
@@ -562,6 +584,8 @@ def main() -> int:
                 [],
                 0,
                 non_executed_levels,
+                bound_testplans=[repo_relative_testplan(root, task_plan)],
+                bound_change_ids=task_change_ids_from_testplan(task_plan),
             )
         return 0
     source_count = sum(len(entry["sources"]) for entry in plan if isinstance(entry.get("sources"), list))

@@ -150,6 +150,70 @@ pub(crate) fn is_non_lan_ipv4_addr(addr: &SocketAddr) -> bool {
         && !ip.is_multicast()
 }
 
+/// Address eligibility for rendezvous endpoints, predictions, and UDP punch.
+///
+/// Non-test builds keep the strict non-LAN rule. The `test-real-socket-matrix`
+/// feature additionally admits loopback and RFC1918 private IPv4 addresses so
+/// the real-socket strategy matrix can drive the production rendezvous/punch
+/// path over a controlled loopback topology. This is a compile-time test seam:
+/// release and default builds never enable it.
+pub(crate) fn rendezvous_ipv4_eligible(addr: &SocketAddr) -> bool {
+    if is_non_lan_ipv4_addr(addr) {
+        return true;
+    }
+    #[cfg(feature = "test-real-socket-matrix")]
+    {
+        matches!(addr, SocketAddr::V4(v4) if v4.ip().is_loopback() || v4.ip().is_private())
+    }
+    #[cfg(not(feature = "test-real-socket-matrix"))]
+    {
+        let _ = addr;
+        false
+    }
+}
+
+/// Endpoint-area eligibility for rendezvous requests, predicted candidates,
+/// and UDP punch.
+///
+/// Production behavior accepts only `ServerReflexive` endpoints whose IPv4
+/// address is non-LAN. With the `test-real-socket-matrix` feature, loopback
+/// and RFC1918 private addresses are additionally accepted under the Wan and
+/// Mapped areas, because a loopback SN may classify the client's own QUIC
+/// source as Wan when the observed address equals a reported listener address.
+pub(crate) fn rendezvous_eligible_area(endpoint: &Endpoint) -> bool {
+    if !rendezvous_ipv4_eligible(endpoint.addr()) {
+        return false;
+    }
+    if endpoint.get_area() == EndpointArea::ServerReflexive {
+        return true;
+    }
+    #[cfg(feature = "test-real-socket-matrix")]
+    {
+        matches!(
+            endpoint.get_area(),
+            EndpointArea::Wan | EndpointArea::Mapped
+        )
+    }
+    #[cfg(not(feature = "test-real-socket-matrix"))]
+    {
+        false
+    }
+}
+
+/// Endpoint-area eligibility for rendezvous operations that ask the target
+/// peer to connect back to the initiator.
+///
+/// Unlike UDP punch and prediction, reverse connect may directly dial a
+/// static or mapped public endpoint. The address must still satisfy the same
+/// production non-LAN IPv4 boundary (or the explicit real-socket test seam).
+pub(crate) fn rendezvous_reverse_connect_eligible_area(endpoint: &Endpoint) -> bool {
+    rendezvous_ipv4_eligible(endpoint.addr())
+        && matches!(
+            endpoint.get_area(),
+            EndpointArea::ServerReflexive | EndpointArea::Wan | EndpointArea::Mapped
+        )
+}
+
 impl Default for Endpoint {
     fn default() -> Self {
         Self {
@@ -580,4 +644,9 @@ mod tests {
         assert_eq!(decoded.get_area(), EndpointArea::ServerReflexive);
         assert_eq!(decoded, endpoint);
     }
+
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/endpoint/rendezvous_endpoint_policy_tests.rs"]
+mod rendezvous_endpoint_policy_tests;

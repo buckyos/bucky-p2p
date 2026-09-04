@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, split};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep, timeout};
 
 const TEST_CHANNEL_CAPACITY: usize = 8;
@@ -149,6 +149,7 @@ struct FakeTunnel {
     remote_id: P2pId,
     local_ep: Endpoint,
     remote_ep: Endpoint,
+    state: Mutex<TunnelState>,
     incoming_stream_rx: AsyncMutex<
         mpsc::Receiver<
             P2pResult<(
@@ -222,6 +223,7 @@ impl FakeTunnel {
             remote_id,
             local_ep,
             remote_ep,
+            state: Mutex::new(TunnelState::Connected),
             incoming_stream_rx: AsyncMutex::new(stream_rx),
             incoming_stream_tx: stream_tx,
             incoming_datagram_rx: AsyncMutex::new(datagram_rx),
@@ -258,6 +260,10 @@ impl FakeTunnel {
 
     fn set_close_error(&self, code: P2pErrorCode, message: &'static str) {
         *self.close_error.lock().unwrap() = Some((code, message));
+    }
+
+    fn set_state(&self, state: TunnelState) {
+        *self.state.lock().unwrap() = state;
     }
 
     fn registered_listeners(&self) -> (bool, bool, bool) {
@@ -399,7 +405,7 @@ impl Tunnel for FakeTunnel {
     }
 
     fn state(&self) -> TunnelState {
-        TunnelState::Connected
+        *self.state.lock().unwrap()
     }
 
     fn is_closed(&self) -> bool {
@@ -504,8 +510,8 @@ impl Tunnel for FakeTunnel {
 
 struct FakeTunnelNetwork {
     protocol: Protocol,
-    rx: AsyncMutex<Option<mpsc::Receiver<P2pResult<TunnelRef>>>>,
-    tx: mpsc::Sender<P2pResult<TunnelRef>>,
+    rx: AsyncMutex<Option<mpsc::Receiver<(P2pResult<TunnelRef>, Option<oneshot::Sender<()>>)>>>,
+    tx: mpsc::Sender<(P2pResult<TunnelRef>, Option<oneshot::Sender<()>>)>,
     infos: Mutex<Vec<TunnelListenerInfo>>,
     created_tunnel: Mutex<Option<TunnelRef>>,
     create_count: AtomicUsize,
@@ -529,13 +535,27 @@ impl FakeTunnelNetwork {
     }
 
     fn push_tunnel(&self, tunnel: TunnelRef) -> P2pResult<()> {
-        self.tx.try_send(Ok(tunnel)).map_err(|err| {
+        self.tx.try_send((Ok(tunnel), None)).map_err(|err| {
             p2p_err!(
                 P2pErrorCode::OutOfLimit,
                 "test tunnel queue failed: {}",
                 err
             )
         })
+    }
+
+    fn push_tunnel_with_completion(&self, tunnel: TunnelRef) -> P2pResult<oneshot::Receiver<()>> {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.tx
+            .try_send((Ok(tunnel), Some(completion_tx)))
+            .map_err(|err| {
+                p2p_err!(
+                    P2pErrorCode::OutOfLimit,
+                    "test tunnel queue failed: {}",
+                    err
+                )
+            })?;
+        Ok(completion_rx)
     }
 
     fn create_count(&self) -> usize {
@@ -573,7 +593,12 @@ impl TunnelNetwork for FakeTunnelNetwork {
         Executor::spawn_ok(async move {
             loop {
                 match rx.recv().await {
-                    Some(result) => on_incoming_tunnel(result).await,
+                    Some((result, completion)) => {
+                        on_incoming_tunnel(result).await;
+                        if let Some(completion) = completion {
+                            let _ = completion.send(());
+                        }
+                    }
                     None => break,
                 }
             }
@@ -663,7 +688,7 @@ async fn ttp_attach_failure_closes_each_listener_registration_error() {
     ];
 
     for (listener, message, expected_registered) in cases {
-        let runtime = super::runtime::TtpRuntime::new();
+        let runtime = super::runtime::TtpDispatchRuntime::new();
         let tunnel = make_attach_test_tunnel();
         tunnel.set_listen_error(listener, P2pErrorCode::ErrorState, message);
 
@@ -681,7 +706,7 @@ async fn ttp_attach_failure_closes_each_listener_registration_error() {
 
 #[tokio::test]
 async fn ttp_attach_failure_preserves_registration_error_when_close_fails() {
-    let runtime = super::runtime::TtpRuntime::new();
+    let runtime = super::runtime::TtpDispatchRuntime::new();
     let tunnel = make_attach_test_tunnel();
     tunnel.set_listen_error(
         FakeListenerKind::Stream,
@@ -702,7 +727,7 @@ async fn ttp_attach_failure_preserves_registration_error_when_close_fails() {
 
 #[tokio::test]
 async fn ttp_attach_failure_success_and_not_support_do_not_close() {
-    let success_runtime = super::runtime::TtpRuntime::new();
+    let success_runtime = super::runtime::TtpDispatchRuntime::new();
     let success_tunnel = make_attach_test_tunnel();
     success_runtime
         .attach_tunnel(success_tunnel.clone() as TunnelRef)
@@ -711,7 +736,7 @@ async fn ttp_attach_failure_success_and_not_support_do_not_close() {
     assert_eq!(success_tunnel.close_count(), 0);
     assert_eq!(success_tunnel.registered_listeners(), (true, true, true));
 
-    let unsupported_runtime = super::runtime::TtpRuntime::new();
+    let unsupported_runtime = super::runtime::TtpDispatchRuntime::new();
     let unsupported_tunnel = make_attach_test_tunnel();
     unsupported_tunnel.set_listen_error(
         FakeListenerKind::Stream,
@@ -1167,6 +1192,45 @@ async fn server_default_validator_accepts_incoming_tunnel() {
     assert_eq!(meta.purpose, purpose_of(4021));
     assert_eq!(tunnel.opened_stream_vports(), vec![4021]);
     assert_eq!(tunnel.close_count(), 0);
+}
+
+#[tokio::test]
+async fn server_cache_readiness_observer_preserves_connecting_tunnel() {
+    let local_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24123".parse().unwrap()));
+    let remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24124".parse().unwrap()));
+    let other_remote_ep = Endpoint::from((Protocol::Tcp, "127.0.0.1:24125".parse().unwrap()));
+    let local = make_identity(51, "local-server-cache-readiness", local_ep);
+    let remote = make_identity(52, "remote-server-cache-readiness", remote_ep);
+    let network = FakeTunnelNetwork::new(Protocol::Tcp);
+    let manager = make_manager(network.clone() as TunnelNetworkRef);
+    manager.listen(&[local_ep], None).await.unwrap();
+    let server = TtpServer::new(local.clone(), manager).unwrap();
+    let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
+    tunnel.set_state(TunnelState::Connecting);
+    let target = TtpTarget {
+        local_ep: None,
+        remote_ep,
+        remote_id: remote.get_id(),
+        remote_name: Some(remote.get_name()),
+    };
+
+    assert!(!server.has_cached_tunnel_for_test(&target));
+
+    let attached = network.push_tunnel_with_completion(tunnel.clone()).unwrap();
+    timeout(Duration::from_secs(1), attached)
+        .await
+        .expect("TTP server should finish the incoming attach callback")
+        .expect("TTP server attach completion sender should remain alive");
+
+    assert!(!server.has_cached_tunnel_for_test(&target));
+    tunnel.set_state(TunnelState::Connected);
+
+    let mismatched_target = TtpTarget {
+        remote_ep: other_remote_ep,
+        ..target.clone()
+    };
+    assert!(!server.has_cached_tunnel_for_test(&mismatched_target));
+    assert!(server.has_cached_tunnel_for_test(&target));
 }
 
 #[tokio::test]

@@ -1,0 +1,80 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 018-quic-punch-skip-missed-ticks
+submodule: 018-quic-punch-skip-missed-ticks
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/listener/tests.rs", "p2p-frame/src/networks/quic/network.rs", "docs/versions/v0.1/modules/p2p-frame/018-quic-punch-skip-missed-ticks/proposal.md", "docs/versions/v0.1/modules/p2p-frame/018-quic-punch-skip-missed-ticks/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task changes no public API, crate-root export, build surface, documentation example, punch payload, candidate contract, QUIC/TLS wire behavior, or neighboring-module interface; task-scoped unit/DV covers the private scheduling branch and integration retains existing QUIC consumer success/failure semantics.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Cover every branch of the new next-offset helper, including normal future ticks, exact/partial overdue ticks, five-second skipping, deadline rejection, duration overflow, interval-count overflow, and active/reverse start offsets.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated test file directly exercises the delivered private helper through the existing child test module and covers both changed-code arms plus every early None result.
+        - The five-second expectation is red against the source-bound pre-fix behavior: the old loop advanced 50ms per iteration, so after current offset 50ms it selected 100ms and repeatedly produced zero waits instead of jumping to 5050ms. Reverting the shared dirty production file solely to replay the defect would overwrite unrelated 017 work and violate the captured task baseline.
+    steps:
+      - id: quic-punch-missed-tick-unit
+        name: Run QUIC punch missed-tick schedule branch coverage
+        change_ids: ["quic_punch_skip_missed_ticks"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "udp_punch_missed_tick_", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Exercise the delivered p2p-frame punch scheduler workflow from intent offset through delayed recovery and deadline termination without external services.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The recovery sequence proves a current delayed send at five seconds advances directly to 5050ms and the following grid tick to 5100ms, so the workflow cannot emit the approximately 101 historical sends produced by the old loop.
+        - DV intentionally shares the focused unit command because the complete scheduler workflow is private, deterministic, and has no external dependency; the unified runner deduplicates the identical argv while preserving both registrations.
+    steps:
+      - id: quic-punch-missed-tick-dv
+        name: Run delayed recovery and deadline scheduler workflow
+        change_ids: ["quic_punch_skip_missed_ticks"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "udp_punch_missed_tick_", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: Verify unchanged listener-based QUIC success and no-listener failure semantics across the existing TunnelNetwork consumer boundary.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The success case creates two signed loopback QUIC peers through the unchanged local-endpoint TunnelNetwork API and completes a tunnel handshake.
+        - The failure case retains existing unreachable-listener connect error semantics; neither case enables public ServerReflexive punch and therefore detects accidental neighboring behavior changes without pretending to reproduce Internet NAT.
+    steps:
+      - id: quic-punch-non-punch-success-integration
+        name: Run unchanged listener-based QUIC tunnel success contract
+        change_ids: ["quic_punch_skip_missed_ticks"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::network::tests::quic_tunnel_create_tunnel_with_local_ep_ok", "--", "--nocapture"]
+      - id: quic-punch-non-punch-failure-integration
+        name: Run unchanged no-listener QUIC connect failure contract
+        change_ids: ["quic_punch_skip_missed_ticks"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::network::tests::quic_tunnel_create_tunnel_no_listener_unreachable_returns_connect_error", "--", "--nocapture"]

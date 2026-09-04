@@ -1,0 +1,57 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["wan_mapped_reverse_connect_eligibility", "wan_mapped_rendezvous_protocol_validation", "production_default_reverse_connect_regression_tests"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+risks:
+  contract:
+    applies: true
+    evidence:
+      - p2p-frame/src/endpoint.rs defines the accepted rendezvous endpoint area and address domain
+      - p2p-frame/src/sn/protocol/sn.rs applies that domain to request and notify validation
+      - p2p-frame/tests/tunnel_rendezvous_protocol.rs fixes the default-build positive and negative protocol domain
+    required_checks:
+      - Default-build request and notify validation accept public Wan and Mapped endpoints for reverse-connect operations
+      - Punch-only and prediction responses retain the existing ServerReflexive-only production area boundary
+      - Endpoint count, transport, address, port, uniqueness, and wire layout constraints remain unchanged
+  data:
+    applies: false
+    evidence: The task changes no persistence, schema, migration, serialization layout, cache key, or durable state.
+    required_checks: []
+  security:
+    applies: true
+    evidence:
+      - p2p-frame/src/sn/service/service.rs binds rendezvous request endpoint IPs to the authenticated initiator report or certificate
+      - p2p-frame/src/sn/protocol/sn.rs continues to reject Lan and invalid address or port inputs
+    required_checks:
+      - SN ownership validation remains on the authenticated initiator path and is not bypassed by Wan or Mapped area acceptance
+      - Lan, private, loopback, IPv6, zero-port, duplicate, and mixed-transport negative cases remain rejected in production-default tests
+  runtime:
+    applies: true
+    evidence:
+      - p2p-frame/src/tunnel/nat_connect_plan.rs selects Callee ReverseConnectOnly when caller_public is true
+      - p2p-frame/src/tunnel/tunnel_manager.rs constructs the request candidates and executes the target reverse action
+      - p2p-frame/src/networks/quic/listener.rs owns the separate UDP punch eligibility boundary
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs exercises the caller-public real-socket path
+    required_checks:
+      - Caller-public ReverseConnectOnly candidate construction retains public TCP and QUIC Wan and Mapped endpoints without enabling pure UDP punch for them
+      - The feature-gated caller-public real-socket matrix reaches request-sent, action-armed, direct connected, and payload-complete evidence
+      - Existing fallback ordering, deadlines, owner-token lifecycle, and prediction behavior remain unchanged by source review and regression execution
+  build:
+    applies: true
+    evidence:
+      - p2p-frame/Cargo.toml declares test-real-socket-matrix and its comments currently describe a production area difference
+      - p2p-frame/src/endpoint.rs conditionally relaxes test addresses and areas under that feature
+    required_checks:
+      - Default builds accept public Wan and Mapped only for reverse-connect operations while still rejecting loopback and private addresses
+      - The test feature remains opt-in and only supplies controlled loopback or private address reachability for the real-socket matrix
+      - No dependency, lockfile, exported API, crate-root export, or release feature default changes
+  ui:
+    applies: false
+    evidence: p2p-frame rendezvous has no UI, navigation, accessibility, localization, or user-workflow surface.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes existing Harness pipeline, test, and acceptance tooling without changing repository Harness policy or scripts.
+    required_checks: []

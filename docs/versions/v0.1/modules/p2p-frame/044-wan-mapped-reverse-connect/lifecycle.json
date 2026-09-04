@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/044-wan-mapped-reverse-connect/proposal.md": "800f864e00708ac59c5f9d423b44b7c3d60e1e287f2b66c3347d30244ce9edb5"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "93875d363555b16851149c5e083914517b7f09d47b5030cfecb596fd4ae7bd27"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

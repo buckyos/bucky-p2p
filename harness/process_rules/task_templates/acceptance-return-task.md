@@ -30,7 +30,7 @@
 - Notes for re-running acceptance:
 
 ## Done Condition
-- [ ] The acceptance-blocking issue is addressed inside this stage boundary
+- [ ] The acceptance-blocking issue is addressed and any cross-stage edits are recorded
 - [ ] Evidence is attached for the next acceptance run
 - [ ] No unrelated stage work was bundled into this return task
 - [ ] If this issue has already survived more than 5 unsuccessful iterations, stop and report it to the user instead of opening another return task

@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: trivial
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 051-revert-format-only-changes
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/051-revert-format-only-changes.paths
+baseline_manifest: .harness/baselines/v0.1/051-revert-format-only-changes-delivery/manifest.json
+
+changes:
+  - id: CHG-revert-format-only-changes
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/networks/control_stream.rs", "p2p-frame/src/networks/control_stream/tests.rs", "p2p-frame/src/networks/tcp/tunnel.rs", "p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs", "p2p-frame/tests/cmd_pkg_len_compatibility.rs", "p2p-frame/tests/endpoint_from_str_safety.rs"]
+    changed_paths_file:

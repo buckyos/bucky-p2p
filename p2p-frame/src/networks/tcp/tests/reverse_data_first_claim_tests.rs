@@ -16,6 +16,7 @@ use crate::networks::{
 };
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityRef};
 use crate::runtime::{AsyncReadExt, AsyncWriteExt};
+use crate::test_support::TestTcpPortGuard;
 use crate::tls::{DefaultTlsServerCertResolver, TlsServerCertResolver};
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
@@ -412,12 +413,8 @@ async fn setup_reverse_network_pair() -> (TestNetworkPair, TunnelRef, TunnelRef)
     register_listener_identity(&client_resolver, client_identity.clone()).await;
     register_listener_identity(&server_resolver, server_identity.clone()).await;
 
-    let client_port_reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let client_local_ep = Endpoint::from((
-        Protocol::Tcp,
-        client_port_reservation.local_addr().unwrap(),
-    ));
-    drop(client_port_reservation);
+    let client_port_guard = TestTcpPortGuard::bind_ipv4_loopback().unwrap();
+    let client_local_ep = client_port_guard.endpoint();
     let (server_callback, server_incoming) = incoming_channel();
     server_network
         .listen(&loopback_tcp_ep(), None, None, server_callback)
@@ -446,6 +443,7 @@ async fn setup_reverse_network_pair() -> (TestNetworkPair, TunnelRef, TunnelRef)
         )
         .await
         .unwrap();
+    drop(client_port_guard);
     let accepted = accept_incoming(&pair.server_incoming).await;
     pair.client_network
         .listen(&pair.client_local_ep, None, None, ignore_incoming())

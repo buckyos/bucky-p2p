@@ -1,0 +1,88 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 017-quic-nat-traversal-improvement
+submodule: 017-quic-nat-traversal-improvement
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/listener/tests.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/networks/quic/network/punch_owner_tests.rs", "docs/versions/v0.1/modules/p2p-frame/017-quic-nat-traversal-improvement/proposal.md", "docs/versions/v0.1/modules/p2p-frame/017-quic-nat-traversal-improvement/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The public API, crate-root exports, build surface, documentation examples, QUIC/TLS wire behavior, SN protocol, and candidate contracts are unchanged; task-scoped unit/DV coverage exercises the crate-private owner interface and integration steps exercise unchanged TunnelNetwork success and failure semantics.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Cover full-deadline active/reverse schedule boundaries, every punch eligibility exit, listener close, best-effort send failure, connect success/final-error/timeout ownership branches, owner cancellation, and worker-task abort-on-drop.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+      - p2p-frame/src/networks/quic/network.rs
+      - p2p-frame/src/networks/quic/network/punch_owner_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The existing schedule test now proves active offsets 250ms..3s and reverse offsets 0ms..3s remain exactly 50ms apart, while the one-second helper remains dedicated to connect minimum and early terminal-error retry compatibility.
+        - Dedicated test files drive the delivered structured-concurrency helper and real listener runtime; success, final error, caller cancellation, listener close, candidate rejection, missing socket, best-effort send failure, and worker-runtime task cancellation are all executable paths.
+        - The deadline-completion case proves the already-created connect future continues after punch completes and is not recreated by the punch cadence.
+        - Pre-fix red behavior is source-bound rather than replayed: the admitted baseline capped offsets at one second and detached the punch with Executor::spawn_ok, so the new 3s schedule and owner-drop assertions could not hold. Reverting production in the shared worktree would violate task scope.
+    steps:
+      - id: quic-nat-punch-lifecycle-unit
+        name: Run QUIC punch schedule, ownership, cancellation, and compatibility unit coverage
+        change_ids: ["quic_nat_punch_connect_lifetime", "quic_nat_punch_owner_cancellation"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "udp_punch_", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Exercise the p2p-frame QUIC punch/connect lifecycle with a real listener source socket plus a delayed connect future that remains single and pending beyond the former one-second punch cap.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+      - p2p-frame/src/networks/quic/network.rs
+      - p2p-frame/src/networks/quic/network/punch_owner_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - A real sfo-reuseport QUIC listener supplies the punch socket, proves the listener source port contract, and wakes an in-flight ten-second punch future on close.
+        - The delayed owner workflow holds one connect future for 1100ms while active and reverse punch-side counters run concurrently with their production 250ms/0ms starts and 50ms cadence beyond one second, then proves connect success drops both sides immediately.
+        - A separate completion workflow lets punch finish first and proves the exact same connect future is awaited to success; outer early-error tests retain the existing 50ms retry and one-second failure window.
+        - DV intentionally shares the unit command because the filtered suite combines pure schedule branches, the real listener runtime, source-port I/O, owner cancellation, and delayed lifecycle behavior; the unified runner deduplicates identical argv while retaining both registrations.
+    steps:
+      - id: quic-nat-punch-connect-lifecycle-dv
+        name: Run full QUIC punch/connect deadline and lifecycle workflow
+        change_ids: ["quic_nat_punch_connect_lifetime", "quic_nat_punch_owner_cancellation"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "udp_punch_", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: Verify unchanged TunnelNetwork listener-based QUIC success and no-listener failure semantics for consumers outside the crate-private punch ownership seam.
+    test_targets:
+      - p2p-frame/src/networks/quic/network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The success case creates two signed loopback QUIC peers through the unchanged local-endpoint TunnelNetwork API and completes a tunnel handshake.
+        - The failure case uses the existing client-endpoint fallback against an unreachable listener and retains the current connect error semantics without enabling punch.
+        - These cases intentionally do not claim a public loopback address is a ServerReflexive punch target; public-address policy is covered separately without weakening production eligibility.
+    steps:
+      - id: quic-nat-non-punch-success-integration
+        name: Run unchanged listener-based QUIC tunnel success contract
+        change_ids: ["quic_nat_punch_connect_lifetime", "quic_nat_punch_owner_cancellation"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::network::tests::quic_tunnel_create_tunnel_with_local_ep_ok", "--", "--nocapture"]
+      - id: quic-nat-non-punch-failure-integration
+        name: Run unchanged no-listener QUIC connect failure contract
+        change_ids: ["quic_nat_punch_connect_lifetime", "quic_nat_punch_owner_cancellation"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::network::tests::quic_tunnel_create_tunnel_no_listener_unreachable_returns_connect_error", "--", "--nocapture"]

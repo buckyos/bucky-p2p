@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-sanitize-sn-reported-endpoints"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["pipeline/plan.md#exported-interfaces", "pipeline/plan.md#failure-flows", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["empty WaitIncoming compatibility", "operation transport and area validation preservation", "same-SN and inter-SN routing preservation"]
+  data:
+    applies: false
+    evidence: No persistent data, serialization layout, schema, migration, or durable cache representation changes are requested.
+    required_checks: []
+  security:
+    applies: true
+    evidence: ["pipeline/plan.md#state-ownership", "pipeline/plan.md#failure-flows", "pipeline/plan.md#rejected-alternatives"]
+    required_checks: ["forged ReportSn third-party public IP removed", "certificate-declared public IP does not authorize rendezvous", "current request tunnel observed-IP enforcement", "mixed endpoint list atomic rejection"]
+  runtime:
+    applies: true
+    evidence: ["pipeline/plan.md#dependency-graphs", "pipeline/plan.md#state-ownership", "pipeline/plan.md#file-level-implementation-sequence"]
+    required_checks: ["authenticated real-control-socket report-to-rendezvous flow", "missing or stale tunnel observation fails closed", "valid observed-IP request remains admissible"]
+  build:
+    applies: false
+    evidence: No dependency, feature definition, build graph, produced artifact, deployment, release, or exported API change is planned.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing Harness pipeline, test runner, and checkers without changing repository Harness policy or tooling.
+    required_checks: []

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "35fba1b5c3d6055483af14c1dd36c3a8eb11544e5922a9341d92be0c804e7f5e",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-TTP-1": {"status": "complete"}
+  },
+  "testing_evidence": [
+    {
+      "change_id": "ttp_attach_failure_closes_tunnel",
+      "validation_id": "V-TAFC-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "ttp-attach-failure-unit",
+      "evidence": "p2p-frame/src/ttp/tests.rs injects success, NotSupport, stream/control/datagram registration errors, and close failure through the existing Tunnel boundary; it asserts close count, partial registration position, and returned error identity against delivered runtime.rs",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "normal", "required": "yes", "validation_id": "V-TAFC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "boundary", "required": "yes", "validation_id": "V-TAFC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "negative", "required": "yes", "validation_id": "V-TAFC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "error", "required": "yes", "validation_id": "V-TAFC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "compatibility", "required": "yes", "validation_id": "V-TAFC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "lifecycle", "required": "yes", "validation_id": "V-TAFC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "ttp_attach_failure_closes_tunnel", "case_type": "cross-module", "required": "no", "validation_id": "V-TAFC-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "The implementation changes only a crate-private TTP runtime cleanup side effect; public signatures, transport implementations, caller error values, and cross-crate contracts are unchanged."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260714T100306Z-p2p-frame+006-ttp-attach-failure-close-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/006-ttp-attach-failure-close/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

@@ -1,0 +1,142 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 012-tcp-reverse-data-first-claim
+submodule: 012-tcp-reverse-data-first-claim
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["docs/modules/p2p-frame.md", "p2p-frame/docs/tcp_tunnel_protocol_design.md", "p2p-frame/src/networks/tcp/protocol.rs", "p2p-frame/src/networks/tcp/tunnel.rs", "p2p-frame/src/networks/tcp/network.rs", "p2p-frame/src/networks/tcp/tests/reverse_data_first_claim_tests.rs", "p2p-frame/src/ttp/server.rs", "p2p-frame/src/ttp/tests.rs", "p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs", "p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: tcp-reverse-registration-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: compile the crate-internal TCP wire consumer and x509 runtime tests with the reverse registration response
+      change_ids: ["tcp_reverse_data_first_claim_handoff"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "--no-run"]
+    - id: tcp-reverse-registration-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: verify the TCP runtime consumer no longer implements request-only reverse registration
+      change_ids: ["tcp_reverse_data_first_claim_handoff"]
+      run: ["uv", "run", "--active", "python", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "012-tcp-reverse-data-first-claim"]
+    - id: tcp-reverse-registration-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: compile every p2p-frame target with the coordinated internal TCP wire update
+      change_ids: ["tcp_reverse_data_first_claim_handoff"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify the production reverse-open correlation, first-claim ownership, genuine conflict arbitration, exact error mappings, and bounded response codec.
+    test_targets:
+      - p2p-frame/src/networks/tcp/tests/reverse_data_first_claim_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated file is included from the pre-existing x509 test module; the return iteration snapshots network.rs and pn_server.rs before additional testing edits.
+        - Unit tests call the crate-visible production transition and decision helpers used by tunnel.rs; they do not maintain a second test-only state implementation.
+        - Correlation tests cover the pure event decisions at unit level; real guard/map/staged-entry ownership for cancellation, timeout, and close is exercised through the TCP/TLS DV steps below.
+        - Red evidence is the supplied PN production log ending in `Conflict: claim retries exhausted` plus the proposal's source-level trace from remote-created `FirstClaimPending` to the old `created_by_local` rejection. An automated pre-fix replay was not run because post-implementation testing cannot revert production in the shared dirty worktree, and the original signed PN topology is not repository-local; the new local test deterministically forces the same reverse transport branch for green evidence.
+    steps:
+      - id: tcp-reverse-registration-wire-unit
+        name: run reverse registration response codec positive and malformed cases
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_response_wire_", "--", "--nocapture"]
+      - id: tcp-reverse-correlation-state-unit
+        name: cover both event orders, duplicate/idempotent input, mismatch, terminal cleanup, and late rejection on the production correlation state
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_correlation_", "--", "--nocapture"]
+      - id: tcp-reverse-first-claim-conflict-unit
+        name: verify request-side first ownership, wrong-side rejection, lease mismatch, and symmetric simultaneous-claim winner selection
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_validates_owner_lease_and_simultaneous_tie_break", "--", "--nocapture"]
+      - id: tcp-reverse-error-map-unit
+        name: verify every bounded failure result maps through the actual production codec and error conversions in both directions
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_failure_wire_maps_to_exact_error_categories", "--", "--nocapture"]
+  dv:
+    mode: enabled
+    summary: Exercise the real TCP/TLS control and data paths while forcing direct data dial failure, then verify reverse fallback, owner cleanup, mixed-version fail-closed behavior, listener rejection, and terminal error fidelity.
+    test_targets:
+      - p2p-frame/src/networks/tcp/network.rs
+      - p2p-frame/src/networks/tcp/tests/reverse_data_first_claim_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The fixture binds the control connection to a port that is reopened as the requester's listener, then closes the target listener so the first direct data dial fails and only reverse fallback can succeed.
+        - Real-network cases are serialized by a test-only async lock because each fixture deliberately closes and reopens the control source port; protocol progress remains event-driven.
+        - The creator-side response gate activates only in test builds and pauses after the real reverse data connection receives `DataConnReady` and is registered, which makes guard drop, close, and timeout cleanup deterministic without replacing the production owner/map/entry paths.
+        - The bounded legacy requester uses the same production control decoder with command 11 as its maximum and therefore rejects command 12 from the real peer before reading its body; the bounded legacy creator completes the real reverse data registration but intentionally omits the response.
+    steps:
+      - id: tcp-reverse-fallback-success-dv
+        name: force reverse data fallback and verify two bidirectional stream opens
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_opens_and_reopens_after_direct_listener_closes", "--", "--nocapture"]
+      - id: tcp-reverse-fallback-listener-error-dv
+        name: preserve unlistened-purpose rejection across reverse fallback
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_preserves_unlistened_purpose_error", "--", "--nocapture"]
+      - id: tcp-reverse-fallback-connect-error-dv
+        name: preserve real connect failure when neither side can create a data connection
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_returns_connect_failure_when_both_listeners_close", "--", "--nocapture"]
+      - id: tcp-reverse-caller-abort-cleanup-dv
+        name: abort the caller after reverse registration and verify guard drop removes the waiter and retires the staged entry
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_caller_abort_drops_guard_and_retires_staged_entry", "--", "--nocapture"]
+      - id: tcp-reverse-tunnel-close-cleanup-dv
+        name: close the requester tunnel after reverse registration and verify pending and staged connection ownership is cleared
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_tunnel_close_removes_waiter_and_staged_entry", "--", "--nocapture"]
+      - id: tcp-reverse-new-requester-old-creator-dv
+        name: omit the response from a bounded old-creator peer and verify the new requester times out and retires all request-owned state
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_new_requester_old_creator_timeout_cleans_owned_state", "--", "--nocapture"]
+      - id: tcp-reverse-old-requester-new-creator-dv
+        name: run a bounded old-requester decoder on a real tunnel and verify command 12 closes before any business stream is accepted
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_old_requester_new_creator_rejects_command_12_on_wire", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: Exercise the TTP success/failure contract and one composed signed A-to-PN-to-B proxy stream whose PN-to-B direct data dial is forced to fail and whose bytes traverse the real reverse TCP fallback.
+    test_targets:
+      - p2p-frame/src/ttp/tests.rs
+      - p2p-frame/src/pn/service/pn_server.rs
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+      - p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The composed fixture uses a fake A only for injecting the source PN stream, but PN/TTP target selection, B's signed x509 TCP control tunnel, direct-dial failure, reverse data connection, proxy command exchange, and bidirectional byte bridge are all real production paths in one test.
+        - B's listener is closed before the successful proxy attempt and no cache probe creates an idle data connection, so the success cannot bypass reverse fallback through reuse.
+        - Mixed-version compatibility is covered at DV level by bounded legacy policies on real TCP/TLS tunnels without requiring a second historical crate build.
+    steps:
+      - id: tcp-reverse-ttp-consumer-integration
+        name: verify TTP server opens channels on an existing incoming tunnel and preserves reuse behavior
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "server_open_stream_and_datagram_reuse_existing_incoming_tunnel", "--", "--nocapture"]
+      - id: tcp-reverse-ttp-missing-target-integration
+        name: verify TTP preserves an explicit NotFound failure when no incoming target tunnel exists
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "server_open_stream_requires_existing_incoming_tunnel", "--", "--nocapture"]
+      - id: tcp-reverse-pn-composed-integration
+        name: force the PN-to-B direct data dial to fail and bridge one signed A-to-PN-to-B stream through real TCP reverse fallback
+        change_ids: ["tcp_reverse_data_first_claim_handoff"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_reverse_data_first_claim_pn_proxy_stream_uses_real_reverse_tcp_target", "--", "--nocapture"]

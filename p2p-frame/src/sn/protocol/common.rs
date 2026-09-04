@@ -25,11 +25,13 @@ pub enum PackageCmdCode {
     ReportSnResp = 0x25,
     SnQuery = 0x26,
     SnQueryResp = 0x27,
+    SnTunnelRendezvous = 0x2C,
+    SnTunnelRendezvousNotify = 0x2D,
 }
 
 impl PackageCmdCode {
     pub fn is_sn(&self) -> bool {
-        (*self >= Self::SnCall) && (*self <= Self::SnQueryResp)
+        (*self >= Self::SnCall) && (*self <= Self::SnTunnelRendezvousNotify)
     }
 }
 
@@ -45,6 +47,8 @@ impl TryFrom<u8> for PackageCmdCode {
             0x25u8 => Ok(Self::ReportSnResp),
             0x26u8 => Ok(Self::SnQuery),
             0x27u8 => Ok(Self::SnQueryResp),
+            0x2Cu8 => Ok(Self::SnTunnelRendezvous),
+            0x2Du8 => Ok(Self::SnTunnelRendezvousNotify),
 
             _ => Err(P2pError::new(
                 P2pErrorCode::InvalidParam,

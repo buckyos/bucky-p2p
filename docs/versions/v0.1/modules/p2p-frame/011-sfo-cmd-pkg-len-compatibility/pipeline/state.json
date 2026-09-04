@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "05d8140ba948c8fe93584ff03fb1584e75ba4ad32b31911f4549b3eeff6c289e",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-TYPES": {"status": "complete"},
+    "I-SN-CLIENT": {"status": "complete"},
+    "I-SN-SERVICE": {"status": "complete"},
+    "I-DIRECTORY-CLIENT": {"status": "complete"},
+    "I-DIRECTORY-SERVER": {"status": "complete"},
+    "I-INTER-SN": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-TYPES"],
+        "serialization_reasons": {
+          "I-1": "coordinated with the first implementation child; all consumer children depend on the shared aliases"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-SN-CLIENT", "I-SN-SERVICE", "I-DIRECTORY-CLIENT"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 4,
+        "tasks": ["I-DIRECTORY-SERVER", "I-INTER-SN"],
+        "serialization_reasons": {
+          "I-DIRECTORY-SERVER": "backfilled after a wave-3 child completed because runtime capacity limited wave 3 to three child agents",
+          "I-INTER-SN": "backfilled after a wave-3 child completed because runtime capacity limited wave 3 to three child agents"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["T-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 6,
+        "tasks": ["A-1"],
+        "serialization_reasons": {}
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "sfo_cmd_pkg_len_v04_compatibility",
+      "validation_id": "V-CMD-PKG-LEN-INTEGRATION",
+      "testplan_level": "integration",
+      "testplan_step_id": "cmd-pkg-len-alias-contract",
+      "evidence": "The dedicated external Rust test proves both shared aliases implement CmdPkgLen, preserves the former-u16 two-byte width and u16 maximum, fixes the owner/inter-SN alias at three bytes and 10 MiB, rejects the next byte, and instantiates both CmdHeader forms; task-local contract steps compile the new path, scan migrated consumers, and compile all p2p-frame targets.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "normal", "required": "yes", "validation_id": "V-CMD-PKG-LEN-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "boundary", "required": "yes", "validation_id": "V-CMD-PKG-LEN-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "negative", "required": "yes", "validation_id": "V-CMD-PKG-LEN-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "error", "required": "yes", "validation_id": "V-CMD-PKG-LEN-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "compatibility", "required": "yes", "validation_id": "V-CMD-PKG-LEN-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "lifecycle", "required": "no", "validation_id": "V-CMD-PKG-LEN-LIFECYCLE-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "The delivered change is compile-time type selection with no runtime state, task, lock, startup, shutdown, retry, or cleanup lifecycle."},
+    {"change_id": "sfo_cmd_pkg_len_v04_compatibility", "case_type": "cross-module", "required": "yes", "validation_id": "V-CMD-PKG-LEN-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260721T065710Z-p2p-frame+011-sfo-cmd-pkg-len-compatibility-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/011-sfo-cmd-pkg-len-compatibility/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

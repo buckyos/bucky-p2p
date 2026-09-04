@@ -1,34 +1,48 @@
-use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
-use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
+use crate::endpoint::{
+    Endpoint, EndpointArea, Protocol, rendezvous_eligible_area, rendezvous_ipv4_eligible,
+    rendezvous_reverse_connect_eligible_area,
+};
+use crate::error::{P2pError, P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
+use crate::nat_type::{NatProfile, NatTraversalContext};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef};
 use crate::runtime;
-use crate::sn::client::SNClientServiceRef;
+use crate::sn::client::{SNClientServiceRef, SnTunnelRendezvousActionAck};
 use crate::sn::protocol::v0::{SnCalled, TunnelType};
-use crate::types::{TunnelCandidateId, TunnelId, TunnelIdGenerator};
+use crate::sn::protocol::{SnTunnelRendezvousNotify, SnTunnelRendezvousOperation};
+use crate::types::{Sequence, Timestamp, TunnelCandidateId, TunnelId, TunnelIdGenerator};
 use async_named_locker::Locker;
 use bucky_time::bucky_time_now;
 use notify_future::Notify;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::Notify as AsyncNotify;
+use tokio::sync::{Notify as AsyncNotify, oneshot};
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
-use super::{ConnectDirection, DeviceFinderRef, P2pConnectionInfo, P2pConnectionInfoCacheRef};
+use super::nat_connect_plan::{
+    ConnectPlan as NatConnectPlan, RendezvousCallerAction, RendezvousPlan,
+};
+use super::{
+    ConnectDirection, DeviceFinderRef, NatCandidateMode, NatPlanAction, NatPlanParty,
+    P2pConnectionInfo, P2pConnectionInfoCacheRef, PeerLookupInfo, select_connect_plan,
+};
 use crate::networks::{
-    IncomingTunnelAcceptance, IncomingTunnelCallback, ListenVPortsRef, NetManagerRef,
-    TunnelCommandResult, TunnelConnectIntent, TunnelDatagramRead, TunnelDatagramWrite, TunnelForm,
-    TunnelListenerInfo, TunnelNetwork, TunnelNetworkRef, TunnelRef, TunnelState, TunnelStreamRead,
-    TunnelStreamWrite,
+    IncomingTunnelAcceptance, IncomingTunnelCallback, IncomingTunnelSubscriptionGuard,
+    ListenVPortsRef, NetManagerRef, TunnelCommandResult, TunnelConnectIntent, TunnelDatagramRead,
+    TunnelDatagramWrite, TunnelForm, TunnelListenerInfo, TunnelNetwork, TunnelNetworkRef,
+    TunnelRef, TunnelState, TunnelStreamRead, TunnelStreamWrite, UdpTunnelNetwork,
 };
 
 const HEDGED_REVERSE_DELAY: Duration = Duration::from_millis(300);
 const NAT_HEDGED_REVERSE_DELAY: Duration = HEDGED_REVERSE_DELAY;
+/// Consecutive failed direct dials (since the last success) after which a
+/// cached Direct connection entry is treated as stale and invalidated.
+const DIRECT_CACHE_MAX_FAILURES: u32 = 2;
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(60);
 const PROXY_UPGRADE_INITIAL_INTERVAL: Duration = Duration::from_secs(300);
 const PROXY_UPGRADE_MAX_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
@@ -38,6 +52,9 @@ const PROXY_UPGRADE_SHORT_INTERVALS: [Duration; 4] = [
     Duration::from_secs(60),
     Duration::from_secs(120),
 ];
+const MAX_NAT_PLAN_CANDIDATES: usize = 8;
+const RENDEZVOUS_PREDICTION_TIMEOUT: Duration = Duration::from_secs(2);
+const RENDEZVOUS_PREDICTION_TTL: Duration = Duration::from_secs(30);
 
 async fn race_with_delay<T, FD, FR>(
     direct_future: FD,
@@ -78,6 +95,29 @@ where
     }
 }
 
+async fn drive_nat_rendezvous_and_action<T, FC, FA>(
+    call: FC,
+    action: FA,
+) -> (P2pResult<T>, Option<P2pResult<()>>)
+where
+    FC: Future<Output = P2pResult<()>>,
+    FA: Future<Output = P2pResult<T>>,
+{
+    tokio::pin!(call);
+    tokio::pin!(action);
+    tokio::select! {
+        result = &mut action => (result, None),
+        call_result = &mut call => (action.await, Some(call_result)),
+    }
+}
+
+fn is_ambiguous_rendezvous_failure(err: &P2pError) -> bool {
+    matches!(
+        err.code(),
+        P2pErrorCode::IoError | P2pErrorCode::Unmatch | P2pErrorCode::InvalidData
+    )
+}
+
 struct TunnelEntry {
     tunnel: TunnelRef,
     updated_at: Instant,
@@ -107,13 +147,66 @@ impl EndpointScoreKey {
     }
 }
 
-type ReverseWaitKey = (P2pId, TunnelId);
+type IncomingWaitKey = (P2pId, TunnelId, bool);
+
+struct IncomingWaiterEntry {
+    token: Arc<()>,
+    waiter: Notify<P2pResult<TunnelRef>>,
+}
 
 struct ReverseWaitRegistration<'a> {
     manager: &'a TunnelManager,
     remote_id: P2pId,
     tunnel_id: TunnelId,
+    token: Arc<()>,
     active: bool,
+}
+
+struct IncomingPlanWaitRegistration<'a> {
+    manager: &'a TunnelManager,
+    remote_id: P2pId,
+    tunnel_id: TunnelId,
+    expected_reverse: bool,
+    token: Arc<()>,
+    active: bool,
+}
+
+impl<'a> IncomingPlanWaitRegistration<'a> {
+    fn register(
+        manager: &'a TunnelManager,
+        remote_id: P2pId,
+        tunnel_id: TunnelId,
+        expected_reverse: bool,
+        waiter: Notify<P2pResult<TunnelRef>>,
+    ) -> Self {
+        let token =
+            manager.add_incoming_waiter(remote_id.clone(), tunnel_id, expected_reverse, waiter);
+        Self {
+            manager,
+            remote_id,
+            tunnel_id,
+            expected_reverse,
+            token,
+            active: true,
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for IncomingPlanWaitRegistration<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.manager.remove_incoming_waiter(
+                &self.remote_id,
+                &self.tunnel_id,
+                self.expected_reverse,
+                &self.token,
+            );
+        }
+    }
 }
 
 impl<'a> ReverseWaitRegistration<'a> {
@@ -123,11 +216,12 @@ impl<'a> ReverseWaitRegistration<'a> {
         tunnel_id: TunnelId,
         waiter: Notify<P2pResult<TunnelRef>>,
     ) -> Self {
-        manager.add_reverse_waiter(remote_id.clone(), tunnel_id, waiter);
+        let token = manager.add_reverse_waiter(remote_id.clone(), tunnel_id, waiter);
         Self {
             manager,
             remote_id,
             tunnel_id,
+            token,
             active: true,
         }
     }
@@ -140,14 +234,19 @@ impl<'a> ReverseWaitRegistration<'a> {
 impl Drop for ReverseWaitRegistration<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.manager
-                .take_reverse_waiter(&self.remote_id, &self.tunnel_id);
+            self.manager.remove_incoming_waiter(
+                &self.remote_id,
+                &self.tunnel_id,
+                true,
+                &self.token,
+            );
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct ProxyUpgradeState {
+    generation: u64,
     next_attempt_at: Instant,
     retry_interval: Duration,
     short_retry_index: usize,
@@ -155,9 +254,10 @@ struct ProxyUpgradeState {
 }
 
 impl ProxyUpgradeState {
-    fn new(now: Instant, _initial_interval: Duration) -> Self {
+    fn new(generation: u64, now: Instant, _initial_interval: Duration) -> Self {
         let retry_interval = PROXY_UPGRADE_SHORT_INTERVALS[0];
         Self {
+            generation,
             next_attempt_at: now + retry_interval,
             retry_interval,
             short_retry_index: 0,
@@ -187,8 +287,135 @@ fn advance_proxy_upgrade_retry(
 
 struct ManagerState {
     endpoint_scores: HashMap<EndpointScoreKey, EndpointScore>,
-    pending_reverse_waiters: HashMap<ReverseWaitKey, Notify<P2pResult<TunnelRef>>>,
+    pending_reverse_waiters: HashMap<IncomingWaitKey, IncomingWaiterEntry>,
     proxy_upgrade_states: HashMap<P2pId, ProxyUpgradeState>,
+    next_proxy_upgrade_generation: u64,
+    rendezvous_attempts: HashMap<P2pId, RendezvousAttemptOwner>,
+}
+
+impl ManagerState {
+    fn allocate_proxy_upgrade_generation(&mut self) -> u64 {
+        self.next_proxy_upgrade_generation = self
+            .next_proxy_upgrade_generation
+            .checked_add(1)
+            .expect("proxy upgrade generation exhausted");
+        self.next_proxy_upgrade_generation
+    }
+
+    fn insert_proxy_upgrade(
+        &mut self,
+        remote_id: P2pId,
+        now: Instant,
+        initial_interval: Duration,
+    ) {
+        let generation = self.allocate_proxy_upgrade_generation();
+        self.proxy_upgrade_states.insert(
+            remote_id,
+            ProxyUpgradeState::new(generation, now, initial_interval),
+        );
+    }
+}
+
+struct RendezvousAttemptOwner {
+    seq: Sequence,
+    initiator_local: bool,
+    cancel: Arc<AsyncNotify>,
+    task: Option<SpawnHandle<()>>,
+    expected_incoming_reverse: Option<bool>,
+    tunnel_id: TunnelId,
+    yielded: Arc<AtomicBool>,
+    winner_completions: Vec<oneshot::Sender<RendezvousWinnerCompletion>>,
+    token: Arc<()>,
+}
+
+#[derive(Clone)]
+enum RendezvousWinnerCompletion {
+    Success(TunnelRef),
+    Failure { code: P2pErrorCode, message: String },
+}
+
+impl RendezvousWinnerCompletion {
+    fn from_result(result: &P2pResult<TunnelRef>) -> Self {
+        match result {
+            Ok(tunnel) => Self::Success(tunnel.clone()),
+            Err(err) => Self::Failure {
+                code: err.code(),
+                message: err.msg().to_owned(),
+            },
+        }
+    }
+
+    fn into_result(self) -> P2pResult<TunnelRef> {
+        match self {
+            Self::Success(tunnel) => Ok(tunnel),
+            Self::Failure { code, message } => Err(p2p_err!(code, "{}", message)),
+        }
+    }
+
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self::Failure {
+            code: P2pErrorCode::UserCanceled,
+            message: message.into(),
+        }
+    }
+}
+
+struct RendezvousOwnerRegistration {
+    manager: Weak<TunnelManager>,
+    remote_id: P2pId,
+    seq: Sequence,
+    tunnel_id: TunnelId,
+    token: Arc<()>,
+    active: bool,
+}
+
+impl RendezvousOwnerRegistration {
+    fn new(
+        manager: &TunnelManager,
+        remote_id: P2pId,
+        seq: Sequence,
+        tunnel_id: TunnelId,
+        token: Arc<()>,
+    ) -> Self {
+        Self {
+            manager: manager.self_weak.clone(),
+            remote_id,
+            seq,
+            tunnel_id,
+            token,
+            active: true,
+        }
+    }
+
+    fn complete(&mut self, completion: RendezvousWinnerCompletion) {
+        if self.active {
+            if let Some(manager) = self.manager.upgrade() {
+                manager.complete_rendezvous_owner(
+                    &self.remote_id,
+                    self.seq,
+                    self.tunnel_id,
+                    &self.token,
+                    completion,
+                );
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for RendezvousOwnerRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            if let Some(manager) = self.manager.upgrade() {
+                manager.cancel_rendezvous_owner(
+                    &self.remote_id,
+                    self.seq,
+                    self.tunnel_id,
+                    &self.token,
+                );
+            }
+        }
+    }
 }
 
 pub struct TunnelManager {
@@ -206,6 +433,7 @@ pub struct TunnelManager {
     tunnels: RwLock<HashMap<P2pId, TunnelEntries>>,
     state: Mutex<ManagerState>,
     subscriptions: Mutex<Vec<IncomingTunnelCallback>>,
+    incoming_subscription: Mutex<Option<IncomingTunnelSubscriptionGuard>>,
     cleanup_task: SpawnHandle<()>,
     proxy_upgrade_notify: Arc<AsyncNotify>,
     proxy_upgrade_task: SpawnHandle<()>,
@@ -246,8 +474,11 @@ impl TunnelManager {
                 endpoint_scores: HashMap::new(),
                 pending_reverse_waiters: HashMap::new(),
                 proxy_upgrade_states: HashMap::new(),
+                next_proxy_upgrade_generation: 0,
+                rendezvous_attempts: HashMap::new(),
             }),
             subscriptions: Mutex::new(Vec::new()),
+            incoming_subscription: Mutex::new(None),
             cleanup_task: Executor::spawn_with_handle({
                 let weak = weak.clone();
                 async move {
@@ -293,9 +524,9 @@ impl TunnelManager {
             .unwrap(),
         });
         let weak = Arc::downgrade(&manager);
-        manager
+        let incoming_subscription = manager
             .net_manager
-            .register_incoming_tunnel_acceptance_subscriber(
+            .register_owned_incoming_tunnel_acceptance_subscriber(
                 local_identity.get_id(),
                 Arc::new(move |result| {
                     let Some(manager) = weak.upgrade() else {
@@ -320,19 +551,28 @@ impl TunnelManager {
                     })
                 }),
             )?;
+        *manager.incoming_subscription.lock().unwrap() = Some(incoming_subscription);
         if let Some(sn_service) = sn_service_for_listener {
             let weak = Arc::downgrade(&manager);
             sn_service.set_listener(move |called: SnCalled| {
                 let weak = weak.clone();
                 async move {
-                    Executor::spawn(async move {
-                        if let Some(manager) = weak.upgrade() {
-                            if let Err(err) = manager.on_sn_called(called).await {
-                                log::warn!("handle network reverse sn call failed: {:?}", err);
-                            }
+                    if let Some(manager) = weak.upgrade() {
+                        if let Err(err) = manager.on_sn_called(called).await {
+                            log::warn!("handle network reverse sn call failed: {:?}", err);
                         }
-                    });
+                    }
                     Ok(())
+                }
+            });
+            let weak = Arc::downgrade(&manager);
+            sn_service.set_rendezvous_listener(move |notify, serving_sn_id| {
+                let weak = weak.clone();
+                async move {
+                    let manager = weak.upgrade().ok_or_else(|| {
+                        p2p_err!(P2pErrorCode::Interrupted, "TunnelManager dropped")
+                    })?;
+                    manager.on_sn_rendezvous(notify, serving_sn_id).await
                 }
             });
         }
@@ -348,16 +588,30 @@ impl TunnelManager {
     }
 
     fn has_available_tunnel_id(&self, remote_id: &P2pId, tunnel_id: TunnelId) -> bool {
-        let mut tunnels = self.tunnels.write().unwrap();
-        let Some(entries) = tunnels.get_mut(remote_id) else {
-            return false;
+        let (exists, notify_proxy_upgrade) = {
+            let mut tunnels = self.tunnels.write().unwrap();
+            let exists = if let Some(entries) = tunnels.get_mut(remote_id) {
+                entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
+                let exists = entries
+                    .iter()
+                    .any(|entry| entry.tunnel.tunnel_id() == tunnel_id);
+                if entries.is_empty() {
+                    tunnels.remove(remote_id);
+                }
+                exists
+            } else {
+                false
+            };
+            let mut state = self.state.lock().unwrap();
+            let notify_proxy_upgrade = self.reconcile_proxy_upgrade_state(
+                &mut state,
+                remote_id,
+                tunnels.get(remote_id),
+            );
+            (exists, notify_proxy_upgrade)
         };
-        entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
-        let exists = entries
-            .iter()
-            .any(|entry| entry.tunnel.tunnel_id() == tunnel_id);
-        if entries.is_empty() {
-            tunnels.remove(remote_id);
+        if notify_proxy_upgrade {
+            self.proxy_upgrade_notify.notify_one();
         }
         exists
     }
@@ -379,57 +633,66 @@ impl TunnelManager {
     where
         F: Fn(&TunnelEntry) -> bool,
     {
-        let (selected, should_track_proxy_upgrade) = {
+        let (selected, notify_proxy_upgrade) = {
             let mut tunnels = self.tunnels.write().unwrap();
-            let entries = tunnels.get_mut(remote_id)?;
-            let mut removed_unavailable = Vec::new();
-            entries.retain(|entry| {
-                let keep = is_tunnel_available(entry.tunnel.as_ref());
-                if !keep {
-                    removed_unavailable.push(format!(
-                        "tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} published={} state={:?} is_closed={}",
-                        entry.tunnel.tunnel_id(),
-                        entry.tunnel.candidate_id(),
-                        entry.tunnel.form(),
-                        entry.tunnel.protocol(),
-                        entry.tunnel.is_reverse(),
-                        entry.published,
-                        entry.tunnel.state(),
-                        entry.tunnel.is_closed()
-                    ));
-                }
-                keep
-            });
-            if !removed_unavailable.is_empty() {
-                log::warn!(
-                    "get tunnel local={} remote={} dropped unavailable entries [{}]",
-                    self.local_identity.get_id(),
-                    remote_id,
-                    removed_unavailable.join("; ")
-                );
-            }
-            let published = entries
-                .iter()
-                .filter(|entry| filter(entry))
-                .filter(|entry| entry.published);
-            let selected = Self::select_preferred_tunnel_entry(published)
-                .or_else(|| {
-                    if !allow_hidden_fallback {
-                        return None;
+            let selected = if let Some(entries) = tunnels.get_mut(remote_id) {
+                let mut removed_unavailable = Vec::new();
+                entries.retain(|entry| {
+                    let keep = is_tunnel_available(entry.tunnel.as_ref());
+                    if !keep {
+                        removed_unavailable.push(format!(
+                            "tunnel_id={:?} candidate_id={:?} form={:?} protocol={:?} reverse={} published={} state={:?} is_closed={}",
+                            entry.tunnel.tunnel_id(),
+                            entry.tunnel.candidate_id(),
+                            entry.tunnel.form(),
+                            entry.tunnel.protocol(),
+                            entry.tunnel.is_reverse(),
+                            entry.published,
+                            entry.tunnel.state(),
+                            entry.tunnel.is_closed()
+                        ));
                     }
-                    Self::select_preferred_tunnel_entry(
-                        entries.iter().filter(|entry| filter(entry)),
-                    )
-                })
-                .map(|entry| entry.tunnel.clone());
-            let should_track_proxy_upgrade = Self::only_published_proxy_candidates(entries);
-            if entries.is_empty() {
-                tunnels.remove(remote_id);
-            }
-            (selected, should_track_proxy_upgrade)
+                    keep
+                });
+                if !removed_unavailable.is_empty() {
+                    log::warn!(
+                        "get tunnel local={} remote={} dropped unavailable entries [{}]",
+                        self.local_identity.get_id(),
+                        remote_id,
+                        removed_unavailable.join("; ")
+                    );
+                }
+                let published = entries
+                    .iter()
+                    .filter(|entry| filter(entry))
+                    .filter(|entry| entry.published);
+                let selected = Self::select_preferred_tunnel_entry(published)
+                    .or_else(|| {
+                        if !allow_hidden_fallback {
+                            return None;
+                        }
+                        Self::select_preferred_tunnel_entry(
+                            entries.iter().filter(|entry| filter(entry)),
+                        )
+                    })
+                    .map(|entry| entry.tunnel.clone());
+                if entries.is_empty() {
+                    tunnels.remove(remote_id);
+                }
+                selected
+            } else {
+                None
+            };
+            let mut state = self.state.lock().unwrap();
+            let notify_proxy_upgrade = self.reconcile_proxy_upgrade_state(
+                &mut state,
+                remote_id,
+                tunnels.get(remote_id),
+            );
+            (selected, notify_proxy_upgrade)
         };
-        if should_track_proxy_upgrade {
-            self.track_proxy_upgrade_if_missing(remote_id);
+        if notify_proxy_upgrade {
+            self.proxy_upgrade_notify.notify_one();
         }
         selected
     }
@@ -485,8 +748,10 @@ impl TunnelManager {
         }
 
         if let Some(device_finder) = self.device_finder.as_ref() {
-            match device_finder.get_identity_cert(remote_id).await {
-                Ok(remote) => return self.open_tunnel(&remote).await,
+            match device_finder.get_peer_info(remote_id).await {
+                Ok(peer_info) => {
+                    return self.open_tunnel_from_lookup(peer_info).await;
+                }
                 Err(e) => {
                     log::warn!(
                         "device_finder lookup failed for {}, try proxy: {}",
@@ -501,6 +766,54 @@ impl TunnelManager {
             remote_id,
             None,
             TunnelConnectIntent::active_logical(self.gen_id.generate()),
+        )
+        .await
+    }
+
+    async fn open_tunnel_from_lookup(&self, lookup: PeerLookupInfo) -> P2pResult<TunnelRef> {
+        let remote_id = lookup.identity_cert.get_id();
+        let remote_name = Some(lookup.identity_cert.get_name());
+        let remote_endpoints = lookup.identity_cert.endpoints();
+        let Some(sn_peer_id) = lookup.sn_peer_id else {
+            return self
+                .open_known_tunnel(remote_endpoints, &remote_id, remote_name)
+                .await;
+        };
+        let (Some(caller_profile), Some(callee_profile)) =
+            (lookup.local_net_profile, lookup.remote_net_profile)
+        else {
+            return self
+                .open_known_tunnel(remote_endpoints, &remote_id, remote_name)
+                .await;
+        };
+        let context = NatTraversalContext::new(
+            self.local_identity.get_id(),
+            remote_id.clone(),
+            caller_profile,
+            callee_profile,
+        );
+        let now = bucky_time_now();
+        if !context.is_valid_for(&self.local_identity.get_id(), &remote_id, now) {
+            return self
+                .open_known_tunnel(remote_endpoints, &remote_id, remote_name)
+                .await;
+        }
+        let caller_public =
+            Self::has_static_wan_identity(&self.local_identity.get_identity_cert()?);
+        let callee_public = Self::has_static_wan_identity(&lookup.identity_cert);
+        let plan = select_connect_plan(&context, now, caller_public, callee_public);
+        if matches!(plan.action_for(NatPlanParty::Caller), NatPlanAction::Legacy) {
+            return self
+                .open_known_tunnel(remote_endpoints, &remote_id, remote_name)
+                .await;
+        }
+        self.open_nat_aware_tunnel(
+            remote_endpoints,
+            &remote_id,
+            remote_name,
+            &sn_peer_id,
+            context,
+            plan,
         )
         .await
     }
@@ -529,8 +842,19 @@ impl TunnelManager {
             tunnel.local_ep(),
             tunnel.remote_ep()
         );
+        if let Some(waiter) = self.take_incoming_waiter(&remote_id, &tunnel_id, tunnel.is_reverse())
+        {
+            log::debug!(
+                "incoming tunnel remote={} tunnel_id={:?} matched direction waiter reverse={}",
+                remote_id,
+                tunnel_id,
+                tunnel.is_reverse()
+            );
+            waiter.notify(Ok(tunnel));
+            return Ok(true);
+        }
         if tunnel.is_reverse() {
-            let Some(waiter) = self.take_reverse_waiter(&remote_id, &tunnel_id) else {
+            {
                 log::debug!(
                     "incoming tunnel remote={} tunnel_id={:?} no reverse waiter, close tunnel",
                     remote_id,
@@ -538,14 +862,7 @@ impl TunnelManager {
                 );
                 tunnel.close()?;
                 return Ok(false);
-            };
-            log::debug!(
-                "incoming tunnel remote={} tunnel_id={:?} matched reverse waiter",
-                remote_id,
-                tunnel_id
-            );
-            waiter.notify(Ok(tunnel));
-            return Ok(true);
+            }
         }
         let tunnel = self.register_tunnel(tunnel).await?;
         self.publish_registered_tunnel(&tunnel)?;
@@ -611,7 +928,15 @@ impl TunnelManager {
         if let Some(info) = self.conn_info_cache.get(remote_id).await {
             match info.direct {
                 ConnectDirection::Direct => {
-                    if remote_eps.iter().any(|ep| ep == &info.remote_ep) {
+                    if self.direct_cache_endpoint_degraded(&info.remote_ep) {
+                        log::debug!(
+                            "open tunnel remote={} cached direct ep={:?} degraded after {} consecutive failures, invalidating cache entry",
+                            remote_id,
+                            info.remote_ep,
+                            DIRECT_CACHE_MAX_FAILURES
+                        );
+                        self.conn_info_cache.remove(remote_id).await;
+                    } else if remote_eps.iter().any(|ep| ep == &info.remote_ep) {
                         match self
                             .open_direct_path(
                                 vec![info.remote_ep],
@@ -622,7 +947,17 @@ impl TunnelManager {
                             .await
                         {
                             Ok(tunnel) => return Ok(tunnel),
-                            Err(err) => last_err = Some(err),
+                            Err(err) => {
+                                if self.direct_cache_endpoint_degraded(&info.remote_ep) {
+                                    log::debug!(
+                                        "open tunnel remote={} cached direct ep={:?} failed past threshold, invalidating cache entry",
+                                        remote_id,
+                                        info.remote_ep
+                                    );
+                                    self.conn_info_cache.remove(remote_id).await;
+                                }
+                                last_err = Some(err);
+                            }
                         }
                     }
                 }
@@ -749,6 +1084,1126 @@ impl TunnelManager {
             .unwrap_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no tunnel network matched")))
     }
 
+    fn has_static_wan_identity(cert: &P2pIdentityCertRef) -> bool {
+        cert.endpoints().iter().any(Endpoint::is_static_wan)
+    }
+
+    fn nat_candidates(
+        base_endpoints: &[Endpoint],
+        profile: &NatProfile,
+        mode: NatCandidateMode,
+        now: u64,
+    ) -> Vec<Endpoint> {
+        let mut candidates = Vec::new();
+        match mode {
+            NatCandidateMode::Base => {
+                for endpoint in base_endpoints.iter().copied() {
+                    Self::push_unique_endpoint(&mut candidates, endpoint);
+                }
+            }
+            NatCandidateMode::Predicted => {
+                let hint = profile.usable_prediction_hint(now);
+                for base in base_endpoints.iter().copied().filter(|endpoint| {
+                    endpoint.protocol() == Protocol::Quic
+                        && rendezvous_eligible_area(endpoint)
+                        && endpoint.addr().port() != 0
+                }) {
+                    Self::push_unique_endpoint(&mut candidates, base);
+                    let Some(hint) = hint else {
+                        continue;
+                    };
+                    let remaining = MAX_NAT_PLAN_CANDIDATES.saturating_sub(candidates.len());
+                    for port in hint.predicted_ports(&base, remaining) {
+                        let mut predicted =
+                            Endpoint::from((Protocol::Quic, base.addr().ip(), port));
+                        predicted.set_area(EndpointArea::ServerReflexive);
+                        Self::push_unique_endpoint(&mut candidates, predicted);
+                    }
+                    if candidates.len() >= MAX_NAT_PLAN_CANDIDATES {
+                        break;
+                    }
+                }
+            }
+        }
+        candidates.truncate(MAX_NAT_PLAN_CANDIDATES);
+        candidates
+    }
+
+    fn rendezvous_base_endpoints(
+        endpoints: &[Endpoint],
+        operation: SnTunnelRendezvousOperation,
+    ) -> Vec<Endpoint> {
+        let mut result = Vec::new();
+        for endpoint in endpoints.iter().copied().filter(|endpoint| {
+            let eligible_transport = if operation.punches() {
+                endpoint.protocol() == Protocol::Quic
+            } else {
+                matches!(endpoint.protocol(), Protocol::Quic | Protocol::Tcp)
+            };
+            let eligible_area = if operation.reverse_connects() {
+                rendezvous_reverse_connect_eligible_area(endpoint)
+            } else {
+                rendezvous_eligible_area(endpoint)
+            };
+            eligible_transport && eligible_area && endpoint.addr().port() != 0
+        }) {
+            Self::push_unique_endpoint(&mut result, endpoint);
+            if result.len() >= MAX_NAT_PLAN_CANDIDATES {
+                break;
+            }
+        }
+        result
+    }
+
+    async fn predict_owned_rendezvous_endpoints(
+        &self,
+        sn_peer_id: &P2pId,
+    ) -> P2pResult<crate::networks::TraversalEndpointPrediction> {
+        let sn_service = self
+            .sn_service
+            .as_ref()
+            .ok_or_else(|| p2p_err!(P2pErrorCode::NotSupport, "SN service not configured"))?;
+        let probe_snapshot = sn_service
+            .get_nat_probe_snapshot_for_sn(sn_peer_id)
+            .ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::NotFound,
+                    "active SN has no trusted traversal prediction snapshot"
+                )
+            })?;
+        if probe_snapshot.endpoints.len() < 2 {
+            return Err(p2p_err!(
+                P2pErrorCode::NotFound,
+                "active SN has no traversal prediction reflectors"
+            ));
+        }
+        let network = self.net_manager.get_network(Protocol::Quic)?;
+        let udp_network = network.as_udp_tunnel_network().ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::NotSupport,
+                "QUIC network does not support UDP traversal prediction"
+            )
+        })?;
+        let prediction = udp_network
+            .predict_traversal_endpoints(
+                probe_snapshot.endpoints.as_slice(),
+                &probe_snapshot.expected_signer,
+                RENDEZVOUS_PREDICTION_TIMEOUT,
+                RENDEZVOUS_PREDICTION_TTL,
+            )
+            .await?;
+        udp_network.validate_traversal_prediction(&prediction, bucky_time_now())?;
+        Ok(prediction)
+    }
+
+    fn abort_rendezvous_owner(&self, remote_id: &P2pId, owner: RendezvousAttemptOwner) {
+        if let Some(expected_reverse) = owner.expected_incoming_reverse {
+            self.remove_incoming_waiter(
+                remote_id,
+                &owner.tunnel_id,
+                expected_reverse,
+                &owner.token,
+            );
+        }
+        owner.cancel.notify_one();
+        if let Some(task) = owner.task {
+            task.abort();
+        }
+        for waiter in owner.winner_completions {
+            let _ = waiter.send(RendezvousWinnerCompletion::cancelled(
+                "rendezvous winner was cancelled",
+            ));
+        }
+    }
+
+    fn install_rendezvous_owner(
+        &self,
+        remote_id: P2pId,
+        mut owner: RendezvousAttemptOwner,
+        mut incoming_waiter: Option<Notify<P2pResult<TunnelRef>>>,
+    ) -> P2pResult<()> {
+        let (displaced, yielded_cancel) = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(existing) = state.rendezvous_attempts.get_mut(&remote_id) {
+                if existing.initiator_local == owner.initiator_local
+                    && existing.seq == owner.seq
+                    && existing.tunnel_id == owner.tunnel_id
+                {
+                    return Err(p2p_err!(
+                        P2pErrorCode::AlreadyExists,
+                        "rendezvous attempt already armed"
+                    ));
+                }
+                let local_initiator_wins =
+                    self.local_identity.get_id().as_slice() < remote_id.as_slice();
+                let new_wins = if owner.initiator_local {
+                    local_initiator_wins
+                } else {
+                    !local_initiator_wins
+                };
+                if !new_wins {
+                    if owner.initiator_local && !existing.initiator_local {
+                        owner.yielded.store(true, Ordering::SeqCst);
+                        existing
+                            .winner_completions
+                            .append(&mut owner.winner_completions);
+                        (None, Some(owner.cancel.clone()))
+                    } else {
+                        return Err(p2p_err!(
+                            P2pErrorCode::Conflict,
+                            "stable peer ordering rejected rendezvous collision"
+                        ));
+                    }
+                } else {
+                    let mut displaced = state.rendezvous_attempts.remove(&remote_id).unwrap();
+                    if displaced.initiator_local && !owner.initiator_local {
+                        displaced.yielded.store(true, Ordering::SeqCst);
+                        owner
+                            .winner_completions
+                            .append(&mut displaced.winner_completions);
+                    }
+                    if let Some(expected_reverse) = displaced.expected_incoming_reverse {
+                        Self::remove_incoming_waiter_from_state(
+                            &mut state,
+                            &remote_id,
+                            &displaced.tunnel_id,
+                            expected_reverse,
+                            &displaced.token,
+                        );
+                    }
+                    Self::publish_rendezvous_waiter(
+                        &mut state,
+                        &remote_id,
+                        &owner,
+                        incoming_waiter.take(),
+                    );
+                    state.rendezvous_attempts.insert(remote_id.clone(), owner);
+                    (Some(displaced), None)
+                }
+            } else {
+                Self::publish_rendezvous_waiter(
+                    &mut state,
+                    &remote_id,
+                    &owner,
+                    incoming_waiter.take(),
+                );
+                state.rendezvous_attempts.insert(remote_id.clone(), owner);
+                (None, None)
+            }
+        };
+        if let Some(displaced) = displaced {
+            self.abort_rendezvous_owner(&remote_id, displaced);
+        }
+        if let Some(cancel) = yielded_cancel {
+            cancel.notify_one();
+        }
+        Ok(())
+    }
+
+    fn attach_rendezvous_task(
+        &self,
+        remote_id: &P2pId,
+        seq: Sequence,
+        tunnel_id: TunnelId,
+        token: &Arc<()>,
+        task: SpawnHandle<()>,
+        start: &AsyncNotify,
+    ) -> bool {
+        let mut task = Some(task);
+        let mut attached = false;
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Some(owner) = state.rendezvous_attempts.get_mut(remote_id) {
+                if owner.seq == seq
+                    && owner.tunnel_id == tunnel_id
+                    && Arc::ptr_eq(&owner.token, token)
+                {
+                    owner.task = task.take();
+                    // Release the action while the owner lock still proves
+                    // this attempt owns the target slot.
+                    start.notify_one();
+                    attached = true;
+                }
+            }
+        }
+        if let Some(task) = task {
+            task.abort();
+        }
+        attached
+    }
+
+    fn complete_rendezvous_owner(
+        &self,
+        remote_id: &P2pId,
+        seq: Sequence,
+        tunnel_id: TunnelId,
+        token: &Arc<()>,
+        completion: RendezvousWinnerCompletion,
+    ) {
+        let owner = {
+            let mut state = self.state.lock().unwrap();
+            if state
+                .rendezvous_attempts
+                .get(remote_id)
+                .is_some_and(|owner| {
+                    owner.seq == seq
+                        && owner.tunnel_id == tunnel_id
+                        && Arc::ptr_eq(&owner.token, token)
+                })
+            {
+                let owner = state.rendezvous_attempts.remove(remote_id);
+                if let Some(owner) = owner.as_ref() {
+                    if let Some(expected_reverse) = owner.expected_incoming_reverse {
+                        Self::remove_incoming_waiter_from_state(
+                            &mut state,
+                            remote_id,
+                            &owner.tunnel_id,
+                            expected_reverse,
+                            &owner.token,
+                        );
+                    }
+                }
+                owner
+            } else {
+                None
+            }
+        };
+        if let Some(owner) = owner {
+            for waiter in owner.winner_completions {
+                let _ = waiter.send(completion.clone());
+            }
+        }
+    }
+
+    fn cancel_rendezvous_owner(
+        &self,
+        remote_id: &P2pId,
+        seq: Sequence,
+        tunnel_id: TunnelId,
+        token: &Arc<()>,
+    ) {
+        let owner = {
+            let mut state = self.state.lock().unwrap();
+            if state
+                .rendezvous_attempts
+                .get(remote_id)
+                .is_some_and(|owner| {
+                    owner.seq == seq
+                        && owner.tunnel_id == tunnel_id
+                        && Arc::ptr_eq(&owner.token, token)
+                })
+            {
+                let owner = state.rendezvous_attempts.remove(remote_id);
+                if let Some(owner) = owner.as_ref() {
+                    if let Some(expected_reverse) = owner.expected_incoming_reverse {
+                        Self::remove_incoming_waiter_from_state(
+                            &mut state,
+                            remote_id,
+                            &owner.tunnel_id,
+                            expected_reverse,
+                            &owner.token,
+                        );
+                    }
+                }
+                owner
+            } else {
+                None
+            }
+        };
+        if let Some(owner) = owner {
+            self.abort_rendezvous_owner(remote_id, owner);
+        }
+    }
+
+    async fn open_rendezvous_tunnel(
+        &self,
+        remote_endpoints: Vec<Endpoint>,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        sn_peer_id: &P2pId,
+        context: &NatTraversalContext,
+        plan: RendezvousPlan,
+        fallback_action: NatPlanAction,
+        deadline: Instant,
+    ) -> P2pResult<TunnelRef> {
+        let sn_service = self
+            .sn_service
+            .as_ref()
+            .ok_or_else(|| p2p_err!(P2pErrorCode::NotSupport, "SN service not configured"))?;
+        let lock_name = format!("network-tunnel-{}", remote_id);
+        let _guard = Locker::get_locker(lock_name).await;
+        if let Some(tunnel) = self.get_tunnel(remote_id) {
+            return Ok(tunnel);
+        }
+
+        let tunnel_id = self.gen_id.generate();
+        let (request_endpoints, request_prediction) = match plan.request_candidates {
+            None => (Vec::new(), None),
+            Some(NatCandidateMode::Base) => {
+                let endpoints = Self::rendezvous_base_endpoints(
+                    self.reverse_endpoints_for_sn(sn_peer_id).as_slice(),
+                    plan.operation,
+                );
+                if endpoints.is_empty() {
+                    return Err(p2p_err!(
+                        P2pErrorCode::NotFound,
+                        "no local rendezvous endpoints"
+                    ));
+                }
+                (endpoints, None)
+            }
+            Some(NatCandidateMode::Predicted) => {
+                let prediction = self.predict_owned_rendezvous_endpoints(sn_peer_id).await?;
+                (prediction.endpoints.clone(), Some(prediction))
+            }
+        };
+        let request = sn_service.new_rendezvous_request(
+            tunnel_id,
+            remote_id,
+            plan.operation,
+            request_endpoints,
+            plan.need_predict_endpoint,
+        )?;
+        if let Some(prediction) = request_prediction.as_ref() {
+            let network = self.net_manager.get_network(Protocol::Quic)?;
+            let udp_network = network.as_udp_tunnel_network().ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::NotSupport,
+                    "QUIC network does not support UDP traversal prediction validation"
+                )
+            })?;
+            udp_network.validate_traversal_prediction(prediction, bucky_time_now())?;
+        }
+
+        let expected_reverse = match plan.caller_action {
+            RendezvousCallerAction::PunchThenWait { .. } | RendezvousCallerAction::WaitIncoming => {
+                Some(true)
+            }
+            RendezvousCallerAction::Connect { .. } => None,
+        };
+        let mut incoming_notify = None;
+        let mut incoming_waiter = None;
+        if let Some(expected_reverse) = expected_reverse {
+            let (notify, waiter) = Notify::new();
+            incoming_notify = Some(notify);
+            incoming_waiter = Some(waiter);
+        }
+        let cancel = Arc::new(AsyncNotify::new());
+        let yielded = Arc::new(AtomicBool::new(false));
+        let owner_token = Arc::new(());
+        let (winner_completion, mut winner_completion_waiter) = oneshot::channel();
+        if let Err(err) = self.install_rendezvous_owner(
+            remote_id.clone(),
+            RendezvousAttemptOwner {
+                seq: request.seq,
+                initiator_local: true,
+                cancel: cancel.clone(),
+                task: None,
+                expected_incoming_reverse: expected_reverse,
+                tunnel_id,
+                yielded: yielded.clone(),
+                winner_completions: vec![winner_completion],
+                token: owner_token.clone(),
+            },
+            incoming_notify,
+        ) {
+            return Err(err);
+        }
+        let mut owner_registration = RendezvousOwnerRegistration::new(
+            self,
+            remote_id.clone(),
+            request.seq,
+            tunnel_id,
+            owner_token,
+        );
+
+        log::info!(
+            "event=sn_rendezvous_requesting seq={} remote={} operation={:?} endpoint_count={} predict={}",
+            request.seq.value(),
+            remote_id,
+            plan.operation,
+            request.end_point_array.len(),
+            request.need_predict_endpoint
+        );
+        let response = tokio::select! {
+            response = sn_service.rendezvous_via_sn(sn_peer_id, &request) => response,
+            _ = cancel.notified() => {
+                if yielded.load(Ordering::SeqCst) {
+                    return winner_completion_waiter
+                        .await
+                        .map_err(|_| p2p_err!(P2pErrorCode::UserCanceled, "rendezvous winner completion channel closed"))?
+                        .into_result();
+                }
+                Err(p2p_err!(P2pErrorCode::UserCanceled, "rendezvous collision cancelled outbound attempt"))
+            },
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(err) if is_ambiguous_rendezvous_failure(&err) => {
+                log::warn!(
+                    "event=sn_rendezvous_ambiguous seq={} remote={} reason={:?} retry=local_action_only",
+                    request.seq.value(),
+                    remote_id,
+                    err.code()
+                );
+                let action = async {
+                    self.execute_nat_action(
+                        fallback_action,
+                        NatPlanParty::Caller,
+                        remote_endpoints,
+                        remote_id,
+                        remote_name,
+                        tunnel_id,
+                        context,
+                        incoming_waiter.take(),
+                    )
+                    .await
+                };
+                let result = tokio::select! {
+                    result = runtime::timeout(
+                        self.conn_timeout
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                        action,
+                    ) => match result {
+                        Ok(result) => result,
+                        Err(err) => Err(p2p_err!(
+                            P2pErrorCode::Timeout,
+                            "rendezvous ambiguous retry action exceeded attempt window: {}",
+                            err
+                        )),
+                    },
+                    _ = cancel.notified() => {
+                        if yielded.load(Ordering::SeqCst) {
+                            return winner_completion_waiter
+                                .await
+                                .map_err(|_| p2p_err!(P2pErrorCode::UserCanceled, "rendezvous winner completion channel closed"))?
+                                .into_result();
+                        }
+                        Err(p2p_err!(
+                            P2pErrorCode::UserCanceled,
+                            "rendezvous collision cancelled outbound action"
+                        ))
+                    },
+                };
+                owner_registration.complete(RendezvousWinnerCompletion::from_result(&result));
+                return result;
+            }
+            Err(err) => return Err(err),
+        };
+
+        let action = async {
+            match plan.caller_action {
+                RendezvousCallerAction::Connect {
+                    use_predicted_response: true,
+                } => {
+                    self.open_direct_path(
+                        response.predicted_endpoint_array.clone(),
+                        remote_id,
+                        remote_name.clone(),
+                        TunnelConnectIntent::active_logical(tunnel_id),
+                    )
+                    .await
+                }
+                RendezvousCallerAction::PunchThenWait {
+                    use_predicted_response: true,
+                } => {
+                    self.punch_and_wait_incoming(
+                        response.predicted_endpoint_array.clone(),
+                        remote_id,
+                        tunnel_id,
+                        false,
+                        incoming_waiter.take().ok_or_else(|| {
+                            p2p_err!(
+                                P2pErrorCode::ErrorState,
+                                "missing rendezvous reverse waiter"
+                            )
+                        })?,
+                    )
+                    .await
+                }
+                _ => {
+                    self.execute_nat_action(
+                        fallback_action,
+                        NatPlanParty::Caller,
+                        remote_endpoints,
+                        remote_id,
+                        remote_name,
+                        tunnel_id,
+                        context,
+                        incoming_waiter.take(),
+                    )
+                    .await
+                }
+            }
+        };
+        let result = tokio::select! {
+            result = runtime::timeout(
+                self.conn_timeout
+                    .min(deadline.saturating_duration_since(Instant::now())),
+                action,
+            ) => match result {
+                Ok(result) => result,
+                Err(err) => Err(p2p_err!(
+                    P2pErrorCode::Timeout,
+                    "rendezvous initiator action exceeded local timeout: {}",
+                    err
+                )),
+            },
+            _ = cancel.notified() => {
+                if yielded.load(Ordering::SeqCst) {
+                    return winner_completion_waiter
+                        .await
+                        .map_err(|_| p2p_err!(P2pErrorCode::UserCanceled, "rendezvous winner completion channel closed"))?
+                        .into_result();
+                }
+                Err(p2p_err!(
+                    P2pErrorCode::UserCanceled,
+                    "rendezvous collision cancelled outbound action"
+                ))
+            },
+        };
+        owner_registration.complete(RendezvousWinnerCompletion::from_result(&result));
+        result
+    }
+
+    async fn on_sn_rendezvous(
+        self: &Arc<Self>,
+        notify: SnTunnelRendezvousNotify,
+        serving_sn_id: P2pId,
+    ) -> P2pResult<SnTunnelRendezvousActionAck> {
+        notify.validate()?;
+        let cert = self.cert_factory.create(&notify.peer_info)?;
+        let remote_id = cert.get_id();
+        if remote_id == self.local_identity.get_id() {
+            return Err(p2p_err!(
+                P2pErrorCode::PermissionDenied,
+                "rendezvous initiator must not be the local identity"
+            ));
+        }
+
+        let prediction = if notify.need_predict_endpoint {
+            Some(
+                self.predict_owned_rendezvous_endpoints(&serving_sn_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let ack = if let Some(prediction) = prediction.as_ref() {
+            SnTunnelRendezvousActionAck {
+                predicted_endpoints: prediction.endpoints.clone(),
+                socket_binding_generation: prediction.socket_binding_generation,
+                valid_until: prediction.valid_until,
+            }
+        } else {
+            SnTunnelRendezvousActionAck::without_prediction()
+        };
+        if let Some(prediction) = prediction.as_ref() {
+            let network = self.net_manager.get_network(Protocol::Quic)?;
+            let udp_network = network.as_udp_tunnel_network().ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::NotSupport,
+                    "QUIC network does not support UDP traversal prediction validation"
+                )
+            })?;
+            udp_network.validate_traversal_prediction(prediction, bucky_time_now())?;
+        }
+
+        let expected_reverse = match notify.operation {
+            SnTunnelRendezvousOperation::PunchOnly | SnTunnelRendezvousOperation::WaitIncoming => {
+                Some(false)
+            }
+            SnTunnelRendezvousOperation::PunchAndReverseConnect
+            | SnTunnelRendezvousOperation::ReverseConnectOnly => None,
+        };
+        let mut incoming_notify = None;
+        let mut incoming_waiter = None;
+        if let Some(expected_reverse) = expected_reverse {
+            let (wait_notify, waiter) = Notify::new();
+            incoming_notify = Some(wait_notify);
+            incoming_waiter = Some(waiter);
+        }
+        let cancel = Arc::new(AsyncNotify::new());
+        let owner_token = Arc::new(());
+        if let Err(err) = self.install_rendezvous_owner(
+            remote_id.clone(),
+            RendezvousAttemptOwner {
+                seq: notify.seq,
+                initiator_local: false,
+                cancel: cancel.clone(),
+                task: None,
+                expected_incoming_reverse: expected_reverse,
+                tunnel_id: notify.tunnel_id,
+                yielded: Arc::new(AtomicBool::new(false)),
+                winner_completions: Vec::new(),
+                token: owner_token.clone(),
+            },
+            incoming_notify,
+        ) {
+            return Err(err);
+        }
+
+        let manager = self.clone();
+        let notify_for_task = notify.clone();
+        let remote_for_task = remote_id.clone();
+        let remote_name = cert.get_name();
+        let action_timeout = self.conn_timeout;
+        let owner_token_for_task = owner_token.clone();
+        let start = Arc::new(AsyncNotify::new());
+        let start_for_task = start.clone();
+        let task = match Executor::spawn_with_handle(async move {
+            start_for_task.notified().await;
+            let tunnel_id = notify_for_task.tunnel_id;
+            let operation = notify_for_task.operation;
+            let action = async {
+                match operation {
+                    SnTunnelRendezvousOperation::PunchOnly => {
+                        manager
+                            .punch_and_wait_incoming(
+                                notify_for_task.end_point_array.clone(),
+                                &remote_for_task,
+                                tunnel_id,
+                                true,
+                                incoming_waiter.ok_or_else(|| {
+                                    p2p_err!(
+                                        P2pErrorCode::ErrorState,
+                                        "missing rendezvous active waiter"
+                                    )
+                                })?,
+                            )
+                            .await
+                    }
+                    SnTunnelRendezvousOperation::WaitIncoming => {
+                        manager
+                            .wait_planned_incoming(
+                                &remote_for_task,
+                                true,
+                                incoming_waiter.ok_or_else(|| {
+                                    p2p_err!(
+                                        P2pErrorCode::ErrorState,
+                                        "missing rendezvous active waiter"
+                                    )
+                                })?,
+                            )
+                            .await
+                    }
+                    SnTunnelRendezvousOperation::PunchAndReverseConnect
+                    | SnTunnelRendezvousOperation::ReverseConnectOnly => {
+                        let intent = TunnelConnectIntent::reverse_logical(tunnel_id)
+                            .set_udp_punch_enabled(
+                                operation == SnTunnelRendezvousOperation::PunchAndReverseConnect,
+                            );
+                        manager
+                            .open_direct_path(
+                                notify_for_task.end_point_array.clone(),
+                                &remote_for_task,
+                                Some(remote_name),
+                                intent,
+                            )
+                            .await
+                    }
+                }
+            };
+            let result = tokio::select! {
+                result = runtime::timeout(action_timeout, action) => match result {
+                    Ok(result) => result,
+                    Err(err) => Err(p2p_err!(P2pErrorCode::Timeout, "rendezvous target action exceeded local timeout: {}", err)),
+                },
+                _ = cancel.notified() => Err(p2p_err!(P2pErrorCode::UserCanceled, "rendezvous action cancelled")),
+            };
+            log::info!(
+                "event=sn_rendezvous_target_finished seq={} remote={} operation={:?} result={:?}",
+                notify_for_task.seq.value(),
+                remote_for_task,
+                operation,
+                result.as_ref().map(|_| ()).map_err(|err| err.code())
+            );
+            manager.complete_rendezvous_owner(
+                &remote_for_task,
+                notify_for_task.seq,
+                notify_for_task.tunnel_id,
+                &owner_token_for_task,
+                RendezvousWinnerCompletion::from_result(&result),
+            );
+        }) {
+            Ok(task) => task,
+            Err(err) => {
+                self.cancel_rendezvous_owner(
+                    &remote_id,
+                    notify.seq,
+                    notify.tunnel_id,
+                    &owner_token,
+                );
+                return Err(err);
+            }
+        };
+        if !self.attach_rendezvous_task(
+            &remote_id,
+            notify.seq,
+            notify.tunnel_id,
+            &owner_token,
+            task,
+            start.as_ref(),
+        ) {
+            self.cancel_rendezvous_owner(&remote_id, notify.seq, notify.tunnel_id, &owner_token);
+            return Err(p2p_err!(
+                P2pErrorCode::Conflict,
+                "rendezvous target ownership changed before action arm"
+            ));
+        }
+        Ok(ack)
+    }
+
+    async fn open_nat_aware_tunnel(
+        &self,
+        remote_endpoints: Vec<Endpoint>,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        sn_peer_id: &P2pId,
+        context: NatTraversalContext,
+        plan: NatConnectPlan,
+    ) -> P2pResult<TunnelRef> {
+        let Some(rendezvous_plan) = plan.rendezvous_plan() else {
+            return self
+                .open_nat_aware_tunnel_legacy(
+                    remote_endpoints,
+                    remote_id,
+                    remote_name,
+                    sn_peer_id,
+                    context,
+                    plan.action_for(NatPlanParty::Caller),
+                )
+                .await;
+        };
+        let fallback_action = plan.action_for(NatPlanParty::Caller);
+        let total_budget = self
+            .sn_service
+            .as_ref()
+            .map(|sn_service| sn_service.call_timeout())
+            .unwrap_or(self.conn_timeout)
+            .saturating_add(self.conn_timeout.saturating_mul(2));
+        let deadline = Instant::now() + total_budget;
+        log::info!(
+            "event=sn_rendezvous_open_start remote={} total_budget_ms={}",
+            remote_id,
+            total_budget.as_millis()
+        );
+        let remaining_budget = deadline.saturating_duration_since(Instant::now());
+        let result = runtime::timeout(
+            remaining_budget,
+            async move {
+                match self
+                    .open_rendezvous_tunnel(
+                        remote_endpoints.clone(),
+                        remote_id,
+                        remote_name.clone(),
+                        sn_peer_id,
+                        &context,
+                        rendezvous_plan,
+                        fallback_action,
+                        deadline,
+                    )
+                    .await
+                {
+                    Ok(tunnel) => Ok(tunnel),
+                    Err(err) => {
+                        log::warn!(
+                            "event=sn_rendezvous_fallback remote={} reason={:?} path=legacy_sn_call",
+                            remote_id,
+                            err.code()
+                        );
+                        self.open_nat_aware_tunnel_legacy(
+                            remote_endpoints,
+                            remote_id,
+                            remote_name,
+                            sn_peer_id,
+                            context,
+                            fallback_action,
+                        )
+                        .await
+                    }
+                }
+            },
+        )
+        .await;
+        match result {
+            Ok(result) => result,
+            Err(_) => Err(p2p_err!(
+                P2pErrorCode::Timeout,
+                "open NAT-aware tunnel exceeded total deadline"
+            )),
+        }
+    }
+
+    async fn open_nat_aware_tunnel_legacy(
+        &self,
+        remote_endpoints: Vec<Endpoint>,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        sn_peer_id: &P2pId,
+        context: NatTraversalContext,
+        action: NatPlanAction,
+    ) -> P2pResult<TunnelRef> {
+        let Some(sn_service) = self.sn_service.as_ref() else {
+            return self
+                .open_known_tunnel(remote_endpoints, remote_id, remote_name)
+                .await;
+        };
+        let lock_name = format!("network-tunnel-{}", remote_id);
+        let _guard = Locker::get_locker(lock_name).await;
+        if let Some(tunnel) = self.get_tunnel(remote_id) {
+            return Ok(tunnel);
+        }
+
+        let tunnel_id = self.gen_id.generate();
+        let reverse_endpoints = self.reverse_endpoints_for_sn(sn_peer_id);
+        let reverse_endpoint_arg = (!reverse_endpoints.is_empty()).then_some(reverse_endpoints);
+        let mut incoming_registration = None;
+        let mut incoming_waiter = None;
+        let expected_reverse = match action {
+            NatPlanAction::PunchThenWait { .. } | NatPlanAction::WaitIncoming => Some(true),
+            _ => None,
+        };
+        if let Some(expected_reverse) = expected_reverse {
+            let (notify, waiter) = Notify::new();
+            incoming_registration = Some(IncomingPlanWaitRegistration::register(
+                self,
+                remote_id.clone(),
+                tunnel_id,
+                expected_reverse,
+                notify,
+            ));
+            incoming_waiter = Some(waiter);
+        }
+
+        let call = async {
+            sn_service
+                .call_via_sn(
+                    sn_peer_id,
+                    tunnel_id,
+                    reverse_endpoint_arg.as_deref(),
+                    remote_id,
+                    TunnelType::Stream,
+                    Vec::new(),
+                    Some(&context),
+                )
+                .await
+                .map(|_| ())
+        };
+        let action_future = self.execute_nat_action(
+            action,
+            NatPlanParty::Caller,
+            remote_endpoints,
+            remote_id,
+            remote_name.clone(),
+            tunnel_id,
+            &context,
+            incoming_waiter,
+        );
+        let (action_result, call_result) =
+            drive_nat_rendezvous_and_action(call, action_future).await;
+        if let Some(Err(err)) = call_result {
+            log::warn!(
+                "NAT-aware rendezvous failed remote={} tunnel_id={:?} code={:?} msg={}",
+                remote_id,
+                tunnel_id,
+                err.code(),
+                err.msg()
+            );
+        }
+        if action_result.is_ok() {
+            if let Some(registration) = incoming_registration.as_mut() {
+                registration.dismiss();
+            }
+        }
+        match action_result {
+            Ok(tunnel) => Ok(tunnel),
+            Err(action_err) => {
+                log::warn!(
+                    "NAT-aware action failed remote={} tunnel_id={:?} code={:?} msg={}, trying proxy",
+                    remote_id,
+                    tunnel_id,
+                    action_err.code(),
+                    action_err.msg()
+                );
+                self.open_proxy_path(
+                    remote_id,
+                    remote_name,
+                    TunnelConnectIntent::active_logical(tunnel_id),
+                )
+                .await
+                .map_err(|proxy_err| {
+                    log::warn!(
+                        "NAT-aware proxy fallback failed remote={} tunnel_id={:?} action_err={:?}",
+                        remote_id,
+                        tunnel_id,
+                        action_err
+                    );
+                    proxy_err
+                })
+            }
+        }
+    }
+
+    async fn execute_nat_action(
+        &self,
+        action: NatPlanAction,
+        party: NatPlanParty,
+        remote_endpoints: Vec<Endpoint>,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        tunnel_id: TunnelId,
+        context: &NatTraversalContext,
+        incoming_waiter: Option<notify_future::NotifyWaiter<P2pResult<TunnelRef>>>,
+    ) -> P2pResult<TunnelRef> {
+        let remote_profile = match party {
+            NatPlanParty::Caller => &context.callee_profile,
+            NatPlanParty::Callee => &context.caller_profile,
+        };
+        match action {
+            NatPlanAction::Connect {
+                candidates,
+                reverse,
+            } => {
+                let candidates = Self::nat_candidates(
+                    remote_endpoints.as_slice(),
+                    remote_profile,
+                    candidates,
+                    bucky_time_now(),
+                );
+                let intent = if reverse {
+                    TunnelConnectIntent::reverse_logical(tunnel_id)
+                } else {
+                    TunnelConnectIntent::active_logical(tunnel_id)
+                };
+                self.open_direct_path(candidates, remote_id, remote_name, intent)
+                    .await
+            }
+            NatPlanAction::PunchThenWait { candidates } => {
+                let candidates = Self::nat_candidates(
+                    remote_endpoints.as_slice(),
+                    remote_profile,
+                    candidates,
+                    bucky_time_now(),
+                );
+                self.punch_and_wait_incoming(
+                    candidates,
+                    remote_id,
+                    tunnel_id,
+                    party == NatPlanParty::Callee,
+                    incoming_waiter.ok_or_else(|| {
+                        p2p_err!(P2pErrorCode::Failed, "missing NAT incoming waiter")
+                    })?,
+                )
+                .await
+            }
+            NatPlanAction::WaitIncoming => {
+                self.wait_planned_incoming(
+                    remote_id,
+                    party == NatPlanParty::Callee,
+                    incoming_waiter.ok_or_else(|| {
+                        p2p_err!(P2pErrorCode::Failed, "missing NAT incoming waiter")
+                    })?,
+                )
+                .await
+            }
+            NatPlanAction::Legacy => Err(p2p_err!(
+                P2pErrorCode::NotSupport,
+                "legacy action is not NAT-aware"
+            )),
+        }
+    }
+
+    async fn punch_and_wait_incoming(
+        &self,
+        endpoints: Vec<Endpoint>,
+        remote_id: &P2pId,
+        tunnel_id: TunnelId,
+        incoming_is_active: bool,
+        waiter: notify_future::NotifyWaiter<P2pResult<TunnelRef>>,
+    ) -> P2pResult<TunnelRef> {
+        let punch = self.punch_candidates(endpoints, tunnel_id, incoming_is_active);
+        tokio::pin!(punch);
+        tokio::pin!(waiter);
+        let tunnel = runtime::timeout(self.conn_timeout, async {
+            tokio::select! {
+                result = &mut waiter => result,
+                _ = &mut punch => waiter.await,
+            }
+        })
+        .await
+        .map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
+        self.finish_planned_incoming(remote_id, tunnel).await
+    }
+
+    async fn wait_planned_incoming(
+        &self,
+        remote_id: &P2pId,
+        _incoming_is_active: bool,
+        waiter: notify_future::NotifyWaiter<P2pResult<TunnelRef>>,
+    ) -> P2pResult<TunnelRef> {
+        let tunnel = runtime::timeout(self.conn_timeout, waiter)
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::Timeout))??;
+        self.finish_planned_incoming(remote_id, tunnel).await
+    }
+
+    async fn finish_planned_incoming(
+        &self,
+        remote_id: &P2pId,
+        tunnel: TunnelRef,
+    ) -> P2pResult<TunnelRef> {
+        let direct = if tunnel.is_reverse() {
+            ConnectDirection::Reverse
+        } else {
+            ConnectDirection::Direct
+        };
+        let tunnel = self.register_tunnel(tunnel).await?;
+        self.publish_registered_tunnel(&tunnel)?;
+        self.conn_info_cache
+            .add(
+                remote_id.clone(),
+                P2pConnectionInfo {
+                    direct,
+                    local_ep: tunnel.local_ep().unwrap_or_default(),
+                    remote_ep: tunnel.remote_ep().unwrap_or_default(),
+                },
+            )
+            .await;
+        Ok(tunnel)
+    }
+
+    async fn punch_candidates(&self, endpoints: Vec<Endpoint>, tunnel_id: TunnelId, reverse: bool) {
+        let mut futures = FuturesUnordered::new();
+        for endpoint in endpoints
+            .into_iter()
+            .filter(Self::udp_punch_enabled_for_candidate)
+        {
+            let Ok(network) = self.net_manager.get_network(endpoint.protocol()) else {
+                continue;
+            };
+            let intent = if reverse {
+                TunnelConnectIntent::reverse(tunnel_id, self.next_candidate_id())
+            } else {
+                TunnelConnectIntent::active(tunnel_id, self.next_candidate_id())
+            };
+            let duration = self.conn_timeout;
+            futures.push(async move {
+                let Some(udp_network) = network.as_udp_tunnel_network() else {
+                    log::debug!(
+                        "punch-only candidate {:?} stopped: network has no UDP traversal capability",
+                        endpoint
+                    );
+                    return;
+                };
+                if let Err(err) = udp_network.punch_only(&endpoint, intent, duration).await {
+                    log::debug!("punch-only candidate {:?} stopped: {:?}", endpoint, err);
+                }
+            });
+        }
+        while futures.next().await.is_some() {}
+    }
+
     async fn open_direct_path(
         &self,
         remote_eps: Vec<Endpoint>,
@@ -871,18 +2326,6 @@ impl TunnelManager {
                         remote_id,
                         remote_ep
                     );
-                    if !connect_futures.is_empty() {
-                        Executor::spawn_ok(async move {
-                            while let Some(result) = connect_futures.next().await {
-                                if let Err(err) = result {
-                                    log::trace!(
-                                        "direct path background candidate failed: {:?}",
-                                        err
-                                    );
-                                }
-                            }
-                        });
-                    }
                     return Ok(tunnel);
                 }
                 Err(err) => {
@@ -901,8 +2344,7 @@ impl TunnelManager {
 
     fn udp_punch_enabled_for_candidate(endpoint: &Endpoint) -> bool {
         endpoint.protocol() == Protocol::Quic
-            && endpoint.get_area() == EndpointArea::ServerReflexive
-            && is_non_lan_ipv4_addr(endpoint.addr())
+            && rendezvous_eligible_area(endpoint)
             && endpoint.addr().port() != 0
     }
 
@@ -933,7 +2375,14 @@ impl TunnelManager {
 
         for (protocol, listeners) in listener_entries {
             for listener in listeners {
-                if !listener.local.addr().ip().is_unspecified() {
+                #[cfg(feature = "test-real-socket-matrix")]
+                let loopback_covered_by_wan = wan_endpoints.iter().any(|wan_ep| {
+                    wan_ep.protocol() == listener.local.protocol()
+                        && wan_ep.addr() == listener.local.addr()
+                });
+                #[cfg(not(feature = "test-real-socket-matrix"))]
+                let loopback_covered_by_wan = false;
+                if !listener.local.addr().ip().is_unspecified() && !loopback_covered_by_wan {
                     Self::push_unique_endpoint(&mut endpoints, listener.local);
                 }
                 if let Some(port) = listener.mapping_port {
@@ -959,6 +2408,18 @@ impl TunnelManager {
             .sn_service
             .as_ref()
             .map(|sn_service| sn_service.get_wan_ip_list())
+            .unwrap_or_default();
+        Self::collect_reverse_endpoints_from_sources(
+            self.net_manager.listener_info_entries(),
+            wan_endpoints,
+        )
+    }
+
+    fn reverse_endpoints_for_sn(&self, sn_peer_id: &P2pId) -> Vec<Endpoint> {
+        let wan_endpoints = self
+            .sn_service
+            .as_ref()
+            .map(|sn_service| sn_service.get_wan_ip_list_for_sn(sn_peer_id))
             .unwrap_or_default();
         Self::collect_reverse_endpoints_from_sources(
             self.net_manager.listener_info_entries(),
@@ -1099,19 +2560,28 @@ impl TunnelManager {
             .enumerate()
             .map(|(idx, ep)| {
                 let mut score: i64 = 0;
-                if preferred_ep
-                    .map(|preferred| preferred == *ep)
-                    .unwrap_or(false)
-                {
-                    score += 10_000;
+                let stat = state.endpoint_scores.get(&EndpointScoreKey::new(ep));
+                let degraded = stat
+                    .map(|stat| stat.fail_count >= DIRECT_CACHE_MAX_FAILURES)
+                    .unwrap_or(false);
+                if !degraded {
+                    if preferred_ep
+                        .map(|preferred| preferred == *ep)
+                        .unwrap_or(false)
+                    {
+                        score += 10_000;
+                    }
+                    if stat
+                        .map(|stat| stat.last_success_at > 0)
+                        .unwrap_or(false)
+                    {
+                        score += 2_000;
+                    }
                 }
                 if ep.is_static_wan() {
                     score += 500;
                 }
-                if let Some(stat) = state.endpoint_scores.get(&EndpointScoreKey::new(ep)) {
-                    if stat.last_success_at > 0 {
-                        score += 2_000;
-                    }
+                if let Some(stat) = stat {
                     score -= (stat.fail_count.min(20) as i64) * 300;
                 }
                 (score, idx, *ep)
@@ -1119,6 +2589,15 @@ impl TunnelManager {
             .collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         ranked.into_iter().map(|(_, _, ep)| ep).collect()
+    }
+
+    fn direct_cache_endpoint_degraded(&self, endpoint: &Endpoint) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .endpoint_scores
+            .get(&EndpointScoreKey::new(endpoint))
+            .map(|stat| stat.fail_count >= DIRECT_CACHE_MAX_FAILURES)
+            .unwrap_or(false)
     }
 
     fn on_direct_connect_result(&self, endpoint: &Endpoint, success: bool) {
@@ -1143,12 +2622,26 @@ impl TunnelManager {
         remote_id: P2pId,
         tunnel_id: TunnelId,
         waiter: Notify<P2pResult<TunnelRef>>,
-    ) {
-        self.state
-            .lock()
-            .unwrap()
-            .pending_reverse_waiters
-            .insert((remote_id, tunnel_id), waiter);
+    ) -> Arc<()> {
+        self.add_incoming_waiter(remote_id, tunnel_id, true, waiter)
+    }
+
+    fn add_incoming_waiter(
+        &self,
+        remote_id: P2pId,
+        tunnel_id: TunnelId,
+        expected_reverse: bool,
+        waiter: Notify<P2pResult<TunnelRef>>,
+    ) -> Arc<()> {
+        let token = Arc::new(());
+        self.state.lock().unwrap().pending_reverse_waiters.insert(
+            (remote_id, tunnel_id, expected_reverse),
+            IncomingWaiterEntry {
+                token: token.clone(),
+                waiter,
+            },
+        );
+        token
     }
 
     fn take_reverse_waiter(
@@ -1156,11 +2649,76 @@ impl TunnelManager {
         remote_id: &P2pId,
         tunnel_id: &TunnelId,
     ) -> Option<Notify<P2pResult<TunnelRef>>> {
+        self.take_incoming_waiter(remote_id, tunnel_id, true)
+    }
+
+    fn take_incoming_waiter(
+        &self,
+        remote_id: &P2pId,
+        tunnel_id: &TunnelId,
+        expected_reverse: bool,
+    ) -> Option<Notify<P2pResult<TunnelRef>>> {
         self.state
             .lock()
             .unwrap()
             .pending_reverse_waiters
-            .remove(&(remote_id.clone(), *tunnel_id))
+            .remove(&(remote_id.clone(), *tunnel_id, expected_reverse))
+            .map(|entry| entry.waiter)
+    }
+
+    fn publish_rendezvous_waiter(
+        state: &mut ManagerState,
+        remote_id: &P2pId,
+        owner: &RendezvousAttemptOwner,
+        waiter: Option<Notify<P2pResult<TunnelRef>>>,
+    ) {
+        if let (Some(expected_reverse), Some(waiter)) = (owner.expected_incoming_reverse, waiter) {
+            state.pending_reverse_waiters.insert(
+                (remote_id.clone(), owner.tunnel_id, expected_reverse),
+                IncomingWaiterEntry {
+                    token: owner.token.clone(),
+                    waiter,
+                },
+            );
+        }
+    }
+
+    fn remove_incoming_waiter_from_state(
+        state: &mut ManagerState,
+        remote_id: &P2pId,
+        tunnel_id: &TunnelId,
+        expected_reverse: bool,
+        token: &Arc<()>,
+    ) -> Option<Notify<P2pResult<TunnelRef>>> {
+        let key = (remote_id.clone(), *tunnel_id, expected_reverse);
+        if state
+            .pending_reverse_waiters
+            .get(&key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.token, token))
+        {
+            state
+                .pending_reverse_waiters
+                .remove(&key)
+                .map(|entry| entry.waiter)
+        } else {
+            None
+        }
+    }
+
+    fn remove_incoming_waiter(
+        &self,
+        remote_id: &P2pId,
+        tunnel_id: &TunnelId,
+        expected_reverse: bool,
+        token: &Arc<()>,
+    ) -> Option<Notify<P2pResult<TunnelRef>>> {
+        Self::remove_incoming_waiter_from_state(
+            &mut self.state.lock().unwrap(),
+            remote_id,
+            tunnel_id,
+            expected_reverse,
+            token,
+        )
     }
 
     fn has_reverse_waiter(&self, remote_id: &P2pId, tunnel_id: &TunnelId) -> bool {
@@ -1168,44 +2726,59 @@ impl TunnelManager {
             .lock()
             .unwrap()
             .pending_reverse_waiters
-            .contains_key(&(remote_id.clone(), *tunnel_id))
+            .contains_key(&(remote_id.clone(), *tunnel_id, true))
     }
 
+    #[cfg(test)]
     fn track_proxy_upgrade(&self, remote_id: &P2pId) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
-        state
-            .proxy_upgrade_states
-            .entry(remote_id.clone())
-            .and_modify(|entry| {
-                *entry = ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval);
-            })
-            .or_insert_with(|| ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval));
-        drop(state);
-        self.proxy_upgrade_notify.notify_one();
-    }
-
-    fn track_proxy_upgrade_if_missing(&self, remote_id: &P2pId) {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap();
-        if state.proxy_upgrade_states.contains_key(remote_id) {
-            return;
-        }
-        state.proxy_upgrade_states.insert(
+        state.insert_proxy_upgrade(
             remote_id.clone(),
-            ProxyUpgradeState::new(now, self.proxy_upgrade_initial_interval),
+            now,
+            self.proxy_upgrade_initial_interval,
         );
         drop(state);
         self.proxy_upgrade_notify.notify_one();
     }
 
-    fn clear_proxy_upgrade(&self, remote_id: &P2pId) {
-        self.state
-            .lock()
-            .unwrap()
-            .proxy_upgrade_states
-            .remove(remote_id);
-        self.proxy_upgrade_notify.notify_one();
+    fn reconcile_proxy_upgrade_state(
+        &self,
+        state: &mut ManagerState,
+        remote_id: &P2pId,
+        entries: Option<&TunnelEntries>,
+    ) -> bool {
+        let Some(entries) = entries else {
+            return state.proxy_upgrade_states.remove(remote_id).is_some();
+        };
+        let mut has_available = false;
+        let mut has_available_non_proxy = false;
+        let mut published_proxy_only = true;
+        for entry in entries
+            .iter()
+            .filter(|entry| is_tunnel_available(entry.tunnel.as_ref()))
+        {
+            has_available = true;
+            if entry.tunnel.form() != TunnelForm::Proxy {
+                has_available_non_proxy = true;
+                break;
+            }
+            published_proxy_only &= entry.published;
+        }
+        if !has_available || has_available_non_proxy {
+            return state.proxy_upgrade_states.remove(remote_id).is_some();
+        }
+        if published_proxy_only
+            && !state.proxy_upgrade_states.contains_key(remote_id)
+        {
+            state.insert_proxy_upgrade(
+                remote_id.clone(),
+                Instant::now(),
+                self.proxy_upgrade_initial_interval,
+            );
+            return true;
+        }
+        false
     }
 
     fn next_proxy_upgrade_wait(&self) -> Option<Duration> {
@@ -1219,22 +2792,29 @@ impl TunnelManager {
             .min()
     }
 
-    fn collect_due_proxy_upgrades(&self) -> Vec<P2pId> {
+    fn collect_due_proxy_upgrades(&self) -> Vec<(P2pId, u64)> {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
         let mut due = Vec::new();
         for (remote_id, upgrade) in state.proxy_upgrade_states.iter_mut() {
             if !upgrade.in_progress && upgrade.next_attempt_at <= now {
                 upgrade.in_progress = true;
-                due.push(remote_id.clone());
+                due.push((remote_id.clone(), upgrade.generation));
             }
         }
         due
     }
 
-    fn on_proxy_upgrade_failed(&self, remote_id: &P2pId) -> Option<Duration> {
+    fn on_proxy_upgrade_failed_generation(
+        &self,
+        remote_id: &P2pId,
+        generation: u64,
+    ) -> Option<Duration> {
         let mut state = self.state.lock().unwrap();
         let upgrade = state.proxy_upgrade_states.get_mut(remote_id)?;
+        if upgrade.generation != generation {
+            return None;
+        }
         upgrade.in_progress = false;
         advance_proxy_upgrade_retry(upgrade, self.proxy_upgrade_initial_interval);
         upgrade.next_attempt_at = Instant::now() + upgrade.retry_interval;
@@ -1244,29 +2824,70 @@ impl TunnelManager {
         Some(next_interval)
     }
 
+    #[cfg(test)]
+    fn on_proxy_upgrade_failed(&self, remote_id: &P2pId) -> Option<Duration> {
+        let generation = self
+            .state
+            .lock()
+            .unwrap()
+            .proxy_upgrade_states
+            .get(remote_id)?
+            .generation;
+        self.on_proxy_upgrade_failed_generation(remote_id, generation)
+    }
+
     async fn process_proxy_upgrade_attempts(&self) {
         let due = self.collect_due_proxy_upgrades();
         if due.is_empty() {
             return;
         }
 
-        for remote_id in due {
+        for (remote_id, generation) in due {
             let weak = self.self_weak.clone();
             Executor::spawn_ok(async move {
                 let Some(manager) = weak.upgrade() else {
                     return;
                 };
-                manager.attempt_proxy_upgrade(remote_id).await;
+                manager
+                    .attempt_proxy_upgrade_generation(remote_id, generation)
+                    .await;
             });
         }
     }
 
+    #[cfg(test)]
     async fn attempt_proxy_upgrade(&self, remote_id: P2pId) {
+        let Some(generation) = self
+            .state
+            .lock()
+            .unwrap()
+            .proxy_upgrade_states
+            .get(&remote_id)
+            .map(|upgrade| upgrade.generation)
+        else {
+            return;
+        };
+        self.attempt_proxy_upgrade_generation(remote_id, generation)
+            .await;
+    }
+
+    async fn attempt_proxy_upgrade_generation(&self, remote_id: P2pId, generation: u64) {
+        if !self
+            .state
+            .lock()
+            .unwrap()
+            .proxy_upgrade_states
+            .get(&remote_id)
+            .map(|upgrade| upgrade.generation == generation)
+            .unwrap_or(false)
+        {
+            return;
+        }
         match self.try_upgrade_proxy_tunnel(&remote_id).await {
             Ok(tunnel) => {
-                self.clear_proxy_upgrade(&remote_id);
-                self.close_proxy_tunnels_after_upgrade(&remote_id, &tunnel)
-                    .await;
+                if !self.finalize_proxy_upgrade_success(&remote_id, &tunnel) {
+                    return;
+                }
                 log::info!(
                     "proxy upgrade succeeded remote={} form={:?} protocol={:?}",
                     remote_id,
@@ -1275,7 +2896,8 @@ impl TunnelManager {
                 );
             }
             Err(err) => {
-                let next_interval = self.on_proxy_upgrade_failed(&remote_id);
+                let next_interval =
+                    self.on_proxy_upgrade_failed_generation(&remote_id, generation);
                 log::warn!(
                     "proxy upgrade failed remote={} code={:?} msg={} next_retry_secs={:?}",
                     remote_id,
@@ -1327,30 +2949,49 @@ impl TunnelManager {
         Ok(tunnel)
     }
 
-    async fn close_proxy_tunnels_after_upgrade(&self, remote_id: &P2pId, tunnel: &TunnelRef) {
+    fn finalize_proxy_upgrade_success(&self, remote_id: &P2pId, tunnel: &TunnelRef) -> bool {
         if tunnel.form() == TunnelForm::Proxy {
-            return;
+            return false;
         }
 
-        let proxy_tunnels = {
+        let (finalized, proxy_tunnels, notify_proxy_upgrade) = {
             let mut tunnels = self.tunnels.write().unwrap();
-            let Some(entries) = tunnels.get_mut(remote_id) else {
-                return;
-            };
             let mut proxy_tunnels = Vec::new();
-            entries.retain(|entry| {
-                let is_proxy = entry.tunnel.form() == TunnelForm::Proxy;
-                if is_proxy {
-                    proxy_tunnels.push(entry.tunnel.clone());
+            let finalized = if let Some(entries) = tunnels.get_mut(remote_id) {
+                let returned_is_live = entries.iter().any(|entry| {
+                    Arc::ptr_eq(&entry.tunnel, tunnel)
+                        && entry.tunnel.form() != TunnelForm::Proxy
+                        && is_tunnel_available(entry.tunnel.as_ref())
+                });
+                if returned_is_live {
+                    entries.retain(|entry| {
+                        let is_proxy = entry.tunnel.form() == TunnelForm::Proxy;
+                        if is_proxy {
+                            proxy_tunnels.push(entry.tunnel.clone());
+                        }
+                        !is_proxy
+                    });
                 }
-                !is_proxy
-            });
-            if entries.is_empty() {
-                tunnels.remove(remote_id);
-            }
-            proxy_tunnels
+                returned_is_live
+            } else {
+                false
+            };
+            let mut state = self.state.lock().unwrap();
+            let notify_proxy_upgrade = if finalized {
+                state.proxy_upgrade_states.remove(remote_id).is_some()
+            } else {
+                self.reconcile_proxy_upgrade_state(
+                    &mut state,
+                    remote_id,
+                    tunnels.get(remote_id),
+                )
+            };
+            (finalized, proxy_tunnels, notify_proxy_upgrade)
         };
 
+        if notify_proxy_upgrade {
+            self.proxy_upgrade_notify.notify_one();
+        }
         for proxy in proxy_tunnels {
             log::debug!(
                 "close proxy tunnel after upgrade remote={} proxy_tunnel_id={:?} proxy_candidate_id={:?} upgraded_tunnel_id={:?} upgraded_candidate_id={:?} upgraded_form={:?}",
@@ -1372,6 +3013,7 @@ impl TunnelManager {
                 );
             }
         }
+        finalized
     }
 
     async fn on_sn_called(&self, called: SnCalled) -> P2pResult<()> {
@@ -1424,6 +3066,33 @@ impl TunnelManager {
             remote_id,
             eps
         );
+        let nat_action = called.nat_context.as_ref().and_then(|context| {
+            let local_id = self.local_identity.get_id();
+            let active_on_called_sn = self
+                .sn_service
+                .as_ref()
+                .map(|service| {
+                    service
+                        .get_active_sn_list()
+                        .iter()
+                        .any(|active| active.sn_peer_id == called.sn_peer_id)
+                })
+                .unwrap_or(false);
+            if !active_on_called_sn
+                || !context.is_valid_for(&remote_id, &local_id, bucky_time_now())
+            {
+                return None;
+            }
+            let local_cert = self.local_identity.get_identity_cert().ok()?;
+            let plan = select_connect_plan(
+                context,
+                bucky_time_now(),
+                Self::has_static_wan_identity(&cert),
+                Self::has_static_wan_identity(&local_cert),
+            );
+            let action = plan.action_for(NatPlanParty::Callee);
+            (!matches!(action, NatPlanAction::Legacy)).then_some(action)
+        });
         let _guard = Locker::get_locker(format!("network-tunnel-{}", remote_id)).await;
         if self.has_available_tunnel_id(&remote_id, called.tunnel_id) {
             log::debug!(
@@ -1432,6 +3101,43 @@ impl TunnelManager {
                 called.tunnel_id
             );
             return Ok(());
+        }
+        if let (Some(action), Some(context)) = (nat_action, called.nat_context.as_ref()) {
+            let mut registration = None;
+            let mut incoming_waiter = None;
+            if matches!(
+                action,
+                NatPlanAction::PunchThenWait { .. } | NatPlanAction::WaitIncoming
+            ) {
+                let (notify, waiter) = Notify::new();
+                registration = Some(IncomingPlanWaitRegistration::register(
+                    self,
+                    remote_id.clone(),
+                    called.tunnel_id,
+                    false,
+                    notify,
+                ));
+                incoming_waiter = Some(waiter);
+            }
+            let result = self
+                .execute_nat_action(
+                    action,
+                    NatPlanParty::Callee,
+                    eps,
+                    &remote_id,
+                    Some(cert.get_name()),
+                    called.tunnel_id,
+                    context,
+                    incoming_waiter,
+                )
+                .await;
+            if result.is_ok() {
+                if let Some(registration) = registration.as_mut() {
+                    registration.dismiss();
+                }
+                return Ok(());
+            }
+            return result.map(|_| ());
         }
         match self
             .open_direct_path(
@@ -1482,11 +3188,11 @@ impl TunnelManager {
 
         let _guard = Locker::get_locker(format!("network-register-{}", remote_id)).await;
         let remote_id_for_log = remote_id.clone();
-        let duplicate_same_arc = {
+        let (duplicate_same_arc, notify_proxy_upgrade) = {
             let mut tunnels = self.tunnels.write().unwrap();
             let entries = tunnels.entry(remote_id).or_default();
             entries.retain(|entry| is_tunnel_available(entry.tunnel.as_ref()));
-            if let Some(entry) = entries.iter_mut().find(|entry| {
+            let duplicate_same_arc = if let Some(entry) = entries.iter_mut().find(|entry| {
                 entry.tunnel.tunnel_id() == tunnel.tunnel_id()
                     && entry.tunnel.candidate_id() == tunnel.candidate_id()
             }) {
@@ -1498,8 +3204,47 @@ impl TunnelManager {
                     published: false,
                 });
                 None
-            }
+            };
+            let mut state = self.state.lock().unwrap();
+            let notify_proxy_upgrade = if duplicate_same_arc.is_none() {
+                let has_available_non_proxy = entries.iter().any(|entry| {
+                    entry.tunnel.form() != TunnelForm::Proxy
+                        && is_tunnel_available(entry.tunnel.as_ref())
+                });
+                if has_available_non_proxy {
+                    state
+                        .proxy_upgrade_states
+                        .remove(&remote_id_for_log)
+                        .is_some()
+                } else if tunnel.form() == TunnelForm::Proxy
+                    && is_tunnel_available(tunnel.as_ref())
+                {
+                    state.insert_proxy_upgrade(
+                        remote_id_for_log.clone(),
+                        Instant::now(),
+                        self.proxy_upgrade_initial_interval,
+                    );
+                    true
+                } else {
+                    self.reconcile_proxy_upgrade_state(
+                        &mut state,
+                        &remote_id_for_log,
+                        Some(entries),
+                    )
+                }
+            } else {
+                self.reconcile_proxy_upgrade_state(
+                    &mut state,
+                    &remote_id_for_log,
+                    Some(entries),
+                )
+            };
+            (duplicate_same_arc, notify_proxy_upgrade)
         };
+
+        if notify_proxy_upgrade {
+            self.proxy_upgrade_notify.notify_one();
+        }
 
         if let Some(same_arc) = duplicate_same_arc {
             log::warn!(
@@ -1533,11 +3278,6 @@ impl TunnelManager {
             tunnel.protocol(),
             self.is_registered_tunnel_published(&remote_id_for_log, &tunnel)
         );
-        if tunnel.form() == TunnelForm::Proxy {
-            self.track_proxy_upgrade(&remote_id_for_log);
-        } else {
-            self.clear_proxy_upgrade(&remote_id_for_log);
-        }
         Ok(tunnel)
     }
 
@@ -1618,9 +3358,10 @@ impl TunnelManager {
 
     async fn cleanup_closed_tunnels(&self, _idle_timeout: Duration) {
         let mut removed = Vec::new();
-        let mut proxy_only_remotes = Vec::new();
-        {
+        let notify_proxy_upgrade = {
             let mut tunnels = self.tunnels.write().unwrap();
+            let mut state = self.state.lock().unwrap();
+            let mut notify_proxy_upgrade = false;
             tunnels.retain(|remote_id, entries| {
                 entries.retain(|entry| {
                     let keep = is_tunnel_available(entry.tunnel.as_ref());
@@ -1629,14 +3370,17 @@ impl TunnelManager {
                     }
                     keep
                 });
-                if Self::only_published_proxy_candidates(entries) {
-                    proxy_only_remotes.push(remote_id.clone());
-                }
+                notify_proxy_upgrade |= self.reconcile_proxy_upgrade_state(
+                    &mut state,
+                    remote_id,
+                    Some(entries),
+                );
                 !entries.is_empty()
             });
-        }
-        for remote_id in proxy_only_remotes {
-            self.track_proxy_upgrade_if_missing(&remote_id);
+            notify_proxy_upgrade
+        };
+        if notify_proxy_upgrade {
+            self.proxy_upgrade_notify.notify_one();
         }
         for tunnel in removed {
             let _ = tunnel.close();
@@ -1646,6 +3390,13 @@ impl TunnelManager {
 
 impl Drop for TunnelManager {
     fn drop(&mut self) {
+        let rendezvous_owners = self
+            .state
+            .get_mut()
+            .unwrap()
+            .rendezvous_attempts
+            .drain()
+            .collect::<Vec<_>>();
         let tunnels = self
             .tunnels
             .write()
@@ -1653,10 +3404,11 @@ impl Drop for TunnelManager {
             .drain()
             .flat_map(|(_, entries)| entries.into_iter().map(|entry| entry.tunnel))
             .collect::<Vec<_>>();
-        self.net_manager
-            .unregister_incoming_tunnel_subscriber(&self.local_identity.get_id());
         self.cleanup_task.abort();
         self.proxy_upgrade_task.abort();
+        for (remote_id, owner) in rendezvous_owners {
+            self.abort_rendezvous_owner(&remote_id, owner);
+        }
         for tunnel in tunnels {
             let _ = tunnel.close();
         }
@@ -1666,6 +3418,10 @@ impl Drop for TunnelManager {
 fn is_tunnel_available(tunnel: &dyn crate::networks::Tunnel) -> bool {
     !tunnel.is_closed() && tunnel.state() == TunnelState::Connected
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/tunnel/rendezvous_endpoint_policy_tests.rs"]
+mod rendezvous_endpoint_policy_tests;
 
 #[cfg(test)]
 mod nat_strategy_tests {
@@ -2258,7 +4014,8 @@ mod nat_strategy_tests {
 
     #[test]
     fn proxy_upgrade_short_window_falls_back_to_capped_backoff() {
-        let mut upgrade = ProxyUpgradeState::new(Instant::now(), PROXY_UPGRADE_INITIAL_INTERVAL);
+        let mut upgrade =
+            ProxyUpgradeState::new(1, Instant::now(), PROXY_UPGRADE_INITIAL_INTERVAL);
         let mut intervals = Vec::new();
         for _ in 0..5 {
             intervals.push(advance_proxy_upgrade_retry(
@@ -2332,6 +4089,12 @@ mod tests {
     use std::sync::Once;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
+
+    #[path = "../../../../tests/nat_type_aware/tunnel_manager_tests.rs"]
+    mod nat_type_aware_tests;
+
+    #[path = "../../../../tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs"]
+    mod proxy_upgrade_lifecycle_tests;
 
     static TLS_INIT: Once = Once::new();
     static TEST_TUNNEL_ID_SEQ: AtomicUsize = AtomicUsize::new(1);
@@ -2455,6 +4218,7 @@ mod tests {
             call_send_time: 0,
             call_type: TunnelType::Stream,
             payload: vec![],
+            nat_context: None,
         }
     }
 
@@ -2471,6 +4235,7 @@ mod tests {
         started_at: Instant,
         start_offsets: Mutex<HashMap<Endpoint, Duration>>,
         intents: Mutex<HashMap<Endpoint, TunnelConnectIntent>>,
+        dial_counts: Mutex<HashMap<Endpoint, usize>>,
         call_count: AtomicUsize,
     }
 
@@ -2487,6 +4252,7 @@ mod tests {
                 started_at: Instant::now(),
                 start_offsets: Mutex::new(HashMap::new()),
                 intents: Mutex::new(HashMap::new()),
+                dial_counts: Mutex::new(HashMap::new()),
                 call_count: AtomicUsize::new(0),
             })
         }
@@ -2497,6 +4263,15 @@ mod tests {
 
         fn call_count(&self) -> usize {
             self.call_count.load(Ordering::SeqCst)
+        }
+
+        fn dial_count(&self, endpoint: &Endpoint) -> usize {
+            self.dial_counts
+                .lock()
+                .unwrap()
+                .get(endpoint)
+                .copied()
+                .unwrap_or(0)
         }
 
         fn intent_for(&self, endpoint: &Endpoint) -> Option<TunnelConnectIntent> {
@@ -2768,6 +4543,12 @@ mod tests {
             intent: TunnelConnectIntent,
         ) -> P2pResult<TunnelRef> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
+            *self
+                .dial_counts
+                .lock()
+                .unwrap()
+                .entry(*remote)
+                .or_insert(0) += 1;
             self.start_offsets
                 .lock()
                 .unwrap()
@@ -3230,6 +5011,82 @@ mod tests {
 
         assert!(
             runtime::timeout(Duration::from_millis(100), waiter)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_duplicate_construction_keeps_incumbent_subscriber() {
+        init_tls_once();
+
+        let local_identity = new_identity("duplicate-local");
+        let remote_identity = new_identity("duplicate-remote");
+        let net_manager =
+            crate::networks::NetManager::new(Vec::new(), DefaultTlsServerCertResolver::new())
+                .unwrap();
+
+        let incumbent = TunnelManager::new(
+            local_identity.clone(),
+            Some(Arc::new(StaticDeviceFinder {
+                devices: HashMap::new(),
+            })),
+            net_manager.clone(),
+            None,
+            Arc::new(X509IdentityCertFactory),
+            None,
+            DefaultP2pConnectionInfoCache::new(),
+            Arc::new(TunnelIdGenerator::new()),
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            PROXY_UPGRADE_INITIAL_INTERVAL,
+        )
+        .unwrap();
+        let mut sub = subscribe_tunnels(&incumbent);
+
+        let duplicate = TunnelManager::new(
+            local_identity.clone(),
+            Some(Arc::new(StaticDeviceFinder {
+                devices: HashMap::new(),
+            })),
+            net_manager.clone(),
+            None,
+            Arc::new(X509IdentityCertFactory),
+            None,
+            DefaultP2pConnectionInfoCache::new(),
+            Arc::new(TunnelIdGenerator::new()),
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            PROXY_UPGRADE_INITIAL_INTERVAL,
+        );
+        assert_eq!(duplicate.err().unwrap().code(), P2pErrorCode::AlreadyExists);
+
+        let tunnel_id = next_test_tunnel_id();
+        let (notify, waiter) = Notify::new();
+        incumbent.add_reverse_waiter(remote_identity.get_id(), tunnel_id, notify);
+        let incoming: TunnelRef = Arc::new(MockTunnel {
+            tunnel_id,
+            candidate_id: TunnelCandidateId::from(1),
+            form: TunnelForm::Active,
+            local_id: local_identity.get_id(),
+            remote_id: remote_identity.get_id(),
+            state: TunnelState::Connected,
+            is_reverse: true,
+        });
+
+        // The failed duplicate construction must not delete the incumbent's
+        // acceptance subscriber: dispatching through the shared NetManager still
+        // reaches the incumbent instead of being rejected for missing subscriber.
+        let acceptance =
+            net_manager.incoming_tunnel_acceptance_callback()(Ok(incoming.clone())).await;
+        assert_eq!(acceptance, IncomingTunnelAcceptance::Accepted);
+        let notified = runtime::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(notified.remote_id(), remote_identity.get_id());
+        assert!(
+            runtime::timeout(Duration::from_millis(100), recv_tunnel(&mut sub))
                 .await
                 .is_err()
         );
@@ -4334,17 +6191,27 @@ mod tests {
             .register_tunnel_and_publish(proxy.clone())
             .await
             .unwrap();
+        let proxy_generation = manager
+            .state
+            .lock()
+            .unwrap()
+            .proxy_upgrade_states
+            .get(&remote_identity.get_id())
+            .map(|upgrade| upgrade.generation)
+            .unwrap();
         manager
             .register_tunnel_and_publish(direct.clone())
             .await
             .unwrap();
-        assert!(
-            !manager
+        assert_eq!(
+            manager
                 .state
                 .lock()
                 .unwrap()
                 .proxy_upgrade_states
-                .contains_key(&remote_identity.get_id())
+                .get(&remote_identity.get_id())
+                .map(|upgrade| upgrade.generation),
+            Some(proxy_generation)
         );
 
         manager.cleanup_closed_tunnels(Duration::from_secs(0)).await;
@@ -4353,13 +6220,15 @@ mod tests {
         let proxy_ref: TunnelRef = proxy.clone();
         assert!(Arc::ptr_eq(&selected, &proxy_ref));
         assert_eq!(direct.close_count(), 1);
-        assert!(
+        assert_eq!(
             manager
                 .state
                 .lock()
                 .unwrap()
                 .proxy_upgrade_states
-                .contains_key(&remote_identity.get_id())
+                .get(&remote_identity.get_id())
+                .map(|upgrade| upgrade.generation),
+            Some(proxy_generation)
         );
     }
 
@@ -4531,6 +6400,208 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(info.remote_ep, cached_ep);
+    }
+
+    #[tokio::test]
+    async fn degraded_cached_direct_entry_skips_preflight_and_loses_preference() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-cache-degrade");
+        let remote_identity = new_identity("remote-cache-degrade");
+        let cached_ep = ext_ep(10, 24001);
+        let working_ep = ext_ep(10, 24002);
+        let network = MockDialNetwork::new(
+            Protocol::Ext(10),
+            local_identity.get_id(),
+            HashMap::from([
+                (
+                    cached_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(30),
+                        result: Err(P2pErrorCode::ConnectFailed),
+                    },
+                ),
+                (
+                    working_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(5),
+                        result: Ok(()),
+                    },
+                ),
+            ]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+        manager
+            .conn_info_cache
+            .add(
+                remote_identity.get_id(),
+                P2pConnectionInfo {
+                    direct: ConnectDirection::Direct,
+                    local_ep: loopback_tcp_ep(),
+                    remote_ep: cached_ep,
+                },
+            )
+            .await;
+
+        // A healthy cached entry keeps the preference until failures accumulate.
+        let preferred = manager
+            .preferred_direct_endpoints(
+                Some(&remote_identity.get_id()),
+                &[cached_ep, working_ep],
+            )
+            .await;
+        assert_eq!(preferred[0], cached_ep);
+
+        // One success then two consecutive failures: the never-decaying
+        // last_success bonus must no longer keep the stale endpoint on top.
+        manager.on_direct_connect_result(&cached_ep, true);
+        manager.on_direct_connect_result(&cached_ep, false);
+        manager.on_direct_connect_result(&cached_ep, false);
+
+        let preferred = manager
+            .preferred_direct_endpoints(
+                Some(&remote_identity.get_id()),
+                &[cached_ep, working_ep],
+            )
+            .await;
+        assert_eq!(preferred[0], working_ep);
+
+        let tunnel = manager
+            .open_direct_tunnel(vec![cached_ep, working_ep], &remote_identity.get_id())
+            .await
+            .unwrap();
+        assert_eq!(tunnel.remote_id(), remote_identity.get_id());
+
+        // The stale endpoint is dialed exactly once as part of the concurrent
+        // candidate matrix; no dedicated single-endpoint preflight is issued.
+        assert_eq!(network.dial_count(&cached_ep), 1);
+        assert_eq!(network.dial_count(&working_ep), 1);
+        let info = manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .unwrap();
+        assert_eq!(info.remote_ep, working_ep);
+    }
+
+    #[tokio::test]
+    async fn degraded_cached_direct_entry_is_removed_when_single_endpoint_fails() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-cache-remove");
+        let remote_identity = new_identity("remote-cache-remove");
+        let cached_ep = ext_ep(11, 24011);
+        let network = MockDialNetwork::new(
+            Protocol::Ext(11),
+            local_identity.get_id(),
+            HashMap::from([(
+                cached_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(10),
+                    result: Err(P2pErrorCode::ConnectFailed),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+        manager
+            .conn_info_cache
+            .add(
+                remote_identity.get_id(),
+                P2pConnectionInfo {
+                    direct: ConnectDirection::Direct,
+                    local_ep: loopback_tcp_ep(),
+                    remote_ep: cached_ep,
+                },
+            )
+            .await;
+
+        manager.on_direct_connect_result(&cached_ep, false);
+        manager.on_direct_connect_result(&cached_ep, false);
+
+        let err = manager
+            .open_direct_tunnel(vec![cached_ep], &remote_identity.get_id())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), P2pErrorCode::NotSupport);
+
+        assert!(manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .is_none());
+        assert_eq!(network.dial_count(&cached_ep), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_cache_direct_skips_preflight_after_two_failed_opens() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-cache-repeat");
+        let remote_identity = new_identity("remote-cache-repeat");
+        let cached_ep = ext_ep(12, 24021);
+        let network = MockDialNetwork::new(
+            Protocol::Ext(12),
+            local_identity.get_id(),
+            HashMap::from([(
+                cached_ep,
+                MockDialBehavior {
+                    delay: Duration::from_millis(10),
+                    result: Err(P2pErrorCode::ConnectFailed),
+                },
+            )]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+        manager
+            .conn_info_cache
+            .add(
+                remote_identity.get_id(),
+                P2pConnectionInfo {
+                    direct: ConnectDirection::Direct,
+                    local_ep: loopback_tcp_ep(),
+                    remote_ep: cached_ep,
+                },
+            )
+            .await;
+
+        let err = manager
+            .open_direct_tunnel(vec![cached_ep], &remote_identity.get_id())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), P2pErrorCode::NotSupport);
+        assert!(manager.direct_cache_endpoint_degraded(&cached_ep));
+
+        let err = manager
+            .open_direct_tunnel(vec![cached_ep], &remote_identity.get_id())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), P2pErrorCode::NotSupport);
+
+        // Open 1 used preflight + matrix (2 dials); open 2 used only the
+        // concurrent matrix (1 dial). Without invalidation it would be 4.
+        assert_eq!(network.dial_count(&cached_ep), 3);
+        assert!(manager
+            .conn_info_cache
+            .get(&remote_identity.get_id())
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -4834,9 +6905,15 @@ mod tests {
 
         let local_identity = new_identity("local-proxy-upgrade-fail");
         let remote_identity = new_identity("remote-proxy-upgrade-fail");
-        let manager = new_test_manager(local_identity, HashMap::new(), None);
+        let manager = new_test_manager(local_identity.clone(), HashMap::new(), None);
+        let proxy = TrackableTunnel::new(
+            TunnelForm::Proxy,
+            local_identity.get_id(),
+            remote_identity.get_id(),
+            TunnelState::Connected,
+        );
 
-        manager.track_proxy_upgrade(&remote_identity.get_id());
+        manager.register_tunnel_and_publish(proxy).await.unwrap();
         for _ in 0..12 {
             manager
                 .attempt_proxy_upgrade(remote_identity.get_id())
@@ -4986,4 +7063,51 @@ mod tests {
             PROXY_UPGRADE_INITIAL_INTERVAL.saturating_mul(2)
         );
     }
+
+    fn protocol_endpoint(protocol: Protocol, port: u16) -> Endpoint {
+        Endpoint::from((protocol, ([8, 8, 8, 8], port).into()))
+    }
+
+    fn observed_endpoint(port: u16) -> Endpoint {
+        let mut ep = protocol_endpoint(Protocol::Quic, port);
+        ep.set_area(EndpointArea::ServerReflexive);
+        ep
+    }
+
+    #[test]
+    fn ambiguous_rendezvous_failure_classification_keeps_io_and_response_anomalies_retryable() {
+        for code in [
+            P2pErrorCode::IoError,
+            P2pErrorCode::Unmatch,
+            P2pErrorCode::InvalidData,
+        ] {
+            let err = p2p_err!(code, "ambiguous probe failure");
+            assert!(
+                is_ambiguous_rendezvous_failure(&err),
+                "{:?} must stay locally retryable",
+                code
+            );
+        }
+        for code in [
+            P2pErrorCode::NotFound,
+            P2pErrorCode::Conflict,
+            P2pErrorCode::AlreadyExists,
+            P2pErrorCode::NotSupport,
+            P2pErrorCode::Failed,
+            P2pErrorCode::Timeout,
+            P2pErrorCode::Expired,
+            P2pErrorCode::ErrorState,
+            P2pErrorCode::RawCodecError,
+            P2pErrorCode::InvalidParam,
+            P2pErrorCode::UserCanceled,
+        ] {
+            let err = p2p_err!(code, "deterministic probe failure");
+            assert!(
+                !is_ambiguous_rendezvous_failure(&err),
+                "{:?} must skip the local action and proxy",
+                code
+            );
+        }
+    }
+
 }

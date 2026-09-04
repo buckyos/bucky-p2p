@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "7cb5f1455eac8db3c201e3205df0bc92568567196b3f1ce8490e007db1acf070",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-PN-RELEASE-STATE": {"status": "complete"},
+    "I-PN-RETENTION-BOUND": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-PN-RELEASE-STATE"],
+        "serialization_reasons": {
+          "I-1": "merged with the first serial file child because both responsibilities own pn_server.rs"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-PN-RETENTION-BOUND"],
+        "serialization_reasons": {
+          "I-PN-RETENTION-BOUND": "depends on I-PN-RELEASE-STATE and overlaps pn_server.rs"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["T-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 5,
+        "tasks": ["A-1"],
+        "serialization_reasons": {}
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "pn_traffic_release_state_simplification",
+      "validation_id": "V-PN-TRAFFIC-RELEASE-STATE",
+      "testplan_level": "unit",
+      "testplan_step_id": "pn-traffic-release-manager-unit",
+      "evidence": "The dedicated traffic_manager_tests.rs covers final-session counting, same-user participation, exact one-deadline membership, production-API reconnect cancellation and Arc entry reuse, survival beyond the old deadline, expiry at the current deadline, cleanup batching, observation, retained limits, late shutdown/session behavior, and removal of generation-based fixtures. The focused DV step runs the real cleanup task, timer, and Notify path.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "pn_traffic_retention_finite_bound",
+      "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND",
+      "testplan_level": "dv",
+      "testplan_step_id": "pn-traffic-release-lifecycle-dv",
+      "evidence": "The exact-maximum and Duration::MAX setter paths prove 30-day normalization, exact stored/deadline membership, bounded one-hour cleanup waits, and shutdown clearing; zero, ordinary, and future-disconnect-only semantics remain in the full unit filter. The checked-add failure after a 30-day clamp is unreachable on supported targets and is recorded as a fail-closed branch gap in testplan.yaml.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "normal", "required": "yes", "validation_id": "V-PN-TRAFFIC-RELEASE-STATE", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "boundary", "required": "yes", "validation_id": "V-PN-TRAFFIC-RELEASE-STATE", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "negative", "required": "yes", "validation_id": "V-PN-TRAFFIC-RELEASE-STATE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "error", "required": "yes", "validation_id": "V-PN-TRAFFIC-RELEASE-STATE", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "compatibility", "required": "yes", "validation_id": "V-PN-TRAFFIC-RELEASE-STATE", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "lifecycle", "required": "yes", "validation_id": "V-PN-TRAFFIC-RELEASE-STATE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_release_state_simplification", "case_type": "cross-module", "required": "no", "validation_id": "V-PN-TRAFFIC-RELEASE-CROSS-MODULE-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "The reduced state is private to p2p-frame; PN wire, snapshot types, and neighboring-crate flows are unchanged, while repository contract checks cover compilation closure."},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "normal", "required": "yes", "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "boundary", "required": "yes", "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "negative", "required": "yes", "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "error", "required": "yes", "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND-FUTURE-TARGET-GAP", "level": "unit", "status": "gap", "gap_manual_reason": "Owner: testing; the checked_add(None) fallback cannot be triggered after the 30-day setter clamp on supported Windows/MSVC and Linux targets; risk is limited to shorter retention on a future narrow-Instant target and the path remains non-panicking; acceptance impact is non-blocking unless supported targets change."},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "compatibility", "required": "yes", "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "lifecycle", "required": "yes", "validation_id": "V-PN-TRAFFIC-RETENTION-BOUND", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_retention_finite_bound", "case_type": "cross-module", "required": "no", "validation_id": "V-PN-TRAFFIC-RETENTION-CROSS-MODULE-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "No repository neighbor calls the setter and its Rust signature is unchanged; task-local contract checks compile repository consumers and the semantic clamp is documented for external callers."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260715T143615Z-p2p-frame+010-pn-traffic-release-simplification-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/010-pn-traffic-release-simplification/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

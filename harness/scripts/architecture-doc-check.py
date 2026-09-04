@@ -3,7 +3,7 @@
 
 The default harness treats `docs/architecture/` as a project-wide architecture
 documentation area. It does not require mirrored implementation directories,
-proposal/design documents, source hash bindings, or a fixed document set.
+proposal/design documents or a fixed document set.
 
 Repo-local project rules may define stricter requirements. Keep those rules in
 versioned project-owned policy, such as `harness/custom-rules/`, and add custom

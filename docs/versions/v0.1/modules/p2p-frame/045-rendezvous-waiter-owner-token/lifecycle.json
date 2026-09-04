@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/045-rendezvous-waiter-owner-token/proposal.md": "b3bc4262cba81c3b96f9013198c78402743fb41e24f73d498a72dd175b703862"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "da64ed246e7750abb24c6a4010e2a02a0da0f4b11550479a8a4c6b5114578460"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

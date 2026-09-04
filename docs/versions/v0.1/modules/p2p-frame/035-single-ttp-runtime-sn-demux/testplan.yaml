@@ -1,0 +1,97 @@
+schema_version: 1
+task_manifest: task.yaml
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: true
+  build_surface_change: true
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/net_manager.rs", "p2p-frame/src/ttp", "p2p-frame/src/sn/types.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/sn/directory/server.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/ttp_runtime_public_api_check.py", "p2p-frame/tests/ttp_shared_runtime_lifecycle.rs", "p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs", "docs/versions/v0.1/modules/p2p-frame/035-single-ttp-runtime-sn-demux/proposal.md", "docs/versions/v0.1/modules/p2p-frame/035-single-ttp-runtime-sn-demux/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: ttp-runtime-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile additive public facade API and opaque runtime probes
+      change_ids: ["shared_ttp_runtime_sn_purpose_demux", "ttp_incoming_subscription_lifecycle"]
+      run: ["python3", "p2p-frame/tests/ttp_runtime_public_api_check.py"]
+    - id: ttp-runtime-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile every p2p-frame target with x509
+      change_ids: ["shared_ttp_runtime_sn_purpose_demux", "ttp_incoming_subscription_lifecycle"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise runtime opacity, subscription ownership, facade lifecycle, endpoint isolation, and requested-versus-actual SN classification.
+    test_targets:
+      - p2p-frame/tests/ttp_runtime_public_api_check.py
+      - p2p-frame/tests/ttp_shared_runtime_lifecycle.rs
+      - p2p-frame/src/networks/net_manager.rs
+      - p2p-frame/src/ttp/tests.rs
+      - p2p-frame/src/sn/tests.rs
+    preconditions:
+      tools: ["cargo", "python3"]
+      env: []
+      services: []
+      notes:
+        - Controlled public tunnel dispatch is used only for lifecycle and cache branches that cannot be observed through an external runtime handle.
+        - The unrelated Connecting-readiness expectation is excluded because the approved design preserves existing readiness semantics.
+    steps:
+      - id: sn-tunnel-read-dual-classification
+        name: Verify requested classification remains separate from actual tunnel metadata
+        change_ids: ["shared_ttp_runtime_sn_purpose_demux"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "sn::tests::sn_tunnel_read_keeps_actual_metadata_separate_from_requested_classification", "--", "--exact", "--test-threads=1"]
+      - id: ttp-shared-runtime-lifecycle
+        name: Verify shared ownership validation purpose and cache lifecycle
+        change_ids: ["shared_ttp_runtime_sn_purpose_demux", "ttp_incoming_subscription_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "ttp_shared_runtime_lifecycle", "--", "--test-threads=1"]
+      - id: ttp-owned-subscription-lifecycle
+        name: Verify owner-matched registration cleanup and stale callback protection
+        change_ids: ["ttp_incoming_subscription_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "networks::net_manager::tests", "--", "--test-threads=1"]
+      - id: ttp-existing-branch-regressions
+        name: Run existing TTP active passive validation and attach branches
+        change_ids: ["shared_ttp_runtime_sn_purpose_demux", "ttp_incoming_subscription_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "--features", "x509", "ttp::tests::", "--", "--test-threads=1", "--skip", "server_cache_readiness_observer_preserves_connecting_tunnel"]
+  dv:
+    mode: enabled
+    summary: Prove membership-enabled single-SN Report and online over real sockets.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Dynamic loopback endpoints, an absolute deadline, and RAII cleanup are used.
+    steps:
+      - id: membership-single-sn-online
+        name: Run membership-enabled single-SN Report online regression
+        change_ids: ["shared_ttp_runtime_sn_purpose_demux"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "real_p2p_tunnel_flow", "collision_cross_sn::membership_enabled_single_sn_report_reaches_online_on_shared_runtime", "--", "--exact", "--nocapture", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Prove production membership inter-SN Query and Rendezvous target action across SN A and B.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The fixture establishes the serving session and seeds the target route through public owner-directory APIs before the observed flow.
+        - Query, inter-SN relay, Rendezvous delivery, and target action use production real-socket paths and retain the TunnelManager-installed listener.
+        - Loopback peer-data connection is not required and the case does not claim connected or payload-complete.
+    steps:
+      - id: production-cross-sn-query-rendezvous
+        name: Run exact production cross-SN Query and Rendezvous action case
+        change_ids: ["shared_ttp_runtime_sn_purpose_demux"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "real_p2p_tunnel_flow", "collision_cross_sn::production_ttp_cross_sn_query_and_rendezvous_arm_target_action", "--", "--exact", "--nocapture", "--test-threads=1"]

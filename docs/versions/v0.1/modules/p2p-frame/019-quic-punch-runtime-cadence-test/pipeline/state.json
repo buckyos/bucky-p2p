@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "75d954107ae03d0707a954058829cf875bc87e71ec52953e4305030afe04a40d",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-QUIC-OBS-1": {"status": "complete"},
+    "T-QUIC-CADENCE-1": {"status": "complete"},
+    "T-OWNER-CLAIM-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "the design child produced the test-only boundary mapping and the parent orchestrator merged the shared immutable plan"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-QUIC-OBS-1"],
+        "serialization_reasons": {
+          "I-QUIC-OBS-1": "the only implementation file child starts after D-1 and exclusively owns the admitted listener.rs test-build seam"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "the implementation aggregate completes only after the observer child, admission, non-test/test compilation, and implementation scope evidence are available"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["T-QUIC-CADENCE-1", "T-OWNER-CLAIM-1"],
+        "serialization_reasons": {
+          "T-QUIC-CADENCE-1": "the listener cadence test exclusively owns listener/tests.rs after implementation completion",
+          "T-OWNER-CLAIM-1": "the owner-claim test exclusively owns network/punch_owner_tests.rs and runs concurrently with the disjoint cadence test"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "the parent-owned testing aggregate starts after both disjoint test children and merges testplan, coverage, task-run, and scope evidence"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance starts only after the current implementation, two testing children, task-scoped artifact, coverage, and testing scope evidence are complete"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["T-QUIC-CADENCE-1"],
+        "serialization_reasons": {
+          "T-QUIC-CADENCE-1": "acceptance F-QPRCT-001 returns only the cadence test to remove the scheduler-sensitive 40ms deadline window"
+        }
+      },
+      {
+        "wave": 8,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "the testing aggregate reruns after F-QPRCT-001 with updated interval evidence and a fresh successful task-scoped artifact"
+        }
+      },
+      {
+        "wave": 9,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "acceptance retries after the cadence test removes the narrow deadline race and fresh task-scoped evidence passes"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "quic_punch_runtime_cadence_direct_test",
+      "validation_id": "V-QPRCT-CADENCE",
+      "testplan_level": "dv",
+      "testplan_step_id": "quic-punch-runtime-cadence-direct-dv",
+      "evidence": "Separate bound and started QuicTunnelListener fixtures directly execute run_udp_punch_burst for active and reverse intents with started_at backdated 2s and a 10s deadline; each fixture waits for three actual send-branch observations, then proves the first three are separated by at least 25ms, distinguishing the delivered cadence from historical zero-wait catch-up without a narrow deadline race.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_punch_owner_test_claim_accuracy",
+      "validation_id": "V-QPRCT-OWNER",
+      "testplan_level": "unit",
+      "testplan_step_id": "quic-punch-owner-claim-accuracy-unit",
+      "evidence": "The renamed owner test contains no synthetic active/reverse cadence loop or send counters and directly proves connect completion after more than one second, one connect poll, and owned punch-future drop.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "normal", "required": "yes", "validation_id": "V-QPRCT-CADENCE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "boundary", "required": "yes", "validation_id": "V-QPRCT-CADENCE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "negative", "required": "yes", "validation_id": "V-QPRCT-CADENCE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "error", "required": "no", "validation_id": "V-QPRCT-CADENCE-NA", "level": "dv", "status": "not-applicable", "gap_manual_reason": "The observation-only correction adds no production error category; installed observer completion is intentionally successful and the unchanged real sender error path remains covered by existing behavior."},
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "compatibility", "required": "yes", "validation_id": "V-QPRCT-CADENCE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "lifecycle", "required": "yes", "validation_id": "V-QPRCT-CADENCE", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_runtime_cadence_direct_test", "case_type": "cross-module", "required": "no", "validation_id": "V-QPRCT-CADENCE-NA", "level": "dv", "status": "not-applicable", "gap_manual_reason": "The observer and exercised method are crate-private listener internals and change no neighboring-module contract."},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "normal", "required": "yes", "validation_id": "V-QPRCT-OWNER", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "boundary", "required": "yes", "validation_id": "V-QPRCT-OWNER", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "negative", "required": "no", "validation_id": "V-QPRCT-OWNER-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "The correction narrows an inaccurate positive test claim and introduces no supported negative owner behavior."},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "error", "required": "no", "validation_id": "V-QPRCT-OWNER-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "No production owner error path changes; existing final-error and cancellation tests remain unchanged and outside this claim-only correction."},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "compatibility", "required": "yes", "validation_id": "V-QPRCT-OWNER", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "lifecycle", "required": "yes", "validation_id": "V-QPRCT-OWNER", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "quic_punch_owner_test_claim_accuracy", "case_type": "cross-module", "required": "no", "validation_id": "V-QPRCT-OWNER-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "The dedicated fixture consumes a crate-private owner helper and changes no exported or neighboring-module interface."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260827T142744Z-p2p-frame+019-quic-punch-runtime-cadence-test-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "F-QPRCT-001",
+      "owning_stage": "testing",
+      "count": 1,
+      "target_task": "T-QUIC-CADENCE-1",
+      "reason": "the 1960ms backdate against a 2s deadline leaves only about 40ms before a correct production deadline return can produce zero observations under scheduler preemption",
+      "expected_fix_output": "a direct active/reverse runtime-loop regression with substantial scheduling slack or controlled progress evidence that reliably distinguishes 50ms cadence from historical zero-wait catch-up"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/019-quic-punch-runtime-cadence-test/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

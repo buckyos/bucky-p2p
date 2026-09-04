@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/046-clear-proxy-upgrade-after-tunnel-close/proposal.md": "3d2d31e1a3c3b72f8e55337dc9ff15e87e7c10a8c29293efdf6eb396fb17fac4"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "77180c46ec299bc63b61526a088d6ecf2b955bc6a69e6e42bc068dc8f9938b69"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

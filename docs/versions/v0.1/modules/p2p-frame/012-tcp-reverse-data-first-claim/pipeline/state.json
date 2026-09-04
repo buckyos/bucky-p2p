@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "caeebb5375633c409ff2230aec5febe0aa17f320e4c94fce590abe1d4850118c",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-TCP-DOC-1": {"status": "complete"},
+    "I-TCP-PROTO-1": {"status": "complete"},
+    "I-TCP-TUNNEL-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-TCP-DOC-1"],
+        "serialization_reasons": {
+          "I-1": "coordinated with the first serial implementation child; wire/runtime work depends on the authoritative protocol contract"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-TCP-PROTO-1"],
+        "serialization_reasons": {
+          "I-TCP-PROTO-1": "depends on I-TCP-DOC-1 and encodes the synchronized protocol contract"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["I-TCP-TUNNEL-1"],
+        "serialization_reasons": {
+          "I-TCP-TUNNEL-1": "depends on I-TCP-PROTO-1 and consumes the new response contract"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing starts only after all implementation file tasks and implementation scope validation complete"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance starts only after the final task artifact and testing scope evidence are current"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "acceptance-returned testing requires a deterministic test-only view of private reverse-open ownership before T-1 can resume"
+        }
+      },
+      {
+        "wave": 8,
+        "tasks": ["I-TCP-TUNNEL-1"],
+        "serialization_reasons": {
+          "I-TCP-TUNNEL-1": "serialized after the returned implementation parent reopens and limited to test-only lifecycle and compatibility observability"
+        }
+      },
+      {
+        "wave": 9,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing resumes after the returned test-only observability compiles and implementation scope validation passes"
+        }
+      },
+      {
+        "wave": 10,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance reruns only after the 17-step artifact and current canonical testing scope result are complete"
+        }
+      },
+      {
+        "wave": 11,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "pre-acceptance self-review found that the bounded legacy decoder sampled its policy before awaiting the next frame"
+        }
+      },
+      {
+        "wave": 12,
+        "tasks": ["I-TCP-TUNNEL-1"],
+        "serialization_reasons": {
+          "I-TCP-TUNNEL-1": "the test-only decoder policy must be sampled after the actual frame header arrives so compatibility evidence is scheduler-independent"
+        }
+      },
+      {
+        "wave": 13,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing resumes after the dynamic bounded-decoder sampling path compiles and implementation scope validation passes"
+        }
+      },
+      {
+        "wave": 14,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance restarts against the scheduler-independent compatibility fixture and refreshed 17-step artifact"
+        }
+      },
+      {
+        "wave": 15,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing returns to place PN composition under an already registered test module so one canonical baseline can cover the complete manifest"
+        }
+      },
+      {
+        "wave": 16,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "iteration 4 starts only after the complete canonical testing manifest passes against the original machine-generated baseline and a refreshed artifact succeeds"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "tcp_reverse_data_first_claim_handoff",
+      "validation_id": "V-TCP-REVERSE-FIRST-CLAIM",
+      "testplan_level": "dv",
+      "testplan_step_id": "tcp-reverse-fallback-success-dv",
+      "evidence": "Production-seam unit tests cover arrival/response ordering, duplicate/mismatch/terminal correlation, first-claim ownership, simultaneous conflict, and error mapping. Real TCP/TLS DV pauses after DataConnReady registration and executes caller-abort guard drop, tunnel-close cleanup, new-requester timeout against an old creator, and command-12 rejection by an old requester; snapshots verify waiter, staged entry, and data connection counts return to zero. DV also covers fallback/reuse and terminal errors. One composed signed x509 A-to-PN-to-B test proves ProxyOpenResp Success plus bidirectional bytes through PN/TTP and real reverse TCP.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "normal", "required": "yes", "validation_id": "V-TCP-REVERSE-FIRST-CLAIM", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "boundary", "required": "yes", "validation_id": "V-TCP-REVERSE-FIRST-CLAIM", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "negative", "required": "yes", "validation_id": "V-TCP-REVERSE-FIRST-CLAIM", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "error", "required": "yes", "validation_id": "V-TCP-REVERSE-FIRST-CLAIM", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "compatibility", "required": "yes", "validation_id": "V-TCP-REVERSE-FIRST-CLAIM", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "lifecycle", "required": "yes", "validation_id": "V-TCP-REVERSE-FIRST-CLAIM", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_reverse_data_first_claim_handoff", "case_type": "cross-module", "required": "yes", "validation_id": "V-TCP-REVERSE-PN-TTP-COMPOSITION", "level": "integration", "status": "covered", "gap_manual_reason": ""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260826T025938Z-p2p-frame+012-tcp-reverse-data-first-claim-all.json",
+      "test-results/test-runs/20260826T034251Z-p2p-frame+012-tcp-reverse-data-first-claim-all.json",
+      "test-results/test-runs/20260826T041605Z-p2p-frame+012-tcp-reverse-data-first-claim-all.json",
+      "test-results/test-runs/20260826T042555Z-p2p-frame+012-tcp-reverse-data-first-claim-all.json",
+      "test-results/test-runs/20260826T043936Z-p2p-frame+012-tcp-reverse-data-first-claim-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "F-TRDFCH-001",
+      "owning_stage": "testing",
+      "count": 1,
+      "target_task": "T-1",
+      "reason": "the canonical task artifact proves TCP reverse fallback, TTP consumption, and PN bridging separately but does not execute one forced-reverse A-to-PN-to-B topology",
+      "expected_fix_output": "one canonical task step that transfers an A-to-PN-to-B proxy stream after the PN-to-target direct data dial is forced to fail"
+    },
+    {
+      "issue_id": "F-TRDFCH-002",
+      "owning_stage": "testing",
+      "count": 2,
+      "target_task": "T-1",
+      "reason": "returned tests cover pure correlation decisions but do not execute PendingOpenRequestGuard/map/staged-entry cleanup or bounded legacy/new production wire and tunnel paths",
+      "expected_fix_output": "task-scoped production-owner lifecycle tests and both bounded rolling-upgrade peer directions"
+    },
+    {
+      "issue_id": "F-TRDFCH-003",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-TCP-TUNNEL-1",
+      "reason": "caller cancellation drops the reverse-open future without removing its pending request or retiring a staged connection",
+      "expected_fix_output": "drop-safe request ownership that atomically retires pending and staged state on cancellation, with a deterministic test seam"
+    },
+    {
+      "issue_id": "F-TRDFCH-004",
+      "owning_stage": "design",
+      "count": 1,
+      "target_task": "D-1",
+      "reason": "the pipeline mapping and authoritative TCP protocol/module documentation still describe the previous no-response, creator-claims-first, late-pool behavior",
+      "expected_fix_output": "synchronized design authority for response correlation, requester first claim, late rejection, cancellation ownership, and mixed-version fail-closed behavior"
+    },
+    {
+      "issue_id": "F-TRDFCH-005",
+      "owning_stage": "testing",
+      "count": 2,
+      "target_task": "T-1",
+      "reason": "the canonical testing manifest omits the task-owned network.rs registration path even though the current diff, initial testing baseline, testplan, and artifact include it",
+      "expected_fix_output": "a canonical testing manifest and passing owning-stage scope result covering network.rs plus every current testing input"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/012-tcp-reverse-data-first-claim/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

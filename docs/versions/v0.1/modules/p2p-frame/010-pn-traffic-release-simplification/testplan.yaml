@@ -1,0 +1,80 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 010-pn-traffic-release-simplification
+submodule: 010-pn-traffic-release-simplification
+api_impact:
+  public_api: migration-required
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs", "docs/versions/v0.1/modules/p2p-frame/010-pn-traffic-release-simplification/proposal.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: pn-traffic-release-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile all p2p-frame targets with the source-compatible bounded retention setter
+      change_ids: ["pn_traffic_release_state_simplification", "pn_traffic_retention_finite_bound"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+    - id: pn-traffic-release-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify repository closure for removed generation and platform-edge retention implementation symbols
+      change_ids: ["pn_traffic_release_state_simplification", "pn_traffic_retention_finite_bound"]
+      run: ["uv", "run", "--active", "python", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "010-pn-traffic-release-simplification"]
+    - id: pn-traffic-release-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile affected repository consumers without executing broad runtime suites
+      change_ids: ["pn_traffic_release_state_simplification", "pn_traffic_retention_finite_bound"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Branch and invariant coverage for zero/ordinary/exact-max/above-max retention, final-session release, exact deadline membership, reconnect cancellation, active-session counts, same-user participation, observation, retained limit policy, shutdown, cleanup batching, and async task ownership.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated nested test file exercises private manager state without adding new inline test bodies to production source.
+        - The future-target `checked_add(None)` immediate-release fallback cannot be triggered after the setter clamps to 30 days on the supported Windows/MSVC and Linux targets. Owner: testing; risk: a future target with an unexpectedly narrower Instant range could shorten retention but will not panic; acceptance impact: non-blocking because the branch is fail-closed and the supported-target bound is automated.
+        - Acquired-entry mismatch, an already-zero active count, and duplicate deadline insertion require bypassing production transitions to corrupt private state. Owner: testing; risk: internal invariant violation only; acceptance impact: non-blocking because the proposal explicitly removes fabricated stale-state guarantees while all reachable cancellation/reconnect/shutdown transitions are covered.
+    steps:
+      - id: pn-traffic-release-manager-unit
+        name: Run PN traffic manager release, retention, observation, and cleanup branch coverage
+        change_ids: ["pn_traffic_release_state_simplification", "pn_traffic_retention_finite_bound"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_manager_tests", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Real current-thread Tokio task/timer/Notify workflows verify above-bound normalization, bounded waiting, reconnect cancellation and entry reuse, survival past the old deadline, expiry at the new deadline, and nonblocking shutdown.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server.rs
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The focused DV cases use only production transition APIs for lifecycle changes; they do not inject stale deadlines or replacement map entries.
+        - These cases also run inside the full unit filter because the dedicated private test module is the lowest available placement; the focused DV step is retained to isolate real scheduler/timer behavior and task evidence.
+    steps:
+      - id: pn-traffic-release-lifecycle-dv
+        name: Run bounded retention and reconnect-expiry lifecycle verification
+        change_ids: ["pn_traffic_release_state_simplification", "pn_traffic_retention_finite_bound"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_release_simplification_dv_", "--", "--nocapture"]
+
+  integration:
+    mode: disabled
+    summary: The setter keeps its Rust signature, PN wire and snapshot shapes are unchanged, and repository search found no neighboring-crate caller of the retention setter.
+    change_ids: ["pn_traffic_release_state_simplification", "pn_traffic_retention_finite_bound"]
+    reason: "owner: testing; reason: lifecycle changes are private to p2p-frame and the migration applies only to out-of-repository callers requesting more than 30 days, while task-local external-positive, removed-symbol, and repository compile-closure checks cover repository consumers; risk: an unknown external caller may rely on retention above 30 days; acceptance impact: non-blocking because the semantic clamp is documented and explicitly authorized by the proposal."

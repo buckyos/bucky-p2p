@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: trivial
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 058-align-sn-real-network-query-loopback
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/058-align-sn-real-network-query-loopback.paths
+baseline_manifest: .harness/baselines/v0.1/058-align-sn-real-network-query-loopback-delivery/manifest.json
+
+changes:
+  - id: CHG-align-sn-real-network-query-loopback
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/tests/sn_protocol_real_network.rs"]
+    changed_paths_file:

@@ -18,7 +18,7 @@ use super::listener::{
     TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStreamCallback,
     TtpPortListener,
 };
-use super::runtime::TtpRuntime;
+use super::runtime::TtpDispatchRuntime;
 use super::{TtpDatagramMeta, TtpStreamMeta, TtpTarget};
 
 #[async_trait::async_trait]
@@ -43,7 +43,7 @@ pub trait TtpConnector: Send + Sync + 'static {
 pub struct TtpClient {
     local_identity: P2pIdentityRef,
     net_manager: NetManagerRef,
-    runtime: Arc<TtpRuntime>,
+    runtime: Arc<TtpDispatchRuntime>,
     tunnels: Arc<Mutex<HashMap<P2pId, TtpClientTunnelEntries>>>,
     maintained_targets: Mutex<Vec<TtpTarget>>,
     maintain_started: AtomicBool,
@@ -142,7 +142,7 @@ impl TtpClient {
         let client = Arc::new(Self {
             local_identity,
             net_manager,
-            runtime: TtpRuntime::new(),
+            runtime: TtpDispatchRuntime::new(),
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             maintained_targets: Mutex::new(Vec::new()),
             maintain_started: AtomicBool::new(false),
@@ -620,10 +620,23 @@ pub(crate) fn find_existing_tunnel_in_multi(
         .cloned()
 }
 
+#[cfg(test)]
+pub(crate) fn has_cached_tunnel_in_multi(
+    tunnels: &Mutex<TtpTunnelCache>,
+    target: &TtpTarget,
+) -> bool {
+    let tunnels = tunnels.lock().unwrap();
+    tunnels.get(&target.remote_id).is_some_and(|entries| {
+        entries.values().any(|tunnel| {
+            is_tunnel_available(tunnel.as_ref()) && match_target(tunnel.as_ref(), target)
+        })
+    })
+}
+
 pub(crate) async fn get_or_create_tunnel_for_multi(
     local_identity: &P2pIdentityRef,
     net_manager: &NetManagerRef,
-    runtime: &Arc<TtpRuntime>,
+    runtime: &Arc<TtpDispatchRuntime>,
     tunnels: &Mutex<TtpTunnelCache>,
     target: &TtpTarget,
 ) -> P2pResult<TunnelRef> {
@@ -664,7 +677,17 @@ pub(crate) fn match_target(tunnel: &dyn crate::networks::Tunnel, target: &TtpTar
     }
 
     if let Some(local_ep) = target.local_ep {
-        if tunnel.local_ep().map(|ep| ep != local_ep).unwrap_or(false) {
+        if tunnel
+            .local_ep()
+            .map(|ep| {
+                if local_ep.addr().port() == 0 {
+                    ep.protocol() != local_ep.protocol() || ep.addr().ip() != local_ep.addr().ip()
+                } else {
+                    ep != local_ep
+                }
+            })
+            .unwrap_or(false)
+        {
             return false;
         }
     }

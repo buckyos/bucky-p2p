@@ -1,0 +1,107 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 025-sn-query-target-protocol-version
+submodule: 025-sn-query-target-protocol-version
+api_impact:
+  public_api: migration-required
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/peer_manager.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs", "p2p-frame/tests/unit/sn_tests/inter_sn_profile_tests.rs", "p2p-frame/tests/unit/sn_tests/service/reported_net_profile_tests.rs", "p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs", "p2p-frame/tests/unit/sn_tests/service/reported_protocol_version_tests.rs", "p2p-frame/tests/unit/sn_tests/service/protocol_version_query_tests.rs", "p2p-frame/tests/sn_protocol_version_public_api.rs"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: sn-protocol-version-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile an external-style consumer of the protocol version response and inter-SN APIs
+      change_ids: ["sn_protocol_version_registration", "sn_query_target_protocol_version"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--test", "sn_protocol_version_public_api", "--no-run"]
+    - id: sn-protocol-version-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify all repository struct literals and report update callers migrated to the new shape
+      change_ids: ["sn_protocol_version_registration", "sn_query_target_protocol_version"]
+      run: ["uv", "run", "--active", "python", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "025-sn-query-target-protocol-version"]
+    - id: sn-protocol-version-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile every p2p-frame target and public struct-literal consumer
+      change_ids: ["sn_protocol_version_registration", "sn_query_target_protocol_version"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets", "--features", "x509"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Validate the additive response wire, known-zero semantics, shared producer constant and peer-cache registration lifecycle.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs
+      - p2p-frame/tests/unit/sn_tests/service/reported_protocol_version_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Existing test and cfg(test) wiring was snapshotted before task edits.
+        - Wire cases retain the existing NAT-profile extension while exercising absent, zero, current, malformed and legacy-tail behavior.
+    steps:
+      - id: sn-protocol-version-wire-unit
+        name: Run target version wire compatibility and shared producer constant cases
+        change_ids: ["sn_protocol_version_registration", "sn_query_target_protocol_version"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::protocol::sn::nat_type_wire_tests::target_protocol_version_", "--", "--test-threads=1"]
+      - id: sn-protocol-version-wire-malformed-unit
+        name: Run malformed optional extension fail-closed cases
+        change_ids: ["sn_query_target_protocol_version"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::protocol::sn::nat_type_wire_tests::malformed_protocol_version_extensions_", "--", "--test-threads=1"]
+      - id: sn-protocol-version-producer-unit
+        name: Prove ReportSn SnCall and SnQuery producers use one current baseline
+        change_ids: ["sn_protocol_version_registration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::protocol::sn::nat_type_wire_tests::sn_protocol_version_constant_is_used_by_all_three_client_producers", "--", "--exact", "--test-threads=1"]
+      - id: sn-protocol-version-registration-unit
+        name: Run unknown known-zero replacement preservation and removal registration cases
+        change_ids: ["sn_protocol_version_registration"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::peer_manager::tests::reported_protocol_version_tests", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise authenticated report handling and local or distributed query assembly through the real service methods with deterministic owner and inter-SN doubles.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/protocol_version_query_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - No external SN is required; service identity validation, peer state and query assembly are real in-process code.
+        - Every advertised serving lease participates in version consensus while successful detail data remains best effort.
+    steps:
+      - id: sn-protocol-version-query-dv
+        name: Run authenticated registration local authority and all-participant distributed consensus cases
+        change_ids: ["sn_protocol_version_registration", "sn_query_target_protocol_version"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::protocol_version_query_tests", "--", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Verify inter-SN producer mapping, the external public surface and repository compile closure.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/inter_sn_profile_tests.rs
+      - p2p-frame/tests/sn_protocol_version_public_api.rs
+      - p2p-frame
+    preconditions:
+      tools: ["cargo", "uv"]
+      env: []
+      services: []
+      notes:
+        - Inter-SN dispatch uses the real request response mapper with an in-process peer double.
+        - Repository closure is compile-only and does not run unrelated task suites.
+    steps:
+      - id: sn-protocol-version-inter-sn-integration
+        name: Prove serving detail response mapping preserves a known legacy zero version
+        change_ids: ["sn_query_target_protocol_version"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::inter_sn::tests::sn_distributed_detail_response_forwards_profile_without_replication", "--", "--exact", "--test-threads=1"]
+      - id: sn-protocol-version-public-api-integration
+        name: Run the external-style public response and detail consumer
+        change_ids: ["sn_protocol_version_registration", "sn_query_target_protocol_version"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "sn_protocol_version_public_api", "--", "--test-threads=1"]

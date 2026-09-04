@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "1504319147dbf9703ac8c774d561c79c19d326e7e54b6c2857281156fdd42387",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-NOOP-P2P-1": {"status": "complete"},
+    "I-NOOP-SNMINER-1": {"status": "complete"},
+    "T-P2P-RELOCATE-1": {"status": "complete"},
+    "T-SNMINER-RELOCATE-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "the design review validates the cross-crate test-only topology while the parent owns the shared plan and state"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-NOOP-P2P-1", "I-NOOP-SNMINER-1"],
+        "serialization_reasons": {
+          "I-NOOP-P2P-1": "p2p-frame no-op production-boundary inspection is disjoint from sn-miner",
+          "I-NOOP-SNMINER-1": "sn-miner no-op production-boundary inspection is disjoint from p2p-frame"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "the parent aggregates both no-op boundary inspections and owns the shared admission and stage-scope evidence"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["T-P2P-RELOCATE-1", "T-SNMINER-RELOCATE-1"],
+        "serialization_reasons": {
+          "T-P2P-RELOCATE-1": "p2p-frame relocation has an exclusive crate-local write scope",
+          "T-SNMINER-RELOCATE-1": "sn-miner relocation has an exclusive crate-local write scope"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "testing exposed the root sn ignore collision, so the design mapping must be corrected before downstream work resumes"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["I-NOOP-P2P-1", "I-NOOP-SNMINER-1"],
+        "serialization_reasons": {
+          "I-NOOP-P2P-1": "recheck the p2p-frame no-op production boundary against the corrected ignore-safe mapping and refreshed stamp",
+          "I-NOOP-SNMINER-1": "recheck the unchanged sn-miner no-op boundary against the refreshed cross-target admission"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "the parent closes implementation only after both refreshed no-op inspections and target admissions pass"
+        }
+      },
+      {
+        "wave": 8,
+        "tasks": ["T-P2P-RELOCATE-1", "T-SNMINER-RELOCATE-1"],
+        "serialization_reasons": {
+          "T-P2P-RELOCATE-1": "resume the exclusive p2p-frame testing scope with the corrected visible destination map",
+          "T-SNMINER-RELOCATE-1": "revalidate the already completed disjoint sn-miner relocation against the refreshed plan"
+        }
+      },
+      {
+        "wave": 9,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "the parent owns the shared testplan, coverage metadata, task-scoped run artifact, and testing scope evidence"
+        }
+      },
+      {
+        "wave": 10,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance starts only after implementation and post-implementation testing evidence are complete"
+        }
+      },
+      {
+        "wave": 11,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "acceptance found the already-correct TunnelManager inventory was documented as seven although the bound file and executed module contain eight tests"
+        }
+      },
+      {
+        "wave": 12,
+        "tasks": ["I-NOOP-P2P-1", "I-NOOP-SNMINER-1"],
+        "serialization_reasons": {
+          "I-NOOP-P2P-1": "reconfirm the no-op p2p-frame production boundary against the corrected inventory and refreshed stamp",
+          "I-NOOP-SNMINER-1": "reconfirm the unchanged sn-miner production boundary against the refreshed plan binding"
+        }
+      },
+      {
+        "wave": 13,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "the parent recloses implementation after refreshed target admissions and both no-op boundary checks"
+        }
+      },
+      {
+        "wave": 14,
+        "tasks": ["T-P2P-RELOCATE-1", "T-SNMINER-RELOCATE-1"],
+        "serialization_reasons": {
+          "T-P2P-RELOCATE-1": "revalidate the unchanged p2p-frame relocation against the corrected eight-test validation inventory",
+          "T-SNMINER-RELOCATE-1": "revalidate the unchanged disjoint sn-miner relocation after the plan-only correction"
+        }
+      },
+      {
+        "wave": 15,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "the parent regenerates a task-scoped artifact because the corrected plan is an evidence input"
+        }
+      },
+      {
+        "wave": 16,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "final acceptance reruns after the inventory drift return, refreshed admissions, and fresh task artifact"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "nat_type_aware_test_file_layout",
+      "validation_id": "V-021-LAYOUT",
+      "testplan_level": "unit",
+      "testplan_step_id": "relocated-layout-static",
+      "evidence": "Exact destination and old-path assertions cover both crates, every new file is Git-visible, the ignored common-wire blob retains its pre-move hash, inline bodies leave src, and release checks prove cfg(test) isolation.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "nat_type_aware_test_registration_parity",
+      "validation_id": "V-021-REGISTRATION",
+      "testplan_level": "unit",
+      "testplan_step_id": "relocated-p2p-name-set-parity",
+      "evidence": "Exact Cargo list comparisons require the pre-move 18 p2p-frame names and one sn-miner name, while unit, DV, and integration steps execute every moved or already-correct 020-owned test surface.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "normal", "required": "yes", "validation_id": "V-021-LAYOUT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "boundary", "required": "yes", "validation_id": "V-021-LAYOUT", "level": "unit", "status": "covered", "gap_manual_reason": "The static step checks the root ignore collision, exact source/destination allowlist, nested-unit discovery boundary, and inline extraction boundary."},
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "negative", "required": "yes", "validation_id": "V-021-LAYOUT", "level": "unit", "status": "covered", "gap_manual_reason": "The static step fails if any old source file, ignored new file, inline test body, or accidental tests/unit integration target remains."},
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "error", "required": "no", "validation_id": "V-021-LAYOUT-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "The move introduces no production error category or recovery flow; bad include paths and missing files fail compilation or the static step."},
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "compatibility", "required": "yes", "validation_id": "V-021-LAYOUT-COMPAT", "level": "dv", "status": "covered", "gap_manual_reason": "Both crate release checks compile with test-only includes disabled and no public seam."},
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "lifecycle", "required": "no", "validation_id": "V-021-LAYOUT-NA", "level": "dv", "status": "not-applicable", "gap_manual_reason": "Physical test-source placement owns no runtime lifecycle; existing lifecycle tests are executed under registration parity."},
+    {"change_id": "nat_type_aware_test_file_layout", "case_type": "cross-module", "required": "yes", "validation_id": "V-021-LAYOUT-CROSS", "level": "unit", "status": "covered", "gap_manual_reason": "One static allowlist validates p2p-frame and sn-miner destinations together while each crate compiles its private loader."},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "normal", "required": "yes", "validation_id": "V-021-REGISTRATION", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "boundary", "required": "yes", "validation_id": "V-021-REGISTRATION", "level": "unit", "status": "covered", "gap_manual_reason": "Exact selected name sets must equal 18 and 1 with no missing or extra module names before filtered commands run."},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "negative", "required": "yes", "validation_id": "V-021-REGISTRATION", "level": "unit", "status": "covered", "gap_manual_reason": "The list-comparison steps fail on renamed, missing, duplicated, or unexpected matching tests and therefore reject a zero-test filter path."},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "error", "required": "no", "validation_id": "V-021-REGISTRATION-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "Registration parity adds no production error behavior; command or assertion failures are test infrastructure failures surfaced by nonzero exit status."},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "compatibility", "required": "yes", "validation_id": "V-021-REGISTRATION-COMPAT", "level": "integration", "status": "covered", "gap_manual_reason": "Original module filters plus the external public API and SN profile-flow tests run unchanged."},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "lifecycle", "required": "yes", "validation_id": "V-021-REGISTRATION-LIFECYCLE", "level": "dv", "status": "covered", "gap_manual_reason": "The real UDP probe and NAT-aware TunnelManager modules retain probe, owner-cancellation, prediction, direction, and fallback execution."},
+    {"change_id": "nat_type_aware_test_registration_parity", "case_type": "cross-module", "required": "yes", "validation_id": "V-021-REGISTRATION-CROSS", "level": "integration", "status": "covered", "gap_manual_reason": "The already-correct public consumer, SN query/call flow, and extracted distributed query case exercise neighboring boundaries."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260829T113614Z-globals+021-relocate-nat-type-aware-tests-all.json",
+      "test-results/test-runs/20260829T115417Z-globals+021-relocate-nat-type-aware-tests-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "021-DESIGN-SN-IGNORE-COLLISION",
+      "owning_stage": "design",
+      "target_task": "D-1",
+      "reason": "the unanchored root sn/ ignore rule hides every planned p2p-frame/tests/unit/sn/** destination",
+      "expected_fix_output": "map SN-owned tests to p2p-frame/tests/unit/sn_tests/**, keep loaders and exact test names stable, and revalidate plan plus cross-target admission",
+      "count": 1
+    },
+    {
+      "issue_id": "021-DESIGN-TUNNEL-COUNT-DRIFT",
+      "owning_stage": "design",
+      "target_task": "D-1",
+      "reason": "the plan described seven already-correct TunnelManager tests while the bound source and executed module contain eight",
+      "expected_fix_output": "correct the validation-only inventory to eight, refresh target admissions and task evidence, and rerun independent acceptance",
+      "count": 1
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/globals/021-relocate-nat-type-aware-tests/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

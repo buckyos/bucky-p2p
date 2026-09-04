@@ -1,0 +1,94 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 023-nat-probe-lifecycle-logging
+submodule: 023-nat-probe-lifecycle-logging
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/service/nat_probe_scheduler.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs", "p2p-frame/tests/nat_probe_logging_contract.rs", "docs/versions/v0.1/modules/p2p-frame/023-nat-probe-lifecycle-logging/proposal.md", "docs/versions/v0.1/modules/p2p-frame/023-nat-probe-lifecycle-logging/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: nat-probe-logging-compile-contract
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile the unchanged p2p-frame public and build surface with logging enabled
+      change_ids: ["sn_nat_probe_server_lifecycle_logging", "sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+      run: ["cargo", "check", "-p", "p2p-frame", "--features", "x509"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify scheduler lifecycle reasons, exact client rejection reasons, event coverage, privacy boundaries and stable-report noise control.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs
+      - p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs
+      - p2p-frame/tests/nat_probe_logging_contract.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The shared test logger captures only nat_probe events and filters by unique peer identity.
+        - Static source checks prohibit secret and raw payload fields and restrict endpoint values to debug logs.
+    steps:
+      - id: nat-probe-server-logging-unit
+        name: Run scheduler lifecycle reason correlation suppression timeout removal and stable-report noise checks
+        change_ids: ["sn_nat_probe_server_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::nat_probe_scheduler"]
+      - id: nat-probe-client-logging-unit
+        name: Run precise transport identity generation replay deadline and endpoint rejection checks
+        change_ids: ["sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::client::sn_service::tests::nat_probe_directive"]
+      - id: nat-probe-log-safety-unit
+        name: Scan operational event coverage forbidden fields and info-warn endpoint-value boundaries
+        change_ids: ["sn_nat_probe_server_lifecycle_logging", "sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "nat_probe_logging_contract"]
+  dv:
+    mode: enabled
+    summary: Exercise the correlated SN-to-client real QUIC directive and UDP probe lifecycle plus the TCP zero-execution boundary.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The real flow uses an in-process QUIC SN and two live UDP reflectors on loopback.
+        - The two-hour deadline is forced through the existing test seam; no two-hour wall-clock wait is required.
+    steps:
+      - id: nat-probe-correlated-log-flow-dv
+        name: Prove online and periodic directive UDP completion result report acceptance correlation and stable silence
+        change_ids: ["sn_nat_probe_server_lifecycle_logging", "sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::periodic_deadline_issues_exactly_one_real_probe_directive", "--", "--exact"]
+      - id: nat-probe-tcp-zero-regression-dv
+        name: Prove a real TCP-only registration remains online and executes no probe
+        change_ids: ["sn_nat_probe_server_lifecycle_logging", "sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::tcp_only_registration_never_receives_or_executes_probe", "--", "--exact"]
+      - id: nat-probe-result-report-failure-dv
+        name: Prove malformed result-report response emits a correlated warning without gating online state
+        change_ids: ["sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::initial_probe_and_result_report_failure_do_not_gate_online", "--", "--exact"]
+  integration:
+    mode: enabled
+    summary: Run the full SN client-server command and NAT profile suite to prove logging does not alter runtime behavior.
+    test_targets:
+      - p2p-frame/src/sn/tests.rs
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The suite covers QUIC and TCP registration, query, call, timeout, reconnect and command-matrix behavior.
+    steps:
+      - id: nat-probe-sn-regression-integration
+        name: Run complete SN command profile and NAT probe regressions
+        change_ids: ["sn_nat_probe_server_lifecycle_logging", "sn_nat_probe_client_lifecycle_logging", "sn_nat_probe_log_safety_and_noise_control"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests", "--", "--test-threads=1"]

@@ -1,0 +1,75 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 015-callback-result-scope-path-amendment
+submodule: 015-callback-result-scope-path-amendment
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["Cargo.toml", "p2p-frame/Cargo.toml", "Cargo.lock", "docs/versions/v0.1/modules/p2p-frame/014-callback-result-published-release-migration/proposal.md", "docs/versions/v0.1/modules/p2p-frame/014-callback-result-published-release-migration/design.md", "docs/versions/v0.1/modules/p2p-frame/015-callback-result-scope-path-amendment/testing/verify_callback_result_registry.py"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: callback-result-repository-compile-closure
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: compile every p2p-frame target against registry callback-result 0.2.5
+      change_ids: ["callback_result_scope_path_amendment"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Prove the registry-state verifier accepts the clean shape and rejects stale path, version, lock, and vendor states.
+    test_targets:
+      - docs/versions/v0.1/modules/p2p-frame/015-callback-result-scope-path-amendment/testing/verify_callback_result_registry.py
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: callback-result-registry-verifier-unit
+        name: exercise positive and negative dependency-state fixtures
+        change_ids: ["callback_result_scope_path_amendment"]
+        run: ["python3", "docs/versions/v0.1/modules/p2p-frame/015-callback-result-scope-path-amendment/testing/verify_callback_result_registry.py", "--mode", "self-test"]
+
+  dv:
+    mode: enabled
+    summary: Validate the delivered workspace manifests, lock entry, checksum, and complete vendor removal.
+    test_targets:
+      - Cargo.toml
+      - p2p-frame/Cargo.toml
+      - Cargo.lock
+    preconditions:
+      tools: ["python3"]
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: callback-result-registry-workspace-dv
+        name: validate the current workspace dependency state
+        change_ids: ["callback_result_scope_path_amendment"]
+        run: ["python3", "docs/versions/v0.1/modules/p2p-frame/015-callback-result-scope-path-amendment/testing/verify_callback_result_registry.py", "--mode", "workspace", "--workspace-root", "."]
+
+  integration:
+    mode: enabled
+    summary: Confirm Cargo resolves the unique registry package through the real p2p-frame and sfo-cmd-server consumer closure.
+    test_targets:
+      - p2p-frame/Cargo.toml
+      - Cargo.lock
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: ["crates.io or populated Cargo cache"]
+      notes: []
+    steps:
+      - id: callback-result-registry-consumer-integration
+        name: inspect the concrete reverse dependency tree for callback-result 0.2.5
+        change_ids: ["callback_result_scope_path_amendment"]
+        run: ["cargo", "tree", "--invert", "callback-result@0.2.5"]

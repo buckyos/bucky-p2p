@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: high-risk
+version: v0.1
+packet_module: globals
+task_name: 031-allow-harness-tooling-implementation-scope
+stage: design
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+changed_paths_file: .harness/evidence/v0.1/stage-scope/031-allow-harness-tooling-implementation-scope.paths
+baseline_manifest:
+changes:
+  - id: define_harness_tooling_implementation_artifacts
+    target_module: p2p-frame
+    scope_paths: ["harness/rules/task-entry-gate-rules.md", "harness/rules/implementation-rules.md", "harness/scripts/stage-scope-check.py"]
+    changed_paths_file:
+  - id: enforce_globals_harness_tooling_scope
+    target_module: cyfs-p2p
+    scope_paths: ["harness/rules/task-entry-gate-rules.md", "harness/rules/implementation-rules.md", "harness/scripts/stage-scope-check.py"]
+    changed_paths_file:

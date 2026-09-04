@@ -1,0 +1,64 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 005-move-net-manager-post-accept-tests
+submodule: 005-move-net-manager-post-accept-tests
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/net_manager.rs", "p2p-frame/tests/net_manager/net_manager_post_accept_tests.rs", "p2p-frame/tests/net_manager/net_manager_tcp_post_accept_tests.rs", "docs/versions/v0.1/modules/p2p-frame/005-move-net-manager-post-accept-tests/proposal.md", "docs/versions/v0.1/modules/p2p-frame/005-move-net-manager-post-accept-tests/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The relocation changes no public API, crate-root export, build surface, or documentation example; focused test compilation validates the test-only include boundary.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Existing NetManager post-accept branch tests compile and execute from the nested tests directory under their unchanged private module path.
+    test_targets:
+      - p2p-frame/src/networks/net_manager.rs
+      - p2p-frame/tests/net_manager/net_manager_post_accept_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Task-start commit b3b2562b46e6c98ae15b619772b5575dd09f20ff records the red layout with both files under src/networks and the old local include paths.
+        - Blob b0be40f5c9fe02f4b2aa675a3d3356a14539e358 is identical before and after the non-x509 file move; only its path changes.
+        - The command must execute three existing cases; a successful zero-test filter is not acceptable evidence.
+    steps:
+      - id: net-manager-post-accept-relocation-unit
+        name: Run relocated NetManager post-accept branch tests
+        change_ids: ["relocate_net_manager_post_accept_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "networks::net_manager::tests::post_accept_tests", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Existing x509-gated real TCP duplicate-control regression compiles and runs from the nested tests directory without changing its runtime behavior.
+    test_targets:
+      - p2p-frame/src/networks/net_manager.rs
+      - p2p-frame/tests/net_manager/net_manager_tcp_post_accept_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Blob 3d09b8a59a6db7c26a32441625e950fead78e3a5 is identical before and after the x509 test file move; only its path changes.
+        - The command must execute the one existing real TCP case under the unchanged module/filter name.
+    steps:
+      - id: net-manager-tcp-post-accept-relocation-dv
+        name: Run relocated x509 TCP post-accept registry regression
+        change_ids: ["relocate_net_manager_post_accept_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::net_manager::tests::tcp_post_accept_registry_tests::duplicate_control_rejection_preserves_original_data_connection_route", "--", "--nocapture"]
+
+  integration:
+    mode: disabled
+    summary: This amendment changes only physical test-source placement and private cfg(test) include wiring; no cross-module or external interface exists to validate.
+    change_ids: ["relocate_net_manager_post_accept_tests"]
+    reason: Unit compilation proves the private include boundary and DV runs the existing real TCP workflow; an external integration target would require the explicitly forbidden API visibility expansion.

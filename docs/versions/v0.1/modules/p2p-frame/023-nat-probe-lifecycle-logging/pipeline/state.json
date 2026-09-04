@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "6cffc3de01a91cff0b67d301cd202642e28a7413aec67c40ceac87e243fd79c2",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-SCHEDULER-LOG-1": {"status": "complete"},
+    "I-SERVICE-LOG-1": {"status": "complete"},
+    "I-CLIENT-LOG-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "the parent owns the shared pipeline design mappings and validates them before implementation"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-SCHEDULER-LOG-1", "I-CLIENT-LOG-1"],
+        "serialization_reasons": {
+          "I-1": "the admitted implementation parent starts after confirmed design",
+          "I-SCHEDULER-LOG-1": "scheduler reason ownership is disjoint from client validation logging",
+          "I-CLIENT-LOG-1": "client logging is independent of scheduler source changes"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-SERVICE-LOG-1"],
+        "serialization_reasons": {
+          "I-SERVICE-LOG-1": "service logging consumes scheduler-owned reason and authority removal interfaces"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation tests are designed from the delivered logging implementation"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "acceptance starts after the serialized full-SN integration return is closed by a fresh unified artifact"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","validation_id":"V-NPLL-SERVER","testplan_level":"unit","testplan_step_id":"nat-probe-server-logging-unit","evidence":"Captured scheduler logs prove correlated authority, trigger, issuance, suppression, timeout, accepted/rejected result, periodic and removal events; the real DV carries the same peer/request/generation across SN and client.","gap":"no","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","validation_id":"V-NPLL-CLIENT","testplan_level":"unit","testplan_step_id":"nat-probe-client-logging-unit","evidence":"Private validation cases assert exact transport, version, identity, deadline, replay and endpoint reason codes; real DVs capture client start/completion, successful reporting, correlated report failure and TCP zero execution.","gap":"no","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","validation_id":"V-NPLL-SAFETY","testplan_level":"unit","testplan_step_id":"nat-probe-log-safety-unit","evidence":"Static and runtime checks prohibit secret/raw payload fields, keep endpoint values out of info/warn, and prove stable reports and maintenance do not add high-level NAT probe logs.","gap":"no","gap_manual_reason":""}
+  ],
+  "testing_case_type_coverage": [
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"normal","required":"yes","validation_id":"V-NPLL-SERVER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"boundary","required":"yes","validation_id":"V-NPLL-SERVER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"negative","required":"yes","validation_id":"V-NPLL-SERVER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"error","required":"yes","validation_id":"V-NPLL-SERVER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"compatibility","required":"yes","validation_id":"V-NPLL-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"lifecycle","required":"yes","validation_id":"V-NPLL-SERVER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_server_lifecycle_logging","case_type":"cross-module","required":"yes","validation_id":"V-NPLL-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"normal","required":"yes","validation_id":"V-NPLL-CLIENT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"boundary","required":"yes","validation_id":"V-NPLL-CLIENT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"negative","required":"yes","validation_id":"V-NPLL-CLIENT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"error","required":"yes","validation_id":"V-NPLL-CLIENT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"compatibility","required":"yes","validation_id":"V-NPLL-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"lifecycle","required":"yes","validation_id":"V-NPLL-CLIENT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_client_lifecycle_logging","case_type":"cross-module","required":"yes","validation_id":"V-NPLL-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"normal","required":"yes","validation_id":"V-NPLL-SAFETY","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"boundary","required":"yes","validation_id":"V-NPLL-SAFETY","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"negative","required":"yes","validation_id":"V-NPLL-SAFETY","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"error","required":"yes","validation_id":"V-NPLL-SAFETY","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"compatibility","required":"yes","validation_id":"V-NPLL-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"lifecycle","required":"yes","validation_id":"V-NPLL-SAFETY","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_log_safety_and_noise_control","case_type":"cross-module","required":"yes","validation_id":"V-NPLL-FLOW","level":"dv","status":"covered","gap_manual_reason":""}
+  ],
+  "evidence": {
+    "test_runs": ["test-results/test-runs/20260830T113229Z-p2p-frame+023-nat-probe-lifecycle-logging-all.json"],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "NPLL-INTEGRATION-PORT-COLLISION-1",
+      "owning_stage": "testing",
+      "count": 2,
+      "target_task": "T-1",
+      "reason": "the full SN suite twice collided on a fixed loopback TCP port when independent test allocators ran concurrently",
+      "expected_fix_output": "serialize the task-local full SN integration step and regenerate a complete unified artifact without changing production behavior"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/023-nat-probe-lifecycle-logging/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

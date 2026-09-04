@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-fallback-rendezvous-to-legacy"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["pipeline/plan.md#failure-flows", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["rendezvous to legacy to PN fallback order", "one-query input reuse", "no public API or wire change"]
+  data:
+    applies: false
+    evidence: No persistent data, schema, migration, serialization, or cache-key behavior changes.
+    required_checks: []
+  security:
+    applies: false
+    evidence: Authentication, authorization, identity binding, certificates, and trust boundaries remain unchanged.
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: ["pipeline/plan.md#dependency-graphs", "pipeline/plan.md#state-ownership", "pipeline/plan.md#failure-flows"]
+    required_checks: ["legacy direct success after rendezvous failure", "PN fallback after legacy direct failure", "shared absolute deadline remains bounded"]
+  build:
+    applies: false
+    evidence: No dependency, feature, build graph, artifact, rollout default, release, or deployment change is planned.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing Harness workflow and test runner without changing Harness rules, scripts, templates, or infrastructure behavior.
+    required_checks: []

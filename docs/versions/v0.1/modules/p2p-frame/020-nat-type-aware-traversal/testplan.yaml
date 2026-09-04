@@ -1,0 +1,163 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 020-nat-type-aware-traversal
+submodule: 020-nat-type-aware-traversal
+api_impact:
+  public_api: migration-required
+  crate_root_export_change: true
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/lib.rs", "p2p-frame/src/nat_type.rs", "p2p-frame/src/networks/network.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/sn/mod.rs", "p2p-frame/src/sn/nat_probe.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/protocol/v0.rs", "p2p-frame/src/sn/service/peer_manager.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/tunnel/device_finder.rs", "p2p-frame/src/tunnel/mod.rs", "p2p-frame/src/tunnel/nat_connect_plan.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "sn-miner-rust/src/main.rs", "p2p-frame/src/nat_type/tests.rs", "p2p-frame/src/networks/network/punch_only_default_tests.rs", "p2p-frame/src/sn/nat_probe/tests.rs", "p2p-frame/src/sn/protocol/sn/nat_type_wire_tests.rs", "p2p-frame/src/sn/protocol/v0/nat_type_wire_tests.rs", "p2p-frame/src/sn/service/service/nat_probe_config_tests.rs", "p2p-frame/src/tunnel/nat_connect_plan/tests.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/nat_profile_public_api.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs", "p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs", "sn-miner-rust/src/nat_probe_config_tests.rs", "docs/versions/v0.1/modules/p2p-frame/020-nat-type-aware-traversal/proposal.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: nat-profile-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile the external-style consumer of the exported NAT profile and context API
+      change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "nat_type_aware_strategy_selection", "symmetric_port_prediction", "nat_aware_connect_flow"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--test", "nat_profile_public_api", "--no-run"]
+    - id: nat-profile-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify repository consumers contain no superseded 020 NAT model or cache symbols
+      change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "nat_type_aware_strategy_selection", "symmetric_port_prediction", "nat_aware_connect_flow"]
+      run: ["uv", "run", "--active", "python", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "020-nat-type-aware-traversal"]
+    - id: nat-profile-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile p2p-frame and the affected cyfs-p2p and sn-miner repository consumers
+      change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "nat_type_aware_strategy_selection", "symmetric_port_prediction", "nat_aware_connect_flow"]
+      run: ["cargo", "test", "-p", "p2p-frame", "-p", "cyfs-p2p", "-p", "sn-miner", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify true mapping observations, freshness, bounded hints, the ordered two-party matrix, additive wire compatibility, validated probe configuration, and the backward-compatible network default.
+    test_targets:
+      - p2p-frame/src/nat_type/tests.rs
+      - p2p-frame/src/tunnel/nat_connect_plan/tests.rs
+      - p2p-frame/src/sn/protocol/sn/nat_type_wire_tests.rs
+      - p2p-frame/src/sn/protocol/v0/nat_type_wire_tests.rs
+      - p2p-frame/src/sn/service/service/nat_probe_config_tests.rs
+      - p2p-frame/src/sn/service/service.rs
+      - p2p-frame/src/sn/service/peer_manager.rs
+      - p2p-frame/src/sn/inter_sn/mod.rs
+      - p2p-frame/src/networks/network/punch_only_default_tests.rs
+      - sn-miner-rust/src/nat_probe_config_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - New private tests live in dedicated files and are connected only through cfg(test) wiring captured by the testing-stage baselines.
+        - Public is tested only from static-WAN selector inputs; probe observations never generate Public or traditional four-class NAT labels.
+        - Codec tests exercise legacy-to-new, new-to-legacy, missing, unknown-version, and truncated-tail behavior for response, ReportSn request, and SnCalled context tails while proving SnCallResp remains unchanged.
+    steps:
+      - id: nat-profile-model-unit
+        name: Run observation, freshness, context, and prediction-bound tests
+        change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "symmetric_port_prediction"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "nat_type::tests"]
+      - id: nat-connect-plan-unit
+        name: Run ordered NN NS SN SS Public Unknown and bounded-best-effort plan tests
+        change_ids: ["nat_type_aware_strategy_selection", "symmetric_port_prediction", "nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "tunnel::nat_connect_plan::tests"]
+      - id: nat-wire-common-unit
+        name: Run common SN additive-tail and legacy compatibility tests
+        change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::protocol::sn::nat_type_wire_tests"]
+      - id: nat-wire-called-unit
+        name: Run SnCalled context compatibility and unchanged SnCallResp tests
+        change_ids: ["nat_type_peer_cache_and_exchange", "nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::protocol::v0::nat_type_wire_tests"]
+      - id: nat-probe-config-unit
+        name: Run SN service disabled invalid and valid probe configuration tests
+        change_ids: ["sn_nat_probe_ports"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::service::service::nat_probe_config_tests"]
+      - id: punch-only-default-unit
+        name: Run backward-compatible TunnelNetwork punch-only default test
+        change_ids: ["nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "networks::network::tests::punch_only_default"]
+      - id: sn-miner-probe-config-unit
+        name: Run sn-miner zero one duplicate malformed and multi-port parser tests
+        change_ids: ["sn_nat_probe_ports"]
+        run: ["cargo", "test", "-p", "sn-miner", "nat_probe_config_tests"]
+      - id: peer-profile-expiry-unit
+        name: Prove a reported peer profile is unavailable after its own expiry
+        change_ids: ["nat_type_peer_cache_and_exchange"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::service::peer_manager::tests::reported_net_profile_is_available_only_until_its_own_expiry", "--", "--exact"]
+      - id: inter-sn-profile-forwarding-unit
+        name: Prove distributed detail queries forward the profile without lease replication ownership
+        change_ids: ["nat_type_peer_cache_and_exchange"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::inter_sn::tests::sn_distributed_detail_response_forwards_profile_without_replication", "--", "--exact"]
+
+  dv:
+    mode: enabled
+    summary: Exercise real UDP reflectors and same-socket probing, direction-aware incoming ownership, non-gated rendezvous concurrency, legacy tunnel regressions, and the real listener punch cadence.
+    test_targets:
+      - p2p-frame/src/sn/nat_probe/tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+      - p2p-frame/src/tunnel/tunnel_manager.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Loopback reflectors are real UDP sockets on two ports and return the complete source endpoint observed from one client socket.
+        - The tunnel-manager filter includes the task tests plus existing direct/reverse, waiter, fallback, cancellation, and proxy regressions; it executes a predicted hit, an all-predicted miss to PN, and incoming-success/owner-drop punch cancellation.
+        - The call-response timing test delays the response future for five seconds, proves action completion in the first 250ms, and observes owner cancellation.
+    steps:
+      - id: nat-probe-runtime-dv
+        name: Run fixed-packet same-socket two-reflector and fail-closed probe workflows
+        change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::nat_probe::tests"]
+      - id: nat-tunnel-owner-dv
+        name: Run direction waiter prediction no-call-response-gate punch ownership fallback and legacy tunnel-manager regressions
+        change_ids: ["nat_type_aware_strategy_selection", "symmetric_port_prediction", "nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests"]
+      - id: punch-only-listener-lifecycle-dv
+        name: Run the real listener-owned active and reverse UDP punch cadence lifecycle
+        change_ids: ["nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::listener::udp_punch_tests::lifecycle_regression::udp_punch_runtime_skips_missed_ticks_for_active_and_reverse", "--", "--exact"]
+      - id: punch-only-deadline-dv
+        name: Run missed-tick deadline and duration-overflow termination boundaries
+        change_ids: ["nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::listener::udp_punch_tests::lifecycle_regression::udp_punch_missed_tick_stops_at_deadline_and_on_duration_overflow", "--", "--exact"]
+
+  integration:
+    mode: enabled
+    summary: Verify cold first-query profile delivery, exact query-to-call-to-called snapshot forwarding, old SN command behavior, and per-ActiveSN local ownership against a real in-process SN and clients.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+      - p2p-frame/src/sn/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The task test starts one real SN with two reflector ports and two clients; no remote profile map or warm-cache retry is involved.
+        - The distributed cold-query case leaves the querying SN cache empty, resolves the serving lease, calls the remote SnService detail boundary through a constructor-injected Inter-SN client trait fake, and asserts the final SnQueryResp profile without local replication; no global registry fallback is used.
+        - The broader SN filter retains report/query/call timeout, malformed-response, TCP/QUIC, unknown-peer, and five-by-five compatibility coverage.
+        - Public-network NAT mapping diversity and predicted-port hit rates remain environment-dependent acceptance gaps; loopback proves protocol, ownership, and ordering rather than Internet reachability.
+    steps:
+      - id: nat-first-query-snapshot-integration
+        name: Run cold first-query profile and exact traversal-context forwarding
+        change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "nat_type_aware_strategy_selection", "nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::first_query_returns_remote_profile_and_call_forwards_exact_snapshot", "--", "--exact"]
+      - id: active-sn-profile-isolation-integration
+        name: Prove local observations remain isolated per ActiveSN entry
+        change_ids: ["nat_type_peer_cache_and_exchange"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::active_sn_profiles_are_kept_per_sn_id", "--", "--exact"]
+      - id: distributed-cold-query-integration
+        name: Run empty-local-cache serving-lease detail lookup through the final SnQueryResp
+        change_ids: ["nat_type_peer_cache_and_exchange"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::cold_distributed_query_returns_remote_profile_in_final_sn_query_response", "--", "--exact"]
+      - id: sn-command-compatibility-integration
+        name: Run existing SN command and client-server regression closure
+        change_ids: ["sn_nat_probe_ports", "nat_type_peer_cache_and_exchange", "nat_aware_connect_flow"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests"]

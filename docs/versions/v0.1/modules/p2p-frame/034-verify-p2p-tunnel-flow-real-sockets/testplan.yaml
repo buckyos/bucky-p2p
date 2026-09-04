@@ -1,0 +1,96 @@
+schema_version: 1
+task_manifest: task.yaml
+version: v0.1
+module: p2p-frame
+task_name: 034-verify-p2p-tunnel-flow-real-sockets
+submodule: 034-verify-p2p-tunnel-flow-real-sockets
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs:
+  - p2p-frame/src/tunnel/nat_connect_plan.rs
+  - p2p-frame/src/tunnel/tunnel_manager.rs
+  - p2p-frame/src/sn/client/sn_service.rs
+  - p2p-frame/src/sn/service/service.rs
+  - p2p-frame/src/sn/inter_sn/mod.rs
+  - p2p-frame/src/pn/service/pn_server.rs
+  - p2p-frame/tests/real_p2p_tunnel_flow.rs
+  - p2p-frame/tests/real_p2p_tunnel_flow/fixture.rs
+  - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+  - p2p-frame/tests/real_p2p_tunnel_flow/fallback.rs
+  - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+  - docs/versions/v0.1/modules/p2p-frame/034-verify-p2p-tunnel-flow-real-sockets/proposal.md
+  - docs/versions/v0.1/modules/p2p-frame/034-verify-p2p-tunnel-flow-real-sockets/pipeline/plan.md
+contract_checks:
+  mode: disabled
+  reason: The task adds a dedicated p2p-frame test surface and changes no public API, crate-root export, build surface, documentation example, or wire contract.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise the crate-private production selector at its lowest level for public priority, all four NAT mapping combinations, prediction, Unknown, and bounded fallback.
+    test_targets:
+      - p2p-frame/tests/unit/tunnel/nat_connect_plan/tests.rs
+      - p2p-frame/tests/unit/tunnel/nat_connect_plan/rendezvous_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Exact selector assertions stay in the crate unit surface; the new integration test does not invoke a private selector.
+        - These tests provide actual operation and prediction assertions while DV records real UDP observations and observable production-entry boundaries.
+    steps:
+      - id: real-p2p-flow-selector-unit
+        name: Run the complete NAT connect-plan and rendezvous operation selector unit group
+        change_ids: ["real_socket_tunnel_flow_strategy_selection", "real_socket_tunnel_flow_fallbacks"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::nat_connect_plan::tests::", "--", "--test-threads=1"]
+
+  dv:
+    mode: enabled
+    summary: Run the dedicated real-socket UDP observation, public/legacy/PN payload, and simultaneous-connect stability cases serially inside p2p-frame.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/fixture.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/fallback.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Every service uses dynamic loopback sockets, explicit readiness, absolute deadlines, and RAII teardown.
+        - NAT rows always emit every flow stage; pre-request local rejection is recorded as not-observable rather than omitted.
+        - Public, missing-profile legacy, PN proxy, and simultaneous-connect cases require real streams and bidirectional unique payloads.
+        - Simultaneous direct success proves caller-visible stability only and does not claim the internal owner-token branch.
+    steps:
+      - id: real-p2p-flow-socket-dv
+        name: Run all dedicated real-socket flow cases except the cross-SN integration case
+        change_ids: ["real_socket_tunnel_flow_strategy_selection", "real_socket_tunnel_flow_fallbacks", "real_socket_tunnel_flow_collision_cross_sn"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "real_p2p_tunnel_flow", "--", "--test-threads=1", "--skip", "production_ttp_cross_sn_query_and_rendezvous_arm_target_action"]
+
+  integration:
+    mode: enabled
+    summary: Start a real owner-directory, two production-membership serving SNs, and source/target P2pStack nodes, then prove Query and rendezvous target action cross the production TTP inter-SN control transport.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The fixture may seed the target serving lease through the public owner-directory service before the observed flow.
+        - Query, inter-SN relay, rendezvous delivery, and target action use production real-socket paths and retain the TunnelManager-installed listener.
+        - The loopback NAT peer data path is not required and the case does not claim connected or payload-complete.
+    steps:
+      - id: real-p2p-flow-cross-sn-integration
+        name: Run the production TTP inter-SN Query and rendezvous action case
+        change_ids: ["real_socket_tunnel_flow_collision_cross_sn"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "real_p2p_tunnel_flow", "collision_cross_sn::production_ttp_cross_sn_query_and_rendezvous_arm_target_action", "--", "--exact", "--test-threads=1"]

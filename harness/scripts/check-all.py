@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run scaffold-level repository checks without replaying task lifecycle gates.
 
-Task-owned schema, admission, stage-scope, pipeline-plan, test, and acceptance
+Task-owned schema, risk-profile, stage-scope, pipeline-plan, test, and acceptance
 checks run when their relevant inputs change. A repository-wide audit is not an
 invalidation event and must not execute those checkers again.
 """

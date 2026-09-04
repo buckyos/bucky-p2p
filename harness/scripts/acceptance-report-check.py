@@ -1,82 +1,61 @@
 #!/usr/bin/env python3
-"""Validate that an acceptance report contains enforceable review evidence.
+"""Validate coverage and consistency of the Harness defect-discovery report.
 
-Beyond report structure, this checker re-verifies execution evidence. Accepted
-reports must either reference task-relevant machine-written test artifacts
-(test-run.py writes test-results/test-runs/*.json) with non-empty successful
-executed steps, or record a structured automated-test exception with reason,
-owner, risk, acceptance impact, and alternative evidence. Pasted command
-output alone is not acceptance evidence. Single-task acceptance uses only the
-active task's test artifact; package/module, whole-project, and quality-gate
-runs are not automatic task evidence. Risk-triggered API/build-surface tasks
-also require their contract kinds/assertions and a current scoped
-evidence_input_sha256 binding.
-
-The checker also requires a category-by-category implementation correctness
-audit. Passing tests cannot replace explicit review of logic, progress,
-concurrency, resource lifetime, state integrity, recovery, boundaries, and
-security/capacity safety.
+This checker proves that required review surfaces were recorded with concrete
+evidence and that the conclusion agrees with the recorded findings. It cannot
+prove that the reviewer found every real defect.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import re
 import sys
 from pathlib import Path
 
+from task_manifest import TaskManifestError, parse_task_manifest, stage_is_automatic
 
-TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
-EMPTY_VALUES = {"", "-", "n/a", "na", "none", "tbd", "todo", "pending"}
-BLOCKING_EVIDENCE_STATUSES = {"missing", "inconsistent", "logically invalid"}
-BLOCKING_TEST_STATUSES = {"gap", "stale", "not runnable"}
-BLOCKING_RULE_STATUSES = {"fail", "gap"}
-ALLOWED_CORRECTNESS_STATUSES = {"pass", "fail", "not applicable"}
-ALLOWED_CORRECTNESS_STAGES = {"none", "proposal", "design", "implementation", "testing"}
-REQUIRED_CORRECTNESS_CATEGORIES = {
-    "logic and control flow",
-    "termination and progress",
-    "concurrency and synchronization",
-    "resource lifetime and cleanup",
-    "state and data integrity",
-    "error handling and recovery",
-    "interface boundary and compatibility",
-    "security and capacity safety",
-}
-HIGH_SEVERITIES = {"critical", "high"}
+
+TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+EMPTY_VALUES = {"", "-", "n/a", "na", "tbd", "todo", "pending"}
+ALLOWED_RESULTS = {"accepted", "rejected", "needs changes"}
 ALLOWED_SEVERITIES = {"none", "low", "medium", "high", "critical"}
-REQUIRED_VALIDATION_LABELS = (
-    "Existing schema result",
-    "Existing admission stamp",
-    "Existing stage-scope result",
-    "Task-relevant test run artifact",
-    "Commands rerun because checker-owned inputs changed",
-)
-RUN_ARTIFACT_RE = re.compile(
-    r"test-results/(test-runs|quality-runs)/[A-Za-z0-9+_.-]+\.json"
-)
-RUN_ARTIFACT_SCHEMA = 1
-CONTRACT_ASSERTIONS = {
-    "external-positive": "new-path-compiles",
-    "external-negative": "old-path-rejected-for-removed-symbol",
-    "removed-symbol-scan": "no-unallowlisted-old-symbol-references",
-    "repository-compile-closure": "repository-consumers-compile",
-    "documentation-examples": "documentation-examples-compile",
+ALLOWED_OWNING_STAGES = {
+    "requirement",
+    "design",
+    "implementation",
+    "testing",
+    "none",
 }
-QUALITY_GATES_CONFIG = "harness/quality-gates.yaml"
-NOT_APPLICABLE_RE = re.compile(
-    r"\b(not applicable|not required|not relevant|out of scope|no automated tests?|no runnable tests?)\b",
-    re.IGNORECASE,
-)
-AUTOMATED_TEST_EXCEPTION_FIELDS = (
-    "Reason",
-    "Owner",
-    "Risk",
-    "Acceptance impact",
-    "Alternative evidence",
-)
+REVIEW_STATUSES = {"pass", "fail"}
+DISCOVERY_STATUSES = {"pass", "fail", "not-applicable"}
+DOCUMENT_STATUSES = {"pass", "fail", "not-present"}
+REQUIRED_DISCOVERY_CATEGORIES = {
+    "requirement-and-behavior",
+    "logic-and-control-flow",
+    "boundary-and-input",
+    "state-and-data-integrity",
+    "error-handling-and-recovery",
+    "resource-lifetime-and-cleanup",
+    "concurrency-and-ordering",
+    "interface-and-compatibility",
+    "security-and-capacity",
+    "test-adequacy",
+}
+ALWAYS_APPLICABLE_CATEGORIES = {"requirement-and-behavior", "test-adequacy"}
+GENERIC_EVIDENCE = {
+    "reviewed code",
+    "reviewed implementation",
+    "looks correct",
+    "tests pass",
+    "test passed",
+    "no issue",
+    "no issues",
+    "no defect",
+    "no defects",
+}
 
 
 def fail(message: str) -> None:
@@ -85,7 +64,7 @@ def fail(message: str) -> None:
 
 
 def read_text(path: Path) -> str:
-    if not path.exists():
+    if not path.is_file():
         fail(f"missing required file: {path}")
     return path.read_text(encoding="utf-8")
 
@@ -95,16 +74,26 @@ def normalize_column(value: str) -> str:
 
 
 def split_table_row(line: str) -> list[str]:
-    parts = [part.strip() for part in line.strip().split("|")]
-    if parts and parts[0] == "":
-        parts = parts[1:]
-    if parts and parts[-1] == "":
-        parts = parts[:-1]
-    return parts
+    cells = [cell.strip() for cell in line.strip().split("|")]
+    if cells and not cells[0]:
+        cells = cells[1:]
+    if cells and not cells[-1]:
+        cells = cells[:-1]
+    return cells
 
 
 def non_empty(value: str) -> bool:
     return value.strip().lower() not in EMPTY_VALUES
+
+
+def concrete(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    return (
+        non_empty(value)
+        and len(normalized) >= 12
+        and normalized not in GENERIC_EVIDENCE
+        and not re.search(r"<[^>]+>", normalized)
+    )
 
 
 def section_body(text: str, heading: str, path: Path) -> str:
@@ -117,436 +106,173 @@ def section_body(text: str, heading: str, path: Path) -> str:
 
 
 def table_rows(text: str, heading: str, path: Path) -> list[dict[str, str]]:
-    body = section_body(text, heading, path)
-    lines = body.splitlines()
-    table_start = None
-    for index, line in enumerate(lines):
-        if "|" in line and index + 1 < len(lines) and TABLE_SEPARATOR_RE.match(lines[index + 1]):
-            table_start = index
-            break
-    if table_start is None:
-        fail(f"{path} section ## {heading} missing required table")
-    headers = [normalize_column(cell) for cell in split_table_row(lines[table_start])]
+    lines = section_body(text, heading, path).splitlines()
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if "|" in line
+            and index + 1 < len(lines)
+            and TABLE_SEPARATOR_RE.match(lines[index + 1])
+        ),
+        None,
+    )
+    if start is None:
+        fail(f"{path} ## {heading} missing required table")
+    headers = [normalize_column(cell) for cell in split_table_row(lines[start])]
     rows: list[dict[str, str]] = []
-    for line in lines[table_start + 2 :]:
+    for line in lines[start + 2 :]:
         if not line.strip() or not line.lstrip().startswith("|"):
             break
         values = split_table_row(line)
-        rows.append({header: values[pos].strip() if pos < len(values) else "" for pos, header in enumerate(headers)})
+        rows.append(
+            {
+                header: values[index].strip() if index < len(values) else ""
+                for index, header in enumerate(headers)
+            }
+        )
     if not rows:
-        fail(f"{path} section ## {heading} has no data rows")
+        fail(f"{path} ## {heading} must contain at least one review row")
     return rows
 
 
-def require_columns(path: Path, heading: str, rows: list[dict[str, str]], columns: tuple[str, ...]) -> None:
-    missing = sorted(set(columns) - set(rows[0]))
+def require_columns(
+    path: Path, heading: str, rows: list[dict[str, str]], columns: tuple[str, ...]
+) -> None:
+    missing = [column for column in columns if column not in rows[0]]
     if missing:
         fail(f"{path} ## {heading} missing columns: {', '.join(missing)}")
+    for index, row in enumerate(rows, start=1):
+        empty = [column for column in columns if not non_empty(row.get(column, ""))]
+        if empty:
+            fail(
+                f"{path} ## {heading} row {index} has empty fields: "
+                + ", ".join(empty)
+            )
 
 
 def conclusion(text: str, path: Path) -> str:
-    body = section_body(text, "Conclusion", path).lower()
-    if re.search(r"accepted\s*/\s*rejected\s*/\s*needs changes:\s*accepted\b", body):
-        return "accepted"
-    if re.search(r"accepted\s*/\s*rejected\s*/\s*needs changes:\s*rejected\b", body):
-        return "rejected"
-    if re.search(r"accepted\s*/\s*rejected\s*/\s*needs changes:\s*needs changes\b", body):
-        return "needs changes"
-    fail(f"{path} Conclusion must explicitly select accepted, rejected, or needs changes")
-
-
-def check_nonempty_rows(path: Path, heading: str, rows: list[dict[str, str]], skip: set[str] | None = None) -> None:
-    skip = skip or set()
-    for index, row in enumerate(rows, start=1):
-        for column, value in row.items():
-            if column in skip:
-                continue
-            if not non_empty(value):
-                fail(f"{path} ## {heading} row {index} column {column} is empty placeholder content")
-
-
-def check_implementation_correctness_audit(path: Path, text: str, result: str) -> None:
-    heading = "Implementation Correctness Audit"
-    rows = table_rows(text, heading, path)
-    require_columns(
-        path,
-        heading,
-        rows,
-        (
-            "category",
-            "applicable_scope",
-            "evidence_reviewed",
-            "finding_reason_not_applicable",
-            "owning_stage",
-            "status",
-        ),
+    body = section_body(text, "Conclusion", path)
+    match = re.search(
+        r"(?im)^\s*-\s*Accepted / rejected / needs changes:\s*(.+)$", body
     )
-    check_nonempty_rows(path, heading, rows, skip={"owning_stage"})
-
-    seen: set[str] = set()
-    for index, row in enumerate(rows, start=1):
-        category = re.sub(r"\s+", " ", row.get("category", "").strip().lower())
-        if category in seen:
-            fail(f"{path} ## {heading} repeats category: {category}")
-        seen.add(category)
-
-        status = re.sub(r"\s+", " ", row.get("status", "").strip().lower())
-        if status not in ALLOWED_CORRECTNESS_STATUSES:
-            fail(f"{path} ## {heading} row {index} has invalid status: {row.get('status')}")
-
-        stage = row.get("owning_stage", "").strip().lower()
-        if stage not in ALLOWED_CORRECTNESS_STAGES:
-            fail(f"{path} ## {heading} row {index} has invalid owning stage: {row.get('owning_stage')}")
-        if status == "fail" and stage not in {"proposal", "design", "implementation", "testing"}:
-            fail(f"{path} ## {heading} failing row {index} must name its owning upstream stage")
-        if status != "fail" and stage != "none":
-            fail(f"{path} ## {heading} non-failing row {index} must use owning stage: none")
-        if result == "accepted" and status == "fail":
-            fail(f"{path} accepted conclusion has failing implementation correctness category: {category}")
-        if status == "not applicable":
-            reason = row.get("finding_reason_not_applicable", "").strip()
-            if len(reason) < 12:
-                fail(f"{path} ## {heading} row {index} needs a concrete not-applicable reason")
-
-    missing = sorted(REQUIRED_CORRECTNESS_CATEGORIES - seen)
-    if missing:
-        fail(f"{path} ## {heading} missing required categories: {', '.join(missing)}")
+    if not match:
+        fail(f"{path} Conclusion missing result")
+    result = match.group(1).strip().lower()
+    if result not in ALLOWED_RESULTS:
+        fail(f"{path} has unsupported conclusion: {result}")
+    reason = re.search(r"(?im)^\s*-\s*Reason:\s*(.+)$", body)
+    if not reason or not non_empty(reason.group(1)):
+        fail(f"{path} Conclusion missing concrete reason")
+    return result
 
 
-def load_run_artifact(root: Path, rel_path: str) -> dict[str, object]:
-    artifact_path = root / rel_path
-    if not artifact_path.is_file():
-        fail(f"referenced run artifact does not exist: {rel_path}")
-    try:
-        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        fail(f"referenced run artifact is not valid JSON: {rel_path}: {error}")
-    if not isinstance(artifact, dict) or artifact.get("schema") != RUN_ARTIFACT_SCHEMA:
-        fail(f"referenced run artifact has an unsupported schema: {rel_path}")
-    return artifact
-
-
-def required_contract_kinds(root: Path, scope: dict[str, object]) -> set[str]:
-    packet = (
-        root
-        / "docs"
-        / "versions"
-        / str(scope["version"])
-        / "modules"
-        / str(scope["module"])
-        / str(scope["task_name"])
-    )
-    plan = packet / "pipeline" / "plan.md"
-    design = plan if plan.is_file() else packet / "design.md"
-    if not design.is_file():
-        return set()
-    text = design.read_text(encoding="utf-8")
-    section = re.search(r"(?ms)^##\s+API and Build Surface Impact\s*$\n(.*?)(?=^##\s+|\Z)", text)
-    if not section:
-        return set()
-    body = section.group(1)
-    public = re.search(r"(?im)^\s*-\s*Public API impact:\s*([A-Za-z0-9_-]+)\s*$", body)
-    public_api = public.group(1).lower() if public else ""
-    required: set[str] = set()
-    if public_api == "breaking" or re.search(r"(?im)^\s*-\s*Compatibility:\s*breaking\s*$", text):
-        required.update({"external-positive", "external-negative", "removed-symbol-scan", "repository-compile-closure"})
-    elif public_api == "migration-required" or re.search(r"(?im)^\s*-\s*Compatibility:\s*migration-required\s*$", text):
-        required.update({"external-positive", "removed-symbol-scan", "repository-compile-closure"})
-    if re.search(r"(?im)^\s*-\s*Crate-root export change:\s*yes\s*$", body):
-        required.update({"external-positive", "repository-compile-closure"})
-    if re.search(r"(?im)^\s*-\s*Build-surface change:\s*yes\s*$", body):
-        required.add("repository-compile-closure")
-    if re.search(r"(?im)^\s*-\s*Documentation examples affected:\s*yes\s*$", body):
-        required.add("documentation-examples")
-    if plan.is_file():
-        compatibilities = re.findall(
-            r"(?im)^\|[^\n]*\|\s*(new|backward-compatible|migration-required|breaking)\s*\|[^\n]*$",
-            text,
-        )
-        if "breaking" in {value.lower() for value in compatibilities}:
-            required.update({"external-positive", "external-negative", "removed-symbol-scan", "repository-compile-closure"})
-        elif "migration-required" in {value.lower() for value in compatibilities}:
-            required.update({"external-positive", "removed-symbol-scan", "repository-compile-closure"})
-    return required
-
-
-def required_risk_evidence_paths(root: Path, scope: dict[str, object]) -> set[str]:
-    packet = (
-        root / "docs" / "versions" / str(scope["version"]) / "modules"
-        / str(scope["module"]) / str(scope["task_name"])
-    )
-    plan = packet / "pipeline" / "plan.md"
-    design = plan if plan.is_file() else packet / "design.md"
-    text = design.read_text(encoding="utf-8")
-    paths: set[str] = set()
-    for row in table_rows(text, "Consumer Migration Closure", design):
-        if row.get("migration_status", "").strip().lower() == "verified-none":
-            continue
-        value = row.get("consumer_path", "").strip().strip("`")
-        if value:
-            paths.add(value)
-    heading = "Implementation Scope Bindings" if plan.is_file() else "Directly Mapped Change Items"
-    for row in table_rows(text, heading, design):
-        if row.get("change_id", "").strip() not in scope["change_ids"]:
-            continue
-        for value in re.split(r"\s*(?:,|<br\s*/?>)\s*", row.get("scope_paths", "")):
-            cleaned = re.split(r"[*?\[]", value.strip().strip("`"), maxsplit=1)[0].rstrip("/")
-            if cleaned:
-                paths.add(cleaned)
-    return paths
-
-
-def roots_cover_path(roots: list[str], path: str) -> bool:
-    target = Path(path)
-    return any(target == Path(root) or Path(root) in target.parents for root in roots)
-
-
-def current_evidence_input_binding(
-    root: Path, roots: list[str], expected_testplan: str
-) -> tuple[list[str], str]:
-    root_resolved = root.resolve()
-    paths: set[Path] = {(root / expected_testplan).resolve()}
-    for relative_root in roots:
-        if relative_root in {"", "."} or Path(relative_root).is_absolute() or any(
-            part == ".." for part in Path(relative_root).parts
-        ):
-            fail(f"artifact has invalid evidence input root: {relative_root}")
-        configured = root / relative_root
-        if configured.is_symlink():
-            fail(f"artifact evidence input root is a symlink: {relative_root}")
-        candidate = configured.resolve()
-        try:
-            candidate.relative_to(root_resolved)
-        except ValueError:
-            fail(f"artifact evidence input resolves outside repository: {relative_root}")
-        if not candidate.exists():
-            fail(f"artifact evidence input root is missing: {relative_root}")
-        if candidate.is_dir():
-            for child in candidate.rglob("*"):
-                if child.is_symlink():
-                    fail(f"artifact evidence input tree contains a symlink: {child}")
-                if child.is_file() and not any(
-                    part in {".git", ".venv", "target", "test-results", "__pycache__"}
-                    for part in child.relative_to(root_resolved).parts
-                ):
-                    paths.add(child.resolve())
-        elif candidate.is_file():
-            paths.add(candidate)
-    hasher = hashlib.sha256(b"harness-task-evidence-input-v1\0")
-    relative_paths = sorted(path.relative_to(root_resolved).as_posix() for path in paths)
-    for relative in relative_paths:
-        path = root / relative
-        hasher.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
-    return relative_paths, hasher.hexdigest()
-
-
-def configured_quality_gate_ids(root: Path) -> set[str] | None:
-    """Return configured gate ids, an empty set, or None for missing/malformed config."""
-    config = root / QUALITY_GATES_CONFIG
-    if not config.is_file():
-        return None
-    text = config.read_text(encoding="utf-8")
-    if re.search(r"(?m)^gates:\s*\[\s*\]\s*$", text):
-        return set()
-    gates_line = re.search(r"(?m)^gates:\s*$", text)
-    if not gates_line:
-        return None
-    gate_ids = set(re.findall(r"(?m)^\s*-\s*id:\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*$", text[gates_line.end() :]))
-    return gate_ids or None
-
-
-def command_value(command_body: str, label: str) -> str | None:
-    pattern = rf"(?im)^\s*-\s+.*{re.escape(label)}.*:\s*(.+)$"
-    match = re.search(pattern, command_body)
-    return match.group(1).strip() if match else None
-
-
-def check_automated_test_exception(text: str, path: Path) -> None:
-    body = section_body(text, "Automated Test Exception", path)
-    applies = re.search(r"(?im)^\s*-\s+Applies:\s*(yes|true)\s*$", body)
-    if not applies:
-        fail(f"{path} Automated Test Exception must explicitly set Applies: yes")
-    for label in AUTOMATED_TEST_EXCEPTION_FIELDS:
-        match = re.search(rf"(?im)^\s*-\s+{re.escape(label)}:\s*(.+)$", body)
-        value = match.group(1).strip().strip('"').strip("'") if match else ""
-        if not match or not non_empty(value):
-            fail(f"{path} Automated Test Exception missing concrete {label}")
-    reason = re.search(r"(?im)^\s*-\s+Reason:\s*(.+)$", body)
-    if reason and len(reason.group(1).strip()) < 12:
-        fail(f"{path} Automated Test Exception reason is too short to be actionable")
-
-
-def object_scope(text: str, path: Path) -> dict[str, object]:
+def object_scope(text: str, path: Path, root: Path) -> dict[str, object]:
     body = section_body(text, "Object and Scope", path)
-    values: dict[str, str] = {}
-    for label in ("Module", "Version", "Task name", "change_id values reviewed"):
-        match = re.search(rf"(?im)^\s*-\s+{re.escape(label)}:\s*(.+)$", body)
-        if not match or not non_empty(match.group(1)):
-            fail(f"{path} Object and Scope missing concrete value for {label}")
-        values[label] = match.group(1).strip()
-    task_name = values["Task name"]
-    if not re.fullmatch(r"\d{3,}-[a-z0-9][a-z0-9_.-]*", task_name):
-        fail(f"{path} Object and Scope has invalid Task name: {task_name}")
+    match = re.search(r"(?im)^\s*-\s*Task manifest:\s*(.+)$", body)
+    if not match or not non_empty(match.group(1)):
+        fail(f"{path} Object and Scope missing Task manifest")
+    value = match.group(1).strip().strip("`")
+    review_mode = re.search(r"(?im)^\s*-\s*Review mode:\s*(.+)$", body)
+    if (
+        not review_mode
+        or not concrete(review_mode.group(1))
+        or "independent" not in review_mode.group(1).lower()
+    ):
+        fail(
+            f"{path} Object and Scope requires a concrete independent Review mode"
+        )
+    manifest = path.parent / value
+    try:
+        manifest.resolve().relative_to(root.resolve())
+    except ValueError:
+        fail(f"{path} Task manifest resolves outside repository: {value}")
+    try:
+        task = parse_task_manifest(manifest)
+    except TaskManifestError as error:
+        fail(str(error))
+    bindings: dict[str, str] = {}
+    for field in ("version", "packet_module", "task_name"):
+        if task.get(field) is None:
+            fail(f"{manifest} missing {field}")
+        bindings[field] = str(task[field])
     change_ids = {
-        item.strip().strip("`")
-        for item in values["change_id values reviewed"].split(",")
-        if item.strip()
+        str(change.get("id"))
+        for change in task.get("changes", [])
+        if isinstance(change, dict) and change.get("id") is not None
     }
     if not change_ids:
-        fail(f"{path} Object and Scope must list reviewed change_id values")
+        fail(f"{manifest} has no change ids")
     return {
-        "module": values["Module"],
-        "version": values["Version"],
-        "task_name": task_name,
+        "module": bindings["packet_module"],
+        "version": bindings["version"],
+        "task_name": bindings["task_name"],
         "change_ids": change_ids,
-        "task_scope": f"{values['Module']}/{task_name}",
+        "task_scope": f"{bindings['packet_module']}/{bindings['task_name']}",
     }
 
 
-def check_run_artifacts(
-    path: Path,
-    text: str,
-    root: Path,
-    result: str,
-    scope: dict[str, object],
-) -> None:
-    referenced_paths = sorted(set(match.group(0) for match in RUN_ARTIFACT_RE.finditer(text)))
-    artifacts = {rel: load_run_artifact(root, rel) for rel in referenced_paths}
-
-    if result != "accepted":
-        return
-
-    for rel, artifact in artifacts.items():
-        if artifact.get("exit_code") != 0:
-            fail(
-                f"{path} referenced run artifact must be passing for an accepted "
-                f"report: {rel}"
-            )
-
-    task_artifacts: list[str] = []
-    required_contracts = required_contract_kinds(root, scope)
-    expected_testplan = (
-        f"docs/versions/{scope['version']}/modules/{scope['module']}/"
-        f"{scope['task_name']}/testplan.yaml"
+def expected_document_sources(packet: Path) -> dict[str, list[str]]:
+    manifest = packet / "task.yaml"
+    if manifest.is_file():
+        try:
+            task = parse_task_manifest(manifest)
+        except TaskManifestError as error:
+            fail(str(error))
+    else:
+        task = {}
+    policy = {
+        "stage": str(task["stage"]) if task.get("stage") is not None else None,
+        "mode": str(task["mode"]) if task.get("mode") is not None else None,
+        "start": (
+            str(task["auto_pipeline_start_stage"])
+            if task.get("auto_pipeline_start_stage") is not None
+            else None
+        ),
+    }
+    automatic_design = stage_is_automatic(policy, "design")
+    automatic_testing = stage_is_automatic(policy, "testing")
+    design_candidates = (
+        ("pipeline/plan.md",) if automatic_design else ("design.md",)
     )
-    for rel, artifact in artifacts.items():
-        if "/test-runs/" not in rel:
-            continue
-        if artifact.get("requested_module") != scope["task_scope"]:
-            continue
-        if artifact.get("requested_level") != "all":
-            continue
-        testplans = artifact.get("testplans")
-        if not isinstance(testplans, list) or expected_testplan not in testplans:
-            continue
-        artifact_change_ids = artifact.get("change_ids")
-        if not isinstance(artifact_change_ids, list) or not all(
-            isinstance(item, str) for item in artifact_change_ids
-        ):
-            continue
-        if not scope["change_ids"] <= set(artifact_change_ids):
-            continue
-        steps = artifact.get("steps")
-        if not isinstance(steps, list) or not steps:
-            continue
-        if any(
-            not isinstance(step, dict)
-            or step.get("exit_code") != 0
-            or not isinstance(step.get("command"), list)
-            or not step.get("command")
-            or not isinstance(step.get("sources"), list)
-            or not step.get("sources")
-            for step in steps
-        ):
-            continue
-        if required_contracts:
-            seen_contracts: dict[str, str] = {}
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
-                for source in step.get("sources", []):
-                    if not isinstance(source, dict):
-                        continue
-                    kind = source.get("contract_kind")
-                    assertion = source.get("assertion")
-                    if isinstance(kind, str) and isinstance(assertion, str):
-                        seen_contracts[kind] = assertion
-            missing_contracts = required_contracts - set(seen_contracts)
-            if missing_contracts or any(
-                seen_contracts.get(kind) != CONTRACT_ASSERTIONS[kind]
-                for kind in required_contracts
-            ):
-                continue
-            evidence_inputs = artifact.get("evidence_inputs")
-            evidence_roots = artifact.get("evidence_input_roots")
-            recorded_hash = artifact.get("evidence_input_sha256")
-            current_inputs, current_hash = current_evidence_input_binding(
-                root,
-                evidence_roots if isinstance(evidence_roots, list) and all(isinstance(item, str) for item in evidence_roots) else [],
-                expected_testplan,
-            )
-            if (
-                not isinstance(evidence_inputs, list)
-                or not evidence_inputs
-                or not all(isinstance(item, str) for item in evidence_inputs)
-                or not isinstance(evidence_roots, list)
-                or not evidence_roots
-                or any(
-                    not roots_cover_path(evidence_roots, required_path)
-                    for required_path in required_risk_evidence_paths(root, scope)
-                )
-                or not isinstance(recorded_hash, str)
-                or current_inputs != sorted(evidence_inputs)
-                or current_hash != recorded_hash
-            ):
-                continue
-        task_artifacts.append(rel)
-    test_run_ok = bool(task_artifacts)
-    command_body = section_body(text, "Validation Evidence", path)
-    test_artifact_value = command_value(command_body, "Task-relevant test run artifact") or ""
-    if not test_run_ok:
-        if not NOT_APPLICABLE_RE.search(test_artifact_value):
-            fail(
-                f"{path} accepted conclusion requires a referenced passing task run for "
-                f"{scope['task_scope']} all covering change_ids "
-                f"{', '.join(sorted(scope['change_ids']))} from {expected_testplan}, or a structured "
-                "Automated Test Exception"
-            )
-        check_automated_test_exception(text, path)
-
-    quality_value = command_value(command_body, "Quality gates") or ""
-    quality_claims_run = non_empty(quality_value) and not NOT_APPLICABLE_RE.search(quality_value)
-    if quality_claims_run:
-        configured_gate_ids = configured_quality_gate_ids(root)
-        if configured_gate_ids is None:
-            fail(f"{path} cannot determine configured quality gates from {QUALITY_GATES_CONFIG}")
-        quality_artifact_ok = any(
-            "/quality-runs/" in rel
-            and isinstance(artifact.get("gates"), list)
-            and bool(artifact.get("gates"))
-            and {str(gate.get("id", "")) for gate in artifact["gates"] if isinstance(gate, dict)}
-            == configured_gate_ids
-            and all(
-                isinstance(gate, dict)
-                and non_empty(str(gate.get("id", "")))
-                and isinstance(gate.get("command"), list)
-                and bool(gate.get("command"))
-                and gate.get("exit_code") == 0
-                for gate in artifact["gates"]
-            )
-            for rel, artifact in artifacts.items()
-        )
-        if not quality_artifact_ok:
-            fail(
-                f"{path} reports explicitly requested quality gates without citing a passing "
-                "test-results/quality-runs/*.json artifact"
-            )
+    testing_candidates = (
+        ("testplan.yaml",)
+        if automatic_testing
+        else ("testing.md", "testplan.yaml")
+    )
+    design_sources = [
+        relative for relative in design_candidates if (packet / relative).is_file()
+    ]
+    testing_sources = [
+        relative for relative in testing_candidates if (packet / relative).is_file()
+    ]
+    return {"design": design_sources, "testing": testing_sources}
 
 
 def check_report(path: Path, text: str, root: Path) -> None:
+    ordered_headings = (
+        "Findings",
+        "Requirement Coverage",
+        "Independent Defect Discovery",
+        "Document Consistency",
+        "Result Summary",
+        "Conclusion",
+    )
+    positions = []
+    for heading in ordered_headings:
+        match = re.search(rf"(?m)^##\s+{re.escape(heading)}\s*$", text)
+        if not match:
+            fail(f"{path} missing required section: ## {heading}")
+        positions.append(match.start())
+    if positions != sorted(positions):
+        fail(
+            f"{path} must record findings, requirement coverage, and independent "
+            "defect discovery before document consistency, result summary, and conclusion"
+        )
+
     result = conclusion(text, path)
-    scope = object_scope(text, path)
-    expected_report = (
+    scope = object_scope(text, path, root)
+    expected = (
         root
         / "docs"
         / "versions"
@@ -556,111 +282,242 @@ def check_report(path: Path, text: str, root: Path) -> None:
         / str(scope["task_name"])
         / "acceptance-report.md"
     )
-    try:
-        if path.resolve() != expected_report.resolve():
-            fail(f"{path} Object and Scope does not match report task packet path: {expected_report}")
-    except OSError as error:
-        fail(f"cannot resolve acceptance report task binding: {error}")
+    if path.resolve() != expected.resolve():
+        fail(f"{path} Object and Scope does not match report task packet path: {expected}")
+    proposal = path.parent / "proposal.md"
+    if result == "accepted" and not proposal.is_file():
+        fail(f"{path} cannot be accepted because required proposal is missing: {proposal}")
 
     findings = table_rows(text, "Findings", path)
-    require_columns(path, "Findings", findings, ("id", "severity", "stage", "evidence", "problem", "fail_condition_hit"))
-    # severity legitimately uses the value "none" for no-finding rows; its
-    # validity is checked against ALLOWED_SEVERITIES below instead.
-    check_nonempty_rows(path, "Findings", findings, skip={"fail_condition_hit", "severity"})
+    require_columns(
+        path,
+        "Findings",
+        findings,
+        (
+            "id",
+            "severity",
+            "owning_stage",
+            "correctness_category",
+            "evidence",
+            "problem",
+            "blocking",
+        ),
+    )
     for index, row in enumerate(findings, start=1):
-        severity = row.get("severity", "").strip().lower()
+        severity = row["severity"].lower()
+        owning_stage = row["owning_stage"].lower()
+        blocking = row["blocking"].lower()
         if severity not in ALLOWED_SEVERITIES:
-            fail(f"{path} Findings row {index} has invalid severity: {row.get('severity')}")
-        if result == "accepted" and severity in HIGH_SEVERITIES:
-            fail(f"{path} accepted conclusion cannot contain {severity} findings")
-        if result == "accepted" and non_empty(row.get("fail_condition_hit", "")):
-            fail(f"{path} accepted conclusion cannot cite a fail condition in Findings row {index}")
+            fail(f"{path} Findings row {index} has invalid severity: {severity}")
+        if owning_stage not in ALLOWED_OWNING_STAGES:
+            fail(
+                f"{path} Findings row {index} has invalid owning stage: "
+                f"{owning_stage}"
+            )
+        if blocking not in {"yes", "no"}:
+            fail(f"{path} Findings row {index} blocking must be yes or no")
+        if not concrete(row["evidence"]):
+            fail(f"{path} Findings row {index} needs concrete evidence")
+        if severity in {"high", "critical"} and blocking != "yes":
+            fail(
+                f"{path} Findings row {index} severity {severity} must be blocking"
+            )
+        if severity == "none" and owning_stage != "none":
+            fail(
+                f"{path} Findings row {index} with severity none must use owning stage none"
+            )
+        if severity != "none" and owning_stage == "none":
+            fail(
+                f"{path} Findings row {index} with a defect must name an owning stage"
+            )
+        if severity == "none" and blocking != "no":
+            fail(
+                f"{path} Findings row {index} with severity none cannot be blocking"
+            )
+        if severity != "none" and row["correctness_category"].lower() not in (
+            REQUIRED_DISCOVERY_CATEGORIES
+        ):
+            fail(
+                f"{path} Findings row {index} with a defect must name a required "
+                "correctness category"
+            )
+        if result == "accepted" and blocking == "yes":
+            fail(f"{path} accepted conclusion contains a blocking finding: {row['id']}")
 
-    result_summary = section_body(text, "Result Summary", path)
-    summary_values: dict[str, str] = {}
-    for label in (
-        "Overall result",
-        "Plain-language outcome",
-        "What was verified",
-        "Evidence used",
-        "Blocking issues",
-        "Next action",
+    blocking_findings = [
+        row for row in findings if row["blocking"].lower() == "yes"
+    ]
+    if result in {"needs changes", "rejected"} and not blocking_findings:
+        fail(f"{path} {result} conclusion requires a blocking finding")
+    if result == "needs changes" and not any(
+        row["owning_stage"].lower() in {"design", "implementation", "testing"}
+        for row in blocking_findings
     ):
-        pattern = rf"(?im)^\s*-\s+{re.escape(label)}:\s*(.+)$"
-        match = re.search(pattern, result_summary)
-        if not match or not non_empty(match.group(1)):
-            fail(f"{path} Result Summary missing readable content for {label}")
-        summary_values[label] = match.group(1).strip().lower()
-    if result not in summary_values["Overall result"]:
-        fail(f"{path} Result Summary overall result must match the Conclusion result: {result}")
+        fail(
+            f"{path} needs changes must route a blocking finding to design, "
+            "implementation, or testing"
+        )
+    if result == "rejected" and not any(
+        row["owning_stage"].lower() == "requirement"
+        for row in blocking_findings
+    ):
+        fail(f"{path} rejected conclusion requires a blocking requirement finding")
 
-    coverage = table_rows(text, "Evidence Coverage", path)
+    requirements = table_rows(text, "Requirement Coverage", path)
     require_columns(
         path,
-        "Evidence Coverage",
-        coverage,
-        ("documented_item", "source_document", "implementation_evidence", "test_result_evidence", "status"),
+        "Requirement Coverage",
+        requirements,
+        (
+            "change_id",
+            "requirement_or_boundary",
+            "source",
+            "implementation_evidence",
+            "finding",
+            "status",
+        ),
     )
-    check_nonempty_rows(path, "Evidence Coverage", coverage)
-    if result == "accepted":
-        for row in coverage:
-            if row.get("status", "").strip().lower() in BLOCKING_EVIDENCE_STATUSES:
-                fail(f"{path} accepted conclusion has blocking evidence status: {row.get('status')}")
+    actual_change_ids = {row["change_id"] for row in requirements}
+    if actual_change_ids != scope["change_ids"]:
+        fail(
+            f"{path} Requirement Coverage change_ids must exactly match task.yaml: "
+            f"{sorted(scope['change_ids'])}"
+        )
+    for index, row in enumerate(requirements, start=1):
+        status = row["status"].lower()
+        if status not in REVIEW_STATUSES:
+            fail(
+                f"{path} ## Requirement Coverage row {index} has invalid status: {status}"
+            )
+        if not concrete(row["implementation_evidence"]):
+            fail(
+                f"{path} ## Requirement Coverage row {index} needs concrete "
+                "implementation evidence"
+            )
+        if result == "accepted" and status != "pass":
+            fail(
+                f"{path} accepted conclusion has failing Requirement Coverage row {index}"
+            )
 
-    adequacy = table_rows(text, "Test Design Adequacy", path)
+    discovery = table_rows(text, "Independent Defect Discovery", path)
     require_columns(
         path,
-        "Test Design Adequacy",
-        adequacy,
-        ("behavior_risk_change_id", "required_case_types", "test_design_evidence", "runnable_test_evidence", "status"),
+        "Independent Defect Discovery",
+        discovery,
+        (
+            "category",
+            "applicable_scope",
+            "evidence_inspected",
+            "adversarial_check",
+            "finding_or_not_applicable_reason",
+            "status",
+        ),
     )
-    check_nonempty_rows(path, "Test Design Adequacy", adequacy)
-    if result == "accepted":
-        for row in adequacy:
-            if row.get("status", "").strip().lower() in BLOCKING_TEST_STATUSES:
-                fail(f"{path} accepted conclusion has blocking test design status: {row.get('status')}")
+    rows_by_category: dict[str, dict[str, str]] = {}
+    for index, row in enumerate(discovery, start=1):
+        category = row["category"].lower()
+        if category in rows_by_category:
+            fail(
+                f"{path} Independent Defect Discovery repeats category: {category}"
+            )
+        rows_by_category[category] = row
+        if category not in REQUIRED_DISCOVERY_CATEGORIES:
+            fail(
+                f"{path} Independent Defect Discovery row {index} has unknown "
+                f"category: {category}"
+            )
+        status = row["status"].lower()
+        if status not in DISCOVERY_STATUSES:
+            fail(
+                f"{path} Independent Defect Discovery row {index} has invalid "
+                f"status: {status}"
+            )
+        for column in ("applicable_scope", "evidence_inspected", "adversarial_check"):
+            if not concrete(row[column]):
+                fail(
+                    f"{path} Independent Defect Discovery row {index} needs "
+                    f"concrete {column.replace('_', ' ')}"
+                )
+        reason = row["finding_or_not_applicable_reason"]
+        if not concrete(reason):
+            fail(
+                f"{path} Independent Defect Discovery row {index} needs a concrete "
+                "finding or not-applicable reason"
+            )
+        if status == "not-applicable":
+            if category in ALWAYS_APPLICABLE_CATEGORIES:
+                fail(f"{path} category {category} cannot be not-applicable")
+            if len(re.sub(r"\s+", " ", reason.strip())) < 24:
+                fail(
+                    f"{path} category {category} needs a task-specific "
+                    "not-applicable reason"
+                )
+        if result == "accepted" and status == "fail":
+            fail(
+                f"{path} accepted conclusion has failing defect-discovery "
+                f"category: {category}"
+            )
+    missing_categories = sorted(
+        REQUIRED_DISCOVERY_CATEGORIES - set(rows_by_category)
+    )
+    if missing_categories:
+        fail(
+            f"{path} Independent Defect Discovery missing categories: "
+            + ", ".join(missing_categories)
+        )
+    for index, finding in enumerate(findings, start=1):
+        if finding["severity"].lower() == "none":
+            continue
+        category = finding["correctness_category"].lower()
+        if rows_by_category[category]["status"].lower() != "fail":
+            fail(
+                f"{path} Findings row {index} category {category} must have a "
+                "failing Independent Defect Discovery row"
+            )
 
-    check_implementation_correctness_audit(path, text, result)
+    consistency = table_rows(text, "Document Consistency", path)
+    require_columns(
+        path,
+        "Document Consistency",
+        consistency,
+        ("document", "source", "implementation_consistency", "finding", "status"),
+    )
+    rows_by_document = {row["document"].lower(): row for row in consistency}
+    expected_sources = expected_document_sources(path.parent)
+    for document, sources in expected_sources.items():
+        row = rows_by_document.get(document)
+        if not row:
+            fail(f"{path} Document Consistency missing {document} row")
+        status = row["status"].lower()
+        if status not in DOCUMENT_STATUSES:
+            fail(f"{path} Document Consistency {document} has invalid status: {status}")
+        if sources:
+            if status == "not-present":
+                fail(f"{path} {document} source exists but report says not-present")
+            missing_sources = [source for source in sources if source not in row["source"]]
+            if missing_sources:
+                fail(
+                    f"{path} Document Consistency {document} does not name: "
+                    + ", ".join(missing_sources)
+                )
+            if result == "accepted" and status != "pass":
+                fail(f"{path} accepted conclusion has failing {document} consistency")
+        elif status != "not-present":
+            fail(f"{path} {document} source is absent and must use status not-present")
 
-    rules = table_rows(text, "Generated Acceptance Rules", path)
-    require_columns(path, "Generated Acceptance Rules", rules, ("rule_id", "source", "expected_result", "evidence_required", "status"))
-    check_nonempty_rows(path, "Generated Acceptance Rules", rules)
-    if result == "accepted":
-        for row in rules:
-            if row.get("status", "").strip().lower() in BLOCKING_RULE_STATUSES:
-                fail(f"{path} accepted conclusion has failing acceptance rule: {row.get('rule_id')}")
-
-    command_body = section_body(text, "Validation Evidence", path)
-    for label in REQUIRED_VALIDATION_LABELS:
-        pattern = rf"(?im)^\s*-\s+.*{re.escape(label)}.*:\s*(.+)$"
-        match = re.search(pattern, command_body)
+    summary = section_body(text, "Result Summary", path)
+    for label in ("Overall result", "Outcome", "Blocking issues", "Next action"):
+        match = re.search(rf"(?im)^\s*-\s*{re.escape(label)}:\s*(.+)$", summary)
         if not match or not non_empty(match.group(1)):
-            fail(f"{path} Validation Evidence missing result for {label}")
-
-    summary_body = section_body(text, "Consistency Summary", path)
-    for label in (
-        "Proposal authority check",
-        "Proposal vs design",
-        "Design vs implementation",
-        "Test design adequacy",
-        "change_id traceability",
-        "Document logic review",
-        "Implementation logic review",
-        "Implementation correctness audit completeness and routing",
-    ):
-        pattern = rf"(?im)^\s*-\s+{re.escape(label)}:\s*(.+)$"
-        match = re.search(pattern, summary_body)
-        if not match or not non_empty(match.group(1)):
-            fail(f"{path} Consistency Summary missing evidence for {label}")
-
-    follow_up = section_body(text, "Follow-Up Tasks", path)
-    iteration = re.search(r"(?im)^\s*-\s+Iteration count:\s*(\d+)\s*$", follow_up)
-    if not iteration:
-        fail(f"{path} Follow-Up Tasks must include numeric Iteration count")
-    if int(iteration.group(1)) > 5 and result == "accepted":
-        fail(f"{path} accepted conclusion cannot exceed 5 unresolved iterations")
-
-    check_run_artifacts(path, text, root, result, scope)
+            fail(f"{path} Result Summary missing concrete {label}")
+        if label == "Overall result" and result not in match.group(1).lower():
+            fail(f"{path} Result Summary does not match Conclusion: {result}")
+        if (
+            label == "Blocking issues"
+            and result in {"needs changes", "rejected"}
+            and match.group(1).strip().lower() in {"none", "none recorded", "no"}
+        ):
+            fail(f"{path} {result} Result Summary must name blocking issues")
 
 
 def main() -> int:
@@ -669,7 +526,7 @@ def main() -> int:
     parser.add_argument("--root", default=".")
     args = parser.parse_args()
 
-    root = Path(args.root)
+    root = Path(args.root).resolve()
     path = Path(args.report)
     if not path.is_absolute():
         path = root / path

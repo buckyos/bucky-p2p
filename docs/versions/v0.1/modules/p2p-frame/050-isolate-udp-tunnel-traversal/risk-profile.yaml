@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+source_bindings:
+  proposal: proposal.md
+  design_source:
+
+risks:
+  contract:
+    applies: true
+    evidence: ["pipeline/plan.md#exported-interfaces", "pipeline/plan.md#api-and-build-surface-impact", "pipeline/plan.md#consumer-migration-closure"]
+    required_checks: ["new UDP capability external compile", "old generic trait method calls rejected", "repository consumer migration closure"]
+  data:
+    applies: false
+    evidence: No persistence, schema, serialization, migration, cache key, or stored state representation changes are requested.
+    required_checks: []
+  security:
+    applies: false
+    evidence: The existing trusted-signer input and signature validation implementation are moved behind a narrower Rust trait without changing trust acquisition, verification, packet parsing, or wire data.
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: ["pipeline/plan.md#failure-flows", "pipeline/plan.md#state-ownership", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["generic capability absence", "QUIC capability identity and availability", "existing punch prediction and validation behavior"]
+  build:
+    applies: true
+    evidence: ["pipeline/plan.md#api-and-build-surface-impact", "pipeline/plan.md#consumer-migration-closure"]
+    required_checks: ["p2p-frame all-target compile closure", "breaking API negative fixture", "new crate export positive fixture"]
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes existing Harness rules, task runner, and contract checker without changing Harness behavior or policy.
+    required_checks: []

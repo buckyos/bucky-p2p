@@ -1,0 +1,56 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 001-control-stream-runtime-fixes
+submodule: 001-control-stream-runtime-fixes
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: ControlStreamRuntime branch, state-transition, ordering, isolation, close, and buffer tests.
+    test_targets:
+      - p2p-frame/src/networks/control_stream.rs
+      - p2p-frame/src/networks/control_stream/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Dedicated test file covers the private runtime at the lowest level.
+        - Pre-fix executable red evidence was not preserved because the defects were established by code-path review before the auto-pipeline testing stage; each new regression would fail or hang against the reviewed pre-fix branch identified in its test name and proposal rationale.
+    steps:
+      - id: control-stream-runtime-unit
+        name: Run dedicated control stream runtime tests
+        change_ids: ["control_stream_callback_dispatch", "control_stream_per_stream_overflow", "control_stream_id_validation", "control_stream_ordered_shutdown", "control_stream_terminal_delivery", "control_stream_tunnel_close_writes", "control_stream_read_buffer_performance"]
+        run: ["cargo", "test", "-p", "p2p-frame", "networks::control_stream::tests", "--", "--nocapture"]
+
+  dv:
+    mode: disabled
+    summary: No independent p2p-frame DV surface exists for this private runtime fix.
+    change_ids: ["control_stream_callback_dispatch", "control_stream_per_stream_overflow", "control_stream_id_validation", "control_stream_ordered_shutdown", "control_stream_terminal_delivery", "control_stream_tunnel_close_writes", "control_stream_read_buffer_performance"]
+    reason: The runtime has no standalone process lifecycle; private state behavior belongs at unit level and real TCP/QUIC/PN wiring belongs at integration level.
+
+  integration:
+    mode: enabled
+    summary: Existing TCP, QUIC, PN, TTP, and SN control-stream paths remain compatible with the unchanged Tunnel API and private wire variants.
+    test_targets:
+      - p2p-frame/src/networks/tcp/tunnel.rs
+      - p2p-frame/src/networks/quic/tunnel.rs
+      - p2p-frame/src/pn/client/pn_tunnel.rs
+      - p2p-frame/src/ttp
+      - p2p-frame/src/sn
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The x509 feature enables the transport integration variants used by the existing control_stream tests.
+        - This intentionally duplicates the core name filter at a higher level to prove adapter and consumer compatibility, not private branches.
+    steps:
+      - id: control-stream-transport-integration
+        name: Run TCP QUIC PN and consumer control stream tests
+        change_ids: ["control_stream_callback_dispatch", "control_stream_per_stream_overflow", "control_stream_id_validation", "control_stream_ordered_shutdown", "control_stream_terminal_delivery", "control_stream_tunnel_close_writes", "control_stream_read_buffer_performance"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "control_stream", "--", "--nocapture"]

@@ -1,5 +1,21 @@
 schema_version: 1
 rules:
+  - id: direct-skill-harness-refresh
+    file: harness/custom-rules/direct-skill-harness-refresh-rules.md
+    activation: trigger
+    tiers: [trivial, standard, high-risk]
+    stages: [proposal, design, implementation, testing, acceptance, general]
+    modes: [manual, auto-pipeline]
+    triggers: [harness-refresh, harness-scaffold, harness-update, skill-refresh]
+    path_patterns: ["AGENTS.md", "harness/**", "docs/changes/_template.md", "docs/versions/*/modules/_template/**", "test-run.sh", "test-run.bat", ".gitignore"]
+  - id: cyfs-p2p-test-stage-ban
+    file: harness/custom-rules/cyfs-p2p-test-stage-ban-rules.md
+    activation: stage
+    tiers: [high-risk]
+    stages: [testing, acceptance]
+    modes: [manual, auto-pipeline]
+    triggers: []
+    path_patterns: []
   - id: module-interface-export
     file: harness/custom-rules/module-interface-export-rules.md
     activation: trigger

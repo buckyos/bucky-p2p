@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/globals/031-allow-harness-tooling-implementation-scope/proposal.md": "b536c5d6d03859de1738fcb6bafb3d691c9f7aafc8a424cb4c3fdacad25263c5"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "d1ed50182c4e1f1a8409fdd3a61c37d832af3a4add419e5bc7c8c37addb38d57"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

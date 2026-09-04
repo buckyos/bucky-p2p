@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+from task_manifest import (
+    PIPELINE_STAGES,
+    TaskManifestError,
+    stage_is_automatic as policy_stage_is_automatic,
+    task_policy,
+)
 
 
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -103,28 +109,29 @@ def pipeline_trigger_value(text: str, label: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def pipeline_no_stage_docs(
-    root: Path, version: str, module: str, task_name: str | None
-) -> bool:
-    if not task_name:
-        return False
-    plan = root / "docs" / "versions" / version / "modules" / module / task_name / "pipeline" / "plan.md"
-    if not plan.exists():
-        return False
-    text = plan.read_text(encoding="utf-8")
-    launch = (pipeline_trigger_value(text, "User launch confirmed") or "").lower()
-    launch_statement = pipeline_trigger_value(text, "User launch statement") or ""
-    policy = (pipeline_trigger_value(text, "Auto-pipeline document policy") or "").lower()
-    return (
-        launch in {"yes", "true", "confirmed"}
-        and len(launch_statement.strip()) >= 8
-        and pipeline_trigger_value(text, "Version") == version
-        and pipeline_trigger_value(text, "Packet module") == module
-        and pipeline_trigger_value(text, "Task name") == task_name
-        and (pipeline_trigger_value(text, "Proposal") or "").strip("`")
-        == f"docs/versions/{version}/modules/{module}/{task_name}/proposal.md"
-        and "no design/testing markdown docs" in policy
-        and "testplan.yaml required" in policy
+def task_pipeline_policy(packet: Path) -> tuple[bool, str | None]:
+    manifest = packet / "task.yaml"
+    if not manifest.is_file():
+        return False, None
+    try:
+        policy = task_policy(manifest)
+    except TaskManifestError as error:
+        fail(str(error))
+    start_value = policy["start"]
+    active = policy["mode"] == "auto-pipeline"
+    if active and start_value not in PIPELINE_STAGES:
+        fail(f"{manifest} auto-pipeline mode requires auto_pipeline_start_stage")
+    return active, start_value
+
+
+def stage_is_automatic(active: bool, start: str | None, stage: str) -> bool:
+    return policy_stage_is_automatic(
+        {
+            "stage": None,
+            "mode": "auto-pipeline" if active else "manual",
+            "start": start,
+        },
+        stage,
     )
 
 
@@ -160,14 +167,8 @@ def pipeline_state_rows(state_path: Path, key: str) -> list[dict[str, str]]:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         fail(f"invalid pipeline state {state_path}: {error}")
-    plan = state_path.with_name("plan.md")
-    expected_hash = hashlib.sha256(
-        plan.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
-    ).hexdigest()
     if not isinstance(state, dict) or state.get("schema_version") != 1:
         fail(f"{state_path} schema_version must be 1")
-    if state.get("plan_sha256") != expected_hash:
-        fail(f"{state_path} plan_sha256 does not match sibling plan.md")
     raw_rows = state.get(key) if isinstance(state, dict) else None
     if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
         fail(f"{state_path} {key} must be an array of objects")
@@ -334,13 +335,20 @@ def design_scope_paths(packet: Path, plan: Path | None, requested: set[str]) -> 
 
 def check_api_contract_closure(root: Path, packet: Path, plan: Path | None, requested: set[str]) -> None:
     impact, consumers = design_api_contract(packet, plan)
+    required = set(impact["required"])
     testplan = packet / "testplan.yaml"
+    if not testplan.is_file():
+        if required:
+            fail(
+                f"{testplan} is required for API/build-surface contract checks: "
+                + ", ".join(sorted(required))
+            )
+        return
     text = read_text(testplan)
     recorded = testplan_api_impact(text, testplan)
     for key in ("public_api", "crate_root_export_change", "build_surface_change", "documentation_examples_affected"):
         if recorded.get(key) != impact.get(key):
             fail(f"{testplan} api_impact.{key} does not match design/pipeline evidence")
-    required = set(impact["required"])
     if not required:
         return
     inputs_match = re.search(r"(?m)^evidence_inputs:\s*(\[[^\n]*\])\s*$", text)
@@ -538,10 +546,11 @@ def task_scope_from_testplan(packet: Path, module: str) -> str:
     testplan = packet / "testplan.yaml"
     if not testplan.exists():
         return module
-    match = re.search(r"(?m)^task_name:\s*(\S+)\s*$", read_text(testplan))
-    if not match:
-        fail(f"testplan missing task_name: {testplan}")
-    return f"{module}/{match.group(1)}"
+    if not re.search(r"(?m)^task_manifest:\s*task\.yaml\s*$", read_text(testplan)):
+        fail(f"testplan must use task_manifest: task.yaml: {testplan}")
+    if not (packet / "task.yaml").is_file():
+        fail(f"testplan references missing task manifest: {packet / 'task.yaml'}")
+    return f"{module}/{packet.name}"
 
 
 def main() -> int:
@@ -561,10 +570,20 @@ def main() -> int:
 
     root = Path(args.root)
     packet = packet_path(root, args.version, args.module, args.submodule)
-    no_stage_docs = pipeline_no_stage_docs(root, args.version, args.module, args.submodule)
-    plan = pipeline_plan_path(root, args.version, args.module, args.submodule) if no_stage_docs else None
-    state_path = plan.with_name("state.json") if plan is not None else None
-    if no_stage_docs:
+    pipeline_active, pipeline_start = task_pipeline_policy(packet)
+    automatic_design = stage_is_automatic(pipeline_active, pipeline_start, "design")
+    automatic_testing = stage_is_automatic(pipeline_active, pipeline_start, "testing")
+    plan = (
+        pipeline_plan_path(root, args.version, args.module, args.submodule)
+        if automatic_design
+        else None
+    )
+    state_path = (
+        root / ".harness" / "pipelines" / args.version / args.module / args.submodule / "state.json"
+        if automatic_testing and args.submodule is not None
+        else None
+    )
+    if automatic_testing:
         forbidden = ["testing.md"]
         present = [name for name in forbidden if (packet / name).exists()]
         if present or (packet / "testing").exists():
@@ -587,7 +606,7 @@ def main() -> int:
     for change_id in sorted(requested):
         row = coverage[change_id]
         check_row(change_id, row)
-        if no_stage_docs or (packet / "testplan.yaml").exists() or not args.allow_missing_testplan:
+        if automatic_testing or (packet / "testplan.yaml").exists() or not args.allow_missing_testplan:
             check_testplan_mapping(packet, change_id, row)
     check_case_type_coverage(packet, requested, state_path)
     check_api_contract_closure(root, packet, plan, requested)

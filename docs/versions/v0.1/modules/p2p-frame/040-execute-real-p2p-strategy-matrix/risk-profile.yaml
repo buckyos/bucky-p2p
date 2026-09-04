@@ -1,0 +1,42 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["CHG-040-nat-matrix-test-seam", "CHG-040-nat-matrix-fixture", "CHG-040-nat-matrix-execution"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+risks:
+  contract:
+    applies: false
+    evidence: The task adds a test-only eligibility seam and exercises existing SN rendezvous, NAT probe, QUIC/TCP tunnel, and connection-info contracts without changing wire formats, public API semantics, or production defaults.
+    required_checks: []
+  data:
+    applies: false
+    evidence: Test fixtures and run artifacts are ephemeral; the task adds no product persistence, schema, migration, serialization, or cache-key behavior.
+    required_checks: []
+  security:
+    applies: false
+    evidence: The isolated topology uses generated identities and loopback sockets without credentials, authorization changes, private user data, or a new external trust boundary.
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: The formal evidence exercises real UDP/TCP/QUIC socket lifecycle, NAT mapping relays, SN rendezvous wire flow, target action, fallback, and concurrency across p2p-frame runtime modules.
+    required_checks:
+      - Each of the six matrix rows records production profile evidence and emits request-sent plus action-armed (or an asserted bounded pre-request rejection in default builds) with connected/payload only for reachable rows.
+      - SymmetricLike evidence proves one logical internal source socket with per-destination mapping change through real probe reflectors.
+      - Matrix cases rerun serially and repeatedly without fixed sleeps or fixed ports.
+  build:
+    applies: true
+    evidence: A new p2p-frame Cargo feature gates the test-only eligibility seam; default builds must remain byte-for-byte unchanged in predicate output.
+    required_checks:
+      - Default-build predicate output matches current behavior for loopback and private ServerReflexive IPv4 addresses.
+      - Feature-enabled build allows loopback/private ServerReflexive rendezvous candidates, SN wire validation, and QUIC punch/prediction eligibility; this is proven by the real matrix run.
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is changed.
+    required_checks: []
+  harness:
+    applies: true
+    evidence: The task adds a new versioned packet and consumes the unified runner; auto-pipeline, stage-scope, admission, lifecycle, and acceptance gates apply without changing Harness rules or scripts.
+    required_checks:
+      - Unified task-scoped runner executes the packet testplan at p2p-frame/040-execute-real-p2p-strategy-matrix all.
+      - Lifecycle receipts and pipeline plan state close through proposal, design, implementation, testing, and acceptance.

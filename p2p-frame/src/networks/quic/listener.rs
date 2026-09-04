@@ -1,14 +1,20 @@
 use super::tunnel::QuicTunnel;
-use crate::endpoint::{Endpoint, EndpointArea, Protocol, is_non_lan_ipv4_addr};
+use crate::endpoint::{Endpoint, EndpointArea, Protocol, rendezvous_eligible_area};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::finder::DeviceCache;
+use crate::nat_type::{MAX_NAT_PREDICTION_PORTS, NatMappingObservation, NatProfile};
+use crate::networks::TraversalEndpointPrediction;
 use crate::networks::{
     IncomingTunnelCallback, QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelRef,
 };
 use crate::p2p_identity::{
-    P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
+    P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef, P2pIdentityRef,
 };
 use crate::runtime;
+use crate::sn::nat_probe::{
+    DecodedNatProbeResponse, NAT_PROBE_PACKET_LEN, NAT_PROBE_TOKEN_LEN, decode_response_datagram,
+    encode_request,
+};
 use crate::tls::{ServerCertResolverRef, TlsServerCertResolver};
 use quinn::Incoming;
 use quinn::crypto::rustls::{HandshakeData, QuicServerConfig};
@@ -19,16 +25,16 @@ use sfo_reuseport::{
     Error as SfoReuseportError, QuicCidGenerator, QuicServer, ServerRuntime, SocketOptions,
     UdpServiceConfig, UdpSocket as SfoUdpSocket,
 };
+use std::collections::HashMap;
+use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
-#[cfg(test)]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::runtime::Handle as TokioRuntimeHandle;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 
 const UDP_PUNCH_PAYLOAD_MIN_LEN: usize = 5;
 const UDP_PUNCH_PAYLOAD_MAX_LEN: usize = 30;
@@ -38,6 +44,7 @@ const UDP_PUNCH_ACTIVE_START_OFFSET: Duration = Duration::from_millis(250);
 const UDP_PUNCH_REVERSE_START_OFFSET: Duration = Duration::ZERO;
 const UDP_PUNCH_EARLY_ERROR_WINDOW: Duration = Duration::from_secs(1);
 const QUIC_ENDPOINT_READY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_AUXILIARY_DATAGRAMS_PER_POLL: usize = 4;
 
 #[cfg(test)]
 type UdpPunchSendObserver = Arc<dyn Fn() + Send + Sync>;
@@ -66,15 +73,146 @@ struct SfoQuicUdpSocket {
     socket: SfoUdpSocket,
     worker_id: usize,
     worker_count: Arc<AtomicUsize>,
+    nat_probe_waiters: Arc<NatProbeResponseWaiters>,
 }
 
 impl SfoQuicUdpSocket {
-    fn new(socket: SfoUdpSocket, worker_id: usize, worker_count: Arc<AtomicUsize>) -> Self {
+    fn new(
+        socket: SfoUdpSocket,
+        worker_id: usize,
+        worker_count: Arc<AtomicUsize>,
+        nat_probe_waiters: Arc<NatProbeResponseWaiters>,
+    ) -> Self {
         Self {
             socket,
             worker_id,
             worker_count,
+            nat_probe_waiters,
         }
+    }
+}
+
+type NatProbeResponse = std::net::SocketAddr;
+
+struct PendingNatProbeResponse {
+    expected_source: std::net::SocketAddr,
+    expected_signer: P2pIdentityCertRef,
+    owner: Arc<()>,
+    sender: oneshot::Sender<NatProbeResponse>,
+}
+
+#[derive(Default)]
+struct NatProbeResponseWaiters {
+    pending: Arc<Mutex<HashMap<[u8; NAT_PROBE_TOKEN_LEN], PendingNatProbeResponse>>>,
+}
+
+struct NatProbeResponseRegistration {
+    pending: Arc<Mutex<HashMap<[u8; NAT_PROBE_TOKEN_LEN], PendingNatProbeResponse>>>,
+    token: [u8; NAT_PROBE_TOKEN_LEN],
+    owner: Arc<()>,
+}
+
+impl Drop for NatProbeResponseRegistration {
+    fn drop(&mut self) {
+        let mut pending = self.pending.lock().unwrap();
+        if pending
+            .get(&self.token)
+            .is_some_and(|waiter| Arc::ptr_eq(&waiter.owner, &self.owner))
+        {
+            pending.remove(&self.token);
+        }
+    }
+}
+
+struct NatProbeResponseReceiver {
+    receiver: oneshot::Receiver<NatProbeResponse>,
+    _registration: NatProbeResponseRegistration,
+}
+
+impl std::fmt::Debug for NatProbeResponseReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatProbeResponseReceiver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Future for NatProbeResponseReceiver {
+    type Output = Result<NatProbeResponse, oneshot::error::RecvError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.receiver).poll(cx)
+    }
+}
+
+impl NatProbeResponseWaiters {
+    fn register(
+        &self,
+        token: [u8; NAT_PROBE_TOKEN_LEN],
+        expected_source: std::net::SocketAddr,
+        expected_signer: &P2pIdentityCertRef,
+    ) -> P2pResult<NatProbeResponseReceiver> {
+        let (sender, receiver) = oneshot::channel();
+        let owner = Arc::new(());
+        let mut pending = self.pending.lock().unwrap();
+        if pending.contains_key(&token) {
+            return Err(p2p_err!(
+                P2pErrorCode::AlreadyExists,
+                "duplicate NAT probe token"
+            ));
+        }
+        pending.insert(
+            token,
+            PendingNatProbeResponse {
+                expected_source,
+                expected_signer: expected_signer.clone(),
+                owner: owner.clone(),
+                sender,
+            },
+        );
+        drop(pending);
+        Ok(NatProbeResponseReceiver {
+            receiver,
+            _registration: NatProbeResponseRegistration {
+                pending: self.pending.clone(),
+                token,
+                owner,
+            },
+        })
+    }
+
+    fn dispatch(&self, response: DecodedNatProbeResponse<'_>, source: std::net::SocketAddr) {
+        let (expected_signer, owner) = {
+            let pending = self.pending.lock().unwrap();
+            let Some(waiter) = pending.get(&response.token) else {
+                return;
+            };
+            if source != waiter.expected_source {
+                return;
+            }
+            (waiter.expected_signer.clone(), waiter.owner.clone())
+        };
+        if !response.verify(&expected_signer) {
+            return;
+        }
+
+        let sender = {
+            let mut pending = self.pending.lock().unwrap();
+            let Some(waiter) = pending.get(&response.token) else {
+                return;
+            };
+            if !Arc::ptr_eq(&waiter.owner, &owner) {
+                return;
+            }
+            pending
+                .remove(&response.token)
+                .expect("owned NAT probe waiter disappeared")
+                .sender
+        };
+        let _ = sender.send(response.observed);
+    }
+
+    fn clear(&self) {
+        self.pending.lock().unwrap().clear();
     }
 }
 
@@ -187,12 +325,27 @@ impl quinn::AsyncUdpSocket for SfoQuicUdpSocket {
         if bufs.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        let mut auxiliary_datagrams = 0;
         loop {
             match self.socket.poll_recv_from_vectored(cx, bufs) {
                 Poll::Ready(Ok((len, peer_addr))) => {
                     let mut packet = Vec::new();
                     let packet = quic_packet_prefix(bufs, len, &mut packet);
+                    if let Some(response) = decode_response_datagram(packet) {
+                        self.nat_probe_waiters.dispatch(response, peer_addr);
+                        auxiliary_datagrams += 1;
+                        if auxiliary_datagrams == MAX_AUXILIARY_DATAGRAMS_PER_POLL {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        continue;
+                    }
                     if is_udp_punch_payload(packet) {
+                        auxiliary_datagrams += 1;
+                        if auxiliary_datagrams == MAX_AUXILIARY_DATAGRAMS_PER_POLL {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
                         continue;
                     }
                     let worker_count = self.worker_count.load(Ordering::Acquire);
@@ -327,10 +480,7 @@ struct QuicTunnelListenerState {
 
 fn ensure_worker_endpoints_available(closed: bool, endpoints_empty: bool) -> P2pResult<()> {
     if closed {
-        return Err(p2p_err!(
-            P2pErrorCode::Interrupted,
-            "quic listener closed"
-        ));
+        return Err(p2p_err!(P2pErrorCode::Interrupted, "quic listener closed"));
     }
     if endpoints_empty {
         return Err(p2p_err!(
@@ -352,6 +502,8 @@ pub(crate) struct QuicTunnelListener {
     endpoint_ready: Notify,
     closed: AtomicBool,
     worker_count: Arc<AtomicUsize>,
+    socket_binding_generation: u64,
+    nat_probe_waiters: Arc<NatProbeResponseWaiters>,
     server_runtime: ServerRuntime,
     #[cfg(test)]
     udp_punch_send_observer: Mutex<Option<UdpPunchSendObserver>>,
@@ -385,6 +537,8 @@ impl QuicTunnelListener {
             endpoint_ready: Notify::new(),
             closed: AtomicBool::new(false),
             worker_count: Arc::new(AtomicUsize::new(0)),
+            socket_binding_generation: rand::random::<u64>().max(1),
+            nat_probe_waiters: Arc::new(NatProbeResponseWaiters::default()),
             server_runtime,
             #[cfg(test)]
             udp_punch_send_observer: Mutex::new(None),
@@ -441,6 +595,178 @@ impl QuicTunnelListener {
 
     pub(crate) fn mapping_port(&self) -> Option<u16> {
         self.state.read().unwrap().mapping_port
+    }
+
+    pub(crate) fn socket_binding_generation(&self) -> u64 {
+        self.socket_binding_generation
+    }
+
+    pub(crate) fn validate_traversal_prediction(
+        &self,
+        prediction: &TraversalEndpointPrediction,
+        now: crate::types::Timestamp,
+    ) -> P2pResult<()> {
+        if prediction.socket_binding_generation != self.socket_binding_generation {
+            return Err(p2p_err!(
+                P2pErrorCode::Expired,
+                "traversal prediction belongs to a stale QUIC listener generation"
+            ));
+        }
+        if prediction.valid_until < now {
+            return Err(p2p_err!(
+                P2pErrorCode::Expired,
+                "traversal prediction validity has expired"
+            ));
+        }
+
+        let state = self.state.read().unwrap();
+        ensure_worker_endpoints_available(
+            self.closed.load(Ordering::SeqCst),
+            state.endpoints.is_empty(),
+        )?;
+        if state.punch_socket.is_none() {
+            return Err(p2p_err!(
+                P2pErrorCode::ErrorState,
+                "QUIC listener traversal socket is unavailable"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn predict_traversal_endpoints(
+        &self,
+        probe_targets: &[Endpoint],
+        expected_signer: &P2pIdentityCertRef,
+        per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<TraversalEndpointPrediction> {
+        if probe_targets.len() < 2
+            || probe_targets.len() > MAX_NAT_PREDICTION_PORTS
+            || per_target_timeout.is_zero()
+            || ttl.is_zero()
+        {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "invalid listener NAT probe target count or duration"
+            ));
+        }
+        let first_ip = probe_targets[0].addr().ip();
+        let mut target_addrs = std::collections::HashSet::with_capacity(probe_targets.len());
+        for target in probe_targets {
+            if target.protocol() != Protocol::Quic
+                || !target.addr().is_ipv4()
+                || target.addr().ip() != first_ip
+                || target.addr().port() == 0
+                || !target_addrs.insert(*target.addr())
+            {
+                return Err(p2p_err!(
+                    P2pErrorCode::InvalidParam,
+                    "listener NAT probe targets must be distinct IPv4 QUIC endpoints on one IP"
+                ));
+            }
+        }
+
+        let punch_socket = {
+            let state = self.state.read().unwrap();
+            ensure_worker_endpoints_available(
+                self.closed.load(Ordering::SeqCst),
+                state.endpoints.is_empty(),
+            )?;
+            state.punch_socket.clone().ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::ErrorState,
+                    "listener traversal socket missing"
+                )
+            })?
+        };
+        let observed_at = bucky_time::bucky_time_now();
+        let mut observations = Vec::with_capacity(probe_targets.len());
+        for target in probe_targets {
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(p2p_err!(P2pErrorCode::Interrupted, "quic listener closed"));
+            }
+            let token = loop {
+                let token = rand::random::<[u8; NAT_PROBE_TOKEN_LEN]>();
+                if token.iter().any(|byte| *byte != 0) {
+                    break token;
+                }
+            };
+            let receiver =
+                self.nat_probe_waiters
+                    .register(token, *target.addr(), expected_signer)?;
+            let packet = encode_request(token);
+            debug_assert_eq!(packet.len(), NAT_PROBE_PACKET_LEN);
+            if let Err(err) = punch_socket.send_to(&packet, *target.addr()).await {
+                return Err(p2p_err!(
+                    P2pErrorCode::IoError,
+                    "send listener NAT probe failed: {}",
+                    err
+                ));
+            }
+            let response = runtime::timeout(per_target_timeout, receiver).await;
+            let observed = match response {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => {
+                    return Err(p2p_err!(
+                        P2pErrorCode::Interrupted,
+                        "listener NAT probe response channel closed"
+                    ));
+                }
+                Err(_) => {
+                    return Err(p2p_err!(
+                        P2pErrorCode::Timeout,
+                        "listener NAT probe timed out"
+                    ));
+                }
+            };
+            if !observed.is_ipv4() {
+                return Err(p2p_err!(
+                    P2pErrorCode::InvalidData,
+                    "listener NAT probe response is not IPv4"
+                ));
+            }
+            let mut endpoint = Endpoint::from((Protocol::Quic, observed));
+            endpoint.set_area(EndpointArea::ServerReflexive);
+            observations.push(endpoint);
+        }
+
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "quic listener closed"));
+        }
+        let profile = NatProfile::from_observations(&observations, observed_at, ttl);
+        let base = profile.observed_endpoint.ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::NotFound,
+                "listener NAT probe produced no observed endpoint"
+            )
+        })?;
+        let mut endpoints = Vec::new();
+        match profile.observation {
+            NatMappingObservation::NonSymmetricLike => endpoints.push(base),
+            NatMappingObservation::SymmetricLike => {
+                for port in profile.predicted_ports(observed_at, MAX_NAT_PREDICTION_PORTS) {
+                    let mut endpoint = Endpoint::from((Protocol::Quic, base.addr().ip(), port));
+                    endpoint.set_area(EndpointArea::ServerReflexive);
+                    if !endpoints.contains(&endpoint) {
+                        endpoints.push(endpoint);
+                    }
+                }
+            }
+            NatMappingObservation::Unknown => {}
+        }
+        if endpoints.is_empty() {
+            return Err(p2p_err!(
+                P2pErrorCode::NotFound,
+                "listener NAT prediction is unavailable"
+            ));
+        }
+        endpoints.truncate(MAX_NAT_PREDICTION_PORTS);
+        Ok(TraversalEndpointPrediction {
+            endpoints,
+            socket_binding_generation: self.socket_binding_generation(),
+            valid_until: profile.valid_until,
+            profile,
+        })
     }
 
     pub(crate) async fn connect_with_owner_runtime(
@@ -615,11 +941,22 @@ impl QuicTunnelListener {
         }
     }
 
+    pub(crate) async fn run_udp_punch_only(
+        &self,
+        remote: Endpoint,
+        intent: TunnelConnectIntent,
+        max_duration: Duration,
+    ) {
+        self.run_udp_punch_burst(remote, intent, std::time::Instant::now(), max_duration)
+            .await;
+    }
+
     pub(crate) fn close(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
         self.close_notify.notify_waiters();
+        self.nat_probe_waiters.clear();
         let (endpoints, server) = {
             let mut state = self.state.write().unwrap();
             let server = state.server.take();
@@ -782,6 +1119,7 @@ impl QuicTunnelListener {
                 socket.clone(),
                 worker_id,
                 self.worker_count.clone(),
+                self.nat_probe_waiters.clone(),
             )),
             Arc::new(quinn::TokioRuntime),
         )
@@ -876,10 +1214,9 @@ impl QuicTunnelListener {
     }
 }
 
-fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
+pub(crate) fn udp_punch_enabled_for_endpoint(remote: &Endpoint) -> bool {
     remote.protocol() == Protocol::Quic
-        && remote.get_area() == EndpointArea::ServerReflexive
-        && is_non_lan_ipv4_addr(remote.addr())
+        && rendezvous_eligible_area(remote)
         && remote.addr().port() != 0
 }
 

@@ -1,0 +1,47 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["shared_ttp_runtime_sn_purpose_demux", "ttp_incoming_subscription_lifecycle"]
+source_bindings:
+  proposal: proposal.md
+  design_source: 
+risks:
+  contract:
+    applies: true
+    evidence: The task adds public opaque runtime-handle construction and getter APIs while preserving existing TtpServer, TtpNode, TtpInterSnClient, wire, and purpose contracts.
+    required_checks:
+      - Compile external consumers of the additive runtime-handle constructors and getters.
+      - Compile-fail direct access to runtime operational methods and private core state.
+      - Verify existing constructors and repository consumers remain source compatible.
+  data:
+    applies: true
+    evidence: Runtime tunnel-cache ownership moves from separate facades into one shared core, so remote-id and endpoint keys must remain isolated and teardown must not retain stale tunnels.
+    required_checks:
+      - Verify inbound and outbound tunnels share one cache without cross-peer or cross-endpoint reuse.
+      - Verify last-handle teardown releases subscriber and cached tunnel ownership.
+  security:
+    applies: true
+    evidence: Incoming tunnel validation becomes runtime-owned and immutable across shared facades; construction order must not bypass or replace the identity trust policy.
+    required_checks:
+      - Verify a shared facade cannot replace or bypass the runtime incoming validator.
+      - Verify rejected incoming tunnels remain rejected before purpose dispatch.
+  runtime:
+    applies: true
+    evidence: The fix changes subscriber registration, runtime attachment, active connection, purpose dispatch, duplicate-registration failure, and Drop ordering across NetManager, TTP, and SN.
+    required_checks:
+      - Cover exclusive construction, both shared-facade construction orders, duplicate registration failure, normal Drop, last-handle Drop, and re-registration.
+      - Verify sn_service and sn_inter_service control streams dispatch through one incoming runtime.
+      - Verify membership-enabled Report/online and real cross-SN Query/Rendezvous over production sockets.
+  build:
+    applies: true
+    evidence: The additive public Rust API changes the p2p-frame build surface and requires consumer closure, although dependencies, features, wire formats, packaging, and release defaults remain unchanged.
+    required_checks:
+      - Compile p2p-frame public API consumers with x509 and the task-specific external snippets.
+      - Scan and compile repository consumers of TtpServer, TtpNode, and TtpInterSnClient.
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is changed.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing auto-pipeline, admission, runner, and acceptance machinery without changing Harness behavior.
+    required_checks: []

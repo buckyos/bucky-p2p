@@ -1,0 +1,73 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs:
+  - p2p-frame/src/tunnel/tunnel_manager.rs
+  - p2p-frame/tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs
+  - docs/versions/v0.1/modules/p2p-frame/046-clear-proxy-upgrade-after-tunnel-close/proposal.md
+  - docs/versions/v0.1/modules/p2p-frame/046-clear-proxy-upgrade-after-tunnel-close/pipeline/plan.md
+contract_checks:
+  mode: disabled
+  reason: The change is private to TunnelManager lifecycle state with no public API, wire, crate-root export, build surface, or documentation-example impact; enabled Rust test steps compile the affected crate and test module.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise atomic tunnel/state registration, final-candidate pruning, topology-bound success finalization, and generation-bound failure completion at the lowest private TunnelManager state-machine level.
+    test_targets:
+      - p2p-frame/tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated module uses production registration, availability pruning, cleanup, due collection, failure completion, and success finalization helpers with in-memory trackable tunnels.
+        - Atomic registration coverage holds ManagerState, releases a barrier-coordinated registration task, and asserts that the tunnels write lock remains held until the state decision; it does not infer ordering from sleep duration.
+        - Success finalization coverage rejects a removed unavailable direct without mutating the replacement proxy lifecycle, accepts a registered live direct and closes detached proxies, and keeps mixed live direct-plus-proxy topology unscheduled.
+        - Availability-derived registration coverage proves that an unavailable Active candidate cannot clear the generation still owned by a live published Proxy, while an unavailable Proxy candidate cannot create upgrade state without any live candidate; the existing successful registration result remains unchanged in both cases.
+        - Red-green note: the pre-repair implementation released tunnels before its registration state decision and accepted success without proving the returned direct remained registered and available; the controlled lock and topology-finalization cases directly exercise those repaired boundaries.
+    steps:
+      - id: proxy-upgrade-lifecycle-unit
+        name: Run focused proxy upgrade cleanup and generation regressions
+        change_ids: ["CHG-clear-proxy-upgrade-after-close"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "proxy_upgrade_lifecycle_tests", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise the complete p2p-frame proxy-upgrade registration, atomic ownership, retry, topology-bound success, cleanup, retained-proxy, mixed-topology, and stale-generation lifecycle surface.
+    test_targets:
+      - p2p-frame/src/tunnel/tunnel_manager.rs
+      - p2p-frame/tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The broad proxy_upgrade filter includes existing retry cadence, successful promotion, retained-proxy cleanup, exponential backoff, and the dedicated atomic-registration and success-finalization regressions.
+        - Tests use production TunnelManager wiring; external network behavior remains controlled by existing module-local test doubles.
+    steps:
+      - id: proxy-upgrade-lifecycle-dv
+        name: Run the p2p-frame proxy upgrade lifecycle regression set
+        change_ids: ["CHG-clear-proxy-upgrade-after-close"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "proxy_upgrade", "--", "--test-threads=1"]
+  integration:
+    mode: disabled
+    summary: No exported or neighboring-module contract changes require a separate integration runtime.
+    change_ids: ["CHG-clear-proxy-upgrade-after-close"]
+    reason: The defect and fix are wholly inside TunnelManager private in-memory candidate and scheduler ownership. Unit and DV steps compile p2p-frame and execute production lifecycle paths; cyfs-p2p-test is prohibited as testing evidence by the project custom rule and is not used.
+    test_targets: []
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes:
+        - Acceptance must not treat local deterministic coverage as deployed multi-SN or public-NAT evidence.
+    steps: []

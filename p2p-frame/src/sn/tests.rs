@@ -1,36 +1,146 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Once};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use bucky_raw_codec::{RawConvertTo, RawFrom};
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult};
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactory, P2pIdentityRef, P2pSn};
 use crate::sn::protocol::v0::{SnCallResp, SnCalled, TunnelType};
 use crate::sn::protocol::{PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
 use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
-use crate::sn::types::SnTunnelClassification;
+use crate::sn::types::{SnTunnelClassification, SnTunnelRead};
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::{Sequence, TunnelId};
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
-use sfo_cmd_server::client::{ClassifiedCmdClient, CmdClient};
-use sfo_cmd_server::server::CmdServer;
+use bucky_raw_codec::{RawConvertTo, RawFrom};
 use sfo_cmd_server::CmdBody;
+use sfo_cmd_server::client::{ClassifiedCmdClient, ClassifiedCmdTunnelRead, CmdClient};
+use sfo_cmd_server::server::CmdServer;
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 
 #[path = "../../tests/sn_command_matrix/five_by_five_command_matrix_tests.rs"]
 mod five_by_five_command_matrix_tests;
+#[path = "../../tests/nat_type_aware/sn_profile_flow_tests.rs"]
+mod sn_profile_flow_tests;
+#[path = "../../tests/tunnel_rendezvous/sn_same_sn_tests.rs"]
+mod sn_same_sn_tests;
 
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_MAX_RETRY: usize = 20;
-static NEXT_PORT: AtomicU16 = AtomicU16::new(42000);
+const TEST_PORT_LOW: u16 = 25025;
+const TEST_PORT_HIGH_CAP: u16 = 43100;
+static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
+static TEST_PORT_HIGH: LazyLock<u16> = LazyLock::new(|| {
+    #[cfg(target_os = "linux")]
+    if let Some(start) = read_ephemeral_port_start() {
+        return start
+            .saturating_sub(1)
+            .clamp(TEST_PORT_LOW + 1, TEST_PORT_HIGH_CAP);
+    }
+    TEST_PORT_HIGH_CAP
+});
+
+struct NatProbeTestLogger {
+    records: Mutex<Vec<(log::Level, String)>>,
+}
+
+static NAT_PROBE_TEST_LOGGER: NatProbeTestLogger = NatProbeTestLogger {
+    records: Mutex::new(Vec::new()),
+};
+static NAT_PROBE_TEST_LOGGER_INIT: Once = Once::new();
+
+impl log::Log for NatProbeTestLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let message = record.args().to_string();
+        if message.contains("event=nat_probe_") {
+            self.records.lock().unwrap().push((record.level(), message));
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+pub(crate) fn enable_nat_probe_test_logging() {
+    NAT_PROBE_TEST_LOGGER_INIT.call_once(|| {
+        log::set_logger(&NAT_PROBE_TEST_LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Debug);
+    });
+}
+
+pub(crate) fn nat_probe_test_logs() -> Vec<(log::Level, String)> {
+    NAT_PROBE_TEST_LOGGER.records.lock().unwrap().clone()
+}
+
+#[cfg(target_os = "linux")]
+fn read_ephemeral_port_start() -> Option<u16> {
+    let contents = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok()?;
+    let mut parts = contents.split_whitespace();
+    let start = parts.next()?.parse::<u16>().ok()?;
+    let _end = parts.next()?.parse::<u16>().ok()?;
+    Some(start)
+}
 
 fn next_port() -> u16 {
-    NEXT_PORT.fetch_add(1, Ordering::Relaxed)
+    let high = *TEST_PORT_HIGH;
+    let mut current = NEXT_PORT.load(Ordering::Relaxed);
+    loop {
+        let next = if current == 0 || current <= TEST_PORT_LOW {
+            high
+        } else {
+            current - 1
+        };
+        match NEXT_PORT.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => {
+                assert!(
+                    next >= TEST_PORT_LOW && next <= high,
+                    "test port {} outside reserved test range {}..={}",
+                    next,
+                    TEST_PORT_LOW,
+                    high
+                );
+                return next;
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[test]
+fn next_port_stays_outside_os_ephemeral_range() {
+    let mut seen = std::collections::HashSet::new();
+    #[cfg(target_os = "linux")]
+    let ephemeral_start = read_ephemeral_port_start();
+    for _ in 0..64 {
+        let port = next_port();
+        assert!(
+            port >= TEST_PORT_LOW && port <= *TEST_PORT_HIGH,
+            "port {port} outside reserved test range {}..={}",
+            TEST_PORT_LOW,
+            *TEST_PORT_HIGH
+        );
+        assert!(
+            seen.insert(port),
+            "next_port reused a port within the sampled window: {port}"
+        );
+        #[cfg(target_os = "linux")]
+        if let Some(start) = ephemeral_start {
+            assert!(
+                port < start,
+                "test port {port} must stay below OS ephemeral start {start}"
+            );
+        }
+    }
 }
 
 fn localhost_quic_endpoint(port: u16) -> Endpoint {
@@ -60,6 +170,46 @@ fn build_sn_entry(sn_identity: &P2pIdentityRef) -> P2pSn {
 
 fn test_server_runtime() -> ServerRuntime {
     ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap()
+}
+
+#[test]
+fn sn_tunnel_read_keeps_actual_metadata_separate_from_requested_classification() {
+    let actual_local = localhost_tcp_endpoint(43210);
+    let actual_remote = localhost_tcp_endpoint(43211);
+    let requested_local = localhost_tcp_endpoint(0);
+    let requested = SnTunnelClassification::new(Some(requested_local), actual_remote);
+    let local_id = P2pId::default();
+    let remote_id = P2pId::default();
+
+    let (_peer, stream) = tokio::io::duplex(64);
+    let (read, _write) = tokio::io::split(stream);
+    let classified = SnTunnelRead::new_with_classification(
+        Box::pin(read),
+        actual_local,
+        actual_remote,
+        local_id.clone(),
+        remote_id.clone(),
+        requested.clone(),
+    );
+    assert_eq!(classified.local(), actual_local);
+    assert_eq!(classified.remote(), actual_remote);
+    assert_eq!(classified.get_classification(), requested);
+
+    let (_peer, stream) = tokio::io::duplex(64);
+    let (read, _write) = tokio::io::split(stream);
+    let existing = SnTunnelRead::new(
+        Box::pin(read),
+        actual_local,
+        actual_remote,
+        local_id,
+        remote_id,
+    );
+    assert_eq!(existing.local(), actual_local);
+    assert_eq!(existing.remote(), actual_remote);
+    assert_eq!(
+        existing.get_classification(),
+        SnTunnelClassification::new(Some(actual_local), actual_remote)
+    );
 }
 
 fn is_addr_bind_conflict(code: P2pErrorCode) -> bool {
@@ -192,7 +342,7 @@ async fn start_client_stack_with_endpoints(
     .await
 }
 
-async fn setup_sn_and_one_client(
+pub(super) async fn setup_sn_and_one_client(
     name: &str,
 ) -> (
     SnServerRef,
@@ -442,12 +592,14 @@ async fn sn_client_query_registered_peer_returns_full_info() {
 
     let query_resp = stack.sn_client().query(&client_id).await.unwrap();
     assert!(query_resp.peer_info.is_some());
-    assert!(!query_resp.end_point_array.is_empty());
 
     let peer_cert = cert_factory
         .create(query_resp.peer_info.as_ref().unwrap())
         .unwrap();
     assert_eq!(peer_cert.get_id(), client_id);
+    #[cfg(not(feature = "test-real-socket-matrix"))]
+    assert!(query_resp.end_point_array.is_empty());
+    #[cfg(feature = "test-real-socket-matrix")]
     assert!(
         query_resp
             .end_point_array
@@ -636,6 +788,9 @@ async fn sn_client_server_connection_covers_report_query_call_and_called_respons
         .create(callee_query.peer_info.as_ref().unwrap())
         .unwrap();
     assert_eq!(callee_cert.get_id(), callee_id);
+    #[cfg(not(feature = "test-real-socket-matrix"))]
+    assert!(callee_query.end_point_array.is_empty());
+    #[cfg(feature = "test-real-socket-matrix")]
     assert!(
         callee_query
             .end_point_array
@@ -724,8 +879,8 @@ async fn sn_report_late_response_does_not_complete_next_tunnel_report() {
         localhost_quic_endpoint(next_port()),
         localhost_tcp_endpoint(next_port()),
     ];
-    let sn_identity = build_identity("sn-late-report", sn_endpoints[0])
-        .update_endpoints(sn_endpoints.clone());
+    let sn_identity =
+        build_identity("sn-late-report", sn_endpoints[0]).update_endpoints(sn_endpoints.clone());
     let sn_id = sn_identity.get_id();
     let sn_service = create_sn_service(SnServiceConfig::new(
         sn_identity.clone(),
@@ -747,8 +902,7 @@ async fn sn_report_late_response_does_not_complete_next_tunnel_report() {
             let attempts = handler_attempts.clone();
             let sn_id = handler_sn_id.clone();
             async move {
-                let report =
-                    ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                let report = ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 let (delay, endpoint) = if attempt == 0 {
                     (Duration::from_millis(2200), late_endpoint)
@@ -763,6 +917,8 @@ async fn sn_report_late_response_does_not_complete_next_tunnel_report() {
                     peer_info: None,
                     end_point_array: vec![endpoint],
                     receipt: None,
+                    nat_probe_endpoints: vec![],
+                    nat_probe_directive: None,
                 };
                 Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
             }
@@ -787,7 +943,10 @@ async fn sn_report_late_response_does_not_complete_next_tunnel_report() {
     .await
     .unwrap();
 
-    stack.wait_online(Some(Duration::from_secs(10))).await.unwrap();
+    stack
+        .wait_online(Some(Duration::from_secs(10)))
+        .await
+        .unwrap();
     assert!(attempts.load(Ordering::SeqCst) >= 2);
     let active = stack.sn_client().get_active_sn_list();
     assert_eq!(active.len(), 1);
@@ -825,17 +984,13 @@ async fn sn_report_rejects_wrong_business_seq_and_sn_identity() {
             let attempts = handler_attempts.clone();
             let sn_id = handler_sn_id.clone();
             async move {
-                let report =
-                    ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                let report = ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 if attempt == 2 {
                     return Ok(Some(CmdBody::from(vec![0xFF])));
                 }
                 let (seq, response_sn_id) = if attempt == 0 {
-                    (
-                        Sequence::from(report.seq.value().wrapping_add(1)),
-                        sn_id,
-                    )
+                    (Sequence::from(report.seq.value().wrapping_add(1)), sn_id)
                 } else {
                     (report.seq, P2pId::from(vec![0xA5; 32]))
                 };
@@ -846,6 +1001,8 @@ async fn sn_report_rejects_wrong_business_seq_and_sn_identity() {
                     peer_info: None,
                     end_point_array: vec![localhost_quic_endpoint(next_port())],
                     receipt: None,
+                    nat_probe_endpoints: vec![],
+                    nat_probe_directive: None,
                 };
                 Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
             }
@@ -910,6 +1067,8 @@ async fn sn_call_and_query_reject_mismatched_qa_response_bodies() {
                 seq: Sequence::from(query.seq.value().wrapping_add(1)),
                 peer_info: None,
                 end_point_array: vec![],
+                net_profile: None,
+                target_protocol_version: None,
             };
             Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
         },
@@ -994,6 +1153,8 @@ async fn sn_call_and_query_timeouts_preserve_healthy_active_sn() {
                 seq: query.seq,
                 peer_info: None,
                 end_point_array: vec![],
+                net_profile: None,
+                target_protocol_version: None,
             };
             Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
         },
@@ -1010,7 +1171,10 @@ async fn sn_call_and_query_timeouts_preserve_healthy_active_sn() {
     let (call_result, query_result) = tokio::join!(call, query);
 
     assert_eq!(call_result.unwrap_err().code(), P2pErrorCode::ConnectFailed);
-    assert_eq!(query_result.unwrap_err().code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(
+        query_result.unwrap_err().code(),
+        P2pErrorCode::ConnectFailed
+    );
     assert_eq!(caller.sn_client().get_active_sn_list()[0].sn_peer_id, sn_id);
     assert_eq!(
         query_client.sn_client().get_active_sn_list()[0].sn_peer_id,
@@ -1023,11 +1187,7 @@ async fn sn_call_and_query_closed_tunnels_remove_stale_active_sn() {
     let (_sn_service, caller, _caller_id, query_client, query_id, _sn_id, _cert_factory) =
         setup_sn_and_two_clients().await;
 
-    caller
-        .sn_client()
-        .get_cmd_client()
-        .clear_all_tunnel()
-        .await;
+    caller.sn_client().get_cmd_client().clear_all_tunnel().await;
     query_client
         .sn_client()
         .get_cmd_client()

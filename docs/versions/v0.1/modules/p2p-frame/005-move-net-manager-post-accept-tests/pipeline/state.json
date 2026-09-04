@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "acffd89a280d7730722bce7a726122bc78d00d50ad6ce10508ab900ccdb258a6",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-NOOP-1": {"status": "complete"}
+  },
+  "testing_evidence": [
+    {
+      "change_id": "relocate_net_manager_post_accept_tests",
+      "validation_id": "V-MNMPAT-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "net-manager-post-accept-relocation-unit",
+      "evidence": "task-start baseline records old src paths; identical blob hashes record byte-for-byte moves; unit and DV steps compile and execute the unchanged private modules from p2p-frame/tests/net_manager",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "normal", "required": "yes", "validation_id": "V-MNMPAT-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "boundary", "required": "yes", "validation_id": "V-MNMPAT-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "negative", "required": "no", "validation_id": "V-MNMPAT-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "The relocation introduces no negative production behavior; wrong include paths or standalone discovery fail compilation rather than define a supported negative runtime case."},
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "error", "required": "no", "validation_id": "V-MNMPAT-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "No new runtime error category or recovery path is introduced by a byte-identical test-source move."},
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "compatibility", "required": "yes", "validation_id": "V-MNMPAT-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "lifecycle", "required": "yes", "validation_id": "V-MNMPAT-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "relocate_net_manager_post_accept_tests", "case_type": "cross-module", "required": "no", "validation_id": "V-MNMPAT-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "The files remain private included unit modules; no external or neighboring module contract changes."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260714T085224Z-p2p-frame+005-move-net-manager-post-accept-tests-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/005-move-net-manager-post-accept-tests/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

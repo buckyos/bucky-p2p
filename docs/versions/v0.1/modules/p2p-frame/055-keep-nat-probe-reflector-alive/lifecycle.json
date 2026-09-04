@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/055-keep-nat-probe-reflector-alive/proposal.md": "b7eb3c20e30058f8b2e35f48f6e67c67f8b4826e10415a46116294dc5354e3d4"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "0545b8348e1e24d6096e53967b807e258378938c1714a52fc9bdc593c69cbff4"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

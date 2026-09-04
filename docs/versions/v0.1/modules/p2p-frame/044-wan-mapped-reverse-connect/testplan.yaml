@@ -1,0 +1,77 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/endpoint.rs", "p2p-frame/src/tunnel/nat_connect_plan.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/tests/unit/endpoint/rendezvous_endpoint_policy_tests.rs", "p2p-frame/tests/unit/tunnel/rendezvous_endpoint_policy_tests.rs", "p2p-frame/tests/tunnel_rendezvous_protocol.rs", "p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs", "docs/versions/v0.1/modules/p2p-frame/044-wan-mapped-reverse-connect/proposal.md", "docs/versions/v0.1/modules/p2p-frame/044-wan-mapped-reverse-connect/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  reason: ""
+  steps:
+    - id: p2p-frame-compile-closure
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile all p2p-frame targets with the production-default feature set
+      change_ids: ["wan_mapped_reverse_connect_eligibility", "wan_mapped_rendezvous_protocol_validation", "production_default_reverse_connect_regression_tests"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Cover the new reverse-connect area helper and operation-specific TunnelManager base-candidate filter at the lowest level.
+    test_targets:
+      - p2p-frame/tests/unit/endpoint/rendezvous_endpoint_policy_tests.rs
+      - p2p-frame/tests/unit/tunnel/rendezvous_endpoint_policy_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Public ServerReflexive, Wan, and Mapped are positive reverse-connect classes; pure reverse accepts TCP or QUIC while operations containing punch remain QUIC-only.
+        - Lan and production private addresses remain negative; PunchOnly retains the existing production policy.
+    steps:
+      - id: reverse-endpoint-policy-unit
+        name: Run dedicated reverse-connect endpoint policy unit tests
+        change_ids: ["wan_mapped_reverse_connect_eligibility", "production_default_reverse_connect_regression_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_endpoint_policy_tests::", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise caller-public selection through the production NAT plan, SN rendezvous request, target reverse action, direct tunnel, and payload on real loopback sockets.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The opt-in feature permits loopback/private addresses but does not replace the default-build Wan/Mapped policy tests.
+        - The test proves request-sent, action-armed, direct connected, and payload-complete locally; it does not prove public-NAT deployment behavior.
+    steps:
+      - id: caller-public-real-socket-dv
+        name: Run the exact real strategy matrix caller-public production path
+        change_ids: ["wan_mapped_reverse_connect_eligibility", "production_default_reverse_connect_regression_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--test", "real_p2p_tunnel_flow", "strategy_matrix::real_strategy_matrix_executes_production_branches", "--", "--exact", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Validate the default-build rendezvous request/notify protocol domain for reverse, punch-and-reverse, punch-only, and all existing negative boundaries.
+    test_targets:
+      - p2p-frame/tests/tunnel_rendezvous_protocol.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The full protocol target retains codec shape, result, endpoint budget, address, port, uniqueness, and transport assertions.
+        - TCP and QUIC Wan and Mapped request plus notify positives run without test-real-socket-matrix; TCP operations containing punch remain negative.
+    steps:
+      - id: rendezvous-protocol-domain-integration
+        name: Run the full default-build rendezvous protocol contract target
+        change_ids: ["wan_mapped_rendezvous_protocol_validation", "production_default_reverse_connect_regression_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "tunnel_rendezvous_protocol", "--", "--test-threads=1"]

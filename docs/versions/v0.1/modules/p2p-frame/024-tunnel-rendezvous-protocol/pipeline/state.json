@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "f7ffa2a3dbbe46737d7357b2263110602d6b2719eb39d89ab1329261c4e9a007",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-PROTOCOL-1": {"status": "complete"},
+    "I-SOCKET-1": {"status": "complete"},
+    "I-CLIENT-1": {"status": "complete"},
+    "I-SN-STATE-1": {"status": "complete"},
+    "I-INTER-SN-1": {"status": "complete"},
+    "I-SN-SERVICE-1": {"status": "complete"},
+    "I-PLAN-1": {"status": "complete"},
+    "I-TUNNEL-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {"wave": 1, "tasks": ["D-1"], "serialization_reasons": {"D-1": "parent owns and validates the admission-bound design mapping"}},
+      {"wave": 2, "tasks": ["I-PROTOCOL-1"], "serialization_reasons": {"I-PROTOCOL-1": "all later source layers consume the frozen protocol types"}},
+      {"wave": 3, "tasks": ["I-SOCKET-1", "I-SN-STATE-1", "I-INTER-SN-1", "I-PLAN-1"], "serialization_reasons": {"I-SOCKET-1": "single-agent execution required by current delegation boundary", "I-SN-STATE-1": "single-agent execution required by current delegation boundary", "I-INTER-SN-1": "single-agent execution required by current delegation boundary", "I-PLAN-1": "single-agent execution required by current delegation boundary"}},
+      {"wave": 4, "tasks": ["I-CLIENT-1"], "serialization_reasons": {"I-CLIENT-1": "consumes protocol and socket prediction interfaces"}},
+      {"wave": 5, "tasks": ["I-SN-SERVICE-1"], "serialization_reasons": {"I-SN-SERVICE-1": "consumes client QA, bounded state and inter-SN relay"}},
+      {"wave": 6, "tasks": ["I-TUNNEL-1", "I-1"], "serialization_reasons": {"I-TUNNEL-1": "final production integration consumes every prior layer", "I-1": "parent implementation closes only after all file tasks"}},
+      {"wave": 7, "tasks": ["T-1"], "serialization_reasons": {"T-1": "post-implementation tests derive from delivered code"}},
+      {"wave": 8, "tasks": ["A-1"], "serialization_reasons": {"A-1": "acceptance starts after test evidence exists"}}
+    ]
+  },
+  "testing_evidence": [
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","validation_id":"V-TRP-WIRE","testplan_level":"unit","testplan_step_id":"rendezvous-wire-contract-unit","evidence":"Independent command ids, raw round trips, exact request/response business fields, correlation and typed failure invariants are asserted; real same-SN and inter-SN paths consume the same values.","gap":"no","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","validation_id":"V-TRP-ACTIONS","testplan_level":"unit","testplan_step_id":"rendezvous-plan-unit","evidence":"All four target operations, endpoint presence rules, QUIC punch restriction, caller actions, legacy exclusion and symmetric-symmetric mapping are asserted.","gap":"no","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","validation_id":"V-TRP-OWNERSHIP","testplan_level":"dv","testplan_step_id":"rendezvous-listener-socket-dv","evidence":"Real UDP reflectors observe the exact bound QUIC listener socket; protocol validation enforces server-reflexive non-LAN IPv4 values and the real SN path rejects third-party endpoints before target delivery.","gap":"no","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","validation_id":"V-TRP-SOCKET","testplan_level":"dv","testplan_step_id":"rendezvous-listener-socket-dv","evidence":"Listener prediction returns its nonzero generation and observed bound source endpoint; token correlation and close invalidation are exercised.","gap":"no","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","validation_id":"V-TRP-LIFECYCLE","testplan_level":"dv","testplan_step_id":"rendezvous-same-sn-dv","evidence":"The real two-client SN QA proves action-before-response, cached idempotency, Complete delivery and replay rejection; bounded state additionally proves in-flight same-digest response sharing and terminal wakeup without a second action.","gap":"no","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","validation_id":"V-TRP-SECURITY","testplan_level":"unit","testplan_step_id":"rendezvous-state-unit","evidence":"Digest conflicts, terminal tombstones, deadline, pair, total and rolling-rate ceilings plus malformed endpoint/response rejection are automated.","gap":"no","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","validation_id":"V-TRP-INTEGRATION","testplan_level":"dv","testplan_step_id":"rendezvous-same-sn-dv","evidence":"Real SN control flow, deterministic plan mapping, stable collision handling, predicted candidate use and serial legacy/proxy fallback cover integration behavior.","gap":"no","gap_manual_reason":""}
+  ],
+  "testing_case_type_coverage": [
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"normal","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"boundary","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"negative","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"error","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"compatibility","required":"yes","validation_id":"V-TRP-COMPILE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-LIFECYCLE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_wire_contract","case_type":"cross-module","required":"yes","validation_id":"V-TRP-INTER-SN","level":"integration","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"normal","required":"yes","validation_id":"V-TRP-ACTIONS","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"boundary","required":"yes","validation_id":"V-TRP-ACTIONS","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"negative","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"error","required":"yes","validation_id":"V-TRP-FALLBACK","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"compatibility","required":"yes","validation_id":"V-TRP-LEGACY","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-LIFECYCLE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_action_modes","case_type":"cross-module","required":"yes","validation_id":"V-TRP-INTEGRATION","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"normal","required":"yes","validation_id":"V-TRP-OWNERSHIP","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"boundary","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"negative","required":"yes","validation_id":"V-TRP-SAME-SN","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"error","required":"yes","validation_id":"V-TRP-RESPONSE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"compatibility","required":"yes","validation_id":"V-TRP-COMPILE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-SOCKET","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_endpoint_ownership","case_type":"cross-module","required":"yes","validation_id":"V-TRP-SAME-SN","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"normal","required":"yes","validation_id":"V-TRP-SOCKET","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"boundary","required":"yes","validation_id":"V-TRP-SOCKET","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"negative","required":"yes","validation_id":"V-TRP-SOCKET","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"error","required":"yes","validation_id":"V-TRP-SOCKET","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"compatibility","required":"yes","validation_id":"V-TRP-COMPILE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-SOCKET","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"quic_rendezvous_socket_binding","case_type":"cross-module","required":"yes","validation_id":"V-TRP-PREDICTED-CONNECT","level":"integration","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"normal","required":"yes","validation_id":"V-TRP-LIFECYCLE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"boundary","required":"yes","validation_id":"V-TRP-STATE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"negative","required":"yes","validation_id":"V-TRP-COLLISION","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"error","required":"yes","validation_id":"V-TRP-FALLBACK","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"compatibility","required":"yes","validation_id":"V-TRP-LEGACY","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-LIFECYCLE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_lifecycle","case_type":"cross-module","required":"yes","validation_id":"V-TRP-INTER-SN","level":"integration","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"normal","required":"yes","validation_id":"V-TRP-SECURITY","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"boundary","required":"yes","validation_id":"V-TRP-STATE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"negative","required":"yes","validation_id":"V-TRP-SAME-SN","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"error","required":"yes","validation_id":"V-TRP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"compatibility","required":"yes","validation_id":"V-TRP-COMPILE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-STATE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_tunnel_rendezvous_security","case_type":"cross-module","required":"yes","validation_id":"V-TRP-INTER-SN","level":"integration","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"normal","required":"yes","validation_id":"V-TRP-INTEGRATION","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"boundary","required":"yes","validation_id":"V-TRP-ACTIONS","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"negative","required":"yes","validation_id":"V-TRP-COLLISION","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"error","required":"yes","validation_id":"V-TRP-FALLBACK","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"compatibility","required":"yes","validation_id":"V-TRP-LEGACY","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"lifecycle","required":"yes","validation_id":"V-TRP-LIFECYCLE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"tunnel_manager_rendezvous_integration","case_type":"cross-module","required":"yes","validation_id":"V-TRP-SAME-SN","level":"dv","status":"covered","gap_manual_reason":""}
+  ],
+  "testing_design_element_coverage": [
+    {"element_type":"parameter-domain","design_source":"Exported Interfaces and Failure Flows","validation_ids":["V-TRP-WIRE","V-TRP-ACTIONS"],"level":"unit","status":"covered","gap_manual_reason":""},
+    {"element_type":"state-transition","design_source":"State Ownership","validation_ids":["V-TRP-STATE","V-TRP-LIFECYCLE"],"level":"unit,dv","status":"covered","gap_manual_reason":""},
+    {"element_type":"failure-path","design_source":"Failure Flows","validation_ids":["V-TRP-SAME-SN","V-TRP-FALLBACK"],"level":"dv,integration","status":"covered","gap_manual_reason":""},
+    {"element_type":"error-handling","design_source":"typed result and capacity error categories","validation_ids":["V-TRP-WIRE","V-TRP-SECURITY"],"level":"unit","status":"covered","gap_manual_reason":""},
+    {"element_type":"invariant","design_source":"exact body endpoint ownership and real-handshake invariants","validation_ids":["V-TRP-WIRE","V-TRP-SOCKET","V-TRP-SAME-SN"],"level":"unit,dv","status":"covered","gap_manual_reason":""},
+    {"element_type":"concurrency","design_source":"waiter ordering token dispatch and collision ownership","validation_ids":["V-TRP-SOCKET","V-TRP-COLLISION"],"level":"dv","status":"covered","gap_manual_reason":""}
+  ],
+  "evidence": {
+    "test_runs": ["test-results/test-runs/20260831T080843Z-p2p-frame+024-tunnel-rendezvous-protocol-all.json"],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "TRP-TEST-CFG-IMPORT-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-SOCKET-1",
+      "reason": "post-implementation test target compilation exposed a duplicate Mutex import enabled only under cfg(test)",
+      "expected_fix_output": "remove the redundant conditional import and revalidate implementation admission and scope before resuming testing"
+    },
+    {
+      "issue_id": "TRP-SN-QA-REENTRANCY-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-SN-SERVICE-1",
+      "reason": "the real same-SN flow showed that sfo-cmd-server suppresses a nested SN-to-target QA issued from the task handling the initiator QA, returning SnRelayFailure before target delivery",
+      "expected_fix_output": "run the SN-to-target QA in a distinct awaited runtime task while preserving target-response-before-initiator-response ordering, then regenerate testing evidence"
+    },
+    {
+      "issue_id": "TRP-INFLIGHT-IDEMPOTENCY-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-SN-STATE-1",
+      "reason": "acceptance source review found that a same-key same-digest duplicate arriving before the first SN relay response receives RequestConflict instead of idempotently sharing the first result",
+      "expected_fix_output": "retain bounded in-flight duplicate waiters, publish the first cached response to them without a second target action, cover response and terminal races, then regenerate downstream testing evidence"
+    },
+    {
+      "issue_id": "TRP-ENDPOINT-POLICY-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-PROTOCOL-1,I-TUNNEL-1",
+      "reason": "acceptance source review found that rendezvous endpoint validation accepts LAN-area and private IPv4 values despite the proposal requiring bounded server-reflexive non-LAN targets",
+      "expected_fix_output": "require server-reflexive non-LAN IPv4 endpoints at protocol and TunnelManager candidate boundaries, add negative and positive codec coverage, then regenerate downstream testing evidence"
+    },
+    {
+      "issue_id": "TRP-ABSOLUTE-DEADLINE-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-PROTOCOL-1,I-SN-SERVICE-1,I-TUNNEL-1",
+      "reason": "acceptance source review found that only request entry checks the absolute deadline while SN relay and both peer actions can each restart a full local timeout",
+      "expected_fix_output": "reject late responses, recheck after target prediction, and bound SN relay plus target and initiator actions by the original request deadline remaining duration before regenerating evidence"
+    },
+    {
+      "issue_id": "TRP-SN-CORRELATION-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-SN-STATE-1",
+      "reason": "acceptance source review found that RendezvousKey omits sn_peer_id, allowing a terminal with a changed serving-SN identity to address an otherwise matching live attempt",
+      "expected_fix_output": "bind request and terminal state lookup to sn_peer_id and add a negative terminal-correlation assertion before final downstream evidence"
+    },
+    {
+      "issue_id": "TRP-TARGET-ATTACH-RACE-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-TUNNEL-1",
+      "reason": "acceptance concurrency review found a race between spawning the target action and attaching its handle where collision can remove the owner yet the callback still returns an armed success",
+      "expected_fix_output": "gate target task start and atomically attach plus release it while the owner lock is held; return Conflict if ownership was displaced before attach, then regenerate evidence"
+    },
+    {
+      "issue_id": "TRP-TEST-WAITER-LIMIT-VISIBILITY-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-SN-STATE-1",
+      "reason": "the final task runner exposed that the included service-state test could not name the private in-flight waiter limit constant",
+      "expected_fix_output": "expose the limit only to the service parent module, import it in the task test, and rerun the complete unified entry"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/024-tunnel-rendezvous-protocol/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

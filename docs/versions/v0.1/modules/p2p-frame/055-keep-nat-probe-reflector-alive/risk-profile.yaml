@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-keep-nat-probe-reflector-alive"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["pipeline/plan.md#exported-interfaces", "pipeline/plan.md#api-and-build-surface-impact", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["NatProbeReflector::run 公共签名保持不变", "现有 SN service 与 crate 内调用方继续使用原 API 编译", "公开运行时语义只放宽 send_to 错误恢复，不改变 recv_from 与协议错误边界"]
+  data:
+    applies: false
+    evidence: 不改变持久数据、序列化布局、迁移、缓存键或缓存内容。
+    required_checks: []
+  security:
+    applies: false
+    evidence: 固定 1200 字节包长、身份签名、签名校验、签名限流及放大防护均保持不变。
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: ["pipeline/plan.md#state-ownership", "pipeline/plan.md#failure-flows", "pipeline/plan.md#implementation-scope-bindings"]
+    required_checks: ["一次 send_to 错误后 reflector 任务保持存活", "后续合法请求收到可验证的签名响应", "recv_from 错误仍结束 reflector，避免错误自旋", "发送失败不重试当前数据报"]
+  build:
+    applies: false
+    evidence: 不改变依赖、feature、构建图、产物、发布、部署、production default 或回滚机制。
+    required_checks: []
+  ui:
+    applies: false
+    evidence: 不涉及 UI、导航、无障碍、本地化或用户交互流程。
+    required_checks: []
+  harness:
+    applies: false
+    evidence: 仅消费现有 Harness 自动流水线、测试入口和验收机制，不改变规则、checker 或测试基础设施行为。
+    required_checks: []

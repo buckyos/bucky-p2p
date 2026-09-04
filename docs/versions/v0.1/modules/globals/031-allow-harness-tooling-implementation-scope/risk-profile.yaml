@@ -1,0 +1,35 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["define_harness_tooling_implementation_artifacts", "enforce_globals_harness_tooling_scope"]
+source_bindings:
+  proposal: proposal.md
+  design_source:
+risks:
+  contract:
+    applies: false
+    evidence: The change affects repository-local Harness workflow behavior, not product API, protocol, wire format, or user-facing CLI contracts.
+    required_checks: []
+  data:
+    applies: false
+    evidence: No product persistence, schema, serialization, migration, or cache-key behavior changes.
+    required_checks: []
+  security:
+    applies: false
+    evidence: The checker classifies repository-relative evidence paths and introduces no authentication, authorization, privacy, credential, or external trust boundary.
+    required_checks: []
+  runtime:
+    applies: false
+    evidence: No P2P runtime, concurrency, lifecycle, retry, timeout, or network integration behavior changes.
+    required_checks: []
+  build:
+    applies: false
+    evidence: The standard-library Python checker changes no Cargo graph, dependency, produced artifact, deployment, release, or rollback behavior.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow is changed.
+    required_checks: []
+  harness:
+    applies: true
+    evidence: The change alters stage responsibility policy and the mechanical completion checker for non-rule Harness tooling.
+    required_checks: ["globals Harness-script positive scope case", "non-globals and Harness-policy negative scope cases", "rule index and Harness self-check"]

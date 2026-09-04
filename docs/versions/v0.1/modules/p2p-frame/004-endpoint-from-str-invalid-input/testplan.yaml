@@ -1,0 +1,61 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 004-endpoint-from-str-invalid-input
+submodule: 004-endpoint-from-str-invalid-input
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/endpoint.rs", "p2p-frame/tests/endpoint_from_str_safety.rs", "docs/versions/v0.1/modules/p2p-frame/004-endpoint-from-str-invalid-input/proposal.md", "docs/versions/v0.1/modules/p2p-frame/004-endpoint-from-str-invalid-input/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The public FromStr signature, crate-root exports, build surface, and documentation examples are unchanged; compatibility is exercised by the dedicated external test target.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Endpoint::from_str fixed-prefix, area, protocol, extension, address, version, and panic-safety branches.
+    test_targets:
+      - p2p-frame/src/endpoint.rs
+      - p2p-frame/tests/endpoint_from_str_safety.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated test file executes every changed branch at the lowest effective level without adding inline test bodies to production source.
+        - Red evidence is executable in endpoint_from_str_unit_records_pre_fix_red_behavior, which reproduces the exact removed fixed slices against the reported short and UTF-8 inputs; the remaining unit cases provide green evidence against the delivered Endpoint::from_str implementation.
+    steps:
+      - id: endpoint-from-str-unit
+        name: Run endpoint parser branch and red-green regression tests
+        change_ids: ["endpoint_from_str_invalid_input_no_panic"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "endpoint_from_str_safety", "endpoint_from_str_unit_", "--", "--nocapture"]
+
+  dv:
+    mode: disabled
+    summary: Endpoint text parsing is a pure synchronous function with no module lifecycle, configuration, persistence, network IO, or failure workflow beyond its direct Result contract.
+    change_ids: ["endpoint_from_str_invalid_input_no_panic"]
+    reason: All observable behavior is exposed by the pure parser at unit and public-contract integration levels; inventing a runtime DV would not expose an additional failure mode.
+
+  integration:
+    mode: enabled
+    summary: An external Rust test crate consumes the unchanged public FromStr contract for valid IPv6 and malformed Unicode inputs.
+    test_targets:
+      - p2p-frame/tests/endpoint_from_str_safety.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - This intentionally repeats one valid and two invalid representatives at the external consumer boundary; exhaustive parser branches remain unit-only.
+    steps:
+      - id: endpoint-from-str-public-contract
+        name: Run public endpoint FromStr success and failure contract
+        change_ids: ["endpoint_from_str_invalid_input_no_panic"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "endpoint_from_str_safety", "endpoint_from_str_integration_", "--", "--nocapture"]

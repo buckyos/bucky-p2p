@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "0128d67cf659fdea8256eae2fb2bb3daaa9b72af7ba8ebebdddcb6bfecf48847",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-CB-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-CB-1"],
+        "serialization_reasons": {
+          "I-1": "coordinated with its only file-level implementation child",
+          "I-CB-1": "depends on confirmed D-1 and owns the single admitted production path"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing starts only after I-1 and I-CB-1 complete"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance audit starts only after task-scoped testing completes"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "callback_result_replacement_waiter_cleanup",
+      "validation_id": "V-CRRWC-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "callback-result-replacement-ownership-unit",
+      "evidence": "Dependency-owned tests exercise both future constructors, result delivery followed by same-ID replacement, old future drop and normal Ready cleanup, pre-poll cancellation, timeout, duplicate waiter rejection, cache delivery, NoWaiter behavior, and successful replacement completion.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "normal", "required": "yes", "validation_id": "V-CRRWC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "boundary", "required": "yes", "validation_id": "V-CRRWC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "negative", "required": "yes", "validation_id": "V-CRRWC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "error", "required": "yes", "validation_id": "V-CRRWC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "compatibility", "required": "yes", "validation_id": "V-CRRWC-CONSUMER", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "lifecycle", "required": "yes", "validation_id": "V-CRRWC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "callback_result_replacement_waiter_cleanup", "case_type": "cross-module", "required": "yes", "validation_id": "V-CRRWC-CONSUMER", "level": "integration", "status": "covered", "gap_manual_reason": ""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260826T082122Z-p2p-frame+013-callback-result-replacement-waiter-cleanup-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/013-callback-result-replacement-waiter-cleanup/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "stage": "proposal",
+  "version": "v0.1",
+  "module": "example-module",
+  "submodule": "001-example-task",
+  "target_module": "example-module",
+  "baseline_manifest": null,
+  "change_ids": []
+}

@@ -1,0 +1,82 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs:
+  - p2p-frame/src/tunnel/tunnel_manager.rs
+  - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+  - docs/versions/v0.1/modules/p2p-frame/045-rendezvous-waiter-owner-token/proposal.md
+  - docs/versions/v0.1/modules/p2p-frame/045-rendezvous-waiter-owner-token/pipeline/plan.md
+contract_checks:
+  mode: disabled
+  reason: The change is private to TunnelManager lifecycle state with no public API, wire, crate-root export, build surface, or documentation example impact; the enabled Rust test steps compile the affected crate and test module.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Reproduce the two tuple-only waiter ownership defects at the lowest production-helper level with deterministic owner ordering and bounded notification waits.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The rendezvous_waiter_owner_ filter selects only the helper-level duplicate/displaced cases and the actual on_sn_rendezvous duplicate call-site case.
+        - The cases use production install, actual inbound notify registration, stale cleanup, incoming delivery, and completion paths.
+        - Red-green note: the captured pre-implementation target had pre-owner waiter insertion plus tuple-only duplicate/displacement cleanup, so these cases deterministically lose the incumbent/replacement entry before notification. Executing the new tests against that snapshot would require replacing a user-owned dirty production file in the shared worktree, so the red side is recorded from the exact baseline and the green side is executed through this task runner.
+    steps:
+      - id: rendezvous-waiter-owner-race-unit
+        name: Run duplicate incumbent and displaced replacement waiter ownership regressions
+        change_ids: ["rendezvous_waiter_owner_token_lifecycle", "rendezvous_waiter_collision_regression_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_waiter_owner_", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise the complete p2p-frame rendezvous owner, direction, cancellation, timeout, prediction validation, and NAT fallback regression surface.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The broader prefix includes existing owner collision, owner drop, outbound handoff, stale attach/complete/cancel, local timeout, and related rendezvous flow cases.
+        - Tests use the real production TunnelManager state and lifecycle helpers; network dialing remains controlled by module-local test doubles.
+    steps:
+      - id: rendezvous-owner-lifecycle-dv
+        name: Run the p2p-frame rendezvous lifecycle regression set
+        change_ids: ["rendezvous_waiter_owner_token_lifecycle", "rendezvous_waiter_collision_regression_tests"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_", "--", "--test-threads=1"]
+      - id: active-waiter-direction-compatibility-dv
+        name: Preserve active waiter matching without consuming the reverse direction slot
+        change_ids: ["rendezvous_waiter_owner_token_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::direction_aware_waiter_matches_active_tunnel_without_consuming_reverse_key", "--", "--exact", "--test-threads=1"]
+      - id: wrong-direction-waiter-compatibility-dv
+        name: Preserve wrong-direction rejection without consuming the active waiter
+        change_ids: ["rendezvous_waiter_owner_token_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::wrong_direction_does_not_consume_active_plan_waiter", "--", "--exact", "--test-threads=1"]
+      - id: reverse-registration-raii-compatibility-dv
+        name: Preserve token-aware reverse registration Drop cleanup
+        change_ids: ["rendezvous_waiter_owner_token_lifecycle"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::reverse_wait_registration_drop_cleans_up_waiter", "--", "--exact", "--test-threads=1"]
+  integration:
+    mode: disabled
+    summary: No exported or neighboring-module contract changes require a separate integration runtime.
+    change_ids: ["rendezvous_waiter_owner_token_lifecycle", "rendezvous_waiter_collision_regression_tests"]
+    reason: The defect and fix are wholly inside TunnelManager private in-memory ownership; unit and DV tests compile p2p-frame and execute production lifecycle paths. Acceptance impact is limited to the explicitly reported absence of public-NAT, multi-SN, or deployed scheduling evidence.
+    test_targets: []
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes:
+        - cyfs-p2p-test is prohibited as testing evidence by the project custom rule and is not used.
+    steps: []

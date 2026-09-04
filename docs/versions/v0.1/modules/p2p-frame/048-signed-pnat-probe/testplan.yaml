@@ -1,0 +1,127 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: breaking
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/nat_probe.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/networks/network.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs", "p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs", "p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs", "p2p-frame/tests/signed_pnat_api_check.py"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: signed-pnat-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile external calls with explicit signer identity and verification certificate
+      change_ids: ["CHG-signed-pnat-probe"]
+      run: ["python3", "p2p-frame/tests/signed_pnat_api_check.py", "--mode", "positive"]
+    - id: signed-pnat-external-negative
+      kind: external-negative
+      assertion: old-path-rejected-for-removed-symbol
+      name: Prove old unsigned reflector and prediction calls fail with expected argument diagnostics
+      change_ids: ["CHG-signed-pnat-probe"]
+      run: ["python3", "p2p-frame/tests/signed_pnat_api_check.py", "--mode", "negative"]
+    - id: signed-pnat-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify repository consumers no longer use unsigned PNAT call signatures
+      change_ids: ["CHG-signed-pnat-probe"]
+      run: ["python3", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "048-signed-pnat-probe"]
+    - id: signed-pnat-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile every p2p-frame target after the coordinated breaking migration
+      change_ids: ["CHG-signed-pnat-probe"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify the exact PNAT v2 wire format, RSA and Ed25519 signatures, tamper rejection, version cutover, signing budgets, trusted-certificate refresh, waiter ownership, and bounded listener polling at the lowest owning modules.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs
+      - p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs
+      - p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Fixed-size request and response assertions prove a reflector response cannot exceed the triggering datagram size.
+        - Wrong source and wrong signer packets are delivered before a valid packet to prove they do not cancel the live waiter.
+        - Cancellation, ABA replacement, replay, rolling-rate, in-flight, and poll-fairness cases exercise the acceptance-return fixes directly.
+    steps:
+      - id: signed-pnat-codec-unit
+        name: Run signed PNAT codec version tamper length capacity and blocking-work vectors
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::nat_probe::tests::", "--", "--test-threads=1"]
+      - id: signed-pnat-waiter-unit
+        name: Run token source and signer waiter validation
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_probe_waiter_rejects_unowned_wrong_source_and_wrong_signer_packets", "--", "--test-threads=1"]
+      - id: signed-pnat-waiter-lifecycle-unit
+        name: Run waiter cancellation ABA replay and verification race validation
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_waiter_", "--", "--test-threads=1"]
+      - id: signed-pnat-prediction-drop-unit
+        name: Prove dropping the prediction future removes its exact pending waiter
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_prediction_future_drop_removes_pending_waiter", "--", "--test-threads=1"]
+      - id: signed-pnat-poll-fairness-unit
+        name: Prove auxiliary datagram processing is bounded and self wakes
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "auxiliary_datagram_poll_is_bounded_and_self_wakes_for_fairness", "--", "--test-threads=1"]
+      - id: signed-pnat-signer-trust-unit
+        name: Reject untrusted report certificates and allow authenticated refresh after clear
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "nat_probe_signer_validation_rejects_untrusted_reports_and_allows_refresh_after_clear", "--", "--test-threads=1"]
+      - id: signed-pnat-active-state-refresh-unit
+        name: Drive live ActiveSN through invalid signer clearing and valid signer restoration
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "periodic_report_update_clears_and_restores_live_active_sn_signer", "--", "--test-threads=1"]
+      - id: signed-pnat-active-state-unit
+        name: Verify missing probe signer does not prevent control-plane online publication
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "nat_probe_directive_does_not_gate_initial_online_publication", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise two real signed UDP reflectors through the bound production QUIC listener, including wrong-certificate timeout and listener lifecycle validation.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The test uses real loopback UDP sockets and production reflector/listener paths; no mock handler or cyfs-p2p-test runtime is used.
+    steps:
+      - id: signed-pnat-listener-dv
+        name: Run signed reflector to QUIC listener prediction and wrong-signer timeout
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_prediction_uses_the_bound_quic_listener_socket_and_generation", "--", "--test-threads=1"]
+      - id: signed-pnat-strategy-matrix-dv
+        name: Run every production strategy branch with signed v2 profile reflectors
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--test", "real_p2p_tunnel_flow", "real_strategy_matrix_executes_production_branches", "--", "--test-threads=1", "--nocapture"]
+  integration:
+    mode: enabled
+    summary: Verify a real SN report delivers the expected-ID certificate and that the client uses signed probe results in the existing SN query flow.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The in-process SN and clients use authenticated command tunnels and real loopback reflector sockets.
+        - Public NAT and mixed deployed SN versions remain environment-only and are not claimed by this local evidence.
+    steps:
+      - id: signed-pnat-sn-report-integration
+        name: Run authenticated SN certificate publication and signed NAT profile flow
+        change_ids: ["CHG-signed-pnat-probe"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "first_query_returns_remote_profile_and_call_forwards_exact_snapshot", "--", "--test-threads=1"]

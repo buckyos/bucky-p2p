@@ -1,17 +1,13 @@
 ---
-module: example-module
-task_name: 001-example-task
-submodule: 001-example-task
-version: v0.1
+task_manifest: task.yaml
 status: draft
-approved_by:
-approved_at:
-approved_content_sha256:
 ---
 
 # [Module Name] Design
 
-> Keep this document implementation-ready and readable. Put module relationships in UML diagrams, describe file-level interfaces with source-language signatures, and omit anything that does not affect implementation, admission, or acceptance. Do not design test cases or test plans here.
+Risk profile: ./risk-profile.yaml
+
+> Keep this document implementation-ready and readable. Put module relationships in UML diagrams, describe file-level interfaces with source-language signatures, and omit anything that does not affect implementation, scope binding, or acceptance. Do not design test cases or test plans here.
 
 ## Design Scope
 ### Goals
@@ -107,7 +103,7 @@ stateDiagram-v2
 ## Directly Mapped Change Items
 | change_id | target_module | proposal_id | Design Coverage | Scope Paths | Interface / Boundary Impact | Notes |
 |-----------|---------------|-------------|-----------------|-------------|-----------------------------|-------|
-| CHG-example | example-module | P-001 | sections or diagrams in this file | `path/or/component` | none / describe impact | |
+| CHG-example | example-module | P-001 | sections or diagrams in this file | `src/example/**` | none / describe impact | |
 
 ## Implementation Order
 <!-- Keep this to ordering constraints that affect correctness or review. Omit obvious sequential chores. -->
@@ -116,10 +112,10 @@ stateDiagram-v2
 | 1 | | | |
 
 ## File-Level Implementation Sequence
-<!-- Finalize the concrete source files to create or modify, ordered by same-level dependency. Implementation child tasks are created from this sequence and should receive only the relevant proposal/design excerpts, scope paths, interfaces, and source files for that file-level module. -->
+<!-- Record likely source impact and dependency order for planning. This is not a read/write allowlist; implementation may inspect or change additional files. -->
 | sequence | file_level_module | action | depends_on | change_id | scope_path | implementation_task |
 |----------|-------------------|--------|------------|-----------|------------|---------------------|
-| 1 | `path/to/example_store.py` | create / modify | none | CHG-example | `path/to/example_store.py` | I-001 |
+| 1 | `src/example/example_store.py` | create / modify | none | CHG-example | `src/example/**` | I-001 |
 
 ## Design Notes
 <!-- Record only decisions a future implementer/reviewer needs: rejected alternatives, new abstraction justification, rollout/rollback constraints, or large-module submodule decisions. Do not record test cases, test plans, test strategy, validation IDs, testability seams, fixtures, or test implementation here. Use bullets, not mandatory filler tables. -->
@@ -144,15 +140,9 @@ stateDiagram-v2
 - Breaking/migration-required APIs and crate-root/build-surface changes must record structured impact flags plus a file-level consumer migration closure. Directory-only, glob-only, or `all callers` entries are not consumer evidence.
 - Every persistent datum or shared state has exactly one owner; other modules access it through the owner's interface.
 - Include failure behavior only where it affects a boundary, state transition, compatibility promise, or acceptance risk.
-- Keep only useful design content. Remove placeholder sections, speculative extension points, idealized architecture, repeated proposal text, test planning, and low-level implementation detail that does not affect contracts, dependencies, state ownership, admission, or acceptance.
+- Keep only useful design content. Remove placeholder sections, speculative extension points, idealized architecture, repeated proposal text, test planning, and low-level implementation detail that does not affect contracts, dependencies, state ownership, scope binding, or acceptance.
 - Every implementation-ready design item must carry the same `change_id` used in `proposal.md`.
 - Every file-level module to create or modify must appear in `## File-Level Implementation Sequence` in dependency order.
 - Do not include test-stage planning, fixtures, validation identifiers, implementation, or expected results in design-stage documents.
-- `Scope Paths` must be concrete repo-relative path prefixes or globs that cover exactly the allowed implementation area. Over-broad entries such as `src` are design findings.
+- `Scope Paths` are optional planned-impact hints for navigation and traceability. They never authorize or restrict project file access, and broad entries are allowed when the impact is broad.
 - When implementation structure or architectural behavior changes, update `docs/architecture/` only if repo-local project rules require global architecture documentation changes.
-
-## Approval Record
-<!-- Fill only when the user explicitly approves this document. Agents MUST NOT fill this section or set `status: approved` on their own initiative. `approver` must match front matter `approved_by`; `user_statement` must quote the user's approval instruction verbatim. The same edit must record front matter `approved_content_sha256` (generate via `schema-check.py --print-approval-hash <this-file>`); any later content edit invalidates approved evidence and MUST NOT be repaired by refreshing the hash. Use a sibling amendment/fix task for approved-document corrections. Auto-pipeline approvals use front matter plus `pipeline/plan.md` launch evidence instead of this section. -->
-- approver:
-- approval_date:
-- user_statement: ""

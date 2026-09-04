@@ -22,6 +22,12 @@ pub struct P2pConnectionInfo {
 pub trait P2pConnectionInfoCache: Send + Sync + 'static {
     async fn get(&self, conn_id: &P2pId) -> Option<P2pConnectionInfo>;
     async fn add(&self, conn_id: P2pId, info: P2pConnectionInfo);
+    /// Remove a cached connection entry, if present.
+    ///
+    /// The default no-op keeps existing third-party implementors
+    /// source-compatible; caching implementations should override this so
+    /// stale Direct entries discovered by `TunnelManager` can be invalidated.
+    async fn remove(&self, _conn_id: &P2pId) {}
 }
 
 pub type P2pConnectionInfoCacheRef = Arc<dyn P2pConnectionInfoCache>;
@@ -46,5 +52,9 @@ impl P2pConnectionInfoCache for DefaultP2pConnectionInfoCache {
 
     async fn add(&self, conn_id: P2pId, info: P2pConnectionInfo) {
         self.cache.lock().unwrap().insert(conn_id, info);
+    }
+
+    async fn remove(&self, conn_id: &P2pId) {
+        self.cache.lock().unwrap().remove(conn_id);
     }
 }

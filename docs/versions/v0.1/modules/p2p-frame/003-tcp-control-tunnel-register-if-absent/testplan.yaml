@@ -1,0 +1,85 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 003-tcp-control-tunnel-register-if-absent
+submodule: 003-tcp-control-tunnel-register-if-absent
+api_impact:
+  public_api: backward-compatible
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/network.rs", "p2p-frame/src/networks/net_manager.rs", "p2p-frame/src/networks/net_manager_post_accept_tests.rs", "p2p-frame/src/networks/net_manager_tcp_post_accept_tests.rs", "p2p-frame/src/networks/tcp/listener.rs", "p2p-frame/src/networks/tcp/network.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "docs/versions/v0.1/modules/p2p-frame/003-tcp-control-tunnel-register-if-absent/proposal.md", "docs/versions/v0.1/modules/p2p-frame/003-tcp-control-tunnel-register-if-absent/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: tcp-acceptance-api-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile all p2p-frame targets using the additive acceptance APIs
+      change_ids: ["tcp_control_tunnel_commit_after_accept"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+    - id: tcp-acceptance-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile affected repository consumers without executing broad suites
+      change_ids: ["tcp_control_tunnel_commit_after_accept"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: NetManager acceptance callback, validator, missing subscriber, explicit rejection, legacy liveness, and duplicate registration branches.
+    test_targets:
+      - p2p-frame/src/networks/net_manager.rs
+      - p2p-frame/src/networks/net_manager_post_accept_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Dedicated test file covers explicit accepted/rejected outcomes at the lowest dispatch level.
+        - Pre-fix executable red evidence was not preserved because repository policy creates tests after implementation; the reviewed fire-and-forget callback and unconditional registry insertion are the recorded red path, and the DV regression would route data to the closed duplicate on that code.
+    steps:
+      - id: tcp-post-accept-dispatch-unit
+        name: Run acceptance-aware NetManager branch tests
+        change_ids: ["tcp_control_tunnel_commit_after_accept"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::net_manager::tests::post_accept_tests", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Real loopback TCP control duplication held pending at TunnelManager, followed by original-tunnel data connections before and after duplicate rejection.
+    test_targets:
+      - p2p-frame/src/networks/net_manager_tcp_post_accept_tests.rs
+      - p2p-frame/src/networks/tcp/listener.rs
+      - p2p-frame/src/tunnel/tunnel_manager.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Uses real TLS TCP listeners, fixed tunnel/candidate ids, the actual TunnelManager registration lock to hold the duplicate decision pending, and original-tunnel streams both before and after rejection.
+    steps:
+      - id: tcp-duplicate-control-original-data-route-dv
+        name: Run pending/rejected duplicate control and original data route regression
+        change_ids: ["tcp_control_tunnel_commit_after_accept"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::net_manager::tests::tcp_post_accept_registry_tests::duplicate_control_rejection_preserves_original_data_connection_route", "--", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: Existing legacy TunnelNetwork TCP listener callback and stream round trip remain compatible through the additive acceptance adapter.
+    test_targets:
+      - p2p-frame/src/networks/tcp/network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - This intentionally reuses an existing real TCP round-trip at the compatibility boundary rather than duplicating NetManager branch assertions.
+    steps:
+      - id: tcp-legacy-listen-stream-integration
+        name: Run legacy TCP listener and stream compatibility round trip
+        change_ids: ["tcp_control_tunnel_commit_after_accept"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "networks::tcp::network::tests::tcp_tunnel_stream_round_trip_ok", "--", "--nocapture"]

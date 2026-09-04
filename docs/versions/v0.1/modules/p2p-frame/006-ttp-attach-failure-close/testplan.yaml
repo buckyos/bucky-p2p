@@ -1,0 +1,51 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 006-ttp-attach-failure-close
+submodule: 006-ttp-attach-failure-close
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/ttp/runtime.rs", "p2p-frame/src/ttp/tests.rs", "docs/versions/v0.1/modules/p2p-frame/006-ttp-attach-failure-close/proposal.md", "docs/versions/v0.1/modules/p2p-frame/006-ttp-attach-failure-close/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The public Tunnel API, TTP public signatures, crate-root exports, build surface, and documentation examples are unchanged; the crate-private attach lifecycle is exercised directly through its existing Tunnel trait boundary.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: TtpRuntime attach success, optional capability, three ordered registration failures, cleanup success/failure, and original-error precedence branches.
+    test_targets:
+      - p2p-frame/src/ttp/runtime.rs
+      - p2p-frame/src/ttp/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated ttp/tests.rs file injects each Tunnel listener-registration result and the close result at the lowest effective level without adding inline tests to production runtime.rs.
+        - Red evidence is the task-start commit a5a5d098ad5280c481ed212225de30b0c6899f9a, where all three non-NotSupport branches return Err directly and never call Tunnel::close; the task-scoped unit cases are green evidence for the delivered fail-closed behavior.
+        - The three ordered failure positions cover the lifecycle boundary from zero registered listeners through partially registered stream/control callbacks; the cleanup-error case covers the helper's diagnostic branch while asserting original error precedence.
+    steps:
+      - id: ttp-attach-failure-unit
+        name: Run TTP attach fail-closed branch and lifecycle regression tests
+        change_ids: ["ttp_attach_failure_closes_tunnel"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "ttp_attach_failure_", "--", "--nocapture"]
+
+  dv:
+    mode: disabled
+    summary: The changed lifecycle is entirely the crate-private TtpRuntime-to-Tunnel registration boundary and is deterministically exercised with the real runtime coordinator plus an injected Tunnel implementation in unit tests.
+    change_ids: ["ttp_attach_failure_closes_tunnel"]
+    reason: "owner: testing; reason: no socket, service, configuration, persistence, background retry, or caller cache behavior changes, so a real-network DV would only duplicate the same listener result branches; risk: transport-specific close correctness remains owned by existing transport suites; acceptance impact: any discovered caller or transport behavior change would require returning to testing and enabling DV."
+
+  integration:
+    mode: disabled
+    summary: No public or cross-crate interface changes; TtpClient, TtpNode, and TtpServer continue receiving the same original attach error through unchanged signatures.
+    change_ids: ["ttp_attach_failure_closes_tunnel"]
+    reason: "owner: testing; reason: the only new side effect is internal whole-tunnel cleanup at the existing crate-private attach boundary and external consumers cannot invoke or distinguish the helper directly; risk: low because caller caching after Err is unchanged and covered by source inspection; acceptance impact: any public/cross-module semantic drift blocks acceptance and requires integration coverage."

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use super::{
     IncomingTunnelAcceptance, IncomingTunnelAcceptanceCallback, IncomingTunnelCallback,
@@ -31,12 +31,35 @@ enum IncomingTunnelSubscription {
     Acceptance(IncomingTunnelAcceptanceSubscriber),
 }
 
+struct IncomingTunnelSubscriptionOwner;
+
+struct IncomingTunnelSubscriptionEntry {
+    owner: Arc<IncomingTunnelSubscriptionOwner>,
+    subscription: IncomingTunnelSubscription,
+}
+
+#[must_use = "dropping the guard unregisters the owned incoming tunnel subscriber"]
+pub(crate) struct IncomingTunnelSubscriptionGuard {
+    manager: Weak<NetManager>,
+    local_id: P2pId,
+    owner: Arc<IncomingTunnelSubscriptionOwner>,
+}
+
+impl Drop for IncomingTunnelSubscriptionGuard {
+    fn drop(&mut self) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        manager.unregister_owned_incoming_tunnel_subscriber(&self.local_id, &self.owner);
+    }
+}
+
 pub struct NetManager {
     cert_resolver: ServerCertResolverRef,
     incoming_tunnel_validator: IncomingTunnelValidatorRef,
     tunnel_networks: HashMap<Protocol, TunnelNetworkRef>,
     listener_meta: Mutex<HashMap<Protocol, Vec<TunnelListenerInfo>>>,
-    subscriptions: RwLock<HashMap<P2pId, IncomingTunnelSubscription>>,
+    subscriptions: RwLock<HashMap<P2pId, IncomingTunnelSubscriptionEntry>>,
     is_listening: AtomicBool,
 }
 
@@ -203,11 +226,27 @@ impl NetManager {
         self.cert_resolver.get_server_identity(device_id).await
     }
 
-    pub fn register_incoming_tunnel_subscriber(
-        &self,
+    pub(crate) fn register_owned_incoming_tunnel_subscriber(
+        self: &Arc<Self>,
         local_id: P2pId,
         callback: IncomingTunnelSubscriber,
-    ) -> P2pResult<()> {
+    ) -> P2pResult<IncomingTunnelSubscriptionGuard> {
+        let owner = self.register_incoming_tunnel_subscription(
+            local_id.clone(),
+            IncomingTunnelSubscription::Legacy(callback),
+        )?;
+        Ok(IncomingTunnelSubscriptionGuard {
+            manager: Arc::downgrade(self),
+            local_id,
+            owner,
+        })
+    }
+
+    fn register_incoming_tunnel_subscription(
+        &self,
+        local_id: P2pId,
+        subscription: IncomingTunnelSubscription,
+    ) -> P2pResult<Arc<IncomingTunnelSubscriptionOwner>> {
         let mut subscriptions = self.subscriptions.write().unwrap();
         if subscriptions.contains_key(&local_id) {
             return Err(p2p_err!(
@@ -217,37 +256,50 @@ impl NetManager {
             ));
         }
         log::debug!("register incoming tunnel subscriber local_id={}", local_id);
-        subscriptions.insert(local_id, IncomingTunnelSubscription::Legacy(callback));
-        Ok(())
+        let owner = Arc::new(IncomingTunnelSubscriptionOwner);
+        subscriptions.insert(
+            local_id,
+            IncomingTunnelSubscriptionEntry {
+                owner: owner.clone(),
+                subscription,
+            },
+        );
+        Ok(owner)
     }
 
-    pub fn register_incoming_tunnel_acceptance_subscriber(
-        &self,
+    pub(crate) fn register_owned_incoming_tunnel_acceptance_subscriber(
+        self: &Arc<Self>,
         local_id: P2pId,
         callback: IncomingTunnelAcceptanceSubscriber,
-    ) -> P2pResult<()> {
-        let mut subscriptions = self.subscriptions.write().unwrap();
-        if subscriptions.contains_key(&local_id) {
-            return Err(p2p_err!(
-                P2pErrorCode::AlreadyExists,
-                "tunnel acceptor already exists for {}",
-                local_id
-            ));
-        }
-        log::debug!(
-            "register acceptance-aware incoming tunnel subscriber local_id={}",
-            local_id
-        );
-        subscriptions.insert(local_id, IncomingTunnelSubscription::Acceptance(callback));
-        Ok(())
+    ) -> P2pResult<IncomingTunnelSubscriptionGuard> {
+        let owner = self.register_incoming_tunnel_subscription(
+            local_id.clone(),
+            IncomingTunnelSubscription::Acceptance(callback),
+        )?;
+        Ok(IncomingTunnelSubscriptionGuard {
+            manager: Arc::downgrade(self),
+            local_id,
+            owner,
+        })
     }
 
-    pub fn unregister_incoming_tunnel_subscriber(&self, local_id: &P2pId) {
-        log::debug!(
-            "unregister incoming tunnel subscriber local_id={}",
-            local_id
+    fn unregister_owned_incoming_tunnel_subscriber(
+        &self,
+        local_id: &P2pId,
+        owner: &Arc<IncomingTunnelSubscriptionOwner>,
+    ) {
+        let mut subscriptions = self.subscriptions.write().unwrap();
+        let owns_current = matches!(
+            subscriptions.get(local_id),
+            Some(current) if Arc::ptr_eq(&current.owner, owner)
         );
-        self.subscriptions.write().unwrap().remove(local_id);
+        if owns_current {
+            log::debug!(
+                "unregister owned incoming tunnel subscriber local_id={}",
+                local_id
+            );
+            subscriptions.remove(local_id);
+        }
     }
 
     fn refresh_listener_meta(&self) {
@@ -335,7 +387,10 @@ impl NetManager {
         tunnel: super::TunnelRef,
     ) -> IncomingTunnelAcceptance {
         enum SelectedSubscriber {
-            Legacy(IncomingTunnelSubscriber),
+            Legacy(
+                IncomingTunnelSubscriber,
+                Arc<IncomingTunnelSubscriptionOwner>,
+            ),
             Acceptance(IncomingTunnelAcceptanceSubscriber),
         }
 
@@ -344,9 +399,9 @@ impl NetManager {
                 .read()
                 .unwrap()
                 .get(&local_id)
-                .map(|subscriber| match subscriber {
+                .map(|entry| match &entry.subscription {
                     IncomingTunnelSubscription::Legacy(callback) => {
-                        SelectedSubscriber::Legacy(callback.clone())
+                        SelectedSubscriber::Legacy(callback.clone(), entry.owner.clone())
                     }
                     IncomingTunnelSubscription::Acceptance(callback) => {
                         SelectedSubscriber::Acceptance(callback.clone())
@@ -363,7 +418,7 @@ impl NetManager {
                 tunnel.candidate_id()
             );
             let accepted = match subscriber {
-                SelectedSubscriber::Legacy(subscriber) => {
+                SelectedSubscriber::Legacy(subscriber, owner) => {
                     if subscriber(Ok(tunnel.clone())).await {
                         IncomingTunnelAcceptance::Accepted
                     } else {
@@ -374,8 +429,8 @@ impl NetManager {
                         let mut subscriptions = self.subscriptions.write().unwrap();
                         if matches!(
                             subscriptions.get(&local_id),
-                            Some(IncomingTunnelSubscription::Legacy(current))
-                                if Arc::ptr_eq(current, &subscriber)
+                            Some(current)
+                                if Arc::ptr_eq(&current.owner, &owner)
                         ) {
                             subscriptions.remove(&local_id);
                         }
@@ -605,10 +660,13 @@ mod tests {
     fn register_test_acceptor(
         manager: &NetManagerRef,
         local_id: P2pId,
-    ) -> mpsc::Receiver<P2pResult<TunnelRef>> {
+    ) -> (
+        IncomingTunnelSubscriptionGuard,
+        mpsc::Receiver<P2pResult<TunnelRef>>,
+    ) {
         let (tx, rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
-        manager
-            .register_incoming_tunnel_subscriber(
+        let guard = manager
+            .register_owned_incoming_tunnel_subscriber(
                 local_id,
                 Arc::new(move |result| {
                     let tx = tx.clone();
@@ -616,7 +674,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        rx
+        (guard, rx)
     }
 
     async fn accept_test_tunnel(
@@ -633,7 +691,7 @@ mod tests {
         let manager = new_test_manager(TestValidator::new(HashMap::new()));
         let local_id = test_id(1);
         let remote_id = test_id(2);
-        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
+        let (_acceptor_guard, mut acceptor) = register_test_acceptor(&manager, local_id.clone());
         let tunnel = TestTunnel::new(local_id, remote_id, 1, 11);
         let tunnel_ref: TunnelRef = tunnel.clone();
 
@@ -652,7 +710,7 @@ mod tests {
             remote_id.clone(),
             TestDecision::Reject,
         )])));
-        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
+        let (_acceptor_guard, mut acceptor) = register_test_acceptor(&manager, local_id.clone());
         let tunnel = TestTunnel::new(local_id, remote_id, 2, 12);
 
         manager.dispatch_tunnel(tunnel.clone()).await;
@@ -677,7 +735,7 @@ mod tests {
             (error_remote_id.clone(), TestDecision::Error),
             (accepted_remote_id.clone(), TestDecision::Accept),
         ])));
-        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
+        let (_acceptor_guard, mut acceptor) = register_test_acceptor(&manager, local_id.clone());
         let failed_tunnel = TestTunnel::new(local_id.clone(), error_remote_id, 3, 13);
         let accepted_tunnel = TestTunnel::new(local_id, accepted_remote_id, 4, 14);
         let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
@@ -696,7 +754,7 @@ mod tests {
         let manager = new_test_manager(TestValidator::new(HashMap::new()));
         let local_id = test_id(8);
         let remote_id = test_id(9);
-        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
+        let (_acceptor_guard, mut acceptor) = register_test_acceptor(&manager, local_id.clone());
         let accepted_tunnel = TestTunnel::new(local_id, remote_id, 5, 15);
         let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
 
@@ -723,7 +781,7 @@ mod tests {
         let manager = new_test_manager(TestValidator::new(HashMap::new()));
         let local_id = test_id(10);
         let remote_id = test_id(11);
-        let mut acceptor = register_test_acceptor(&manager, local_id.clone());
+        let (_acceptor_guard, mut acceptor) = register_test_acceptor(&manager, local_id.clone());
         let callback = manager.incoming_tunnel_callback();
         let accepted_tunnel = TestTunnel::new(local_id, remote_id, 6, 16);
         let accepted_tunnel_ref: TunnelRef = accepted_tunnel.clone();
@@ -741,5 +799,73 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(&accepted, &accepted_tunnel_ref));
         assert_eq!(accepted_tunnel.close_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_legacy_callback_cannot_remove_replacement_subscriber() {
+        let manager = new_test_manager(TestValidator::new(HashMap::new()));
+        let local_id = test_id(201);
+        let remote_id = test_id(202);
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let unblock = Arc::new(tokio::sync::Notify::new());
+        let callback_started = started.clone();
+        let callback_unblock = unblock.clone();
+        let stale_guard = manager
+            .register_owned_incoming_tunnel_subscriber(
+                local_id.clone(),
+                Arc::new(move |_| {
+                    let started = callback_started.clone();
+                    let unblock = callback_unblock.clone();
+                    Box::pin(async move {
+                        started.notify_one();
+                        unblock.notified().await;
+                        false
+                    })
+                }),
+            )
+            .unwrap();
+
+        let first_tunnel = TestTunnel::new(local_id.clone(), remote_id.clone(), 201, 2011);
+        let manager_for_stale_dispatch = manager.clone();
+        let stale_dispatch = tokio::spawn(async move {
+            manager_for_stale_dispatch
+                .dispatch_tunnel(first_tunnel)
+                .await
+        });
+        started.notified().await;
+        drop(stale_guard);
+
+        let (replace_tx, mut replace_rx) = mpsc::channel(TEST_CHANNEL_CAPACITY);
+        let replacement_guard = manager
+            .register_owned_incoming_tunnel_subscriber(
+                local_id.clone(),
+                Arc::new(move |result| {
+                    let replace_tx = replace_tx.clone();
+                    Box::pin(async move { replace_tx.send(result).await.is_ok() })
+                }),
+            )
+            .unwrap();
+
+        unblock.notify_one();
+        let stale_result = stale_dispatch.await.unwrap();
+        assert_eq!(stale_result, IncomingTunnelAcceptance::Rejected);
+
+        let second_tunnel = TestTunnel::new(local_id.clone(), remote_id.clone(), 202, 2022);
+        let second_ref: TunnelRef = second_tunnel.clone();
+        let second_result = manager.dispatch_tunnel(second_ref.clone()).await;
+        assert_eq!(second_result, IncomingTunnelAcceptance::Accepted);
+        let arrived = accept_test_tunnel(&mut replace_rx).await.unwrap();
+        assert!(Arc::ptr_eq(&arrived, &second_ref));
+
+        // The replacement entry survives the stale callback cleanup: a third
+        // registration for the same P2pId must still observe the slot occupied.
+        let third = manager.register_owned_incoming_tunnel_subscriber(
+            local_id,
+            Arc::new(|_| Box::pin(async { true })),
+        );
+        assert_eq!(third.err().unwrap().code(), P2pErrorCode::AlreadyExists);
+
+        drop(replacement_guard);
     }
 }

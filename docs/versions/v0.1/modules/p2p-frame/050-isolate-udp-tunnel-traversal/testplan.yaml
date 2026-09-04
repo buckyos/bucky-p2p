@@ -1,0 +1,109 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: breaking
+  crate_root_export_change: true
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/network.rs", "p2p-frame/src/networks/udp_network.rs", "p2p-frame/src/networks/mod.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs", "p2p-frame/tests/unit/networks/network/udp_tunnel_network_tests.rs", "p2p-frame/tests/unit/networks/network/punch_only_default_tests.rs", "p2p-frame/tests/udp_tunnel_network_api_check.py", "p2p-frame/tests/signed_pnat_api_check.py", "docs/modules/p2p-frame.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: udp-tunnel-network-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile external UdpTunnelNetwork discovery and supertrait usage
+      change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+      run: ["python3", "p2p-frame/tests/udp_tunnel_network_api_check.py", "--mode", "positive"]
+    - id: udp-tunnel-network-external-negative
+      kind: external-negative
+      assertion: old-path-rejected-for-removed-symbol
+      name: Prove generic TunnelNetwork traversal calls fail with expected diagnostics
+      change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+      run: ["python3", "p2p-frame/tests/udp_tunnel_network_api_check.py", "--mode", "negative"]
+    - id: udp-tunnel-network-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify repository consumers no longer use qualified generic traversal methods
+      change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+      run: ["python3", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "050-isolate-udp-tunnel-traversal"]
+    - id: udp-tunnel-network-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile every p2p-frame target after the public trait migration
+      change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+    - id: signed-pnat-api-regression
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Preserve the signed PNAT API contract through UdpTunnelNetwork
+      change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+      run: ["python3", "p2p-frame/tests/signed_pnat_api_check.py", "--mode", "positive"]
+    - id: signed-pnat-legacy-signature-negative
+      kind: external-negative
+      assertion: old-path-rejected-for-removed-symbol
+      name: Preserve signed PNAT legacy-call rejection after the trait split
+      change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+      run: ["python3", "p2p-frame/tests/signed_pnat_api_check.py", "--mode", "negative"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify default capability absence, explicit same-instance opt-in, supertrait coercion, and prediction validation branches.
+    test_targets:
+      - p2p-frame/tests/unit/networks/network/udp_tunnel_network_tests.rs
+      - p2p-frame/tests/unit/networks/network/punch_only_default_tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Generic networks use the default None accessor and capable test networks return themselves.
+        - Prediction validation retains current, expired, closed-generation, and closed-listener outcomes.
+    steps:
+      - id: udp-tunnel-network-capability-unit
+        name: Run generic absence same-instance opt-in and supertrait assertions
+        change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::network::tests::udp_tunnel_network::", "--", "--test-threads=1"]
+      - id: udp-tunnel-network-validation-unit
+        name: Run migrated prediction validation success and failure branches
+        change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "rendezvous_prediction_validation_", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise TunnelManager punch lifecycle through a UdpTunnelNetwork capability and preserve owner cancellation behavior.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The pending punch double is reached only after generic-to-UDP capability discovery.
+    steps:
+      - id: udp-tunnel-network-punch-lifecycle-dv
+        name: Run punch-only incoming success and owner-drop lifecycle
+        change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "punch_only_stops_on_incoming_success_and_owner_drop", "--", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Exercise the existing signed PNAT and rendezvous flow through a real QUIC network capability.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - In-process SN and client use real loopback QUIC and UDP listener paths; no cyfs-p2p-test evidence is used.
+        - This does not claim public-NAT or deployed mixed-version evidence.
+    steps:
+      - id: udp-tunnel-network-sn-flow-integration
+        name: Run signed NAT profile and SN query flow through QUIC capability discovery
+        change_ids: ["CHG-isolate-udp-tunnel-traversal"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "first_query_returns_remote_profile_and_call_forwards_exact_snapshot", "--", "--test-threads=1"]

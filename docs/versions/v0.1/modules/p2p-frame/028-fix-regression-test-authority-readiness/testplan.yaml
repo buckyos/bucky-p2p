@@ -1,0 +1,65 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 028-fix-regression-test-authority-readiness
+submodule: 028-fix-regression-test-authority-readiness
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/service/nat_probe_scheduler.rs", "p2p-frame/src/sn/service/peer_manager.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/ttp/client.rs", "p2p-frame/src/ttp/server.rs", "p2p-frame/src/networks/tcp/tunnel.rs", "p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs", "p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs", "docs/versions/v0.1/modules/p2p-frame/028-fix-regression-test-authority-readiness/proposal.md", "docs/versions/v0.1/modules/p2p-frame/028-fix-regression-test-authority-readiness/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task changes no public API, crate-root export, build surface, documentation example or wire contract; its dedicated unit and single-module real TCP DV exercise the preserved private boundaries directly.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Prove a cold distributed query obtains the leased remote detail by value while the querying SN remains without a peer/profile cache entry.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The test retains the owner lease and final handle_query_sn aggregation path while avoiding an invalid PeerManager publication fixture.
+    steps:
+      - id: cold-distributed-query-remote-profile-unit
+        name: Run the exact cold distributed NAT profile query regression
+        change_ids: ["distributed_nat_profile_authority_fixture"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::cold_distributed_query_returns_remote_profile_in_final_sn_query_response", "--", "--exact", "--test-threads=1"]
+
+  dv:
+    mode: enabled
+    summary: Prove cache readiness precedes one PN proxy request and that the unchanged PN/TTP/TCP path reaches a real reverse TCP target with bidirectional bytes.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The target's direct data listener is closed before the source request, forcing the real reverse TCP data fallback.
+        - Readiness observation must complete before the sole ProxyOpenReq and must not open a target stream itself.
+        - The stress case executes twelve complete topologies as three rounds of four concurrent cases in one multi-threaded runtime.
+    steps:
+      - id: pn-reverse-tcp-cache-ready-dv
+        name: Run the exact PN reverse TCP first-claim regression
+        change_ids: ["pn_reverse_tcp_cache_ready_synchronization"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "pn::service::pn_server::tests::traffic_manager_tests::reverse_tcp_proxy_tests::tcp_reverse_data_first_claim_pn_proxy_stream_uses_real_reverse_tcp_target", "--", "--exact", "--test-threads=1"]
+      - id: pn-reverse-tcp-cache-ready-parallel-stress-dv
+        name: Run twelve complete PN reverse TCP cases under four-way parallel pressure
+        change_ids: ["pn_reverse_tcp_cache_ready_synchronization"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "pn::service::pn_server::tests::traffic_manager_tests::reverse_tcp_proxy_tests::tcp_reverse_data_first_claim_pn_proxy_stream_is_stable_under_parallel_pressure", "--", "--exact", "--test-threads=1"]
+
+  integration:
+    mode: disabled
+    summary: Both corrections remain inside p2p-frame and change no neighboring crate interface.
+    change_ids: ["distributed_nat_profile_authority_fixture", "pn_reverse_tcp_cache_ready_synchronization"]
+    reason: "owner: testing; reason: the SN unit covers the private inter-SN value boundary and the DV crosses PN, TTP and TCP submodules with real loopback transport; risk: deployed multi-host scheduling and public NAT are not represented; acceptance impact: no cross-crate behavior may be claimed from this task."

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import pathlib
+import subprocess
 import sys
 
 
@@ -20,21 +21,27 @@ REQUIRED_ROOT_FILES = (
     pathlib.Path("docs/architecture/workspace-constraints.md"),
     pathlib.Path("docs/architecture/validation-model.md"),
     pathlib.Path("harness/workspace-governance.yaml"),
-    pathlib.Path("harness/rules/approval-metadata-rules.md"),
+    pathlib.Path("harness/rules/index.yaml"),
     pathlib.Path("harness/rules/acceptance-review-rules.md"),
     pathlib.Path("harness/rules/acceptance-task-rules.md"),
     pathlib.Path("harness/rules/auto-pipeline-rules.md"),
     pathlib.Path("harness/rules/design-doc-rules.md"),
-    pathlib.Path("harness/rules/direct-change-mapping-rules.md"),
     pathlib.Path("harness/rules/implementation-admission-rules.md"),
-    pathlib.Path("harness/rules/module-doc-exception-rules.md"),
+    pathlib.Path("harness/rules/implementation-rules.md"),
     pathlib.Path("harness/rules/proposal-doc-rules.md"),
-    pathlib.Path("harness/rules/proposal-first-acceptance-rules.md"),
+    pathlib.Path("harness/rules/quality-gate-rules.md"),
     pathlib.Path("harness/rules/schema-validation-rules.md"),
     pathlib.Path("harness/rules/task-entry-gate-rules.md"),
+    pathlib.Path("harness/rules/test-design-rules.md"),
     pathlib.Path("harness/rules/testing-doc-rules.md"),
-    pathlib.Path("harness/rules/trigger-rules.md"),
     pathlib.Path("harness/rules/unified-test-entry-rules.md"),
+    pathlib.Path("harness/rules/triggers/build-config-deployment.md"),
+    pathlib.Path("harness/rules/triggers/contract-protocol.md"),
+    pathlib.Path("harness/rules/triggers/data-schema.md"),
+    pathlib.Path("harness/rules/triggers/harness-process.md"),
+    pathlib.Path("harness/rules/triggers/runtime-integration.md"),
+    pathlib.Path("harness/rules/triggers/security.md"),
+    pathlib.Path("harness/rules/triggers/ui-workflow.md"),
     pathlib.Path("harness/process_rules/implementation-loop.md"),
     pathlib.Path("harness/process_rules/task_templates/pipeline-stage-task.md"),
     pathlib.Path("harness/process_rules/task_templates/pipeline-submodule-task.md"),
@@ -80,6 +87,15 @@ def parse_front_matter(path: pathlib.Path) -> dict[str, str]:
 def main() -> int:
     version = sys.argv[1] if len(sys.argv) == 2 else "v0.1"
     errors: list[str] = []
+
+    self_check = subprocess.run(
+        [sys.executable, "harness/scripts/harness-self-check.py", "--root", "."],
+        text=True,
+        capture_output=True,
+    )
+    if self_check.returncode != 0:
+        detail = self_check.stderr.strip() or self_check.stdout.strip()
+        errors.append(f"harness self-check failed: {detail}")
 
     for path in REQUIRED_ROOT_FILES:
         if not path.exists():

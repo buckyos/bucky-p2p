@@ -1,0 +1,84 @@
+schema_version: 1
+task_manifest: task.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: true
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/Cargo.toml", "p2p-frame/src/endpoint.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow", "p2p-frame/tests/real_p2p_tunnel_flow/fixture.rs", "p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs", "docs/versions/v0.1/modules/p2p-frame/040-execute-real-p2p-strategy-matrix/proposal.md", "docs/versions/v0.1/modules/p2p-frame/040-execute-real-p2p-strategy-matrix/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  reason: ""
+  steps:
+    - id: default-build-parity
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Default p2p-frame build with the test seam disabled still compiles
+      change_ids: ["CHG-040-nat-matrix-test-seam", "CHG-040-nat-matrix-fixture", "CHG-040-nat-matrix-execution"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise the production NAT connect-plan selector through the crate unit surface, including public priority, four NAT mapping combinations, prediction, Unknown, and fallback ordering.
+    test_targets:
+      - p2p-frame/tests/unit/tunnel/nat_connect_plan/tests.rs
+      - p2p-frame/tests/unit/tunnel/nat_connect_plan/rendezvous_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The selector unit group stays crate-private and provides exact operation/prediction assertions.
+        - The real matrix integration test independently verifies the same production entry end-to-end.
+    steps:
+      - id: nat-connect-plan-unit
+        name: Run the NAT connect-plan and rendezvous operation selector unit group
+        change_ids: ["CHG-040-nat-matrix-test-seam", "CHG-040-nat-matrix-execution"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::nat_connect_plan::tests::", "--", "--test-threads=1"]
+
+  dv:
+    mode: enabled
+    summary: Run the dedicated real-socket matrix with production redund branches plus the existing real-socket fallback and same-SN collision regressions serially.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/fixture.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/fallback.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/collision_cross_sn.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Every matrix row starts a real SN, two real P2pStack nodes, and real probe reflectors; profiles come from the production Report/Query chain.
+        - SymmetricLike evidence uses one logical internal source socket with per-destination mapping changes reported by real reflectors.
+        - The known production-membership cross-SN case remains a separate blocked 034 gap and is skipped here.
+    steps:
+      - id: real-matrix-dv
+        name: Run the real strategy matrix and real-socket fallback/collision regressions
+        change_ids: ["CHG-040-nat-matrix-test-seam", "CHG-040-nat-matrix-fixture", "CHG-040-nat-matrix-execution"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--test", "real_p2p_tunnel_flow", "--", "--test-threads=1", "--skip", "production_ttp_cross_sn_query_and_rendezvous_arm_target_action"]
+
+  integration:
+    mode: enabled
+    summary: Run the six-row matrix as the same binary's exact integration test to prove the production entry, SN wire, and target action branches under the task feature.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The matrix test is serial by design and uses bounded event waits; no fixed sleeps or fixed ports.
+        - Reachable rows complete bidirectional unique payloads; all rows complete request/action evidence.
+        - The matrix module is cfg-gated to `test-real-socket-matrix`; a default build cannot report loopback WAN endpoints as rendezvous-eligible and therefore must not run this test.
+    steps:
+      - id: real-matrix-integration
+        name: Run the exact real strategy matrix integration case
+        change_ids: ["CHG-040-nat-matrix-fixture", "CHG-040-nat-matrix-execution"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--test", "real_p2p_tunnel_flow", "strategy_matrix::real_strategy_matrix_executes_production_branches", "--", "--exact", "--test-threads=1"]

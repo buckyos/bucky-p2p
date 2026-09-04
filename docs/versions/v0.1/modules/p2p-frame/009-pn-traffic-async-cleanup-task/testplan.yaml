@@ -1,0 +1,68 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 009-pn-traffic-async-cleanup-task
+submodule: 009-pn-traffic-async-cleanup-task
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs", "docs/versions/v0.1/modules/p2p-frame/009-pn-traffic-async-cleanup-task/proposal.md", "docs/versions/v0.1/modules/p2p-frame/009-pn-traffic-async-cleanup-task/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: pn-traffic-async-cleanup-compile
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile all p2p-frame targets after the internal cleanup execution-model correction
+      change_ids: ["pn_traffic_async_cleanup_task"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Branch and regression coverage for runtime-independent construction, idempotent task start, cleanup action selection and fixed-batch yield, shutdown state, deadline/generation validation, retained-user observation, snapshot deltas, reconnect cancellation, and limit policy behavior.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated nested test file exercises private manager/task ownership without adding inline test bodies to production code.
+        - The full traffic_manager_tests filter intentionally retains task 007 and 008 regression coverage while adding task 009 execution-model branches.
+        - Executor spawn failure cannot be injected through the active Tokio executor because its wrapper currently returns Ok after tokio::spawn; mutex poisoning and idle-generation exhaustion remain defensive fail-fast paths that production inputs cannot construct. Owner: testing; risk: process failure only after internal invariant violation or impossible-scale exhaustion; acceptance impact: non-blocking because reachable lifecycle and scheduling paths are automated.
+    steps:
+      - id: pn-traffic-async-cleanup-unit
+        name: Run PN traffic manager async cleanup and retained-statistics branch coverage
+        change_ids: ["pn_traffic_async_cleanup_task"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_manager_tests", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Real current-thread Tokio scheduling verifies one runtime task, nonblocking deadline waits, earlier-deadline notification, bounded-batch yielding and eventual progress, automatic expiry, stale-generation safety, extreme Duration handling, and nonblocking shutdown.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server.rs
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - DV cases use the real executor task, Tokio Notify, runtime timer, ordered deadlines, and synchronous manager state; async polling avoids blocking the current-thread runtime.
+        - Selected lifecycle cases overlap the unit step intentionally because the unit step protects all prior traffic-statistics behavior while this filtered step isolates the changed async scheduling boundary.
+    steps:
+      - id: pn-traffic-async-cleanup-dv
+        name: Run PN asynchronous cleanup scheduling and lifecycle verification
+        change_ids: ["pn_traffic_async_cleanup_task"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_async_cleanup_dv_", "--", "--nocapture"]
+
+  integration:
+    mode: disabled
+    summary: The correction changes only a private p2p-frame cleanup execution mechanism; public PN traffic APIs, wire behavior, crate exports, and cross-crate flows are unchanged.
+    change_ids: ["pn_traffic_async_cleanup_task"]
+    reason: "owner: testing; reason: the pipeline consumer map identifies only PnServer start/stop/drop inside the same production file, while the all-target compile contract checks repository consumers and unit/DV exercise success, cancellation, shutdown, and lifecycle failure semantics; risk: runtime backend behavior is bounded by the currently enabled Tokio executor and no neighbor-module protocol changed; acceptance impact: non-blocking unless a new external runtime/backend consumer is discovered."

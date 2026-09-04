@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "291ddd710dc4925cebb2209493681923f9b88bbf9c92aa55ced4831266b3606b",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-PN-ASYNC-CLEANUP": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-PN-ASYNC-CLEANUP"],
+        "serialization_reasons": {
+          "I-1": "merged with the sole file-level child because both responsibilities own pn_server.rs"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["T-1"],
+        "serialization_reasons": {}
+      },
+      {
+        "wave": 4,
+        "tasks": ["A-1"],
+        "serialization_reasons": {}
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "pn_traffic_async_cleanup_task",
+      "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "pn-traffic-async-cleanup-unit",
+      "evidence": "The dedicated traffic_manager_tests.rs preserves task 007/008 behavior and covers runtime-independent construction, idempotent single-task start, cleanup action branches and batch yielding, Notify-driven deadline rescheduling, automatic expiry, extreme Duration, stale generation/reconnect, retained limits, shutdown, and late-session behavior; the filtered DV step reruns the real Tokio task/timer/notifier lifecycle.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "normal", "required": "yes", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "boundary", "required": "yes", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "negative", "required": "yes", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "error", "required": "yes", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "compatibility", "required": "yes", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "lifecycle", "required": "yes", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_async_cleanup_task", "case_type": "cross-module", "required": "no", "validation_id": "V-PN-TRAFFIC-ASYNC-CLEANUP-CROSS-MODULE-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "The correction is private to p2p-frame's manager/server lifecycle; PN wire and cross-crate APIs are unchanged, and the all-target compile contract closes repository consumers."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260715T083511Z-p2p-frame+009-pn-traffic-async-cleanup-task-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/009-pn-traffic-async-cleanup-task/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

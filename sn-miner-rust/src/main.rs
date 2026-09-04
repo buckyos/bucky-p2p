@@ -1,6 +1,7 @@
 use bucky_crypto::PrivateKey;
 use bucky_objects::{
-    Area, Device, DeviceCategory, Endpoint, NamedObject, ObjectDesc, Protocol, UniqueId,
+    Area, Device, DeviceCategory, Endpoint, EndpointArea, NamedObject, ObjectDesc, Protocol,
+    UniqueId,
 };
 use bucky_raw_codec::{FileDecoder, FileEncoder};
 use std::collections::HashMap;
@@ -126,6 +127,7 @@ struct SnMinerConfig {
     owner_serving_endpoints: String,
     online_heartbeat_interval: Duration,
     route_publish_interval: Duration,
+    nat_probe_ports: Vec<u16>,
 }
 
 impl SnMinerConfig {
@@ -195,6 +197,7 @@ impl SnMinerConfig {
                 300,
                 "route_publish_interval_secs",
             )?,
+            nat_probe_ports: parse_nat_probe_ports(values.get("nat_probe_ports"))?,
         })
     }
 }
@@ -207,7 +210,11 @@ async fn run_configured(config: SnMinerConfig) -> std::result::Result<(), String
 }
 
 async fn run_owner_role(config: SnMinerConfig) -> std::result::Result<(), String> {
-    let (local_identity, identity_factory, cert_factory) = load_identity(&config.desc_path)?;
+    if !config.nat_probe_ports.is_empty() {
+        return Err("owner role cannot configure nat_probe_ports".to_owned());
+    }
+    let (local_identity, identity_factory, cert_factory) =
+        load_identity(&config.desc_path, false)?;
     let membership = parse_owner_membership(&config.owner_members)
         .map_err(|err| format!("invalid owner_members: {}", err))?;
     let owner_peer_endpoints = parse_endpoints(
@@ -239,7 +246,8 @@ async fn run_owner_role(config: SnMinerConfig) -> std::result::Result<(), String
 }
 
 async fn run_serving_role(config: SnMinerConfig) -> std::result::Result<(), String> {
-    let (local_identity, identity_factory, cert_factory) = load_identity(&config.desc_path)?;
+    let (local_identity, identity_factory, cert_factory) =
+        load_identity(&config.desc_path, !config.nat_probe_ports.is_empty())?;
     let membership = parse_owner_membership_with_endpoints(
         &config.owner_members,
         Some(config.owner_serving_endpoints.as_str()),
@@ -253,13 +261,16 @@ async fn run_serving_role(config: SnMinerConfig) -> std::result::Result<(), Stri
     );
     let server_runtime =
         ServerRuntime::start(ServerRuntimeConfig::default()).map_err(|err| format!("{:?}", err))?;
-    let service_config = SnServiceConfig::new(
+    let mut service_config = SnServiceConfig::new(
         local_identity,
         identity_factory,
         cert_factory,
         server_runtime,
     )
     .set_owner_client_membership(membership);
+    if !config.nat_probe_ports.is_empty() {
+        service_config = service_config.set_nat_probe_ports(config.nat_probe_ports);
+    }
     start_serving_service(service_config).await
 }
 
@@ -275,7 +286,7 @@ async fn run_legacy_serving(
                 .to_owned(),
         );
     }
-    let (local_identity, identity_factory, cert_factory) = load_identity(desc_path)?;
+    let (local_identity, identity_factory, cert_factory) = load_identity(desc_path, false)?;
     let server_runtime =
         ServerRuntime::start(ServerRuntimeConfig::default()).map_err(|err| format!("{:?}", err))?;
     let mut service_config = SnServiceConfig::new(
@@ -309,15 +320,9 @@ async fn start_serving_service(config: SnServiceConfig) -> std::result::Result<(
 
 fn load_identity(
     desc_path: &Path,
-) -> std::result::Result<
-    (
-        Arc<CyfsIdentity>,
-        Arc<CyfsIdentityFactory>,
-        Arc<CyfsIdentityCertFactory>,
-    ),
-    String,
-> {
-    let (device, private_key) = load_device_info(desc_path).map_err(|err| {
+    preserve_static_wan: bool,
+) -> std::result::Result<(Arc<CyfsIdentity>, Arc<CyfsIdentityFactory>, Arc<CyfsIdentityCertFactory>), String> {
+    let (device, private_key) = load_device_info(desc_path, preserve_static_wan).map_err(|err| {
         format!(
             "read desc/sec file err {}, path {}",
             err,
@@ -396,6 +401,33 @@ fn parse_duration_secs(
     Ok(Duration::from_secs(secs))
 }
 
+fn parse_nat_probe_ports(value: Option<&String>) -> std::result::Result<Vec<u16>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut ports = Vec::new();
+    for item in value.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let port = item
+            .parse::<u16>()
+            .map_err(|err| format!("invalid nat_probe_ports item '{}': {}", item, err))?;
+        if port == 0 {
+            return Err("nat_probe_ports cannot contain zero".to_owned());
+        }
+        if ports.contains(&port) {
+            return Err(format!("nat_probe_ports contains duplicate port {}", port));
+        }
+        ports.push(port);
+    }
+    if ports.len() == 1 {
+        return Err("nat_probe_ports requires zero or at least two ports".to_owned());
+    }
+    Ok(ports)
+}
+
 fn parse_owner_membership(value: &str) -> std::result::Result<OwnerMembership, String> {
     parse_owner_membership_with_endpoints(value, None, false)
 }
@@ -455,7 +487,10 @@ fn parse_endpoints(value: &str) -> std::result::Result<Vec<cyfs_p2p::endpoint::E
     Ok(endpoints)
 }
 
-fn load_device_info(folder_path: &Path) -> MinerResult<(Device, PrivateKey)> {
+fn load_device_info(
+    folder_path: &Path,
+    preserve_static_wan: bool,
+) -> MinerResult<(Device, PrivateKey)> {
     if !folder_path.with_extension("desc").exists() {
         let private_key =
             PrivateKey::generate_rsa(1024).map_err(into_miner_err!(MinerErrorCode::Failed))?;
@@ -495,6 +530,27 @@ fn load_device_info(folder_path: &Path) -> MinerResult<(Device, PrivateKey)> {
             Protocol::Udp,
             SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 3456, 0, 0)),
         )));
+    } else if preserve_static_wan {
+        let source_endpoints = std::mem::take(eps);
+        for mut endpoint in source_endpoints {
+            if endpoint.is_static_wan() {
+                endpoint.set_area(EndpointArea::Mapped);
+                let mut local = endpoint;
+                local.set_area(EndpointArea::Lan);
+                match local.mut_addr() {
+                    SocketAddr::V4(ref mut addr) => addr.set_ip(Ipv4Addr::UNSPECIFIED),
+                    SocketAddr::V6(ref mut addr) => addr.set_ip(Ipv6Addr::UNSPECIFIED),
+                }
+                eps.push(endpoint);
+                eps.push(local);
+            } else {
+                match endpoint.mut_addr() {
+                    SocketAddr::V4(ref mut addr) => addr.set_ip(Ipv4Addr::UNSPECIFIED),
+                    SocketAddr::V6(ref mut addr) => addr.set_ip(Ipv6Addr::UNSPECIFIED),
+                }
+                eps.push(endpoint);
+            }
+        }
     } else {
         for endpoint in eps {
             match endpoint.mut_addr() {
@@ -505,4 +561,12 @@ fn load_device_info(folder_path: &Path) -> MinerResult<(Device, PrivateKey)> {
     }
 
     Ok((device, private_key))
+}
+
+#[cfg(test)]
+mod nat_probe_config_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/unit/nat_probe_config_tests.rs"
+    ));
 }

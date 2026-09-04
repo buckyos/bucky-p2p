@@ -1,0 +1,44 @@
+schema_version: 1
+task_manifest: task.yaml
+
+# `risk-profile-check.py --prepare --task <packet>/task.yaml` writes these
+# task/change and source bindings. Proposal/design changes then invalidate this
+# profile until its judgments are reviewed and the bindings are prepared again.
+change_ids: ["CHG-example"]
+source_bindings:
+  proposal: proposal.md
+  design_source:
+
+# One task-level matrix. Stage documents reference this file and never copy it.
+# Proposal owns applies/evidence. Design owns required_checks for applicable
+# risks. Testing implements those checks; acceptance may consult the profile
+# but does not require or verify risk evidence as an acceptance gate.
+risks:
+  contract:
+    applies: false
+    evidence: TODO classify exported interface, protocol, CLI, event, and wire-format risk
+    required_checks: []
+  data:
+    applies: false
+    evidence: TODO classify persistence, schema, serialization, migration, and cache-key risk
+    required_checks: []
+  security:
+    applies: false
+    evidence: TODO classify authentication, authorization, privacy, secret, and trust-boundary risk
+    required_checks: []
+  runtime:
+    applies: false
+    evidence: TODO classify runtime, concurrency, lifecycle, retry, timeout, and integration risk
+    required_checks: []
+  build:
+    applies: false
+    evidence: TODO record confirmed material impact to dependency/build graph, supply-chain trust, produced artifacts, production defaults/feature rollout, release/deployment, compatibility, or rollback; path/category matches alone are screening signals
+    required_checks: []
+  ui:
+    applies: false
+    evidence: TODO classify UI, navigation, accessibility, localization, and user-workflow risk
+    required_checks: []
+  harness:
+    applies: false
+    evidence: TODO classify harness, process-rule, checker, and test-infrastructure risk
+    required_checks: []

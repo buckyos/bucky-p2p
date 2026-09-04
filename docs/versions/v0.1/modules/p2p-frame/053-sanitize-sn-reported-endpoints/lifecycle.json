@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/053-sanitize-sn-reported-endpoints/proposal.md": "9108c3f2f9f80d0e82ed66dd30a855f5116b3acce022f69ddba97478fbfaaf7e"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "23e8aecf061e850801b2a67fd285fc21c1ba1de4796638c56f08f7a7202b2357"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

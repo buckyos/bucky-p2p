@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "a813304669ad0695ff809ecbfc3b7f28e67eeb0f61272c51bac78cb28f2946f7",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-TCP-TUNNEL-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "the root executor produced the single shared pipeline plan because no explicit user instruction authorized sub-agent delegation"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-TCP-TUNNEL-1"],
+        "serialization_reasons": {
+          "I-1": "the implementation parent and its only file child are executed by the root executor under the active no-delegation policy",
+          "I-TCP-TUNNEL-1": "the single production-file child starts after D-1 and owns the complete admitted runtime change"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing starts after the admitted runtime file and implementation scope evidence are complete; the root executor owns shared testplan and state updates"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "acceptance starts only after current implementation, testing metadata, testing scope, and the successful task-scoped artifact are complete"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "tcp_data_control_direction_priority",
+      "validation_id": "V-TCP-DATA-CONTROL-DIRECTION",
+      "testplan_level": "unit",
+      "testplan_step_id": "tcp-data-control-direction-branch-unit",
+      "evidence": "The dedicated control_direction_priority_tests.rs file creates real Active/Passive TCP tunnels, observes the production data-entry creator state, executes preferred success without fallback, second-open reuse, both opposite-direction fallbacks, and both dual-failure diagnostic orders; the same exact command is registered as DV for the complete signed TCP/TLS workflow.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "normal", "required": "yes", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "boundary", "required": "yes", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "negative", "required": "yes", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "error", "required": "yes", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "compatibility", "required": "yes", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "lifecycle", "required": "yes", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_data_control_direction_priority", "case_type": "cross-module", "required": "no", "validation_id": "V-TCP-DATA-CONTROL-DIRECTION-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "The implementation changes only crate-private TcpTunnel attempt ordering; public Tunnel signatures, TCP frame shapes, PN/TTP behavior, and downstream crate contracts are unchanged."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260827T052035Z-p2p-frame+016-tcp-data-control-direction-priority-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/016-tcp-data-control-direction-priority/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

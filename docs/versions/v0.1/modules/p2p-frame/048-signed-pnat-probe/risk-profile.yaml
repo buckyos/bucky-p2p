@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-signed-pnat-probe"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["pipeline/plan.md#implementation-scope-bindings", "pipeline/plan.md#exported-interfaces", "pipeline/plan.md#consumer-migration-closure"]
+    required_checks: ["signed wire round-trip and malformed-input checks", "v1 rejection", "producer-consumer closure"]
+  data:
+    applies: false
+    evidence: No persistent schema, migration, storage representation, or cache key changes are requested; failed verification leaves NatProfile unknown.
+    required_checks: []
+  security:
+    applies: true
+    evidence: ["pipeline/plan.md#state-ownership", "pipeline/plan.md#failure-flows", "pipeline/plan.md#exported-interfaces"]
+    required_checks: ["signature positive and negative vectors", "trusted SN identity binding", "replay and token correlation checks", "anti-amplification bound"]
+  runtime:
+    applies: true
+    evidence: ["pipeline/plan.md#dependency-graphs", "pipeline/plan.md#state-ownership", "pipeline/plan.md#failure-flows"]
+    required_checks: ["real listener socket probe", "timeout and waiter cleanup", "reflector rate and response-size bounds"]
+  build:
+    applies: true
+    evidence: ["pipeline/plan.md#api-and-build-surface-impact", "pipeline/plan.md#consumer-migration-closure"]
+    required_checks: ["workspace compile closure", "no new crypto dependency", "explicit breaking API impact metadata"]
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing Harness workflow and test runner without changing rules, checkers, templates, or test infrastructure behavior.
+    required_checks: []

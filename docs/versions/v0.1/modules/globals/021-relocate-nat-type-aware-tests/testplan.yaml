@@ -1,0 +1,153 @@
+schema_version: 1
+version: v0.1
+module: globals
+task_name: 021-relocate-nat-type-aware-tests
+submodule: 021-relocate-nat-type-aware-tests
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: [".gitignore", "p2p-frame/src/nat_type.rs", "p2p-frame/src/networks/network.rs", "p2p-frame/src/sn/nat_probe.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/protocol/v0.rs", "p2p-frame/src/sn/service/peer_manager.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/tunnel/nat_connect_plan.rs", "p2p-frame/tests/unit", "p2p-frame/tests/nat_profile_public_api.rs", "p2p-frame/tests/nat_type_aware", "sn-miner-rust/src/main.rs", "sn-miner-rust/tests/unit", "docs/versions/v0.1/modules/globals/021-relocate-nat-type-aware-tests/proposal.md", "docs/versions/v0.1/modules/globals/021-relocate-nat-type-aware-tests/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The relocation changes no public API, crate-root export, build surface, wire contract, or documentation example; private test-module compilation and release checks cover the affected boundaries.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Prove the exact 020-owned files are in visible crate tests trees, old source copies and inline bodies are absent, and all 18 plus 1 moved unit-test names execute under their original module identities.
+    test_targets:
+      - p2p-frame/tests/unit
+      - sn-miner-rust/tests/unit
+      - p2p-frame/src/nat_type.rs
+      - p2p-frame/src/networks/network.rs
+      - p2p-frame/src/sn/nat_probe.rs
+      - p2p-frame/src/sn/protocol/sn.rs
+      - p2p-frame/src/sn/protocol/v0.rs
+      - p2p-frame/src/sn/service/peer_manager.rs
+      - p2p-frame/src/sn/inter_sn/mod.rs
+      - p2p-frame/src/sn/service/service.rs
+      - p2p-frame/src/tunnel/nat_connect_plan.rs
+      - sn-miner-rust/src/main.rs
+    preconditions:
+      tools: ["python3", "git", "cargo"]
+      env: []
+      services: []
+      notes:
+        - The pre-move Cargo inventory contains exactly 18 mapped p2p-frame names and one mapped sn-miner name; the parity steps compare those names mechanically after relocation.
+        - The old common-wire file was ignored and had SHA-256 5110c42e07e74c3ef47ac64ff3199d6ed6b99f7c2e8698d838d1e0af00f18cf2; the layout step requires the visible moved file to retain that byte hash.
+        - Every Cargo filter below must execute at least one name already proven present by the exact list-parity steps; zero-test success is therefore rejected before execution.
+    steps:
+      - id: relocated-layout-static
+        name: Verify exact visible destinations old-path removal inline extraction and no accidental integration target
+        change_ids: ["nat_type_aware_test_file_layout"]
+        run: ["python3", "-c", "from pathlib import Path; import hashlib, subprocess; new='p2p-frame/tests/unit/nat_type/tests.rs p2p-frame/tests/unit/networks/network/punch_only_default_tests.rs p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs p2p-frame/tests/unit/sn_tests/protocol/v0/nat_type_wire_tests.rs p2p-frame/tests/unit/sn_tests/service/service/nat_probe_config_tests.rs p2p-frame/tests/unit/tunnel/nat_connect_plan/tests.rs p2p-frame/tests/unit/sn_tests/service/reported_net_profile_tests.rs p2p-frame/tests/unit/sn_tests/inter_sn_profile_tests.rs p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs sn-miner-rust/tests/unit/nat_probe_config_tests.rs'.split(); old='p2p-frame/src/nat_type/tests.rs p2p-frame/src/networks/network/punch_only_default_tests.rs p2p-frame/src/sn/nat_probe/tests.rs p2p-frame/src/sn/protocol/sn/nat_type_wire_tests.rs p2p-frame/src/sn/protocol/v0/nat_type_wire_tests.rs p2p-frame/src/sn/service/service/nat_probe_config_tests.rs p2p-frame/src/tunnel/nat_connect_plan/tests.rs sn-miner-rust/src/nat_probe_config_tests.rs'.split(); assert all(Path(p).is_file() for p in new), [p for p in new if not Path(p).is_file()]; assert all(not Path(p).exists() for p in old), [p for p in old if Path(p).exists()]; assert all(subprocess.run(['git','check-ignore','-q','--no-index',p]).returncode == 1 for p in new), [p for p in new if subprocess.run(['git','check-ignore','-q','--no-index',p]).returncode != 1]; assert not Path('p2p-frame/tests/unit.rs').exists() and not Path('p2p-frame/tests/unit/main.rs').exists() and not Path('sn-miner-rust/tests/unit.rs').exists() and not Path('sn-miner-rust/tests/unit/main.rs').exists(); assert 'reported_net_profile_is_available_only_until_its_own_expiry' not in Path('p2p-frame/src/sn/service/peer_manager.rs').read_text(); assert 'sn_distributed_detail_response_forwards_profile_without_replication' not in Path('p2p-frame/src/sn/inter_sn/mod.rs').read_text(); assert 'DirectInterSnClient' not in Path('p2p-frame/src/sn/service/service.rs').read_text() and 'cold_distributed_query_returns_remote_profile_in_final_sn_query_response' not in Path('p2p-frame/src/sn/service/service.rs').read_text(); assert hashlib.sha256(Path('p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs').read_bytes()).hexdigest() == '5110c42e07e74c3ef47ac64ff3199d6ed6b99f7c2e8698d838d1e0af00f18cf2' "]
+      - id: relocated-p2p-name-set-parity
+        name: Compare the exact 18 moved p2p-frame test names with the pre-move Cargo inventory
+        change_ids: ["nat_type_aware_test_registration_parity"]
+        run: ["python3", "-c", "import subprocess; expected=set('nat_type::tests::freshness_and_context_roles_fail_closed_at_boundaries nat_type::tests::observations_use_complete_endpoints_and_require_two_samples nat_type::tests::prediction_hint_requires_consistent_delta_and_obeys_bounds networks::network::tests::punch_only_default::default_punch_only_is_backward_compatible_not_support sn::nat_probe::tests::empty_single_duplicate_and_timeout_inputs_fail_closed sn::nat_probe::tests::packet_codec_rejects_wrong_token_kind_length_and_reserved_bytes sn::nat_probe::tests::same_socket_two_reflectors_produce_real_non_symmetric_observation sn::protocol::sn::nat_type_wire_tests::legacy_query_detail_and_report_bases_decode_without_extensions sn::protocol::sn::nat_type_wire_tests::malformed_or_unknown_query_extension_fails_closed_without_rejecting_legacy_base sn::protocol::sn::nat_type_wire_tests::new_query_report_detail_and_call_extensions_roundtrip_and_old_decoders_ignore_them sn::protocol::v0::nat_type_wire_tests::called_context_is_additive_and_legacy_bases_remain_bidirectionally_compatible sn::protocol::v0::nat_type_wire_tests::sn_call_response_layout_has_no_nat_extension_or_profile_field sn::service::service::nat_probe_config_tests::probe_configuration_accepts_disabled_or_multiple_unique_ports_only tunnel::nat_connect_plan::tests::ordered_matrix_selects_one_connector_and_matching_peer_action tunnel::nat_connect_plan::tests::public_unknown_and_unpredictable_profiles_choose_explicit_fallbacks sn::service::peer_manager::tests::reported_net_profile_is_available_only_until_its_own_expiry sn::inter_sn::tests::sn_distributed_detail_response_forwards_profile_without_replication sn::service::service::tests::cold_distributed_query_returns_remote_profile_in_final_sn_query_response'.split()); prefixes=('nat_type::tests::','networks::network::tests::punch_only_default::','sn::nat_probe::tests::','sn::protocol::sn::nat_type_wire_tests::','sn::protocol::v0::nat_type_wire_tests::','sn::service::service::nat_probe_config_tests::','tunnel::nat_connect_plan::tests::'); inline={'sn::service::peer_manager::tests::reported_net_profile_is_available_only_until_its_own_expiry','sn::inter_sn::tests::sn_distributed_detail_response_forwards_profile_without_replication','sn::service::service::tests::cold_distributed_query_returns_remote_profile_in_final_sn_query_response'}; out=subprocess.run(['cargo','test','-p','p2p-frame','--features','x509','--lib','--','--list'],check=True,capture_output=True,text=True).stdout; actual={line[:-6] for line in out.splitlines() if line.endswith(': test')}; selected={n for n in actual if n.startswith(prefixes) or n in inline}; assert selected == expected, {'missing':sorted(expected-selected),'extra':sorted(selected-expected)}"]
+      - id: relocated-sn-miner-name-set-parity
+        name: Compare the exact moved sn-miner test name with the pre-move Cargo inventory
+        change_ids: ["nat_type_aware_test_registration_parity"]
+        run: ["python3", "-c", "import subprocess; expected={'nat_probe_config_tests::nat_probe_port_parser_preserves_disabled_default_and_rejects_invalid_sets'}; out=subprocess.run(['cargo','test','-p','sn-miner','--','--list'],check=True,capture_output=True,text=True).stdout; actual={line[:-6] for line in out.splitlines() if line.endswith(': test') and line.startswith('nat_probe_config_tests::')}; assert actual == expected, {'missing':sorted(expected-actual),'extra':sorted(actual-expected)}"]
+      - id: nat-profile-model-unit
+        name: Run relocated observation freshness context and prediction-bound tests
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "nat_type::tests"]
+      - id: nat-connect-plan-unit
+        name: Run relocated ordered traversal-matrix and fallback tests
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "tunnel::nat_connect_plan::tests"]
+      - id: nat-wire-common-unit
+        name: Run relocated common SN additive-tail and legacy compatibility tests
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::protocol::sn::nat_type_wire_tests"]
+      - id: nat-wire-called-unit
+        name: Run relocated SnCalled and unchanged SnCallResp wire tests
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::protocol::v0::nat_type_wire_tests"]
+      - id: nat-probe-config-unit
+        name: Run relocated SN service probe configuration tests
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::service::service::nat_probe_config_tests"]
+      - id: punch-only-default-unit
+        name: Run relocated backward-compatible TunnelNetwork default test
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "networks::network::tests::punch_only_default"]
+      - id: peer-profile-expiry-unit
+        name: Run extracted peer-profile expiry test under its original module name
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::service::peer_manager::tests::reported_net_profile_is_available_only_until_its_own_expiry", "--", "--exact"]
+      - id: inter-sn-profile-forwarding-unit
+        name: Run extracted distributed detail forwarding test under its original module name
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::inter_sn::tests::sn_distributed_detail_response_forwards_profile_without_replication", "--", "--exact"]
+      - id: sn-miner-probe-config-unit
+        name: Run relocated private sn-miner NAT probe port parser test
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "sn-miner", "nat_probe_config_tests"]
+
+  dv:
+    mode: enabled
+    summary: Run relocated real UDP probe cases, validate already-correct NAT-aware tunnel ownership cases, and compile both release surfaces with test loaders disabled.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/nat_probe/tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+      - p2p-frame/src/lib.rs
+      - sn-miner-rust/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The probe cases use real loopback UDP sockets; the tunnel cases retain owner cancellation prediction fallback and direction behavior from 020.
+        - Release cargo checks prove every new include remains disabled outside cfg(test).
+    steps:
+      - id: nat-probe-runtime-dv
+        name: Run relocated fixed-packet same-socket two-reflector and fail-closed probe workflows
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "sn::nat_probe::tests"]
+      - id: nat-aware-tunnel-registration-dv
+        name: Run the already-correct NAT-aware TunnelManager test module
+        change_ids: ["nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests"]
+      - id: p2p-frame-release-check-dv
+        name: Compile p2p-frame release paths with test-only loaders disabled
+        change_ids: ["nat_type_aware_test_file_layout"]
+        run: ["cargo", "check", "-p", "p2p-frame", "--features", "x509"]
+      - id: sn-miner-release-check-dv
+        name: Compile sn-miner release paths with test-only loader disabled
+        change_ids: ["nat_type_aware_test_file_layout"]
+        run: ["cargo", "check", "-p", "sn-miner"]
+
+  integration:
+    mode: enabled
+    summary: Re-run the already-correct external public API and SN profile-flow files plus the extracted distributed cold-query case to prove cross-module registration remains intact.
+    test_targets:
+      - p2p-frame/tests/nat_profile_public_api.rs
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+      - p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - These tests validate only registration and behavior parity; task 021 does not claim new NAT behavior or public-network evidence.
+    steps:
+      - id: nat-profile-public-api-integration
+        name: Run the already-correct external NAT profile API consumer
+        change_ids: ["nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "nat_profile_public_api"]
+      - id: sn-profile-flow-integration
+        name: Run the already-correct two-case SN profile-flow module
+        change_ids: ["nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests"]
+      - id: distributed-cold-query-integration
+        name: Run the extracted cold distributed query case under its original exact name
+        change_ids: ["nat_type_aware_test_file_layout", "nat_type_aware_test_registration_parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::service::service::tests::cold_distributed_query_returns_remote_profile_in_final_sn_query_response", "--", "--exact"]

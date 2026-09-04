@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/050-isolate-udp-tunnel-traversal/proposal.md": "4becb66488280cf3cc031e325cb8a9fd086e9b602a982cba513c2403cf7183cf"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "26917dde6661647e787975119528790e38ce3b1677924d11aee9f7e6d7d46396"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

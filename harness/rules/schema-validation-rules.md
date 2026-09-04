@@ -2,88 +2,90 @@
 
 ## Goal
 - Define machine-checkable task packet, rule, and validation metadata structure.
-- Make implementation admission fail closed on missing fields, approval state, or change-level traceability.
+- Make task lifecycle checks fail closed on missing fields, invalid approval state, or change-level traceability.
 
 ## Scope
-- Task packet proposal/design/testing/testplan files under `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`.
+- Full lifecycle schema validation is a high-risk workflow mechanism. Trivial and standard flows still create common `task.yaml` plus `proposal.md`, but do not run the high-risk schema/risk/design checks.
+- Task packet proposal/design/testing/testplan files, lower-tier `completion-report.md`, and high-risk `acceptance-report.md` under `docs/versions/<version>/modules/<project>/<task-seq>-<task-slug>/`.
 - Cross-project task packets under `docs/versions/<version>/modules/globals/<task-seq>-<task-slug>/`.
-- Harness checkers: `schema-check.py`, `admission-check.py`, `stage-scope-check.py`, `doc-structure-check.py`, `testing-coverage-check.py`, `acceptance-report-check.py`, and `pipeline-plan-check.py`.
+- Canonical high-risk stage checker `harness-check.py`, legal manual transition command `task-transition.py`, lifecycle receipt checker `lifecycle-check.py`, lower-tier delivery checker `lower-tier-check.py`, plus internal checkers: `completion-report-check.py`, `schema-check.py`, `stage-scope-check.py`, `doc-structure-check.py`, `testing-coverage-check.py`, `acceptance-report-check.py`, and `pipeline-plan-check.py`.
 
 ## Required Front Matter
-Manual-flow `proposal.md` and `design.md` MUST contain YAML-style front matter. Auto-pipeline requires only packet `proposal.md`; optional `testing.md` uses the same metadata when generated:
+Proposal stage requires only `proposal.md`, regardless of whether auto-pipeline has just been launched; schema validation MUST NOT inspect whether `design.md` or task-local `design/` exists at that stage. From a manual design stage onward, both `proposal.md` and `design.md` are required. In a launched pipeline, stages before `auto_pipeline_start_stage` keep these manual requirements, while automatic design uses `pipeline/plan.md`; manual testing uses `testing.md` plus `testplan.yaml`, while automatic testing uses runtime-state evidence plus `testplan.yaml`. Each human-readable stage document that applies MUST contain YAML-style front matter:
 
 ```yaml
-module: <project-or-globals>
-task_name: <task-seq>-<task-slug>
-version: <version>
+task_manifest: task.yaml
 status: draft | approved | rejected | superseded
-approved_by: <person-or-process>
-approved_at: <iso-8601-date-or-datetime>
-approved_content_sha256: <64-hex-content-hash>
 ```
 
 
-Task packet docs MAY also include:
+Stage documents MUST NOT repeat `module`, `version`, `task_name`, or `submodule`; those identity fields come only from `task.yaml`. A launched pipeline records `auto_pipeline_start_stage`: stages before it use manual document requirements, while automatic design uses plan mappings. Explicit user launch confirms the bound proposal and does not require separate proposal approval metadata.
 
-```yaml
-submodule: <task-seq>-<task-slug>
-```
+`schema-check.py --require-approved` MUST fail unless the mandatory manual proposal/design documents have `status: approved`. `harness-check.py --profile pre-edit` MUST use this flag whenever the active design source is manual `design.md`, including later automatic stages launched after manual design; it MUST NOT use the flag when automatic design uses `pipeline/plan.md`.
 
-Manual-flow implementation admission accepts only `status: approved`. Explicitly user-launched auto-pipeline admission treats launch as confirmation of the bound proposal and does not require proposal approval metadata.
+## Canonical Task Manifest
+Every proposal packet MUST contain `task.yaml` with schema version `1`, canonical
+`version`, `packet_module`, `task_name`, active `stage`, workflow `mode`, artifact
+references, and `workflow_tier`, which is `pending` before confirmation and the
+user-selected tier afterward. Confirmed lower-tier manifests bind `completion_report`
+and one or more change entries; standard also binds `change_record`.
+On lower-tier confirmation, the pending template's blank baseline field is set
+to the canonical value. Confirmed lower-tier manifests require `baseline_manifest` and
+`changed_paths_file` values. Pre-edit captures the repository baseline and
+completion materializes its exact changed-path manifest before report review.
+Confirmed high-risk manifests additionally require evidence
+paths, task-level `risk_profile`, and one or more change entries. Each high-risk change binds a stable `id` to one concrete `target_module` and
+concrete `scope_paths`. Cross-project packets use `packet_module: globals`; ordinary packets
+require every target module to equal the packet module.
 
-## Approval Provenance Schema
-- Agents MUST NOT set `status: approved` or fill approval fields on their own initiative.
-- Approved documents MUST use one of two provenance forms:
-  - User approval: `approved_by` names the user, and `## Approval Record` contains non-placeholder `approver`, `approval_date`, and verbatim `user_statement`; `approver` matches `approved_by`.
-  - Auto-pipeline approval: `approved_by: auto-pipeline`, valid only while `pipeline/plan.md` records confirmed `User launch confirmed:` plus the user's verbatim explicit instruction in `User launch statement:` under `## Trigger`; agents never infer or synthesize those fields.
-- Agent-like `approved_by` values such as `agent`, `assistant`, `claude`, `ai`, `self`, `auto`, or `bot` fail validation.
-- Approval metadata may be changed only as part of explicit approval for that document.
-- The approving edit MUST record `approved_content_sha256` from `schema-check.py --print-approval-hash <document>`; the hash excludes `status`, `approved_by`, `approved_at`, `approved_content_sha256`, and the entire `## Approval Record` section.
-- `schema-check.py` and `admission-check.py` MUST recompute this hash and fail approved documents whose hash is missing, malformed, or stale.
-- `schema-check.py` and `admission-check.py` fail closed on missing, placeholder, inconsistent, agent-like, or unverifiable approval provenance.
+Stage documents and `testplan.yaml` use `task_manifest: task.yaml` and MUST NOT
+repeat task identity fields. Acceptance reports use `Task manifest: task.yaml`. Scope Paths
+in `task.yaml` MUST exactly match the corresponding design or pipeline-plan
+binding before implementation and at downstream completion.
+
+## Task Risk Profile Schema
+- Every confirmed high-risk packet contains exactly one `risk-profile.yaml`, referenced by `task.yaml` as `risk_profile: risk-profile.yaml` and by proposal/design/testing documents as `Risk profile: ./risk-profile.yaml`; lower tiers retain the proposal placeholder and do not create this file.
+- The profile contains exactly `contract`, `data`, `security`, `runtime`, `build`, `ui`, and `harness`. Proposal owns each category's `applies` and `evidence`; design owns `required_checks` for applicable categories; testing implements those checks.
+- `risk-profile-check.py --prepare --task <packet>/task.yaml` machine-writes the task `change_ids`, proposal path, and active design-source path. Normal validation fails when task/change or source-path binding drifts.
+- `harness-check.py` derives context trigger ids only from applicable categories in this profile. Per-stage matrices and per-change `triggers` fields are invalid duplicate sources.
+
+## Approval State
+- Machine validation checks only the document `status` value and, when `--require-approved` is used, requires `status: approved`.
+- Approver identity, conversation provenance, timestamps, and approval records are intentionally outside the generated schema checker.
 
 ## Task Name Sequence Schema
-- Task packet directory names and front matter `task_name` values MUST match `<task-seq>-<task-slug>`.
+- Task packet directory names and `task.yaml` `task_name` values MUST match `<task-seq>-<task-slug>`.
 - `<task-seq>` is a version-local decimal sequence with default width 3 digits. New versions start at `001`; subsequent tasks increment by 1 across all project modules and `globals` in that version.
 - `<task-slug>` is the stable human-readable task slug. Use lowercase ASCII words separated by hyphens unless a repo custom rule defines a stricter slug format.
-- `docs/versions/<version>/modules/tasks.md` MUST record the same sequence-prefixed `task_id` and packet path.
+- Machine-owned `.harness/tasks/<version>/tasks.json` MUST record the same sequence-prefixed `task_id` and canonical `task_manifest`; only `task-index.py init/add/remove` may create or mutate it, while `task-index.py list/validate/contains` provide reads and checks.
 - The sequence identifies creation order only; active/current task resolution still comes from the user request, module Current/Active Task field, or confirmed unfinished-task index row.
-- New task sequence allocation MUST use `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/task-seq.py next --version <version> --slug <task-slug>`; hand-picked sequence numbers are invalid unless the script output is recorded or reproduced by `task-seq.py check --require-next`.
-
-## Approved Task Immutability
-- `status: approved` task packet documents are immutable by default.
-- New requirements, new APIs, new `change_id` values, scope expansion, success-criteria changes, or downstream supplements MUST use a sibling task packet.
-- Corrections to approved task content MUST use a sibling amendment/fix task packet that records the original packet path and correction reason.
-- Only a user-requested current/latest task packet with `status != approved` in the relevant stage document may be edited for that stage.
-- A task is current/latest only when the current user request explicitly points to it or `docs/modules/<module>.md` Current/Active Task points to it; directory order and timestamps do not count.
-- `docs/versions/<version>/modules/tasks.md` is the unfinished-task index. It contains only unfinished task records; new tasks are added when created and removed when completed.
+- New task sequence allocation MUST use `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/task-seq.py next --version <version> --slug <task-slug>`. The allocator increments from the largest sequence already present in the same version; no separate sequence-order or continuity validation is required afterward.
 
 ## Change Traceability Schema
 - Every implementation-ready change has one stable, specific `change_id`; broad IDs such as `misc`, `cleanup`, `all`, `module`, or `bugfix` are invalid.
 - The same `change_id` MUST appear in:
   - `proposal.md` `## Proposal Items`, `change_id` column, with non-empty `proposal_id`, `requirement`, and `success_evidence`.
   - `design.md` `## Directly Mapped Change Items`, keyed by `change_id` plus `target_module`, with non-empty `proposal_id`, `Design Coverage`, and `Scope Paths`.
-- Post-implementation testing evidence also references the same `change_id`, but testing files are not implementation-admission prerequisites.
-- Mentions in comments, prose, unrelated tables, historical notes, module overviews, or oral explanations do not satisfy admission.
+- Post-implementation testing evidence also references the same `change_id`, but testing files are not implementation prerequisites.
+- Mentions in comments, prose, unrelated tables, historical notes, module overviews, or oral explanations do not satisfy direct task coverage.
 
 ## Active Module Resolution
-- Admission requires explicit `version`, `module`, and one or more `change_id` values.
-- Task directories under a project-level module or `globals` also require `submodule=<task-seq>-<task-slug>` for checker compatibility.
-- `globals` is a specialized packet-module keyword, never an implementation target. Multi-project requests use `globals/<task-seq>-<task-slug>/` for shared intent, then run admission and implementation scope checks with `--module globals --submodule <task-seq>-<task-slug> --target-module <project>` independently for every affected project.
-- A new task MUST NOT be admitted from an older or approved task packet.
-- If a new task clearly belongs to a different module than unfinished records in `docs/versions/<version>/modules/tasks.md`, those records are ineligible and the task MUST create a new task packet for the requested module.
-- If an active same-module task cannot be determined from the current request, `docs/modules/<module>.md` Current/Active Task, or a confirmed `docs/versions/<version>/modules/tasks.md` record, create a new task packet or stop for confirmation.
+- Task lifecycle checks require `task.yaml` to declare explicit `version`, `packet_module`, `task_name`, and one or more change entries.
+- The unified checker converts those bindings to legacy checker arguments internally; agents MUST NOT repeat them manually.
+- `globals` is a specialized packet-module keyword, never an implementation target. Multi-project requests use `globals/<task-seq>-<task-slug>/` for shared intent, then run implementation scope checks independently for every affected project target.
+- A new task MUST NOT reuse an older or approved task packet.
+- If a new task clearly belongs to a different module than unfinished records returned by `task-index.py list`, those records are ineligible and the task MUST create a new task packet for the requested module.
+- If an active same-module task cannot be determined from the current request, `docs/modules/<module>.md` Current/Active Task, or module-filtered `task-index.py list` output, create a new task packet or stop for confirmation.
 - If the active module cannot be determined from paths, module docs, or the user's explicit request, route to proposal or design.
 
 ## Testplan Schema
 Completed testing MUST include `testplan.yaml` unless a repo-local versioned rule permits missing machine-readable metadata and records reason, owner, risk, and acceptance impact. `schema-check.py` validates `testplan.yaml` when present; `testing-coverage-check.py` enforces mapping unless explicitly allowed.
 
+`harness-check.py --profile completion` runs schema validation for proposal and design and reruns it for testing after optional `testing.md` or `testplan.yaml` changes. Schema results may be reused only while all schema-bearing inputs remain unchanged.
+
 ```yaml
 schema_version: 1
-version: <version>
-module: <module>
-task_name: <task-seq>-<task-slug> # required for task packets
-submodule: <task-seq>-<task-slug> # optional; required only when explicit submodule metadata is used
+task_manifest: task.yaml
 api_impact:
   public_api: none | backward-compatible | migration-required | breaking
   crate_root_export_change: false
@@ -121,21 +123,21 @@ Rules:
 - Unknown levels fail validation.
 
 ## Checker Contract
-- `schema-check.py` validates packet structure, approval provenance, and optional testplan shape, with `--submodule <task-seq>-<task-slug>` for task directories.
-- `admission-check.py` validates explicit `version`, packet `module`, optional `submodule`, concrete `target_module`, `change_id` values, mandatory proposal/design traceability, and approval provenance. `--module globals` requires `--target-module`.
-- `admission-check.py --evidence-file ...` also validates proposal/design reading evidence, direct coverage judgment, active module resolution, same-module task selection or cross-module task exclusion, no chat-only evidence, file name date, document hashes, and verbatim coverage quotes.
-- `admission-check.py --verify-only` is reserved for an explicit user-requested audit or an admission-owned input change; acceptance and `check-all.py` MUST NOT invoke it for unchanged evidence.
-- On success, `admission-check.py` writes an admission stamp with bound document hashes and admitted design `Scope Paths`; later stages reuse it while those inputs remain unchanged. `stage-scope-check.py` only evaluates the current task manifest against the selected stage and `change_id` Scope Paths.
-- `stage-scope-check.py` validates per-task changed path manifests using canonical paths resolved beneath the real repository root. Absolute paths, `..`, symlink escapes, and glob Scope Paths fail closed. After matching `--submodule`, it strips that task-directory prefix before classifying task-local `design/` and `testing/` paths. It allows only narrow stage companion paths required by the workflow: proposal task-index updates; auto-pipeline task-local `pipeline/plan.md` only for design; task-local `pipeline/state.json` for design/implementation/testing/acceptance bookkeeping; testing-stage `harness/scripts/test-run.py` entrypoint wiring; testing-stage `test-results/test-runs/*.json` run evidence; and stage-scope/admission evidence. During testing, a production-path Rust file is allowed only when a verified `.harness/baselines/<task-id>/manifest.json` snapshot proves all changes are inside pre-existing exact `#[cfg(test)]` items; new inline items, mixed production/test changes, missing/tampered baselines, and extension-only allowances fail closed. Implementation runs require `--version`, packet `--module`, concrete `--target-module`, repeatable `--change-id`, and `--changed-paths-file`, then fail paths outside the selected target's admitted `Scope Paths` except task evidence and allowed state bookkeeping; implementation also rejects stage artifacts in every task packet, not only the active packet.
-- Every `.paths` manifest MUST have a sibling `.paths.meta.json` with schema `1`, stage, version, packet module, optional task submodule, concrete `target_module`, optional `baseline_manifest`, and implementation `change_ids`; testing tasks that change existing inline Rust tests record `.harness/baselines/<task-id>/manifest.json`. Run `stage-scope-check.py` after this metadata, the manifest, governed paths, baseline, or design Scope Paths change; do not replay it otherwise.
-- `baseline-snapshot.py` writes only under git-ignored `.harness/baselines/` and refuses overwrite. Harness rules forbid synthetic Git baselines created with `GIT_INDEX_FILE`, `git read-tree`, `git write-tree`, or `git commit-tree`.
-- `doc-structure-check.py` validates proposal core sections, design UML diagrams, source-language file-level interface blocks, acyclic relationships, useful design sections, testing case coverage, and mandatory tables needed by admission/testing.
+- `harness-check.py --task <packet>/task.yaml --profile pre-edit|completion` is the canonical per-stage check command. `task-transition.py` wraps the completion profile when advancing or completing a manual high-risk stage.
+- `lower-tier-check.py --task <packet>/task.yaml --profile pre-edit` validates the confirmed tier and approved proposal and captures the required canonical task-start repository baseline before trivial/standard project edits. Its `completion` profile requires that baseline, writes the canonical changed-path manifest, then runs `completion-report-check.py`; `task-index.py remove` invokes that profile and fails closed on missing baseline/path evidence, a missing report, incomplete standard change record, uncovered task `change_id`, incomplete or failing proportional defect-discovery coverage, non-passing targeted verification, blocking finding, or non-accepted conclusion.
+- Manual high-risk stage changes use `task-transition.py --task <packet>/task.yaml advance`; direct edits to `task.yaml.stage` do not create a valid transition. The command runs completion before writing a content-bound stage receipt to task-packet `lifecycle.json` and advancing the stage.
+- `lifecycle-check.py --require-prior acceptance` prevents acceptance from waiving earlier manual stages. `lifecycle-check.py --require-complete` is mandatory before high-risk removal and requires proposal, design, implementation, testing, and acceptance receipts in manual mode; auto-pipeline mode requires receipts for every manual-prefix stage plus `pipeline-plan-check.py --require-complete`.
+- When explicit auto-pipeline launch occurs after one or more manual-prefix stages already wrote receipts, run `lifecycle-check.py --task <packet>/task.yaml --refresh-manual-bindings` once after the launch plan validates and before automatic execution. Current versioned receipts must match the exact manual-to-auto launch delta. For unversioned legacy receipts, the validated current plan plus revalidated receipt inputs establishes the migration boundary. The command writes the current binding schema; mode/start-stage, plan-path, Scope Path, change identity, and durable artifact changes remain receipt-invalidating afterward.
+- `schema-check.py` derives the active stage from packet `task.yaml`, validates only `proposal.md` during proposal stage, requires `design.md` from manual design stage onward, and validates document status plus optional testplan shape, with `--submodule <task-seq>-<task-slug>` for task directories.
+- A task-start working-tree baseline plus exact changed-path manifest is mandatory completion-scope evidence for confirmed trivial/standard tasks. High-risk stages use the same mechanism only when their active flow requires it. Capture copies only already-dirty tracked files and existing non-ignored untracked files; `harness/`, `.harness/`, `docs/`, and Git-ignored paths are excluded from capture and completion diffing.
+- `doc-structure-check.py` validates proposal core sections, design UML diagrams, source-language file-level interface blocks, acyclic relationships, useful design sections, testing case coverage, and mandatory tables needed by implementation/testing.
 - `testing-coverage-check.py` validates direct `change_id` coverage, gap reasons, testplan mapping, case-type coverage, and unified test entrypoint reachability.
-- `test-run.py` writes machine-readable task run artifacts under `test-results/test-runs/`; artifacts record exact task scope, testplan, `change_id` values, commands, sources, and exit codes without a repository/package state hash.
-- Changes under `harness/**` or `docs/**` do not invalidate task evidence and MUST NOT trigger package/module tests, whole-project tests, or quality gates.
-- `quality-check.py` runs `harness/quality-gates.yaml` only on explicit user request and writes artifacts under `test-results/quality-runs/`; `check-all.py`, task execution, and acceptance do not invoke it automatically.
-- `acceptance-report-check.py` validates reports when created, including blocking findings, command evidence, consistency evidence, acceptance rules, test design evidence, and referenced passing task artifacts; historical reports are not replayed by `check-all.py`.
-- `pipeline-plan-check.py` validates task-local immutable `pipeline/plan.md`, its sibling `pipeline/state.json`, launch evidence, stage graph dependencies, task statuses, testing evidence, and exit-condition evidence. Run it only after one of those inputs changes; later stages reuse the latest passing result.
-- All checkers MUST exit non-zero on missing mandatory files, invalid approvals, missing traceability, ambiguous active module, malformed optional metadata, or out-of-stage paths.
-- Stage scope checks fail proposal, design, testing, acceptance, or implementation task manifests that contain paths outside their stage and the explicit companion paths above. In auto-pipeline mode, child manifests contain only reserved direct-write paths and task-specific evidence; parent-orchestrator merges of `pipeline/plan.md`, `pipeline/state.json`, shared `testplan.yaml`, indexes, or shared runner registration are recorded and checked as parent-owned coordination updates, never attributed to a parallel child.
-- Passing checkers are necessary but not sufficient: agents must still read approved docs and keep edits inside admitted scope.
+- `test-run.py` writes machine-readable task run artifacts under `.harness/test-results/test-runs/`; artifacts record exact task scope, testplan, `change_id` values, commands, sources, evidence-input paths, and exit codes.
+- Changes under `harness/**` or `docs/**` do not invalidate task evidence and MUST NOT trigger package/module or whole-project tests.
+- `acceptance-report-check.py` validates task binding, exact `change_id` coverage, every required independent defect-discovery category, concrete evidence or task-specific not-applicable reasons, blocking findings, conclusion consistency, and conditional design/testing document consistency. It enforces review coverage but cannot prove that every real defect was found.
+- `task-transition.py complete` requires the canonical acceptance report to conclude `accepted`; `needs changes` uses `return --to <design|implementation|testing>`, and requirement rejection stops without a completion receipt.
+- `completion-report-check.py` validates the proportional trivial/standard review: canonical task/report binding, exact task `change_id` coverage, proposal consistency, all three proportional defect-discovery categories, passing targeted verification, standard change-record completion, findings, and accepted conclusion.
+- `pipeline-plan-check.py` validates task-local immutable `pipeline/plan.md`, matching runtime `.harness/pipelines/.../state.json`, launch evidence, stage graph dependencies, task statuses, automatic-testing runtime evidence when testing is automatic, and exit-condition evidence. Manual testing remains validated from `testing.md` plus `testplan.yaml` and is not duplicated into runtime testing evidence. `harness-check.py --profile pre-edit` runs full structural validation before every automatic stage starts; scope-binding table parsing alone is not sufficient.
+- All checkers MUST exit non-zero on missing mandatory files, invalid document status, missing traceability, ambiguous active module, malformed optional metadata, or out-of-stage paths.
+- Stage scope checks fail proposal, design, testing, acceptance, or implementation task manifests that contain paths outside their stage and the explicit durable companion paths above. Runtime `.harness/` writes are omitted. In auto-pipeline mode, child manifests contain only reserved durable direct-write paths; parent-orchestrator merges of `pipeline/plan.md`, shared `testplan.yaml`, indexes, or shared runner registration are recorded and checked as parent-owned coordination updates, while runtime state is never attributed to a parallel child.
+- An out-of-stage result blocks workflow completion until the task is returned, split, or corrected.

@@ -1,15 +1,11 @@
 ---
-module: example-module
-task_name: 001-example-task
-submodule: 001-example-task
-version: v0.1
+task_manifest: task.yaml
 status: draft
-approved_by:
-approved_at:
-approved_content_sha256:
 ---
 
 # [Module Name] Testing
+
+Risk profile: ./risk-profile.yaml
 
 > This optional file records post-implementation test design. Generate test cases from `proposal.md`, `design.md`, and the delivered code, then keep this file aligned with the actual test implementation.
 
@@ -118,13 +114,7 @@ approved_content_sha256:
 - [ ] Every `## Design Element Coverage` element type maps to derived cases or carries a concrete not-applicable reason naming the design evidence
 - [ ] Each behavior is verified at the lowest test level that can expose its failure (`harness/rules/test-design-rules.md`)
 - [ ] Every implemented change has direct validation coverage or an explicit gap
-- [ ] Every implemented `change_id` appears in `proposal.md`, `design.md`, generated test evidence, and optional `testplan.yaml` unless the validation path is explicitly `manual` or `disabled`
+- [ ] Every implemented `change_id` appears in `proposal.md`, `design.md`, generated test evidence, and the required `testplan.yaml`; a missing plan is allowed only by a repo-local versioned exception, while `manual` or `disabled` levels stay in the plan with concrete reasons
 - [ ] Every validation path maps to a concrete behavior, risk, or success criterion
 - [ ] Any `manual` or `disabled` layer has the same reason in `testing.md` and `testplan.yaml`
 - [ ] Relevant automated tests pass
-
-## Approval Record
-<!-- Fill only when the user explicitly approves this document. Agents MUST NOT fill this section or set `status: approved` on their own initiative. `approver` must match front matter `approved_by`; `user_statement` must quote the user's approval instruction verbatim. The same edit must record front matter `approved_content_sha256` (generate via `schema-check.py --print-approval-hash <this-file>`); any later content edit invalidates approved evidence and MUST NOT be repaired by refreshing the hash. Use a sibling amendment/fix task for approved-document corrections. Auto-pipeline approvals use front matter plus `pipeline/plan.md` launch evidence instead of this section. -->
-- approver:
-- approval_date:
-- user_statement: ""

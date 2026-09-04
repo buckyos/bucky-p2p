@@ -1,0 +1,376 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "0495bbeb3f5771f7c09f0ca6d7c0f48b61d7a2d75148b1d4b206a321726562ad",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-NAT-TYPE-1": {"status": "complete"},
+    "I-LIB-EXPORT-1": {"status": "complete"},
+    "I-SN-WIRE-1": {"status": "complete"},
+    "I-SN-V0-WIRE-1": {"status": "complete"},
+    "I-PEER-CACHE-1": {"status": "complete"},
+    "I-INTER-SN-1": {"status": "complete"},
+    "I-NAT-PROBE-1": {"status": "complete"},
+    "I-SN-MOD-1": {"status": "complete"},
+    "I-SN-SERVICE-1": {"status": "complete"},
+    "I-SN-CLIENT-1": {"status": "complete"},
+    "I-DEVICE-FINDER-1": {"status": "complete"},
+    "I-SN-MINER-1": {"status": "complete"},
+    "I-TUNNEL-PLAN-1": {"status": "complete"},
+    "I-TUNNEL-MOD-1": {"status": "complete"},
+    "I-NETWORK-TRAIT-1": {"status": "complete"},
+    "I-QUIC-LISTENER-1": {"status": "complete"},
+    "I-QUIC-NETWORK-1": {"status": "complete"},
+    "I-TUNNEL-PREDICTION-1": {"status": "complete"},
+    "I-TUNNEL-FLOW-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "an independent read-only design child reviews the current production boundaries while the parent-orchestrator owns and validates the shared plan and state"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-NAT-TYPE-1", "I-NETWORK-TRAIT-1"],
+        "serialization_reasons": {
+          "I-1": "implementation parent starts after the confirmed design and current admission stamp",
+          "I-NAT-TYPE-1": "profile model owns its exclusive new source file and unblocks wire, probe, and plan consumers",
+          "I-NETWORK-TRAIT-1": "the independent network interface file is disjoint from the NAT model and starts in the same ready wave"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-LIB-EXPORT-1", "I-PEER-CACHE-1", "I-NAT-PROBE-1", "I-TUNNEL-PLAN-1", "I-QUIC-LISTENER-1"],
+        "serialization_reasons": {
+          "I-LIB-EXPORT-1": "the crate-root export follows the completed profile model and owns lib.rs",
+          "I-PEER-CACHE-1": "the peer cache follows the profile model and exclusively owns peer_manager.rs",
+          "I-NAT-PROBE-1": "the probe runtime follows the profile model and exclusively owns the new nat_probe.rs",
+          "I-TUNNEL-PLAN-1": "the pure selector follows the completed profile model and owns nat_connect_plan.rs",
+          "I-QUIC-LISTENER-1": "the listener operation follows the default trait contract and exclusively owns listener.rs"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["I-SN-MOD-1", "I-TUNNEL-MOD-1", "I-QUIC-NETWORK-1"],
+        "serialization_reasons": {
+          "I-SN-MOD-1": "SN module wiring follows the completed probe runtime and owns sn/mod.rs",
+          "I-TUNNEL-MOD-1": "private tunnel module wiring follows the completed selector and owns tunnel/mod.rs",
+          "I-QUIC-NETWORK-1": "the QUIC dispatcher follows the listener operation and exclusively owns network.rs"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["I-SN-WIRE-1", "I-TUNNEL-PREDICTION-1"],
+        "serialization_reasons": {
+          "I-SN-WIRE-1": "wire extensions follow the profile model and preserve each legacy base layout",
+          "I-TUNNEL-PREDICTION-1": "candidate generation follows the completed plan selector and consumes profile hints under the global cap"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["I-SN-V0-WIRE-1", "I-INTER-SN-1"],
+        "serialization_reasons": {
+          "I-SN-V0-WIRE-1": "SnCalled context forwarding follows the shared extension envelope while SnCallResp remains unchanged",
+          "I-INTER-SN-1": "distributed detail forwarding follows the common wire fields and completed peer cache without creating replicated state"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["I-SN-SERVICE-1", "I-SN-CLIENT-1"],
+        "serialization_reasons": {
+          "I-SN-SERVICE-1": "service integrates the completed wire, cache, probe, and distributed-detail contracts",
+          "I-SN-CLIENT-1": "client integrates the completed wire and probe contracts while owning per-ActiveSN local profiles"
+        }
+      },
+      {
+        "wave": 8,
+        "tasks": ["I-DEVICE-FINDER-1", "I-SN-MINER-1"],
+        "serialization_reasons": {
+          "I-DEVICE-FINDER-1": "finder follows the completed SN client and passes one-shot query results without remote caching",
+          "I-SN-MINER-1": "the binary follows the completed service configuration and probe module wiring"
+        }
+      },
+      {
+        "wave": 9,
+        "tasks": ["I-TUNNEL-FLOW-1"],
+        "serialization_reasons": {
+          "I-TUNNEL-FLOW-1": "the final owner flow composes all completed query, service, QUIC, prediction, direction-waiter, and fallback contracts"
+        }
+      },
+      {
+        "wave": 10,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing derives dedicated unit, DV, integration, compatibility, and consumer-closure evidence from the completed code"
+        }
+      },
+      {
+        "wave": 11,
+        "tasks": ["I-1", "I-TUNNEL-FLOW-1"],
+        "serialization_reasons": {
+          "I-1": "testing scope found that the call/action owner helper and cfg-test seams had been introduced after the implementation boundary, so they return to their admitted production paths",
+          "I-TUNNEL-FLOW-1": "the production call/action concurrency helper is reclassified under the admitted tunnel-flow implementation before testing restarts"
+        }
+      },
+      {
+        "wave": 12,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing restarts from the revalidated implementation boundary and regenerates the unified task artifact"
+        }
+      },
+      {
+        "wave": 13,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent falsification starts only after the returned implementation and fresh unified testing evidence are complete"
+        }
+      },
+      {
+        "wave": 14,
+        "tasks": ["I-1", "I-SN-SERVICE-1", "I-TUNNEL-PREDICTION-1"],
+        "serialization_reasons": {
+          "I-1": "acceptance returned three implementation defects before the required testing supplement",
+          "I-SN-SERVICE-1": "remove the unplanned advertised-IP override and restore identity-derived probe advertisement",
+          "I-TUNNEL-PREDICTION-1": "restrict prediction bases to eligible ServerReflexive public IPv4 QUIC endpoints"
+        }
+      },
+      {
+        "wave": 15,
+        "tasks": ["I-SN-MINER-1", "I-TUNNEL-FLOW-1"],
+        "serialization_reasons": {
+          "I-SN-MINER-1": "after the service removes the override, preserve identity static-WAN evidence while representing wildcard listeners as mapped endpoint pairs",
+          "I-TUNNEL-FLOW-1": "after service and prediction fixes, make SnCalled NAT action execution owned by the awaited callback rather than a detached spawn"
+        }
+      },
+      {
+        "wave": 16,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "supplement red-green identity, area, ownership, fallback, per-SN, distributed and expiry evidence after the acceptance implementation fixes compile and pass scope"
+        }
+      },
+      {
+        "wave": 17,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "the independent acceptance reviewer rechecks the repaired implementation boundaries and fresh 18-step task-scoped artifact before closeout"
+        }
+      },
+      {
+        "wave": 18,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "second acceptance found only testing gaps: predicted hit and all-miss-to-PN, PunchOnly deadline, full distributed cold query, and missing request/called compatibility tails"
+        }
+      },
+      {
+        "wave": 19,
+        "tasks": ["I-1", "I-SN-SERVICE-1"],
+        "serialization_reasons": {
+          "I-1": "testing scope rejected a cfg(test) registry resolver inside the production query method, so the admitted implementation parent owns that testability seam",
+          "I-SN-SERVICE-1": "the release-disabled distributed-query seam belongs to the already admitted service path and must precede the inline test"
+        }
+      },
+      {
+        "wave": 20,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing restarts from the revalidated cfg(test) service seam and restores only the inline distributed-query test against the new baseline"
+        }
+      },
+      {
+        "wave": 21,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "third independent acceptance reviews the complete 20-step evidence after both testing returns and the scoped testability-seam reclassification"
+        }
+      },
+      {
+        "wave": 22,
+        "tasks": ["I-1", "I-SN-SERVICE-1"],
+        "serialization_reasons": {
+          "I-1": "third acceptance rejected the global-registry test fallback against the existing distributed-directory contract",
+          "I-SN-SERVICE-1": "replace the implicit singleton lookup with a constructor-injected Inter-SN client trait seam while retaining the production TTP adapter"
+        }
+      },
+      {
+        "wave": 23,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "restore the cold distributed test against the explicit constructor-injected fake from a post-seam implementation baseline and regenerate evidence"
+        }
+      },
+      {
+        "wave": 24,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "fourth independent acceptance reviews the explicit Inter-SN client seam, no-registry search, and fresh 20-step artifact"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "sn_nat_probe_ports",
+      "validation_id": "V-NTAT-PROBE",
+      "testplan_level": "dv",
+      "testplan_step_id": "nat-probe-runtime-dv",
+      "evidence": "Dedicated model/config/packet tests plus real loopback UDP reflector DV cover zero, one, duplicate, malformed, two and three-port behavior, fixed tokens, complete endpoints, timeout Unknown, and same-socket stable observation; sn-miner parsing and service validation are independently exercised.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "nat_type_peer_cache_and_exchange",
+      "validation_id": "V-NTAT-EXCHANGE",
+      "testplan_level": "integration",
+      "testplan_step_id": "nat-first-query-snapshot-integration",
+      "evidence": "A real in-process SN with two probe ports and two cold clients proves the first SnQueryResp carries the callee profile, query_with_context returns the same-SN caller profile, and the exact ordered context reaches SnCalled; an empty-local-cache serving-lease query reaches the remote SnService detail boundary through an explicitly constructor-injected Inter-SN client fake and final SnQueryResp; per-ActiveSN isolation, profile expiry, ReportSn/SnCalled malformed tails, and additive wire tests cover ownership and compatibility without a remote profile cache or singleton fallback.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "nat_type_aware_strategy_selection",
+      "validation_id": "V-NTAT-PLAN",
+      "testplan_level": "unit",
+      "testplan_step_id": "nat-connect-plan-unit",
+      "evidence": "The pure selector test covers ordered NonSymmetricLike/NonSymmetricLike, NonSymmetricLike/SymmetricLike, SymmetricLike/NonSymmetricLike, SymmetricLike/SymmetricLike, both Public orientations, Unknown, and unpredictable symmetric bounded-best-effort actions for caller and callee.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "symmetric_port_prediction",
+      "validation_id": "V-NTAT-PREDICT",
+      "testplan_level": "dv",
+      "testplan_step_id": "nat-tunnel-owner-dv",
+      "evidence": "Profile tests cover consistent and irregular deltas, parity, IP mismatch, expiry, overflow and the eight-port cap; TunnelManager applies hints only to current non-LAN IPv4 QUIC ServerReflexive bases, executes a predicted candidate success, and proves all predicted misses converge to PN.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "nat_aware_connect_flow",
+      "validation_id": "V-NTAT-FLOW",
+      "testplan_level": "dv",
+      "testplan_step_id": "nat-tunnel-owner-dv",
+      "evidence": "Direction-aware waiter tests cover active match and wrong-direction preservation; a five-second delayed call future proves action success returns within 250ms and cancels the call owner; predicted all-miss and generic action failure reach PN; incoming success, owner-drop, deadline, duration overflow, and listener close stop PunchOnly; the full 56-test TunnelManager regression retains legacy, reverse, proxy and duplicate behavior.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id":"sn_nat_probe_ports","case_type":"normal","required":"yes","validation_id":"V-NTAT-PROBE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_ports","case_type":"boundary","required":"yes","validation_id":"V-NTAT-PROBE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_ports","case_type":"negative","required":"yes","validation_id":"V-NTAT-PROBE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_ports","case_type":"error","required":"yes","validation_id":"V-NTAT-PROBE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_ports","case_type":"compatibility","required":"yes","validation_id":"V-NTAT-PROBE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_ports","case_type":"lifecycle","required":"yes","validation_id":"V-NTAT-PROBE","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_ports","case_type":"cross-module","required":"yes","validation_id":"V-NTAT-PROBE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"normal","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"boundary","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"negative","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"error","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"compatibility","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"lifecycle","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_peer_cache_and_exchange","case_type":"cross-module","required":"yes","validation_id":"V-NTAT-EXCHANGE","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"normal","required":"yes","validation_id":"V-NTAT-PLAN","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"boundary","required":"yes","validation_id":"V-NTAT-PLAN","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"negative","required":"yes","validation_id":"V-NTAT-PLAN","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"error","required":"yes","validation_id":"V-NTAT-PLAN","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"compatibility","required":"yes","validation_id":"V-NTAT-PLAN","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"lifecycle","required":"yes","validation_id":"V-NTAT-PLAN","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_type_aware_strategy_selection","case_type":"cross-module","required":"yes","validation_id":"V-NTAT-PLAN","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"normal","required":"yes","validation_id":"V-NTAT-PREDICT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"boundary","required":"yes","validation_id":"V-NTAT-PREDICT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"negative","required":"yes","validation_id":"V-NTAT-PREDICT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"error","required":"yes","validation_id":"V-NTAT-PREDICT","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"compatibility","required":"yes","validation_id":"V-NTAT-PREDICT","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"lifecycle","required":"yes","validation_id":"V-NTAT-PREDICT","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"symmetric_port_prediction","case_type":"cross-module","required":"yes","validation_id":"V-NTAT-PREDICT","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"normal","required":"yes","validation_id":"V-NTAT-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"boundary","required":"yes","validation_id":"V-NTAT-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"negative","required":"yes","validation_id":"V-NTAT-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"error","required":"yes","validation_id":"V-NTAT-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"compatibility","required":"yes","validation_id":"V-NTAT-FLOW","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"lifecycle","required":"yes","validation_id":"V-NTAT-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_aware_connect_flow","case_type":"cross-module","required":"yes","validation_id":"V-NTAT-FLOW","level":"integration","status":"covered","gap_manual_reason":""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260829T102716Z-p2p-frame+020-nat-type-aware-traversal-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "D-020-UNKNOWN-FIRST-TIMELINE",
+      "owning_stage": "design",
+      "count": 1,
+      "reason": "A cold current-rendezvous profile was originally modeled as arriving in SnCallResp, conflicting with the required immediate Unknown timeline.",
+      "resolution": "The user clarified that SnQueryResp returns net_profile. The revised design passes that one-shot peer result to TunnelManager, freezes both snapshots in SnCall.nat_context, forwards it unchanged as SnCalled.nat_context, never uses SnCallResp as a profile source or plan gate, and immediately runs the legacy path when the query field is absent."
+    },
+    {
+      "issue_id": "I-020-TESTING-SCOPE-BOUNDARY",
+      "owning_stage": "implementation",
+      "count": 1,
+      "reason": "The first testing scope audit found that the production call/action concurrency helper and new-file cfg(test) seams were added after the implementation boundary, so the testing-stage baseline could not prove a test-only delta.",
+      "resolution": "The helper and test seams are now owned by their already admitted production paths; implementation scope and the three-crate compile closure pass. Testing restarts from that validated implementation state and claims only dedicated test artifacts and evidence."
+    },
+    {
+      "issue_id": "A-020-IMPLEMENTATION-BOUNDARIES",
+      "owning_stage": "implementation",
+      "count": 1,
+      "reason": "Acceptance found an advertised-IP override outside identity evidence, detached callee action ownership, and prediction applied to non-ServerReflexive bases.",
+      "resolution": "Removed the public IP override, derived probe advertisement only from identity static-WAN endpoints, preserved sn-miner wildcard binding with mapped endpoint pairs, awaited SnCalled handling without detached spawn, restricted prediction to ServerReflexive non-LAN bases, and revalidated implementation scope and compilation."
+    },
+    {
+      "issue_id": "A-020-TEST-ADEQUACY",
+      "owning_stage": "testing",
+      "count": 1,
+      "reason": "Acceptance found missing runnable evidence for NAT-aware actions, PN fallback, cancellation/races, per-SN isolation, distributed response forwarding, and peer-profile expiry.",
+      "resolution": "The fresh 18-step task run adds runnable evidence for PN fallback under simultaneous action/call failure, eligible prediction bases, PunchOnly incoming-success and owner-drop cancellation, per-ActiveSN isolation, distributed detail forwarding without replication, and independent peer-profile expiry; all steps exit zero and testing coverage and scope pass."
+    },
+    {
+      "issue_id": "A-020-TEST-EVIDENCE-BOUNDARIES",
+      "owning_stage": "testing",
+      "count": 1,
+      "reason": "Second acceptance verified all implementation defects closed but found no executed predicted hit/all-miss-to-PN path, PunchOnly deadline step, full cold distributed query chain, ReportSn request compatibility, or malformed/unknown SnCalled context tail.",
+      "resolution": "The 20-step task artifact now executes predicted hit, all-predicted miss to PN, PunchOnly deadline and duration overflow, cold distributed final SnQueryResp, ReportSn request compatibility, and malformed/unknown SnCalled tails; every step exits zero and coverage/scope checks pass."
+    },
+    {
+      "issue_id": "I-020-DISTRIBUTED-TEST-SEAM",
+      "owning_stage": "implementation",
+      "count": 1,
+      "reason": "The second testing scope check rejected the cfg(test) registry resolver added inside the production distributed-query method even though release behavior is unchanged.",
+      "resolution": "The release-disabled registry resolver is now owned by the admitted service implementation path; the three-crate compile closure and 21-path implementation scope pass, and testing restored only the inline test from a new baseline."
+    },
+    {
+      "issue_id": "A-020-NO-REGISTRY-TEST-SEAM",
+      "owning_stage": "implementation",
+      "count": 1,
+      "reason": "Third acceptance found that the cfg(test) InterSnRegistry fallback violates the approved distributed-directory no-singleton contract and bypasses the production client abstraction.",
+      "resolution": "SnService now owns an internal Inter-SN client trait with a production TtpInterSnClient adapter and a test-only constructor for explicit fake injection; the implicit registry fallback and registration were removed, targeted static search is empty, and implementation compile/scope pass."
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/020-nat-type-aware-traversal/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

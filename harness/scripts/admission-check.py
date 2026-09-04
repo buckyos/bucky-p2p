@@ -11,7 +11,7 @@ coverage quotes that the checker re-verifies against the current documents,
 so stale or fabricated evidence fails closed.
 
 On success the checker writes a machine-readable admission stamp
-(`docs/versions/<version>/evidence/admission/<evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json`)
+(`.harness/evidence/<version>/admission/<evidence-id>.<module>[.<submodule>][.<target-module>].stamp.json`)
 recording the bound document hashes and the admitted design Scope Paths.
 Later stages reuse the stamp while its bound inputs remain unchanged.
 `--verify-only` is reserved for explicit audits or relevant-input changes.
@@ -722,12 +722,12 @@ def main() -> int:
     evidence_path = Path(args.evidence_file)
     if not evidence_path.is_absolute():
         evidence_path = Path(args.root) / evidence_path
-    expected_evidence_dir = root / "docs" / "versions" / args.version / "evidence" / "admission"
+    expected_evidence_dir = root / ".harness" / "evidence" / args.version / "admission"
     try:
         if evidence_path.parent.resolve() != expected_evidence_dir.resolve():
             fail(
                 "--evidence-file must be under "
-                f"docs/versions/{args.version}/evidence/admission/ for this version"
+                f".harness/evidence/{args.version}/admission/ for this version"
             )
     except OSError as error:
         fail(f"cannot resolve evidence directory for {evidence_path}: {error}")

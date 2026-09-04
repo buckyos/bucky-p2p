@@ -5,6 +5,7 @@ mod network;
 mod quic;
 mod tcp;
 mod tunnel;
+mod udp_network;
 mod validator;
 
 use crate::error::{P2pErrorCode, P2pResult, p2p_err};
@@ -21,6 +22,7 @@ use std::fmt::Debug;
 use std::future::Future;
 pub use tcp::*;
 pub use tunnel::*;
+pub use udp_network::*;
 pub use validator::*;
 
 pub fn validate_server_name(server_name: String) -> String {

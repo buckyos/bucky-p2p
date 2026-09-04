@@ -1,0 +1,73 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 011-sfo-cmd-pkg-len-compatibility
+submodule: 011-sfo-cmd-pkg-len-compatibility
+api_impact:
+  public_api: migration-required
+  crate_root_export_change: false
+  build_surface_change: true
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/Cargo.toml", "Cargo.lock", "p2p-frame/src/sn/types.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/directory/client.rs", "p2p-frame/src/sn/directory/server.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/tests/cmd_pkg_len_compatibility.rs"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: cmd-pkg-len-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: compile an external test consumer of the shared length aliases
+      change_ids: ["sfo_cmd_pkg_len_v04_compatibility"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--test", "cmd_pkg_len_compatibility", "--no-run"]
+    - id: cmd-pkg-len-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: verify migrated consumers no longer contain the recorded primitive or repeated length forms
+      change_ids: ["sfo_cmd_pkg_len_v04_compatibility"]
+      run: ["python3", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "011-sfo-cmd-pkg-len-compatibility"]
+    - id: cmd-pkg-len-repository-compile-closure
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: compile every p2p-frame target against sfo-cmd-server 0.4 without executing broad runtime tests
+      change_ids: ["sfo_cmd_pkg_len_v04_compatibility"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: disabled
+    summary: The implementation changes aliases and generic type identities only; it changes no function, branch, loop, or runtime state transition that can be isolated below the external type boundary.
+    change_ids: ["sfo_cmd_pkg_len_v04_compatibility"]
+    reason: The dedicated external Rust test is the lowest effective level because the failure is whether public aliases satisfy the dependency trait and instantiate CmdHeader; classifying that real dependency contract as a stubbed unit would be misleading.
+
+  dv:
+    mode: disabled
+    summary: Compile-time command-length selection has no startup, shutdown, configuration workflow, persistence, retry, or module lifecycle beyond its type and codec contract.
+    change_ids: ["sfo_cmd_pkg_len_v04_compatibility"]
+    reason: Runtime SN workflows, command bodies, tunnels, timeouts, and dispatch remain unchanged; the integration and compile-closure steps expose every changed failure mode.
+
+  integration:
+    mode: enabled
+    summary: Exercise the public p2p-frame aliases against the real sfo-cmd-server 0.4 traits and header type, including fixed widths, exact caps, over-limit failure, and repository compile closure.
+    test_targets:
+      - p2p-frame/tests/cmd_pkg_len_compatibility.rs
+      - p2p-frame/src/sn/types.rs
+      - p2p-frame/src/sn/client/sn_service.rs
+      - p2p-frame/src/sn/service/service.rs
+      - p2p-frame/src/sn/directory/client.rs
+      - p2p-frame/src/sn/directory/server.rs
+      - p2p-frame/src/sn/inter_sn/mod.rs
+    preconditions:
+      tools: ["cargo", "python3"]
+      env: []
+      services: []
+      notes:
+        - The external test crate consumes the public aliases and the dependency's real CmdPkgLen, RawFixedBytes, conversion, and CmdHeader APIs.
+        - Mixed 0.3.x/0.4.x former-u32 runtime peers remain intentionally unsupported because the length field changed from four to three bytes.
+        - Red-green replay is infeasible without reverting production or the dependency: the old primitive generics prevent the crate and test target from compiling. Before implementation, `cargo check -p p2p-frame` reproduced 15 E0277/E0599/E0631 errors; the green task run and compile closure prove their removal.
+    steps:
+      - id: cmd-pkg-len-alias-contract
+        name: verify shared aliases, fixed widths, exact limits, over-limit rejection, and header usability
+        change_ids: ["sfo_cmd_pkg_len_v04_compatibility"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "cmd_pkg_len_compatibility", "--", "--nocapture"]

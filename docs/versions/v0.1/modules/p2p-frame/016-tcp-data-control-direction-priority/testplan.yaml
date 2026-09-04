@@ -1,0 +1,70 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 016-tcp-data-control-direction-priority
+submodule: 016-tcp-data-control-direction-priority
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/tcp/tunnel.rs", "p2p-frame/src/networks/tcp/network.rs", "p2p-frame/src/networks/tcp/tests/control_direction_priority_tests.rs", "docs/versions/v0.1/modules/p2p-frame/016-tcp-data-control-direction-priority/proposal.md", "docs/versions/v0.1/modules/p2p-frame/016-tcp-data-control-direction-priority/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The TCP wire frames, public Tunnel API, crate-root exports, build surface, and documentation examples are unchanged; the dedicated in-module tests exercise both existing connection-creation mechanisms and their exact direction order through real TCP/TLS.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Cover every changed open-channel branch for Active and Passive preferred success, preferred failure with fallback, existing connection reuse, and direction-labelled dual failure.
+    test_targets:
+      - p2p-frame/src/networks/tcp/tunnel.rs
+      - p2p-frame/src/networks/tcp/network.rs
+      - p2p-frame/src/networks/tcp/tests/control_direction_priority_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated test file is included from a pre-existing cfg(test) module and observes the production data-entry owner snapshot; it does not reimplement the direction policy.
+        - The four tests execute both TunnelForm match arms, both preferred-success arms, both fallback arms, connection reuse before creation, and both dual-failure diagnostic orderings.
+        - The test target uses real loopback TCP/TLS because the changed private branches directly await the existing physical local/peer creation mechanisms; the same command is also the single-module DV workflow and the unified runner deduplicates the identical argv while retaining both registration sources.
+        - Pre-fix red behavior is source-bound rather than replayed: the admitted baseline always called create_data_connection(None) first, so the Passive preferred-success owner assertion would observe passive-local creation instead of active peer creation. Reverting production in the shared worktree during post-implementation testing would violate task scope.
+    steps:
+      - id: tcp-data-control-direction-branch-unit
+        name: Run Active and Passive direction-order, fallback, reuse, and dual-failure branch tests
+        change_ids: ["tcp_data_control_direction_priority"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_data_control_direction_priority_", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Exercise the complete p2p-frame TCP control/data workflow with two signed loopback peers while selectively closing listeners to force each preferred and fallback direction.
+    test_targets:
+      - p2p-frame/src/networks/tcp/network.rs
+      - p2p-frame/src/networks/tcp/tunnel.rs
+      - p2p-frame/src/networks/tcp/tests/control_direction_priority_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Real Active and Passive tunnels are created through TcpTunnelNetwork, and data ownership is read only after bidirectional business bytes and stream drain complete.
+        - Preferred success proves no fallback connection is created; a second channel proves the registered connection is reused without consulting direction.
+        - Closing only the Passive listener forces Active local-created failure and Passive peer-created failure in separate fixtures, proving both opposite-direction fallbacks.
+        - Closing both listeners proves bounded failure and verifies preferred/fallback labels follow actual attempt order for both tunnel forms.
+        - This intentionally shares the exact command with unit registration because one in-module fixture exposes both private changed branches and the real module workflow; the canonical runner executes the argv once.
+    steps:
+      - id: tcp-data-control-direction-workflow-dv
+        name: Run signed TCP control-direction preferred and fallback workflows
+        change_ids: ["tcp_data_control_direction_priority"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tcp_data_control_direction_priority_", "--", "--nocapture"]
+
+  integration:
+    mode: disabled
+    summary: The behavior changes only crate-private attempt ordering inside TcpTunnel; public Tunnel signatures, TCP frames, TTP/PN call contracts, and downstream crate interfaces remain unchanged.
+    change_ids: ["tcp_data_control_direction_priority"]
+    reason: "owner: testing; reason: the real two-peer TCP/TLS DV already crosses the control/data boundary and exercises unchanged open_stream consumption, while a PN/TTP or cross-crate topology would only repeat the same private order without exposing it; risk: upper layers continue to depend on existing Tunnel success/error semantics; acceptance impact: any discovered public, wire, PN/TTP, or cross-crate semantic drift requires returning to testing and enabling integration coverage."

@@ -1,10 +1,9 @@
 # Mechanical quality gates for this repository.
 #
 # harness/scripts/quality-check.py runs every gate below and fails when any
-# gate fails. It is an explicit maintenance entrypoint: task execution,
-# testing, acceptance, auto-pipeline completion, and check-all.py do not run it
-# automatically. An explicitly requested run writes its artifact under the
-# git-ignored test-results/quality-runs/ directory.
+# gate fails. When runnable gates are declared, acceptance requires a passing
+# artifact under the git-ignored .harness/test-results/quality-runs/ directory.
+# Only an explicit gates: [] declaration makes quality gates not relevant.
 #
 # Declare the repository's build/lint/typecheck commands here. Gates must be
 # non-interactive, deterministic, and return a meaningful exit code.

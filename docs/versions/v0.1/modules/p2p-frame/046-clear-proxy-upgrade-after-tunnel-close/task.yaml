@@ -1,0 +1,30 @@
+schema_version: 1
+
+workflow_tier: high-risk
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 046-clear-proxy-upgrade-after-tunnel-close
+stage: design
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/046-clear-proxy-upgrade-after-tunnel-close.paths
+baseline_manifest:
+
+changes:
+  - id: CHG-clear-proxy-upgrade-after-close
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs"]
+    changed_paths_file:

@@ -6,12 +6,20 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use super::TunnelRef;
+use super::{TunnelRef, UdpTunnelNetwork};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct TunnelListenerInfo {
     pub local: Endpoint,
     pub mapping_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TraversalEndpointPrediction {
+    pub endpoints: Vec<Endpoint>,
+    pub socket_binding_generation: u64,
+    pub valid_until: crate::types::Timestamp,
+    pub profile: crate::nat_type::NatProfile,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
@@ -74,6 +82,9 @@ pub type IncomingTunnelAcceptanceCallback = Arc<
 pub trait TunnelNetwork: Send + Sync + 'static {
     fn protocol(&self) -> Protocol;
     fn is_udp(&self) -> bool;
+    fn as_udp_tunnel_network(&self) -> Option<&dyn UdpTunnelNetwork> {
+        None
+    }
     fn set_reuse_address(&self, _reuse_address: bool) {}
 
     async fn listen(
@@ -164,6 +175,20 @@ pub type TunnelNetworkRef = Arc<dyn TunnelNetwork>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod udp_tunnel_network {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/unit/networks/network/udp_tunnel_network_tests.rs"
+        ));
+
+        mod default_capability {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/unit/networks/network/punch_only_default_tests.rs"
+            ));
+        }
+    }
 
     #[test]
     fn tunnel_connect_intent_controls_udp_punch_per_connection_with_default_off() {

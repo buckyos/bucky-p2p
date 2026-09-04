@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "a90eb16fbb61e8da5c04126f808628b35440f8ad90e8b4c19a50ccdd8e0c064a",
+  "tasks": {
+    "D-1": {"status": "complete"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-SN-SCHEDULER": {"status": "complete"},
+    "I-SN-PEER": {"status": "complete"},
+    "I-SN-SERVICE": {"status": "complete"},
+    "I-TTP-CACHE": {"status": "complete"},
+    "I-TTP-SERVER": {"status": "complete"},
+    "I-TCP-TUNNEL": {"status": "complete"},
+    "I-PN-SERVICE": {"status": "complete"},
+    "T-SN-DETAIL": {"status": "complete"},
+    "T-PN-READY": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "parent owns the single admission-bound plan and delegates independent falsification review"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "independent design audit returned the unsafe NotFound retry boundary and incomplete TTP cache ownership mapping to design"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-SN-SCHEDULER", "I-SN-PEER", "I-TTP-CACHE"],
+        "serialization_reasons": {
+          "I-SN-SCHEDULER": "dependency-ready and disjoint scheduler source audit",
+          "I-SN-PEER": "dependency-ready and disjoint peer-cache source audit",
+          "I-TTP-CACHE": "dependency-ready and disjoint TTP helper source audit; remaining ready TCP audit waits only because all child-agent slots are occupied"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["I-TTP-SERVER", "I-TCP-TUNNEL"],
+        "serialization_reasons": {
+          "I-TTP-SERVER": "TTP helper dependency completed and the server audit has a disjoint scope",
+          "I-TCP-TUNNEL": "dependency-ready TCP audit starts when child-agent capacity becomes available"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["I-SN-SERVICE"],
+        "serialization_reasons": {
+          "I-SN-SERVICE": "scheduler and peer-cache dependencies completed; this dependent aggregation audit starts in the newly free slot"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["I-PN-SERVICE"],
+        "serialization_reasons": {
+          "I-PN-SERVICE": "TTP server and TCP first-claim dependencies completed before auditing the PN bridge"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "all seven source-owner audits completed with no production change before parent implementation closeout"
+        }
+      },
+      {
+        "wave": 8,
+        "tasks": ["T-SN-DETAIL", "T-PN-READY"],
+        "serialization_reasons": {
+          "T-SN-DETAIL": "post-implementation SN test correction has an exclusive dedicated test-file scope",
+          "T-PN-READY": "post-implementation PN readiness correction has a disjoint server/test-file scope and runs concurrently"
+        }
+      },
+      {
+        "wave": 9,
+        "tasks": ["I-TTP-SERVER"],
+        "serialization_reasons": {
+          "I-TTP-SERVER": "testing discovered the proposal-authorized read-only observer must be attributed to the admitted source path because testing scope rejects a newly created cfg(test) item"
+        }
+      },
+      {
+        "wave": 10,
+        "tasks": ["I-PN-SERVICE"],
+        "serialization_reasons": {
+          "I-PN-SERVICE": "reconfirm the dependent PN production path after the cfg(test)-only TTP observer return"
+        }
+      },
+      {
+        "wave": 11,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "returned TTP observer and dependent PN audit both passed before implementation re-closeout"
+        }
+      },
+      {
+        "wave": 12,
+        "tasks": ["T-SN-DETAIL", "T-PN-READY"],
+        "serialization_reasons": {
+          "T-SN-DETAIL": "reconfirm the completed SN correction after implementation return closure",
+          "T-PN-READY": "resume the PN test-only request-order correction after the observer moved to implementation ownership"
+        }
+      },
+      {
+        "wave": 13,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "both corrected testing children and their scope checks completed before unified evidence generation"
+        }
+      },
+      {
+        "wave": 14,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance starts only after implementation, testing, unified evidence and all stage scopes completed"
+        }
+      },
+      {
+        "wave": 15,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "acceptance finding F-RTR-TEST-1 returned the shared testplan and task-run evidence to testing for parallel pressure coverage"
+        }
+      },
+      {
+        "wave": 16,
+        "tasks": ["T-PN-READY"],
+        "serialization_reasons": {
+          "T-PN-READY": "acceptance-returned concurrency gap requires a parallel stress case in the already exclusive PN dedicated test file"
+        }
+      },
+      {
+        "wave": 17,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "parallel stress child passed before shared testplan, coverage and unified evidence regeneration"
+        }
+      },
+      {
+        "wave": 18,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "rerun independent acceptance after the parallel-pressure finding received runnable task evidence"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "distributed_nat_profile_authority_fixture",
+      "validation_id": "V-RTR-SN-COLD-DETAIL",
+      "testplan_level": "unit",
+      "testplan_step_id": "cold-distributed-query-remote-profile-unit",
+      "evidence": "p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs",
+      "gap": "no",
+      "gap_manual_reason": "none"
+    },
+    {
+      "change_id": "pn_reverse_tcp_cache_ready_synchronization",
+      "validation_id": "V-RTR-PN-CACHE-READY-STRESS",
+      "testplan_level": "dv",
+      "testplan_step_id": "pn-reverse-tcp-cache-ready-parallel-stress-dv",
+      "evidence": "p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs",
+      "gap": "no",
+      "gap_manual_reason": "none"
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "normal", "required": "yes", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "unit", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "boundary", "required": "yes", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "unit", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "negative", "required": "no", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "none", "status": "not-applicable", "gap_manual_reason": "No production validation or error branch changes; existing distributed-query negative cases remain unchanged."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "error", "required": "no", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "none", "status": "not-applicable", "gap_manual_reason": "The corrected fixture supplies a successful leased detail and does not add an error category."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "compatibility", "required": "no", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "none", "status": "not-applicable", "gap_manual_reason": "No API, wire, build or production behavior changes."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "lifecycle", "required": "yes", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "unit", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "distributed_nat_profile_authority_fixture", "case_type": "cross-module", "required": "no", "validation_id": "V-RTR-SN-COLD-DETAIL", "level": "none", "status": "not-applicable", "gap_manual_reason": "The private inter-SN boundary is exercised inside p2p-frame; no neighboring crate contract changes."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "normal", "required": "yes", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "dv", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "boundary", "required": "yes", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "dv", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "negative", "required": "yes", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "dv", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "error", "required": "yes", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "dv", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "compatibility", "required": "no", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "none", "status": "not-applicable", "gap_manual_reason": "No wire, API, build or production target-factory behavior changes."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "lifecycle", "required": "yes", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "dv", "status": "covered", "gap_manual_reason": "none"},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "case_type": "cross-module", "required": "yes", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "level": "dv", "status": "covered", "gap_manual_reason": "none"}
+  ],
+  "testing_design_element_coverage": [
+    {"change_id": "distributed_nat_profile_authority_fixture", "element_type": "parameter-domain", "status": "not-applicable", "reason": "No changed parameter domain."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "element_type": "state-transition", "status": "covered", "validation_id": "V-RTR-SN-COLD-DETAIL", "reason": "Owner lease selects remote detail while querying cache remains absent before and after."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "element_type": "failure-path", "status": "not-applicable", "reason": "No changed production failure path."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "element_type": "error-handling", "status": "not-applicable", "reason": "No changed error category."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "element_type": "invariant", "status": "covered", "validation_id": "V-RTR-SN-COLD-DETAIL", "reason": "Remote profile is copied by value without granting querying cache authority."},
+    {"change_id": "distributed_nat_profile_authority_fixture", "element_type": "concurrency", "status": "not-applicable", "reason": "The corrected deterministic detail boundary introduces no concurrency mechanism."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "element_type": "parameter-domain", "status": "not-applicable", "reason": "No changed input domain or wire field."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "element_type": "state-transition", "status": "covered", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "reason": "Accepted tunnel becomes cache-ready before the sole request, then the real reverse stream is claimed and bridged."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "element_type": "failure-path", "status": "covered", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "reason": "Bounded readiness failure ends setup before any ProxyOpenReq."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "element_type": "error-handling", "status": "covered", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "reason": "The sole real request preserves target response and bridge failures instead of retrying them."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "element_type": "invariant", "status": "covered", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "reason": "Direct B data listener stays closed and bytes traverse the real reverse fallback in both directions."},
+    {"change_id": "pn_reverse_tcp_cache_ready_synchronization", "element_type": "concurrency", "status": "covered", "validation_id": "V-RTR-PN-CACHE-READY-STRESS", "reason": "Three rounds of four complete concurrent cases exercise the explicit attach/cache happens-before without request retries."}
+  ],
+  "evidence": {
+    "admission": [
+      "docs/versions/v0.1/evidence/admission/20260901-fix-regression-test-authority-readiness.md",
+      "docs/versions/v0.1/evidence/admission/20260901-fix-regression-test-authority-readiness.p2p-frame.028-fix-regression-test-authority-readiness.stamp.json"
+    ],
+    "stage_scope": [
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-sn-scheduler.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-sn-peer.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-sn-service.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-ttp-cache.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-ttp-server.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-tcp-tunnel.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-pn-service.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-ttp-server-return-1.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-i-pn-service-return-1.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-implementation.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-t-sn-detail.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-t-pn-ready.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-t-pn-ready-return-1.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-testing.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-acceptance-1.paths",
+      "docs/versions/v0.1/evidence/stage-scope/028-fix-regression-test-authority-readiness-acceptance-2.paths"
+    ],
+    "test_runs": [
+      "test-results/test-runs/20260901T041604Z-p2p-frame+028-fix-regression-test-authority-readiness-unit.json",
+      "test-results/test-runs/20260901T043201Z-p2p-frame+028-fix-regression-test-authority-readiness-all.json",
+      "test-results/test-runs/20260901T044650Z-p2p-frame+028-fix-regression-test-authority-readiness-all.json"
+    ],
+    "quality_runs": []
+  },
+  "implementation_audits": [
+    {"task_id": "I-SN-SCHEDULER", "path": "p2p-frame/src/sn/service/nat_probe_scheduler.rs", "result": "pass-no-production-change"},
+    {"task_id": "I-SN-PEER", "path": "p2p-frame/src/sn/service/peer_manager.rs", "result": "pass-no-production-change"},
+    {"task_id": "I-SN-SERVICE", "path": "p2p-frame/src/sn/service/service.rs", "result": "pass-no-production-change"},
+    {"task_id": "I-TTP-CACHE", "path": "p2p-frame/src/ttp/client.rs", "result": "pass-no-production-change"},
+    {"task_id": "I-TTP-SERVER", "path": "p2p-frame/src/ttp/server.rs", "result": "pass-production-configuration-unchanged-cfg-test-read-observer-only"},
+    {"task_id": "I-TCP-TUNNEL", "path": "p2p-frame/src/networks/tcp/tunnel.rs", "result": "pass-no-production-change"},
+    {"task_id": "I-PN-SERVICE", "path": "p2p-frame/src/pn/service/pn_server.rs", "result": "pass-no-production-change"}
+  ],
+  "return_records": [
+    {
+      "issue_id": "028-DESIGN-PRE-REQUEST-READINESS",
+      "owning_stage": "design",
+      "count": 1,
+      "status": "corrected_and_reaudit_passed",
+      "reason": "NotFound can originate from real TCP first-claim handling, so target-factory retry could hide a regression; the plan also omitted ttp/client.rs cache helpers and over-specified testing implementation."
+    },
+    {
+      "issue_id": "028-IMPLEMENTATION-TTP-READINESS-OBSERVER",
+      "owning_stage": "implementation",
+      "count": 1,
+      "status": "returned_from_testing",
+      "target_task": "I-TTP-SERVER",
+      "reason": "The proposal-authorized read-only cache observer is a new cfg(test) item in an admitted source file; the testing checker permits only items already present in its baseline, so ownership returns to implementation without changing production configuration or facade.",
+      "expected_fix_output": "A cfg(test)-only read observer that reuses find_existing_tunnel and an implementation scope receipt for ttp/server.rs."
+    },
+    {
+      "issue_id": "028-TESTING-PARALLEL-PRESSURE",
+      "owning_stage": "testing",
+      "count": 1,
+      "status": "closed_by_reacceptance",
+      "target_task": "T-1",
+      "reason": "The proposal requires task-runner success under parallel pressure, but the current all artifact executes each exact test once and serially.",
+      "expected_fix_output": "A task-scoped parallel and repeated PN stress step, updated coverage metadata, and a new successful all artifact."
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/028-fix-regression-test-authority-readiness/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  },
+  "red_green_evidence": {
+    "red": "test-results/test-runs/20260901T041604Z-p2p-frame+028-fix-regression-test-authority-readiness-unit.json",
+    "green": "test-results/test-runs/20260901T044650Z-p2p-frame+028-fix-regression-test-authority-readiness-all.json",
+    "pn_original_failure": "user-provided broad-suite panic; exact pre-fix case was schedule-sensitive and passed in isolation"
+  }
+}

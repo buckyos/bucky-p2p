@@ -1,0 +1,66 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 029-stabilize-pn-control-tunnel-readiness
+submodule: 029-stabilize-pn-control-tunnel-readiness
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/ttp/client.rs", "p2p-frame/src/ttp/server.rs", "p2p-frame/src/ttp/tests.rs", "p2p-frame/src/networks/tcp/tunnel.rs", "p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs", "docs/versions/v0.1/modules/p2p-frame/029-stabilize-pn-control-tunnel-readiness/proposal.md", "docs/versions/v0.1/modules/p2p-frame/029-stabilize-pn-control-tunnel-readiness/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task changes only an existing crate-private cfg(test) observer and dedicated test fixtures; public API, crate-root exports, build surface, documentation examples and wire contracts remain unchanged.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Prove the readiness observer reports only a matching available cached tunnel and never removes a normal Connecting entry while observing it.
+    test_targets:
+      - p2p-frame/src/ttp/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The dedicated fixture waits for the real incoming callback to complete attach and remember before its first observation.
+        - The case covers an absent bucket, Connecting state, endpoint mismatch, transition to Connected and final matching readiness.
+    steps:
+      - id: ttp-cache-readiness-observer-unit
+        name: Run the exact non-destructive TTP cache readiness observer regression
+        change_ids: ["pn_cache_readiness_observer_non_destructive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "ttp::tests::server_cache_readiness_observer_preserves_connecting_tunnel", "--", "--exact", "--test-threads=1"]
+
+  dv:
+    mode: enabled
+    summary: Prove the corrected setup reaches the unchanged real PN/TTP/TCP reverse target once and remains stable across twelve concurrent complete topologies.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The target direct data listener stays closed so the real reverse TCP data fallback remains mandatory.
+        - Readiness completes before the sole ProxyOpenReq; target-open, claim and transport errors are not retried.
+        - The stress case runs three rounds of four concurrent complete isolated topologies.
+    steps:
+      - id: pn-reverse-tcp-readiness-exact-dv
+        name: Run the exact PN reverse TCP readiness regression
+        change_ids: ["pn_cache_readiness_observer_non_destructive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "pn::service::pn_server::tests::traffic_manager_tests::reverse_tcp_proxy_tests::tcp_reverse_data_first_claim_pn_proxy_stream_uses_real_reverse_tcp_target", "--", "--exact", "--test-threads=1"]
+      - id: pn-reverse-tcp-readiness-parallel-stress-dv
+        name: Run twelve complete PN reverse TCP cases under four-way parallel pressure
+        change_ids: ["pn_cache_readiness_observer_non_destructive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "pn::service::pn_server::tests::traffic_manager_tests::reverse_tcp_proxy_tests::tcp_reverse_data_first_claim_pn_proxy_stream_is_stable_under_parallel_pressure", "--", "--exact", "--test-threads=1"]
+
+  integration:
+    mode: disabled
+    summary: The observer remains inside p2p-frame test configuration and changes no neighboring crate contract.
+    change_ids: ["pn_cache_readiness_observer_non_destructive"]
+    reason: "owner: testing; reason: the unit test covers the observer state/mutation contract and the DV crosses TTP, PN and TCP submodules with real loopback TCP; risk: deployed multi-host and public-NAT scheduling are not represented; acceptance impact: no cross-crate or deployed-environment behavior may be claimed."

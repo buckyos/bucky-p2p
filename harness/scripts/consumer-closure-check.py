@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
-EXCLUDED_PARTS = {".git", ".venv", "target", "test-results", "__pycache__"}
+EXCLUDED_PARTS = {".git", ".venv", "target", ".harness", "__pycache__"}
 
 
 def fail(message: str) -> None:

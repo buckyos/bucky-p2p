@@ -1,0 +1,56 @@
+schema_version: 1
+
+# Every task creates this manifest plus proposal.md before user confirmation.
+# Replace pending with the user-confirmed trivial, standard, or high-risk tier.
+workflow_tier: pending
+
+# Canonical task identity. Other task artifacts reference this file instead of
+# asking agents to repeat these values on checker command lines.
+version: v0.1
+packet_module: example-module
+task_name: 001-example-task
+stage: proposal
+mode: manual
+# Set only after an explicit auto-pipeline launch. The launch stage and every
+# earlier stage keep manual stage semantics; this names the first later stage
+# that the orchestrator may execute automatically.
+auto_pipeline_start_stage:
+
+# proposal is common to every tier. The remaining artifact paths are reserved
+# for materialization after high-risk confirmation. Paths are packet-relative
+# unless they start with .harness/, which denotes repository runtime evidence.
+proposal: proposal.md
+# Trivial and standard close through this lightweight acceptance report.
+# Standard additionally sets change_record to docs/changes/<change>.md.
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+# Machine-owned durable completion receipts for manual high-risk stages. Create
+# and update this file only through task-transition.py.
+lifecycle_state: lifecycle.json
+
+# Canonical changed-path evidence. Confirmed trivial/standard tasks generate it
+# from the required working-tree baseline at completion. High-risk stages use
+# the same mechanism when their active flow requires it. Capture copies only
+# tracked files already dirty before the task and existing eligible untracked
+# files; harness/docs/ignored paths are excluded. It is evidence, not filesystem
+# authorization.
+changed_paths_file: .harness/evidence/v0.1/stage-scope/001-example-task.paths
+# On trivial/standard confirmation, set the required canonical value to
+# .harness/baselines/<version>/<task-name>-delivery/manifest.json. Leave blank
+# for high-risk unless that stage needs a selected-file comparison baseline.
+baseline_manifest:
+
+# Scope is bound per change and target module. The task's seven risk/trigger
+# judgments live only in risk-profile.yaml. Cross-project packets use
+# packet_module: globals and add one or more concrete targets here.
+changes:
+  - id: CHG-example
+    target_module: example-module
+    scope_paths: ["src/example/**"]
+    changed_paths_file:

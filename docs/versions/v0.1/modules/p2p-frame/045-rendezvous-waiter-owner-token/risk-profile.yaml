@@ -1,0 +1,41 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["rendezvous_waiter_owner_token_lifecycle", "rendezvous_waiter_collision_regression_tests"]
+source_bindings:
+  proposal: proposal.md
+  design_source: 
+
+risks:
+  contract:
+    applies: false
+    evidence: All changed types and helpers are private TunnelManager state; the SN wire, public Tunnel API, command codes, and acknowledgement semantics remain unchanged.
+    required_checks: []
+  data:
+    applies: false
+    evidence: No persistence, serialization, schema, migration, cache key, or durable data format changes.
+    required_checks: []
+  security:
+    applies: false
+    evidence: Authentication and peer identity validation are unchanged; the token is process-local lifecycle identity and never crosses a trust boundary.
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: The task changes concurrent owner and waiter publication, replacement, cancellation, completion, incoming consumption, and stale cleanup linearization.
+    required_checks:
+      - Deterministic red-green unit coverage for duplicate inbound owner collision preserving the incumbent waiter.
+      - Deterministic red-green unit coverage for displaced stale owner cleanup preserving the replacement waiter.
+      - Existing rendezvous collision, stale attach/complete/cancel, owner-drop, direction matching, and NAT incoming waiter regressions.
+      - A task-scoped DV run of the production TunnelManager lifecycle tests, with bounded timeouts and no mock-only replacement of owner helpers.
+  build:
+    applies: false
+    evidence: No dependencies, Cargo features, build graph, produced artifact, production default, release, deployment, compatibility, or rollback surface changes.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: Harness policy and tooling are unchanged; task-local plan, testplan, evidence, and reports only record this delivery.
+    required_checks: []

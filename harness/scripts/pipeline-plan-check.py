@@ -4,17 +4,28 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path, PurePosixPath
+
+from task_manifest import TaskManifestError, parse_task_manifest, stage_is_automatic
 
 
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 EMPTY_VALUES = {"", "-", "n/a", "na", "none", "tbd", "todo", "pending"}
 ALLOWED_STATUSES = {"pending", "running", "confirmed", "complete", "blocked", "returned"}
 ALLOWED_STAGES = {"design", "implementation", "testing", "acceptance"}
+PIPELINE_STAGES = ("design", "implementation", "testing", "acceptance")
+STAGE_RANK = {stage: index for index, stage in enumerate(PIPELINE_STAGES)}
+LAUNCH_SUCCESSOR = {
+    "proposal": "design",
+    "design": "implementation",
+    "implementation": "testing",
+    "testing": "acceptance",
+}
+EXECUTION_MODES = {"manual", "auto-pipeline"}
 FINISHED_STATUSES = {"confirmed", "complete"}
 TASK_NAME_RE = re.compile(r"^\d{3,}-[a-z0-9][a-z0-9_.-]*$")
 MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -61,7 +72,14 @@ def section_body(text: str, heading: str, path: Path) -> str:
     return text[match.end() : end]
 
 
-def table_rows(text: str, heading: str, path: Path) -> list[dict[str, str]]:
+def table_rows(
+    text: str,
+    heading: str,
+    path: Path,
+    *,
+    allow_empty: bool = False,
+    required_columns: tuple[str, ...] = (),
+) -> list[dict[str, str]]:
     body = section_body(text, heading, path)
     lines = body.splitlines()
     table_start = None
@@ -72,6 +90,9 @@ def table_rows(text: str, heading: str, path: Path) -> list[dict[str, str]]:
     if table_start is None:
         fail(f"{path} section ## {heading} missing required table")
     headers = [normalize_column(cell) for cell in split_table_row(lines[table_start])]
+    missing = sorted(set(required_columns) - set(headers))
+    if missing:
+        fail(f"{path} ## {heading} missing columns: {', '.join(missing)}")
     rows: list[dict[str, str]] = []
     for line in lines[table_start + 2 :]:
         if not line.strip() or not line.lstrip().startswith("|"):
@@ -80,7 +101,7 @@ def table_rows(text: str, heading: str, path: Path) -> list[dict[str, str]]:
         rows.append(
             {header: values[pos].strip() if pos < len(values) else "" for pos, header in enumerate(headers)}
         )
-    if not rows:
+    if not rows and not allow_empty:
         fail(f"{path} ## {heading} has no data rows")
     return rows
 
@@ -114,6 +135,41 @@ def front_matter_value(text: str, key: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def task_manifest_binding(path: Path) -> dict[str, object]:
+    try:
+        task = parse_task_manifest(path)
+    except TaskManifestError as error:
+        fail(str(error))
+    if task.get("workflow_tier", "high-risk") != "high-risk":
+        fail(f"{path} auto-pipeline requires workflow_tier: high-risk")
+    values: dict[str, str] = {}
+    for key in (
+        "version",
+        "packet_module",
+        "task_name",
+        "mode",
+        "auto_pipeline_start_stage",
+    ):
+        if task.get(key) is None:
+            fail(f"{path} missing {key}")
+        values[key] = str(task[key])
+    change_ids: set[str] = set()
+    target_modules: set[str] = set()
+    for change in task.get("changes", []):
+        if not isinstance(change, dict) or change.get("id") is None:
+            fail(f"{path} contains a malformed change entry")
+        change_id = str(change["id"])
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", change_id):
+            fail(f"{path} has invalid change id: {change_id}")
+        if change.get("target_module") is None:
+            fail(f"{path} change {change_id} missing target_module")
+        change_ids.add(change_id)
+        target_modules.add(str(change["target_module"]))
+    if not change_ids:
+        fail(f"{path} has no changes")
+    return {**values, "change_ids": change_ids, "target_modules": target_modules}
+
+
 def check_trigger(text: str, path: Path, root: Path) -> dict[str, object]:
     body = section_body(text, "Trigger", path)
     values = {
@@ -122,6 +178,9 @@ def check_trigger(text: str, path: Path, root: Path) -> dict[str, object]:
             "Proposal",
             "User launch confirmed",
             "User launch statement",
+            "Launch stage",
+            "First auto stage",
+            "Design source",
             "Per-stage user confirmation",
             "Auto-confirm completed document stages",
             "Auto-pipeline document policy",
@@ -137,10 +196,25 @@ def check_trigger(text: str, path: Path, root: Path) -> dict[str, object]:
     if len(values["User launch statement"].strip()) < 8:
         fail(f"{path} User launch statement must record the user's explicit launch instruction verbatim")
     policy = values["Auto-pipeline document policy"].lower()
-    if "no design/testing markdown docs" not in policy or "testplan.yaml required" not in policy:
+    if "stage-selective" not in policy or "testplan.yaml required for automatic testing" not in policy:
         fail(
             f"{path} Auto-pipeline document policy must include: "
-            "no design/testing markdown docs; testplan.yaml required"
+            "stage-selective; testplan.yaml required for automatic testing"
+        )
+    launch_stage = values["Launch stage"].lower()
+    first_auto_stage = values["First auto stage"].lower()
+    if launch_stage not in LAUNCH_SUCCESSOR:
+        fail(f"{path} Launch stage must be proposal, design, implementation, or testing")
+    if LAUNCH_SUCCESSOR[launch_stage] != first_auto_stage:
+        fail(
+            f"{path} First auto stage must be {LAUNCH_SUCCESSOR[launch_stage]} "
+            f"when launched from {launch_stage}"
+        )
+    expected_design_source = "pipeline/plan.md" if first_auto_stage == "design" else "design.md"
+    if values["Design source"].strip("`") != expected_design_source:
+        fail(
+            f"{path} Design source must be {expected_design_source} for first auto stage "
+            f"{first_auto_stage}"
         )
     task_name = values["Task name"]
     if not TASK_NAME_RE.fullmatch(task_name):
@@ -167,26 +241,42 @@ def check_trigger(text: str, path: Path, root: Path) -> dict[str, object]:
     if not proposal_path.is_file():
         fail(f"{path} bound proposal does not exist: {proposal}")
     proposal_text = proposal_path.read_text(encoding="utf-8")
-    expected_front_matter = {
-        "version": values["Version"],
-        "module": packet_module,
-        "task_name": task_name,
-    }
-    for key, expected in expected_front_matter.items():
-        if front_matter_value(proposal_text, key) != expected:
-            fail(f"{path} bound proposal front matter {key} must be {expected}")
-
     change_ids = csv_values(values["change_id values"])
     if not change_ids or any(not non_empty(item) for item in change_ids):
         fail(f"{path} change_id values must list concrete ids")
     if len(change_ids) != len(set(change_ids)):
         fail(f"{path} change_id values contains duplicates")
+    if front_matter_value(proposal_text, "task_manifest") == "task.yaml":
+        binding = task_manifest_binding(proposal_path.parent / "task.yaml")
+        expected_binding = {
+            "version": values["Version"],
+            "packet_module": packet_module,
+            "task_name": task_name,
+            "mode": "auto-pipeline",
+            "auto_pipeline_start_stage": first_auto_stage,
+            "change_ids": set(change_ids),
+            "target_modules": set(target_modules),
+        }
+        if binding != expected_binding:
+            fail(f"{path} Trigger binding does not match canonical task.yaml")
+    else:
+        expected_front_matter = {
+            "version": values["Version"],
+            "module": packet_module,
+            "task_name": task_name,
+        }
+        for key, expected in expected_front_matter.items():
+            if front_matter_value(proposal_text, key) != expected:
+                fail(f"{path} bound proposal front matter {key} must be {expected}")
     return {
         "version": values["Version"],
         "packet_module": packet_module,
         "task_name": task_name,
         "target_modules": set(target_modules),
         "change_ids": set(change_ids),
+        "launch_stage": launch_stage,
+        "first_auto_stage": first_auto_stage,
+        "design_source": expected_design_source,
     }
 
 
@@ -197,21 +287,32 @@ def parse_dependencies(value: str) -> list[str]:
 
 
 def check_task_graph(
-    text: str, path: Path
+    text: str, path: Path, trigger: dict[str, object] | None = None
 ) -> tuple[dict[str, dict[str, str]], dict[str, list[str]]]:
+    trigger = trigger or {"first_auto_stage": "design"}
     stage_rows = table_rows(text, "Stage Graph", path)
     require_columns(
         path,
         "Stage Graph",
         stage_rows,
-        ("task_id", "stage", "responsibility", "scope", "parent_task", "depends_on", "output", "done_condition"),
+        ("task_id", "stage", "execution_mode", "responsibility", "scope", "parent_task", "depends_on", "output", "done_condition"),
     )
-    child_rows = table_rows(text, "Submodule Tasks", path)
-    require_columns(
-        path,
+    child_rows = table_rows(
+        text,
         "Submodule Tasks",
-        child_rows,
-        ("task_id", "stage", "responsibility", "submodule", "parent_task", "depends_on", "output", "done_condition"),
+        path,
+        allow_empty=True,
+        required_columns=(
+            "task_id",
+            "stage",
+            "execution_mode",
+            "responsibility",
+            "submodule",
+            "parent_task",
+            "depends_on",
+            "output",
+            "done_condition",
+        ),
     )
 
     tasks: dict[str, dict[str, str]] = {}
@@ -231,6 +332,18 @@ def check_task_graph(
             if stage not in ALLOWED_STAGES:
                 fail(f"{path} task {task_id} has invalid stage: {stage}")
             row["stage"] = stage
+            execution_mode = row.get("execution_mode", "").strip().lower()
+            expected_mode = (
+                "auto-pipeline"
+                if STAGE_RANK[stage] >= STAGE_RANK[str(trigger["first_auto_stage"])]
+                else "manual"
+            )
+            if execution_mode not in EXECUTION_MODES or execution_mode != expected_mode:
+                fail(
+                    f"{path} task {task_id} stage {stage} must use execution_mode "
+                    f"{expected_mode}, got {execution_mode or '<empty>'}"
+                )
+            row["execution_mode"] = execution_mode
             tasks[task_id] = row
             dependencies[task_id] = parse_dependencies(row.get("depends_on", ""))
 
@@ -238,7 +351,6 @@ def check_task_graph(
     if missing:
         fail(f"{path} ## Stage Graph missing stages: {', '.join(sorted(missing))}")
 
-    stage_rank = {"design": 0, "implementation": 1, "testing": 2, "acceptance": 3}
     for task_id, row in tasks.items():
         parent = row.get("parent_task", "").strip()
         if parent.lower() != "root" and parent not in tasks:
@@ -248,7 +360,7 @@ def check_task_graph(
                 fail(f"{path} task {task_id} references unknown dependency: {dependency}")
             if dependency == task_id:
                 fail(f"{path} task {task_id} cannot depend on itself")
-            if stage_rank[tasks[dependency]["stage"]] > stage_rank[row["stage"]]:
+            if STAGE_RANK[tasks[dependency]["stage"]] > STAGE_RANK[row["stage"]]:
                 fail(f"{path} task {task_id} depends on later-stage task {dependency}")
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -275,11 +387,10 @@ def check_parallel_policy(text: str, path: Path) -> None:
         "Strategy: dependency-ready-set",
         "runtime-available child-agent slots",
         "Shared artifact owner: parent-orchestrator",
-        ".harness/locks/",
-        "maximum dependency-ready set",
-        "immediately backfill free slots",
-        "explicit dependency, overlapping write scope, or exhausted concurrency capacity only",
-        "pipeline/state.json",
+        "practical edit coordination",
+        "available capacity",
+        "explicit dependency, edit coordination, or exhausted concurrency capacity",
+        ".harness/pipelines/",
     )
     missing = [value for value in required if value not in body]
     if missing:
@@ -493,8 +604,6 @@ def check_design_evidence(text: str, path: Path) -> None:
 
 def normalize_repo_path(value: str) -> str:
     normalized = value.strip().strip("`").replace("\\", "/")
-    if any(token in normalized for token in ("*", "?", "[", "]")):
-        fail(f"Scope Paths must name concrete repository paths, not globs: {value}")
     candidate = PurePosixPath(normalized)
     if candidate.is_absolute() or ".." in candidate.parts:
         fail(f"Scope Paths must stay inside the repository: {value}")
@@ -507,20 +616,33 @@ def parse_scope_paths(cell: str) -> list[str]:
 
 
 def check_implementation_scope_bindings(
-    text: str, path: Path, trigger: dict[str, object]
+    text: str,
+    path: Path,
+    trigger: dict[str, object],
+    *,
+    heading: str = "Implementation Scope Bindings",
 ) -> dict[tuple[str, str], list[str]]:
-    rows = table_rows(text, "Implementation Scope Bindings", path)
+    rows = table_rows(text, heading, path)
+    required = (
+        "change_id",
+        "target_module",
+        "proposal_id",
+        "design_coverage",
+        "scope_paths",
+    )
+    if heading == "Implementation Scope Bindings":
+        required += ("design_rules_applied",)
     require_columns(
         path,
-        "Implementation Scope Bindings",
+        heading,
         rows,
-        ("change_id", "target_module", "proposal_id", "design_coverage", "scope_paths", "design_rules_applied"),
+        required,
     )
     bindings: dict[tuple[str, str], list[str]] = {}
     for index, row in enumerate(rows, start=1):
-        for column in ("change_id", "target_module", "proposal_id", "design_coverage", "scope_paths", "design_rules_applied"):
+        for column in required:
             if not non_empty(row.get(column, "")):
-                fail(f"{path} ## Implementation Scope Bindings row {index} column {column} is empty or placeholder")
+                fail(f"{path} ## {heading} row {index} column {column} is empty or placeholder")
         key = (row["change_id"], row["target_module"])
         if key in bindings:
             fail(f"{path} duplicates implementation scope binding {key[0]}/{key[1]}")
@@ -529,8 +651,6 @@ def check_implementation_scope_bindings(
         if row["target_module"] not in trigger["target_modules"]:
             fail(f"{path} binding uses target module not declared in Trigger: {row['target_module']}")
         scope_paths = parse_scope_paths(row["scope_paths"])
-        if not scope_paths or any(scope.lower() in BROAD_SCOPE_PATHS for scope in scope_paths):
-            fail(f"{path} binding {key[0]}/{key[1]} has missing or over-broad Scope Paths")
         bindings[key] = scope_paths
     bound_changes = {change_id for change_id, _ in bindings}
     if bound_changes != trigger["change_ids"]:
@@ -541,6 +661,22 @@ def check_implementation_scope_bindings(
         missing = sorted(trigger["target_modules"] - bound_targets)
         fail(f"{path} Trigger target modules missing scope bindings: {', '.join(missing)}")
     return bindings
+
+
+def manual_design_source(root: Path, trigger: dict[str, object]) -> Path:
+    path = (
+        root
+        / "docs"
+        / "versions"
+        / str(trigger["version"])
+        / "modules"
+        / str(trigger["packet_module"])
+        / str(trigger["task_name"])
+        / "design.md"
+    )
+    if not path.is_file():
+        fail(f"manual design stage requires task-packet design.md: {path}")
+    return path
 
 
 def path_matches_scope(path: str, scopes: list[str]) -> bool:
@@ -586,14 +722,6 @@ def check_file_sequence(
         if key not in bindings:
             fail(f"{path} file sequence has no matching scope binding: {key[0]}/{key[1]}")
         row_scopes = parse_scope_paths(row["scope_paths"])
-        if not row_scopes or any(scope.lower() in BROAD_SCOPE_PATHS for scope in row_scopes):
-            fail(f"{path} file sequence task {task_id} has missing or over-broad Scope Paths")
-        if any(not path_matches_scope(scope, bindings[key]) for scope in row_scopes):
-            fail(f"{path} file sequence task {task_id} widens its bound Scope Paths")
-        if not path_matches_scope(row["file_level_module"], row_scopes):
-            fail(f"{path} file {row['file_level_module']} is outside its file-sequence Scope Paths")
-        if not path_matches_scope(row["file_level_module"], bindings[key]):
-            fail(f"{path} file {row['file_level_module']} is outside binding Scope Paths for {key[0]}/{key[1]}")
         for dependency in parse_dependencies(row.get("depends_on", "")):
             if dependency not in seen_tasks:
                 fail(f"{path} file sequence task {task_id} depends on a missing or later task: {dependency}")
@@ -601,23 +729,104 @@ def check_file_sequence(
         fail(f"{path} file implementation sequence must be contiguous and ordered from 1")
 
 
-def lf_sha256(path: Path) -> str:
-    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def check_manual_file_sequence(
+    text: str,
+    path: Path,
+    tasks: dict[str, dict[str, str]],
+    bindings: dict[tuple[str, str], list[str]],
+) -> None:
+    rows = table_rows(text, "File-Level Implementation Sequence", path)
+    require_columns(
+        path,
+        "File-Level Implementation Sequence",
+        rows,
+        (
+            "sequence",
+            "file_level_module",
+            "action",
+            "depends_on",
+            "change_id",
+            "scope_path",
+            "implementation_task",
+        ),
+    )
+    sequences: list[int] = []
+    seen_tokens: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        for column in (
+            "sequence",
+            "file_level_module",
+            "action",
+            "change_id",
+            "scope_path",
+            "implementation_task",
+        ):
+            if not non_empty(row.get(column, "")):
+                fail(
+                    f"{path} ## File-Level Implementation Sequence row {index} "
+                    f"column {column} is empty or placeholder"
+                )
+        try:
+            sequences.append(int(row["sequence"]))
+        except ValueError:
+            fail(f"{path} file sequence must be an integer: {row['sequence']}")
+        task_id = row["implementation_task"]
+        if task_id not in tasks or tasks[task_id]["stage"] != "implementation":
+            fail(
+                f"{path} implementation_task must reference an implementation task: {task_id}"
+            )
+        scopes = parse_scope_paths(row["scope_path"])
+        candidates = [
+            key
+            for key, bound_scopes in bindings.items()
+            if key[0] == row["change_id"]
+            and any(
+                path_matches_scope(scope, bound_scopes)
+                or any(path_matches_scope(bound, scopes) for bound in bound_scopes)
+                for scope in scopes
+            )
+        ]
+        if len(candidates) != 1:
+            fail(
+                f"{path} file sequence row {index} must resolve to exactly one "
+                f"change/target binding, got {len(candidates)}"
+            )
+        for dependency in parse_dependencies(row.get("depends_on", "")):
+            if dependency not in seen_tokens:
+                fail(
+                    f"{path} file sequence task {task_id} depends on a missing or later "
+                    f"file/task: {dependency}"
+                )
+        seen_tokens.update(
+            {
+                task_id,
+                row["file_level_module"].strip("`"),
+            }
+        )
+    if sequences != list(range(1, len(rows) + 1)):
+        fail(f"{path} file implementation sequence must be contiguous and ordered from 1")
 
 
-def load_pipeline_state(plan_path: Path) -> tuple[Path, dict[str, object]]:
-    state_path = plan_path.with_name("state.json")
+def load_pipeline_state(
+    root: Path, plan_path: Path, trigger: dict[str, object]
+) -> tuple[Path, dict[str, object]]:
+    state_path = (
+        root
+        / ".harness"
+        / "pipelines"
+        / str(trigger["version"])
+        / str(trigger["packet_module"])
+        / str(trigger["task_name"])
+        / "state.json"
+    )
     if not state_path.is_file():
-        fail(f"missing task-local pipeline state: {state_path}")
+        fail(f"missing pipeline runtime state: {state_path}")
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         fail(f"invalid pipeline state {state_path}: {error}")
     if not isinstance(state, dict) or state.get("schema_version") != 1:
         fail(f"{state_path} schema_version must be 1")
-    if state.get("plan_sha256") != lf_sha256(plan_path):
-        fail(f"{state_path} plan_sha256 does not match sibling plan.md")
     return state_path, state
 
 
@@ -668,6 +877,13 @@ def check_scheduler_state(
     if not isinstance(waves, list):
         fail(f"{state_path} scheduler.waves must be an array")
 
+    automatic_tasks = {
+        task_id
+        for task_id, row in tasks.items()
+        if row["execution_mode"] == "auto-pipeline"
+    }
+    task_state = state.get("tasks")
+    assert isinstance(task_state, dict)
     previously_launched: set[str] = set()
     for index, wave in enumerate(waves, start=1):
         if not isinstance(wave, dict):
@@ -681,19 +897,27 @@ def check_scheduler_state(
             or len(task_ids) != len(set(task_ids))
         ):
             fail(f"{state_path} scheduler wave {index} tasks must be a non-empty unique string array")
-        if not isinstance(reasons, dict) or any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in reasons.items()
-        ):
+        if not isinstance(reasons, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in reasons.items()):
             fail(f"{state_path} scheduler wave {index} serialization_reasons must be a string map")
-        unknown = set(task_ids) - set(tasks)
+        unknown = set(task_ids) - automatic_tasks
         if unknown:
-            fail(f"{state_path} scheduler wave {index} has unknown tasks: {', '.join(sorted(unknown))}")
+            fail(
+                f"{state_path} scheduler wave {index} has unknown or manual-stage tasks: "
+                + ", ".join(sorted(unknown))
+            )
         for task_id in task_ids:
             unfinished = [
                 dependency
                 for dependency in dependencies[task_id]
-                if dependency not in previously_launched
+                if (
+                    dependency in automatic_tasks
+                    and dependency not in previously_launched
+                )
+                or (
+                    dependency not in automatic_tasks
+                    and isinstance(task_state.get(dependency), dict)
+                    and task_state[dependency].get("status") not in FINISHED_STATUSES
+                )
             ]
             if unfinished:
                 fail(
@@ -703,7 +927,7 @@ def check_scheduler_state(
         previously_launched.update(task_ids)
 
     if require_complete:
-        missing = set(tasks) - previously_launched
+        missing = automatic_tasks - previously_launched
         if missing:
             fail(f"{state_path} completed pipeline scheduler never launched: {', '.join(sorted(missing))}")
 
@@ -711,6 +935,16 @@ def check_scheduler_state(
 def check_testing_evidence(
     state: dict[str, object], state_path: Path, trigger: dict[str, object], require_complete: bool
 ) -> None:
+    automatic_testing = stage_is_automatic(
+        {
+            "stage": None,
+            "mode": "auto-pipeline",
+            "start": str(trigger["first_auto_stage"]),
+        },
+        "testing",
+    )
+    if not automatic_testing:
+        return
     rows = state.get("testing_evidence")
     if not isinstance(rows, list):
         fail(f"{state_path} testing_evidence must be an array")
@@ -777,14 +1011,23 @@ def check_state_metadata(
             fail(f"{state_path} return_records row {index} has invalid owning_stage")
         if not isinstance(count, int) or count < 1:
             fail(f"{state_path} return_records row {index} count must be a positive integer")
+        for field in ("target_task", "reason", "expected_fix_output"):
+            if not non_empty(str(item.get(field, ""))):
+                fail(f"{state_path} return_records row {index} requires {field}")
     acceptance = state.get("acceptance")
-    if isinstance(acceptance, dict) and acceptance.get("status") == "accepted":
+    if isinstance(acceptance, dict) and acceptance.get("status") != "pending":
         expected = (
             f"docs/versions/{trigger['version']}/modules/{trigger['packet_module']}/"
             f"{trigger['task_name']}/acceptance-report.md"
         )
         if acceptance.get("report") != expected:
-            fail(f"{state_path} accepted report must be the task-packet report: {expected}")
+            fail(f"{state_path} non-pending acceptance report must be the task-packet report: {expected}")
+    if (
+        isinstance(acceptance, dict)
+        and acceptance.get("status") == "needs-changes"
+        and not returns
+    ):
+        fail(f"{state_path} needs-changes acceptance requires a return record")
 
 
 def is_successful_task_run(
@@ -810,8 +1053,28 @@ def is_successful_task_run(
         or not change_ids <= set(artifact_change_ids)
     ):
         return False
-    if not isinstance(steps, list) or not steps:
+    if not isinstance(steps, list):
         return False
+    if not steps:
+        non_executed = artifact.get("non_executed_levels")
+        if not isinstance(non_executed, list) or len(non_executed) != 3:
+            return False
+        records: dict[str, dict[str, object]] = {}
+        for item in non_executed:
+            if not isinstance(item, dict):
+                return False
+            level = item.get("level")
+            mode = item.get("mode")
+            reason = item.get("reason")
+            if (
+                level not in {"unit", "dv", "integration"}
+                or level in records
+                or mode not in {"manual", "disabled"}
+                or not non_empty(str(reason or ""))
+            ):
+                return False
+            records[str(level)] = item
+        return set(records) == {"unit", "dv", "integration"}
     return all(
         isinstance(step, dict)
         and step.get("exit_code") == 0
@@ -821,6 +1084,15 @@ def is_successful_task_run(
         and bool(step.get("sources"))
         for step in steps
     )
+
+
+def sibling_script(name: str, root: Path | None = None) -> Path:
+    if root is not None:
+        generated = root / "harness" / "scripts" / f"{name}.py"
+        if generated.is_file():
+            return generated
+    installed = Path(__file__).with_name(f"{name}.py")
+    return installed if installed.is_file() else Path(__file__).with_name(f"{name}.template.py")
 
 
 def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
@@ -836,7 +1108,7 @@ def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
     task_scope = f"{module}/{task_name}"
     change_ids = set(trigger["change_ids"])
     matching_artifacts: list[Path] = []
-    for artifact_path in sorted((root / "test-results" / "test-runs").glob("*.json")):
+    for artifact_path in sorted((root / ".harness" / "test-results" / "test-runs").glob("*.json")):
         try:
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -854,6 +1126,19 @@ def check_completion_artifacts(root: Path, trigger: dict[str, object]) -> None:
     report = packet / "acceptance-report.md"
     if not report.is_file():
         fail(f"pipeline completion requires acceptance report: {report}")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(sibling_script("acceptance-report-check", root)),
+            str(report),
+            "--root", str(root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        fail(f"pipeline acceptance report validation failed: {detail}")
 
 
 def main() -> int:
@@ -861,7 +1146,6 @@ def main() -> int:
     parser.add_argument("plan")
     parser.add_argument("--root", default=".")
     parser.add_argument("--require-complete", action="store_true")
-    parser.add_argument("--print-plan-hash", action="store_true")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -870,23 +1154,31 @@ def main() -> int:
         path = root / path
     if not path.exists():
         fail(f"missing required file: {path}")
-    if args.print_plan_hash:
-        print(lf_sha256(path))
-        return 0
     text = path.read_text(encoding="utf-8")
     trigger = check_trigger(text, path, root)
     expected_plan = root / "docs" / "versions" / str(trigger["version"]) / "modules" / str(trigger["packet_module"]) / str(trigger["task_name"]) / "pipeline" / "plan.md"
     if path.resolve() != expected_plan.resolve():
         fail(f"pipeline plan must be task-local: {expected_plan}")
-    state_path, state = load_pipeline_state(path)
+    state_path, state = load_pipeline_state(root, path, trigger)
     check_state_metadata(state, state_path, trigger)
-    tasks, dependencies = check_task_graph(text, path)
+    tasks, dependencies = check_task_graph(text, path, trigger)
     check_parallel_policy(text, path)
     check_task_state(state, state_path, tasks, dependencies, args.require_complete)
     check_scheduler_state(state, state_path, tasks, dependencies, args.require_complete)
-    check_design_evidence(text, path)
-    bindings = check_implementation_scope_bindings(text, path, trigger)
-    check_file_sequence(text, path, tasks, bindings)
+    if trigger["design_source"] == "pipeline/plan.md":
+        check_design_evidence(text, path)
+        bindings = check_implementation_scope_bindings(text, path, trigger)
+        check_file_sequence(text, path, tasks, bindings)
+    else:
+        design_path = manual_design_source(root, trigger)
+        design_text = design_path.read_text(encoding="utf-8")
+        bindings = check_implementation_scope_bindings(
+            design_text,
+            design_path,
+            trigger,
+            heading="Directly Mapped Change Items",
+        )
+        check_manual_file_sequence(design_text, design_path, tasks, bindings)
     check_testing_evidence(state, state_path, trigger, args.require_complete)
     check_exit_condition(state, state_path, args.require_complete)
     if args.require_complete:

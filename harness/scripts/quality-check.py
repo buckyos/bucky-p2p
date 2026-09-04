@@ -7,8 +7,9 @@ Gates are declared in harness/quality-gates.yaml. This checker fails closed:
 - any failing gate command fails the run
 
 Every explicitly requested real run writes a machine-readable artifact to
-test-results/quality-runs/<timestamp>.json recording each gate's command and
-exit code. test-results/ is generated output and must be listed in .gitignore.
+.harness/test-results/quality-runs/<timestamp>.json recording each gate's
+command and exit code. `.harness/` is generated runtime state and must be
+listed in .gitignore.
 Task execution and acceptance do not invoke this checker automatically.
 """
 
@@ -96,7 +97,7 @@ def parse_gates(path: Path) -> list[dict[str, object]]:
 
 
 def write_run_artifact(root: Path, steps: list[dict[str, object]], exit_code: int, started_at: str) -> None:
-    artifact_dir = root / "test-results" / "quality-runs"
+    artifact_dir = root / ".harness" / "test-results" / "quality-runs"
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -1,0 +1,30 @@
+schema_version: 1
+# Replace pending with the user-confirmed trivial, standard, or high-risk tier.
+workflow_tier: standard
+version: v0.1
+packet_module: p2p-frame
+task_name: 037-stabilize-reverse-tcp-tests
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+proposal: proposal.md
+completion_report: completion-report.md
+change_record: docs/changes/037-stabilize-reverse-tcp-tests.md
+design:
+testing:
+testplan:
+acceptance_report:
+pipeline_plan:
+risk_profile:
+lifecycle_state:
+changed_paths_file: .harness/evidence/v0.1/stage-scope/037-stabilize-reverse-tcp-tests.paths
+baseline_manifest: .harness/baselines/v0.1/037-stabilize-reverse-tcp-tests-delivery/manifest.json
+changes:
+  - id: reverse_tcp_test_port_guard
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/lib.rs", "p2p-frame/src/test_support.rs", "p2p-frame/src/networks/tcp/tests/reverse_data_first_claim_tests.rs", "p2p-frame/src/networks/tcp/tests/control_direction_priority_tests.rs", "p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs"]
+    changed_paths_file:
+  - id: pn_cache_readiness_deterministic_sync
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/ttp/**", "p2p-frame/src/pn/service/pn_server/tests/reverse_tcp_proxy_tests.rs"]
+    changed_paths_file:

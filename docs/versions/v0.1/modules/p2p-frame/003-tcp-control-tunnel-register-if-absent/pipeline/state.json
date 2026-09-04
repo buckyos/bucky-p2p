@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "703631124142ad908fbd7676aecd0d5313dc537f244ef0165117171670b5b3ad",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-NW-1": {"status": "complete"},
+    "I-NM-2": {"status": "complete"},
+    "I-TM-3": {"status": "complete"},
+    "I-TL-4": {"status": "complete"},
+    "I-TN-5": {"status": "complete"}
+  },
+  "testing_evidence": [
+    {
+      "change_id": "tcp_control_tunnel_commit_after_accept",
+      "validation_id": "V-TCTPAC-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "tcp-post-accept-dispatch-unit",
+      "evidence": "p2p-frame/src/networks/net_manager_post_accept_tests.rs and real pending/rejected duplicate flow in p2p-frame/src/networks/net_manager_tcp_post_accept_tests.rs",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "normal", "required": "yes", "validation_id": "V-TCTPAC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "boundary", "required": "yes", "validation_id": "V-TCTPAC-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "negative", "required": "yes", "validation_id": "V-TCTPAC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "error", "required": "yes", "validation_id": "V-TCTPAC-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "compatibility", "required": "yes", "validation_id": "V-TCTPAC-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "lifecycle", "required": "yes", "validation_id": "V-TCTPAC-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "tcp_control_tunnel_commit_after_accept", "case_type": "cross-module", "required": "yes", "validation_id": "V-TCTPAC-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260713T135130Z-p2p-frame+003-tcp-control-tunnel-register-if-absent-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "TCTPAC-PENDING-COVERAGE-1",
+      "owning_stage": "testing",
+      "count": 1,
+      "target_task": "T-1",
+      "reason": "initial DV proved post-rejection routing but did not directly hold the upper duplicate decision pending while checking that the old mapping remained routable",
+      "expected_fix_output": "a task-scoped real TCP regression that blocks TunnelManager duplicate registration, proves old-tunnel data routing while pending, releases the decision, and proves routing again after rejection"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/003-tcp-control-tunnel-register-if-absent/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

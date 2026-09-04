@@ -1,9 +1,7 @@
 schema_version: 1
 # Optional post-implementation test metadata. Generate after production code exists.
-version: v0.1
-module: example-module
-task_name: 001-example-task
-submodule:
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
 api_impact:
   public_api: none
   crate_root_export_change: false

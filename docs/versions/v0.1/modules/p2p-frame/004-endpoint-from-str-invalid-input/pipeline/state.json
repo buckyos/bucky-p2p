@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "47f24abbc5b772f8e9d6b7dfc14c0100c873053b38a1d40fdbab6e2489d31b6b",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-EP-1": {"status": "complete"}
+  },
+  "testing_evidence": [
+    {
+      "change_id": "endpoint_from_str_invalid_input_no_panic",
+      "validation_id": "V-EFSI-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "endpoint-from-str-unit",
+      "evidence": "p2p-frame/tests/endpoint_from_str_safety.rs covers the exact removed panic slices plus every changed parser branch; the integration step consumes the public FromStr boundary",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "normal", "required": "yes", "validation_id": "V-EFSI-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "boundary", "required": "yes", "validation_id": "V-EFSI-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "negative", "required": "yes", "validation_id": "V-EFSI-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "error", "required": "yes", "validation_id": "V-EFSI-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "compatibility", "required": "yes", "validation_id": "V-EFSI-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "lifecycle", "required": "no", "validation_id": "V-EFSI-NA", "level": "unit", "status": "not-applicable", "gap_manual_reason": "Endpoint::from_str is pure and stateless with no lifecycle transition to exercise."},
+    {"change_id": "endpoint_from_str_invalid_input_no_panic", "case_type": "cross-module", "required": "yes", "validation_id": "V-EFSI-INTEGRATION", "level": "integration", "status": "covered", "gap_manual_reason": ""}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260714T024132Z-p2p-frame+004-endpoint-from-str-invalid-input-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/004-endpoint-from-str-invalid-input/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

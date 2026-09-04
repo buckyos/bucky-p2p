@@ -1,0 +1,35 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["real_socket_tunnel_strategy_matrix", "real_socket_legacy_and_proxy_fallbacks", "real_socket_collision_and_cross_sn_paths"]
+source_bindings:
+  proposal: proposal.md
+  design_source: design.md
+risks:
+  contract:
+    applies: false
+    evidence: The task verifies existing SN rendezvous, legacy SnCall, PN fallback, inter-SN, and tunnel contracts without changing their public API or wire shape.
+    required_checks: []
+  data:
+    applies: false
+    evidence: Fixtures and test artifacts are ephemeral and introduce no product persistence, schema, serialization, migration, or cache-key behavior.
+    required_checks: []
+  security:
+    applies: false
+    evidence: The test topology uses generated identities and loopback sockets without credentials, authorization changes, private data, or a new external trust boundary.
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: ["p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/tunnel/nat_connect_plan.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/inter_sn/mod.rs", "p2p-frame/src/networks/tunnel.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/networks/tcp/network.rs", "p2p-frame/src/pn/client/pn_tunnel.rs"]
+    required_checks: ["production connect-by-id reaches a usable peer tunnel over real sockets", "rendezvous legacy and proxy boundaries are distinguishable from final tunnel usability", "collision cancellation deadlines and teardown preserve one stable owner without leaked socket state", "representative inter-SN routing uses the production TTP control transport"]
+  build:
+    applies: false
+    evidence: The proposal adds p2p-frame test targets and runner wiring only; it does not change production dependencies, Cargo feature defaults, packaging, release, deployment, or produced artifacts.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is changed.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing Harness lifecycle and unified test runner but does not change Harness rules, scripts, templates, indexes, or stage semantics.
+    required_checks: []

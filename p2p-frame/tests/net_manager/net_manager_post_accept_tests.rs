@@ -4,20 +4,20 @@ fn register_acceptance_subscriber(
     manager: &NetManagerRef,
     local_id: P2pId,
     acceptance: IncomingTunnelAcceptance,
-) {
+) -> IncomingTunnelSubscriptionGuard {
     manager
-        .register_incoming_tunnel_acceptance_subscriber(
+        .register_owned_incoming_tunnel_acceptance_subscriber(
             local_id,
             Arc::new(move |_| Box::pin(async move { acceptance })),
         )
-        .unwrap();
+        .unwrap()
 }
 
 #[tokio::test]
 async fn acceptance_callback_commits_only_explicit_acceptance() {
     let accepted_manager = new_test_manager(TestValidator::new(HashMap::new()));
     let accepted_local = test_id(31);
-    register_acceptance_subscriber(
+    let _accepted_guard = register_acceptance_subscriber(
         &accepted_manager,
         accepted_local.clone(),
         IncomingTunnelAcceptance::Accepted,
@@ -32,7 +32,7 @@ async fn acceptance_callback_commits_only_explicit_acceptance() {
 
     let rejected_manager = new_test_manager(TestValidator::new(HashMap::new()));
     let rejected_local = test_id(33);
-    register_acceptance_subscriber(
+    let _rejected_guard = register_acceptance_subscriber(
         &rejected_manager,
         rejected_local.clone(),
         IncomingTunnelAcceptance::Rejected,
@@ -55,7 +55,7 @@ async fn validator_and_missing_subscriber_rejections_are_explicit() {
             remote_id.clone(),
             decision,
         )])));
-        register_acceptance_subscriber(
+        let _subscriber_guard = register_acceptance_subscriber(
             &manager,
             local_id.clone(),
             IncomingTunnelAcceptance::Accepted,
@@ -80,17 +80,17 @@ async fn validator_and_missing_subscriber_rejections_are_explicit() {
 async fn legacy_subscriber_liveness_remains_separate_from_acceptance_path() {
     let manager = new_test_manager(TestValidator::new(HashMap::new()));
     let local_id = test_id(51);
-    manager
-        .register_incoming_tunnel_subscriber(
+    let _legacy_guard = manager
+        .register_owned_incoming_tunnel_subscriber(
             local_id.clone(),
             Arc::new(|_| Box::pin(async { false })),
         )
         .unwrap();
-    let duplicate = manager.register_incoming_tunnel_acceptance_subscriber(
+    let duplicate = manager.register_owned_incoming_tunnel_acceptance_subscriber(
         local_id.clone(),
         Arc::new(|_| Box::pin(async { IncomingTunnelAcceptance::Accepted })),
     );
-    assert_eq!(duplicate.unwrap_err().code(), P2pErrorCode::AlreadyExists);
+    assert_eq!(duplicate.err().unwrap().code(), P2pErrorCode::AlreadyExists);
 
     let first = TestTunnel::new(local_id.clone(), test_id(52), 51, 1051);
     let first_result = manager.incoming_tunnel_acceptance_callback()(Ok(first.clone())).await;

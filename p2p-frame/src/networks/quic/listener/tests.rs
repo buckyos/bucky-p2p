@@ -312,16 +312,17 @@ async fn udp_punch_quic_nat_connect_worker_task_is_aborted_with_owner_future() {
     owner.abort();
     assert!(owner.await.unwrap_err().is_cancelled());
 
-    for _ in 0..20 {
-        if dropped.load(Ordering::SeqCst) {
-            break;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if dropped.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        dropped.load(Ordering::SeqCst),
-        "dropping the connect owner must abort its worker-runtime Quinn task"
-    );
+    })
+    .await
+    .expect("worker task must observe owner cancellation within a bounded scheduler window");
+    assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -490,3 +491,5 @@ async fn network_listener_info_and_close_remain_compatible() {
     network.close_all_listener().await.unwrap();
     assert!(network.listener_infos().is_empty());
 }
+
+include!("rendezvous_prediction_tests.rs");

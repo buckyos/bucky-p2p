@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "001992d90bcdc55af80d19d56aad518a06cc2ee1d8a29cb26c2ba61a1fcf0474",
+  "tasks": {
+    "D-1": {"status": "complete"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-INVENTORY-1": {"status": "complete"},
+    "I-PROTOCOL-1": {"status": "complete"},
+    "I-CLIENT-1": {"status": "complete"},
+    "I-SERVICE-1": {"status": "complete"},
+    "I-TCP-1": {"status": "complete"},
+    "I-QUIC-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "parent owns and validates the single admission-bound plan; active runtime instructions prohibit unrequested agent delegation"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-INVENTORY-1", "I-PROTOCOL-1", "I-TCP-1", "I-QUIC-1"],
+        "serialization_reasons": {
+          "I-INVENTORY-1": "dependency-ready protocol inventory audit owns a distinct source file",
+          "I-PROTOCOL-1": "dependency-ready message audit owns a distinct source file",
+          "I-TCP-1": "dependency-ready TCP audit owns a transport-specific source boundary",
+          "I-QUIC-1": "dependency-ready QUIC audit owns a transport-specific source boundary"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-CLIENT-1"],
+        "serialization_reasons": {
+          "I-CLIENT-1": "depends on completed command inventory and protocol message audits"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["I-SERVICE-1"],
+        "serialization_reasons": {
+          "I-SERVICE-1": "depends on the completed client send and inbound-handler audit"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "no-op implementation closes only after every source-boundary audit and admission pass"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing owns the dedicated test, testplan, coverage state and unified task artifact"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "acceptance falsification starts only after current-input unified evidence and testing scope pass"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {
+      "change_id": "sn_rendezvous_real_socket_command_flow",
+      "validation_id": "V-SRRN-REAL",
+      "testplan_level": "dv",
+      "testplan_step_id": "sn-real-network-tcp-quic-dv",
+      "evidence": "Both transport cases use one real SnServer, two authenticated P2pStack clients, Report-driven online state, the public rendezvous_via_sn path, an exact target notification, a held action-before-response acknowledgement, rejection and wrong-version failure over the selected command tunnel.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "sn_rendezvous_tcp_quic_transport_matrix",
+      "validation_id": "V-SRRN-TRANSPORT",
+      "testplan_level": "dv",
+      "testplan_step_id": "sn-real-network-tcp-quic-dv",
+      "evidence": "Independently named TCP and QUIC cases assert a non-zero loopback SN listener, matching client listener protocol, online registration and non-zero command tunnel IDs classified by the exact SN endpoint before running the same behavioral matrix.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "sn_all_command_real_transport_matrix",
+      "validation_id": "V-SRRN-INVENTORY",
+      "testplan_level": "unit",
+      "testplan_step_id": "sn-real-network-command-inventory-unit",
+      "evidence": "The complete u8 PackageCmdCode conversion domain is compared with an exact ten-role inventory; the real TCP/QUIC DV then exercises Report QA, Query QA, Call QA, Called/CalledResp and Rendezvous/Notify QA including success and protocol-appropriate failure cases.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"normal","required":"yes","validation_id":"V-SRRN-REAL","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"boundary","required":"yes","validation_id":"V-SRRN-REAL","level":"dv","status":"covered","gap_manual_reason":"empty endpoint and prediction arrays are preserved"},
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"negative","required":"yes","validation_id":"V-SRRN-REAL","level":"dv","status":"covered","gap_manual_reason":"target listener rejection returns generic failure"},
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"error","required":"yes","validation_id":"V-SRRN-REAL","level":"dv","status":"covered","gap_manual_reason":"wrong command version fails before target callback"},
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"compatibility","required":"yes","validation_id":"V-SRRN-REAL","level":"dv","status":"covered","gap_manual_reason":"current version succeeds and previous version fails closed"},
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"lifecycle","required":"yes","validation_id":"V-SRRN-REAL","level":"dv","status":"covered","gap_manual_reason":"action remains pending until target release and all stacks stop"},
+    {"change_id":"sn_rendezvous_real_socket_command_flow","case_type":"cross-module","required":"no","validation_id":"V-SRRN-REAL","level":"dv","status":"not-applicable","gap_manual_reason":"confirmed topology is wholly owned by p2p-frame and excludes neighboring crate protocols"},
+
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"normal","required":"yes","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"covered","gap_manual_reason":"same successful matrix runs over both transports"},
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"boundary","required":"yes","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"covered","gap_manual_reason":"non-zero ephemeral listener and tunnel boundaries are asserted"},
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"negative","required":"yes","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"covered","gap_manual_reason":"both transports exercise missing target and listener rejection"},
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"error","required":"yes","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"covered","gap_manual_reason":"both transports reject malformed Report and wrong rendezvous version"},
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"compatibility","required":"yes","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"covered","gap_manual_reason":"TCP and QUIC preserve one command contract and current wire version"},
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"lifecycle","required":"yes","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"covered","gap_manual_reason":"each listener and client topology starts, becomes online and stops serially"},
+    {"change_id":"sn_rendezvous_tcp_quic_transport_matrix","case_type":"cross-module","required":"no","validation_id":"V-SRRN-TRANSPORT","level":"dv","status":"not-applicable","gap_manual_reason":"transport parity crosses p2p-frame submodules but no neighboring crate boundary"},
+
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"normal","required":"yes","validation_id":"V-SRRN-INVENTORY","level":"dv","status":"covered","gap_manual_reason":"all command roles are classified and active families succeed"},
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"boundary","required":"yes","validation_id":"V-SRRN-INVENTORY","level":"unit","status":"covered","gap_manual_reason":"full u8 domain, empty response data and unknown peer are covered"},
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"negative","required":"yes","validation_id":"V-SRRN-INVENTORY","level":"dv","status":"covered","gap_manual_reason":"unknown Query, missing Call and rejected Rendezvous are covered"},
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"error","required":"yes","validation_id":"V-SRRN-INVENTORY","level":"dv","status":"covered","gap_manual_reason":"malformed Report and wrong rendezvous version fail over real tunnels"},
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"compatibility","required":"yes","validation_id":"V-SRRN-INVENTORY","level":"unit","status":"covered","gap_manual_reason":"ten current command values and QA response roles remain unchanged"},
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"lifecycle","required":"yes","validation_id":"V-SRRN-INVENTORY","level":"dv","status":"covered","gap_manual_reason":"Report registration precedes commands and explicit shutdown follows malformed input"},
+    {"change_id":"sn_all_command_real_transport_matrix","case_type":"cross-module","required":"no","validation_id":"V-SRRN-INVENTORY","level":"dv","status":"not-applicable","gap_manual_reason":"inter-SN, PN and neighboring crate protocols are explicit proposal non-goals"}
+  ],
+  "testing_design_element_coverage": [
+    {"element_type":"parameter-domain","design_source":"Exported Interfaces and closed PackageCmdCode inventory","validation_ids":["V-SRRN-INVENTORY"],"level":"unit,dv","status":"covered","gap_manual_reason":"full u8 command domain plus known, unknown, empty and malformed payload classes"},
+    {"element_type":"state-transition","design_source":"State Ownership registration, Call acknowledgement and Rendezvous correlation lifecycles","validation_ids":["V-SRRN-REAL","V-SRRN-INVENTORY"],"level":"dv","status":"covered","gap_manual_reason":"offline construction does not count; both clients must become Report-active before command transitions"},
+    {"element_type":"failure-path","design_source":"Failure Flows for startup, Query, Call, Rendezvous and transport parity","validation_ids":["V-SRRN-REAL","V-SRRN-TRANSPORT","V-SRRN-INVENTORY"],"level":"dv","status":"covered","gap_manual_reason":"unknown, missing, rejected, wrong-version and malformed paths are runnable on both transports"},
+    {"element_type":"error-handling","design_source":"Failure Flows fail-closed command handling","validation_ids":["V-SRRN-REAL","V-SRRN-INVENTORY"],"level":"dv","status":"covered","gap_manual_reason":"invalid version and malformed Report return errors without false downstream success"},
+    {"element_type":"invariant","design_source":"Exported Interfaces and transport parity failure flow","validation_ids":["V-SRRN-REAL","V-SRRN-TRANSPORT","V-SRRN-INVENTORY"],"level":"unit,dv","status":"covered","gap_manual_reason":"authenticated IDs, exact correlation fields, selected endpoint protocol and unchanged command values are asserted"},
+    {"element_type":"concurrency","design_source":"Rendezvous correlation lifecycle and action-before-response ordering","validation_ids":["V-SRRN-REAL"],"level":"dv","status":"covered","gap_manual_reason":"a semaphore holds target acknowledgement while the caller response task is asserted pending, then released and joined"}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260901T022855Z-p2p-frame+027-sn-rendezvous-real-network-tests-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/027-sn-rendezvous-real-network-tests/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

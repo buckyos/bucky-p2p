@@ -1,0 +1,46 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-clear-proxy-upgrade-after-close"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: false
+    evidence: The change is limited to private TunnelManager cleanup and scheduler state; public APIs, SN and PN wire formats, and tunnel selection contracts remain unchanged.
+    required_checks: []
+  data:
+    applies: false
+    evidence: No persistence, serialization, schema, migration, durable data, or cache-key behavior changes.
+    required_checks: []
+  security:
+    applies: false
+    evidence: Authentication, authorization, peer identity, secrets, and trust boundaries are unchanged.
+    required_checks: []
+  runtime:
+    applies: true
+    evidence:
+      - p2p-frame/src/tunnel/tunnel_manager.rs owns the remote candidate registry and proxy_upgrade_states lifecycle under separate synchronization primitives.
+      - p2p-frame/src/tunnel/tunnel_manager.rs runs cleanup, read-side pruning, registration, due-attempt collection, and asynchronous upgrade completion concurrently.
+      - p2p-frame/tests/unit/tunnel/proxy_upgrade_lifecycle_tests.rs exercises the private registration, cleanup, generation, and topology-finalization boundaries.
+    required_checks:
+      - Red-green unit coverage proving cleanup removes the state after the final proxy candidate closes.
+      - Unit coverage proving cleanup retains or re-establishes state when a published proxy candidate remains.
+      - Failure-path coverage proving a late failed attempt cannot re-schedule after cleanup removed the state.
+      - Deterministic ordering coverage proving registration holds the candidate lock until its state decision and derives that decision only from available topology.
+      - Success-path coverage proving only a live registered non-proxy topology can retire proxy candidates and clear current upgrade state.
+      - Task-scoped DV evidence for the affected TunnelManager proxy-upgrade lifecycle with bounded execution.
+  build:
+    applies: false
+    evidence: No dependency, Cargo feature, build graph, produced artifact, production default, release, deployment, compatibility, or rollback surface changes.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: Harness policy and tooling are unchanged; task-local plan, test metadata, runtime evidence, and reports only record this delivery.
+    required_checks: []

@@ -3,7 +3,7 @@
 
 This template intentionally uses only the Python standard library. Adapt paths
 or stricter YAML parsing after the target repository chooses its dependencies.
-Only proposal.md and design.md are mandatory implementation-admission inputs.
+Proposal.md and design.md are the mandatory manual-flow implementation inputs.
 testplan.yaml is validated when present; testing-coverage-check.py enforces it
 for completed testing work.
 """
@@ -12,21 +12,21 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
+import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
 
-
-REQUIRED_FRONT_MATTER = (
-    "module",
-    "version",
-    "status",
-    "approved_by",
-    "approved_at",
-    "approved_content_sha256",
+from task_manifest import (
+    PIPELINE_STAGES,
+    TaskManifestError,
+    stage_is_automatic,
+    task_policy as parse_task_policy,
 )
+
+
+REQUIRED_DOCUMENT_FRONT_MATTER = ("status",)
 ALLOWED_LEVELS = {"unit", "dv", "integration"}
 ALLOWED_MODES = {"enabled", "manual", "disabled"}
 CONTRACT_KINDS = {
@@ -44,19 +44,19 @@ CONTRACT_ASSERTIONS = {
     "documentation-examples": "documentation-examples-compile",
 }
 PUBLIC_API_IMPACTS = {"none", "backward-compatible", "migration-required", "breaking"}
-PIPELINE_APPROVER = "auto-pipeline"
-FORBIDDEN_APPROVERS = {
-    "agent", "assistant", "ai", "bot", "llm", "model", "self", "auto",
-    "claude", "codex", "copilot", "cursor", "gemini", "gpt",
-}
-APPROVAL_RECORD_FIELDS = ("approver", "approval_date", "user_statement")
-APPROVAL_HASH_EXCLUDED_FIELDS = {
-    "status",
-    "approved_by",
-    "approved_at",
-    "approved_content_sha256",
-}
-PLACEHOLDER_VALUES = {"", "-", "n/a", "na", "none", "tbd", "todo", "pending", '""', "''"}
+ALLOWED_DOCUMENT_STATUSES = {"draft", "approved", "rejected", "superseded"}
+
+
+def load_task_index_module():
+    path = Path(__file__).with_name("task-index.py")
+    if not path.is_file():
+        path = Path(__file__).with_name("task-index.template.py")
+    spec = importlib.util.spec_from_file_location("task_index", path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot load required sibling script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 TASK_NAME_RE = re.compile(r"^\d{3,}-[a-z0-9][a-z0-9_.-]*$")
 
 
@@ -69,6 +69,25 @@ def read_text(path: Path) -> str:
     if not path.exists():
         fail(f"missing required file: {path}")
     return path.read_text(encoding="utf-8")
+
+
+def task_policy(packet: Path) -> dict[str, str | None]:
+    """Read the canonical stage policy through the shared manifest parser."""
+    manifest = packet / "task.yaml"
+    if not manifest.is_file():
+        return {"stage": None, "mode": None, "start": None}
+    try:
+        policy = parse_task_policy(manifest)
+    except TaskManifestError as error:
+        fail(str(error))
+    if policy["mode"] == "auto-pipeline":
+        if policy["start"] not in PIPELINE_STAGES:
+            fail(
+                f"{manifest} auto-pipeline mode requires auto_pipeline_start_stage"
+            )
+    elif policy["start"] is not None:
+        fail(f"{manifest} manual mode must not set auto_pipeline_start_stage")
+    return policy
 
 
 def front_matter(text: str, path: Path) -> dict[str, str]:
@@ -86,39 +105,6 @@ def front_matter(text: str, path: Path) -> dict[str, str]:
     return data
 
 
-def approval_hash_content(text: str, path: Path) -> str:
-    """Return canonical document content excluding mutable approval metadata."""
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    if not normalized.startswith("---\n"):
-        fail(f"missing front matter: {path}")
-    front_end = normalized.find("\n---", 4)
-    if front_end == -1:
-        fail(f"unterminated front matter: {path}")
-
-    kept_front_matter: list[str] = []
-    for line in normalized[4:front_end].splitlines():
-        key = line.split(":", 1)[0].strip() if ":" in line else ""
-        if key not in APPROVAL_HASH_EXCLUDED_FIELDS:
-            kept_front_matter.append(line)
-
-    body = normalized[front_end + 4 :]
-    approval = re.search(r"(?m)^##\s+Approval Record\s*$", body)
-    if approval:
-        next_heading = re.search(r"(?m)^##\s+", body[approval.end() :])
-        section_end = approval.end() + next_heading.start() if next_heading else len(body)
-        body = body[: approval.start()] + body[section_end:]
-
-    return "---\n" + "\n".join(kept_front_matter) + "\n---" + body
-
-
-def approval_hash(text: str, path: Path) -> str:
-    return hashlib.sha256(approval_hash_content(text, path).encode("utf-8")).hexdigest()
-
-
-def has_value(value: str) -> bool:
-    return value.strip().strip('"').strip("'").lower() not in PLACEHOLDER_VALUES
-
-
 def validate_task_name(value: str, label: str) -> None:
     if not TASK_NAME_RE.fullmatch(value):
         fail(
@@ -127,39 +113,27 @@ def validate_task_name(value: str, label: str) -> None:
         )
 
 
-def approval_record_fields(text: str, path: Path) -> dict[str, str]:
-    match = re.search(r"(?m)^##\s+Approval Record\s*$", text)
-    if not match:
-        fail(f"{path} is approved but missing required section: ## Approval Record")
-    next_heading = re.search(r"(?m)^##\s+", text[match.end() :])
-    end = match.end() + next_heading.start() if next_heading else len(text)
-    body = text[match.end() : end]
-    fields: dict[str, str] = {}
-    for line in body.splitlines():
-        item = re.match(r"^\s*-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
-        if item:
-            fields[item.group(1).strip()] = item.group(2).strip()
-    return fields
-
-
 def pipeline_trigger_value(text: str, label: str) -> str | None:
     match = re.search(rf"(?mi)^\s*-\s*{re.escape(label)}:\s*(.+)$", text)
     return match.group(1).strip() if match else None
 
 
-def pipeline_no_stage_docs(
-    root: Path, version: str, module: str, task_name: str | None
+def validate_pipeline_binding(
+    root: Path,
+    version: str,
+    module: str,
+    task_name: str | None,
+    policy: dict[str, str | None],
 ) -> bool:
-    if not task_name:
+    if policy["mode"] != "auto-pipeline" or not task_name:
         return False
     plan = root / "docs" / "versions" / version / "modules" / module / task_name / "pipeline" / "plan.md"
     if not plan.exists():
-        return False
+        fail(f"auto-pipeline requires task-local plan: {plan}")
     text = plan.read_text(encoding="utf-8")
     launch = (pipeline_trigger_value(text, "User launch confirmed") or "").lower()
     launch_statement = pipeline_trigger_value(text, "User launch statement") or ""
-    policy = (pipeline_trigger_value(text, "Auto-pipeline document policy") or "").lower()
-    return (
+    valid = (
         launch in {"yes", "true", "confirmed"}
         and len(launch_statement.strip()) >= 8
         and pipeline_trigger_value(text, "Version") == version
@@ -167,104 +141,90 @@ def pipeline_no_stage_docs(
         and pipeline_trigger_value(text, "Task name") == task_name
         and (pipeline_trigger_value(text, "Proposal") or "").strip("`")
         == f"docs/versions/{version}/modules/{module}/{task_name}/proposal.md"
-        and "no design/testing markdown docs" in policy
-        and "testplan.yaml required" in policy
+        and pipeline_trigger_value(text, "First auto stage") == policy["start"]
+    )
+    if not valid:
+        fail(f"auto-pipeline plan binding does not match {plan.parent.parent / 'task.yaml'}")
+    return True
+
+
+def pipeline_no_stage_docs(
+    root: Path, version: str, module: str, task_name: str | None
+) -> bool:
+    """Compatibility helper for a pipeline whose first automatic stage is design."""
+    if not task_name:
+        return False
+    plan = (
+        root
+        / "docs"
+        / "versions"
+        / version
+        / "modules"
+        / module
+        / task_name
+        / "pipeline"
+        / "plan.md"
+    )
+    if not plan.is_file():
+        return False
+    text = plan.read_text(encoding="utf-8")
+    return (
+        (pipeline_trigger_value(text, "User launch confirmed") or "").lower()
+        in {"yes", "true", "confirmed"}
+        and pipeline_trigger_value(text, "Version") == version
+        and pipeline_trigger_value(text, "Packet module") == module
+        and pipeline_trigger_value(text, "Task name") == task_name
+        and pipeline_trigger_value(text, "First auto stage") == "design"
     )
 
 
-def validate_pipeline_launch_evidence(
-    root: Path, path: Path, module: str, version: str, task_name: str | None
+def validate_pipeline_state_link(
+    root: Path, packet: Path, version: str, module: str, task_name: str
 ) -> None:
-    if not task_name:
-        fail(f"{path} auto-pipeline approval requires a task-bound packet")
-    plan = root / "docs" / "versions" / version / "modules" / module / task_name / "pipeline" / "plan.md"
-    if not plan.exists():
-        fail(
-            f"{path} is approved by {PIPELINE_APPROVER} but {plan} is missing; "
-            "auto-pipeline approval requires recorded launch evidence"
-        )
-    if not pipeline_no_stage_docs(root, version, module, task_name):
-        fail(
-            f"{path} is approved by {PIPELINE_APPROVER} but {plan} is not explicitly "
-            f"bound to version={version}, packet_module={module}, task_name={task_name}"
-        )
-
-
-def validate_pipeline_state_link(packet: Path) -> None:
     plan = packet / "pipeline" / "plan.md"
-    state_path = packet / "pipeline" / "state.json"
+    state_path = root / ".harness" / "pipelines" / version / module / task_name / "state.json"
     if not state_path.is_file():
-        fail(f"auto-pipeline requires sibling execution state: {state_path}")
+        fail(f"auto-pipeline requires runtime execution state: {state_path}")
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         fail(f"invalid pipeline state {state_path}: {error}")
     if not isinstance(state, dict) or state.get("schema_version") != 1:
         fail(f"{state_path} schema_version must be 1")
-    expected_hash = hashlib.sha256(
-        plan.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
-    ).hexdigest()
-    if state.get("plan_sha256") != expected_hash:
-        fail(f"{state_path} plan_sha256 does not match sibling plan.md")
 
 
-def validate_approval_provenance(root: Path, path: Path, text: str, data: dict[str, str]) -> None:
-    if data.get("status") != "approved":
-        return
-    approved_by = data.get("approved_by", "").strip()
-    approved_at = data.get("approved_at", "").strip()
-    if not has_value(approved_by) or not has_value(approved_at):
-        fail(f"{path} is approved but approved_by/approved_at are empty")
-    recorded_hash = data.get("approved_content_sha256", "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", recorded_hash):
-        fail(f"{path} is approved but approved_content_sha256 is missing or invalid")
-    expected_hash = approval_hash(text, path)
-    if recorded_hash != expected_hash:
-        fail(
-            f"{path} approved_content_sha256 does not match approved content; "
-            "approved documents are immutable and require a sibling amendment/fix task"
-        )
-
-    if approved_by == PIPELINE_APPROVER:
-        validate_pipeline_launch_evidence(
-            root, path, data.get("module", ""), data.get("version", ""), data.get("task_name")
-        )
-        return
-
-    if approved_by.lower() in FORBIDDEN_APPROVERS:
-        fail(
-            f"{path} approved_by '{approved_by}' looks like an agent self-approval; "
-            "only the user or auto-pipeline (after explicit launch) may approve"
-        )
-
-    record = approval_record_fields(text, path)
-    missing = [field for field in APPROVAL_RECORD_FIELDS if not has_value(record.get(field, ""))]
-    if missing:
-        fail(f"{path} ## Approval Record has missing or placeholder fields: {', '.join(missing)}")
-    if record["approver"].strip() != approved_by:
-        fail(
-            f"{path} ## Approval Record approver '{record['approver'].strip()}' "
-            f"does not match front matter approved_by '{approved_by}'"
-        )
-
-
-def validate_doc(root: Path, path: Path, module: str, version: str, submodule: str | None = None) -> None:
+def validate_doc(
+    root: Path,
+    path: Path,
+    module: str,
+    version: str,
+    submodule: str | None = None,
+    *,
+    require_approved: bool = False,
+) -> None:
     text = read_text(path)
     data = front_matter(text, path)
-    missing = [field for field in REQUIRED_FRONT_MATTER if field not in data]
+    missing = [field for field in REQUIRED_DOCUMENT_FRONT_MATTER if field not in data]
     if missing:
         fail(f"{path} missing front matter fields: {', '.join(missing)}")
-    if data["module"] != module:
-        fail(f"{path} module mismatch: expected {module}, got {data['module']}")
-    if data["version"] != version:
-        fail(f"{path} version mismatch: expected {version}, got {data['version']}")
+    manifest_ref = data.get("task_manifest")
+    if manifest_ref != "task.yaml":
+        fail(f"{path} must use task_manifest: task.yaml")
+    if not (path.parent / manifest_ref).is_file():
+        fail(f"{path} references missing task manifest: {path.parent / manifest_ref}")
+    duplicated = [field for field in ("module", "version", "task_name", "submodule") if field in data]
+    if duplicated:
+        fail(f"{path} duplicates canonical task identity fields: {', '.join(duplicated)}")
     if submodule:
         validate_task_name(submodule, "--submodule")
-        if data.get("task_name") != submodule:
-            fail(f"{path} task_name mismatch: expected {submodule}, got {data.get('task_name', '<missing>')}")
-    if submodule and data.get("submodule") not in {None, "", submodule}:
-        fail(f"{path} submodule mismatch: expected {submodule}, got {data['submodule']}")
-    validate_approval_provenance(root, path, text, data)
+    status = data.get("status", "").strip()
+    if status not in ALLOWED_DOCUMENT_STATUSES:
+        fail(
+            f"{path} status must be one of: "
+            + ", ".join(sorted(ALLOWED_DOCUMENT_STATUSES))
+        )
+    if require_approved and status != "approved":
+        fail(f"{path} must be approved before manual implementation; got status: {status}")
 
 
 def extract_level_blocks(text: str) -> dict[str, str]:
@@ -284,21 +244,24 @@ def extract_level_blocks(text: str) -> dict[str, str]:
 def validate_testplan(path: Path, module: str, version: str, submodule: str | None = None) -> None:
     text = read_text(path)
     step_ids: set[str] = set()
-    for key, value in (("schema_version", "1"), ("version", version), ("module", module)):
+    manifest_bound = bool(re.search(r"(?m)^task_manifest:\s*task\.yaml\s*$", text))
+    if not manifest_bound:
+        fail(f"{path} must use task_manifest: task.yaml")
+    if not (path.parent / "task.yaml").is_file():
+        fail(f"{path} references missing task manifest: {path.parent / 'task.yaml'}")
+    duplicated = [
+        field for field in ("module", "version", "task_name", "submodule")
+        if re.search(rf"(?m)^{field}:\s*\S+", text)
+    ]
+    if duplicated:
+        fail(f"{path} duplicates canonical task identity fields: {', '.join(duplicated)}")
+    required_bindings = (("schema_version", "1"),)
+    for key, value in required_bindings:
         if not re.search(rf"(?m)^{re.escape(key)}:\s*{re.escape(value)}\s*$", text):
             fail(f"{path} missing or mismatched {key}: {value}")
-    task_name_match = re.search(r"(?m)^task_name:\s*(\S+)\s*$", text)
-    if not task_name_match:
-        fail(f"{path} missing task_name")
-    task_name = task_name_match.group(1)
-    validate_task_name(task_name, f"{path} task_name")
-    if submodule:
-        validate_task_name(submodule, "--submodule")
-        if task_name != submodule:
-            fail(f"{path} task_name mismatch: expected {submodule}, got {task_name}")
-    if submodule and re.search(r"(?m)^submodule:\s*\S+", text):
-        if not re.search(rf"(?m)^submodule:\s*{re.escape(submodule)}\s*$", text):
-            fail(f"{path} submodule mismatch: expected {submodule}")
+    task_name = submodule
+    if task_name:
+        validate_task_name(task_name, f"{path} task_name")
 
     impact = re.search(r"(?ms)^api_impact:\s*$\n(.*?)(?=^[A-Za-z0-9_-]+:\s*|\Z)", text)
     if not impact:
@@ -402,57 +365,80 @@ def main() -> int:
     parser.add_argument("--module")
     parser.add_argument("--submodule")
     parser.add_argument(
-        "--print-approval-hash",
-        metavar="DOCUMENT",
-        help="print the approval hash for a stage document and exit",
+        "--require-approved",
+        action="store_true",
+        help="require mandatory manual-flow proposal/design documents to be approved",
     )
     args = parser.parse_args()
 
     root = Path(args.root)
-    if args.print_approval_hash:
-        path = Path(args.print_approval_hash)
-        if not path.is_absolute():
-            path = root / path
-        text = read_text(path)
-        print(approval_hash(text, path))
-        return 0
-
     if not (args.version and args.module):
         fail("--version and --module are required")
     if args.submodule:
         validate_task_name(args.submodule, "--submodule")
 
-    task_index = root / "docs" / "versions" / args.version / "modules" / "tasks.md"
-    if not task_index.exists():
-        fail(f"missing hard-gate unfinished-task index: docs/versions/{args.version}/modules/tasks.md")
+    task_index = load_task_index_module()
+    task_index.load_index(root.resolve(), args.version)
     packet = root / "docs" / "versions" / args.version / "modules" / args.module
     if args.submodule:
         packet = packet / args.submodule
-    no_stage_docs = pipeline_no_stage_docs(root, args.version, args.module, args.submodule)
-    required_docs = ["proposal.md"] if no_stage_docs else ["proposal.md", "design.md"]
+    policy = task_policy(packet)
+    pipeline_active = validate_pipeline_binding(
+        root, args.version, args.module, args.submodule, policy
+    )
+    stage = policy["stage"]
+    automatic_design = stage_is_automatic(policy, "design")
+    automatic_testing = stage_is_automatic(policy, "testing")
+    # A canonical proposal packet may omit design.md. Preserve fail-closed
+    # behavior for malformed/legacy manifests whose stage cannot be resolved.
+    design_required = not automatic_design and stage != "proposal"
+    required_docs = ["proposal.md"] + (["design.md"] if design_required else [])
+    if args.require_approved and automatic_design:
+        fail("--require-approved applies only to manual-flow proposal/design documents")
     for name in required_docs:
-        validate_doc(root, packet / name, args.module, args.version, args.submodule)
-    if no_stage_docs:
-        validate_pipeline_state_link(packet)
-        forbidden = ["design.md", "testing.md"]
+        validate_doc(
+            root,
+            packet / name,
+            args.module,
+            args.version,
+            args.submodule,
+            require_approved=args.require_approved,
+        )
+    if pipeline_active:
+        validate_pipeline_state_link(root, packet, args.version, args.module, args.submodule)
+        forbidden: list[str] = []
+        if automatic_design and stage in {"design", "implementation", "testing", "acceptance"}:
+            forbidden.append("design.md")
+        if automatic_testing and stage in {"testing", "acceptance"}:
+            forbidden.append("testing.md")
         present = [name for name in forbidden if (packet / name).exists()]
         if present:
             fail(
                 "auto-pipeline document policy forbids generated stage docs in this packet: "
                 + ", ".join(str(packet / name) for name in present)
             )
-        if (packet / "design").exists() or (packet / "testing").exists():
-            fail("auto-pipeline document policy forbids task-local design/ or testing/ directories")
-        optional_testplan = packet / "testplan.yaml"
-        if optional_testplan.exists():
-            validate_testplan(optional_testplan, args.module, args.version, args.submodule)
-    else:
-        optional_testing = packet / "testing.md"
-        if optional_testing.exists():
-            validate_doc(root, optional_testing, args.module, args.version, args.submodule)
-        optional_testplan = packet / "testplan.yaml"
-        if optional_testplan.exists():
-            validate_testplan(optional_testplan, args.module, args.version, args.submodule)
+        if (
+            automatic_design
+            and stage in {"design", "implementation", "testing", "acceptance"}
+            and (packet / "design").exists()
+        ):
+            fail("automatic design forbids task-local design/ directories")
+        if (
+            automatic_testing
+            and stage in {"testing", "acceptance"}
+            and (packet / "testing").exists()
+        ):
+            fail("automatic testing forbids task-local testing/ directories")
+    optional_testing = packet / "testing.md"
+    if (
+        stage in {"testing", "acceptance"}
+        and optional_testing.exists()
+        and not automatic_testing
+    ):
+        validate_doc(root, optional_testing, args.module, args.version, args.submodule)
+    optional_testplan = packet / "testplan.yaml"
+    if stage in {"testing", "acceptance"} and optional_testplan.exists():
+        validate_testplan(optional_testplan, args.module, args.version, args.submodule)
     print("schema-check: passed")
     return 0
 

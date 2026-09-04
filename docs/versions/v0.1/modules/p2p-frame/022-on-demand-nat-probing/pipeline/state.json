@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "3647779f13c31af731de8e5c67e5077bda5e3ad83ae691e2ec36197ccbd396fe",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-SCHEDULER-1": {"status": "complete"},
+    "I-WIRE-1": {"status": "complete"},
+    "I-SERVICE-MOD-1": {"status": "complete"},
+    "I-PEER-CACHE-1": {"status": "complete"},
+    "I-SERVICE-1": {"status": "complete"},
+    "I-CLIENT-1": {"status": "complete"}
+  },
+  "scheduler": {
+    "strategy": "dependency-ready-set",
+    "max_concurrency": "runtime-available-slots",
+    "shared_artifact_owner": "parent-orchestrator",
+    "lock_directory": ".harness/locks",
+    "waves": [
+      {
+        "wave": 1,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "an independent read-only child audits the design mapping while the parent owns plan and state"
+        }
+      },
+      {
+        "wave": 2,
+        "tasks": ["I-1", "I-SCHEDULER-1", "I-WIRE-1"],
+        "serialization_reasons": {
+          "I-1": "the admitted implementation parent starts after confirmed design",
+          "I-SCHEDULER-1": "the new scheduler file is disjoint from protocol work",
+          "I-WIRE-1": "the protocol file is exclusively owned by the wire task"
+        }
+      },
+      {
+        "wave": 3,
+        "tasks": ["I-SERVICE-MOD-1", "I-PEER-CACHE-1", "I-CLIENT-1"],
+        "serialization_reasons": {
+          "I-SERVICE-MOD-1": "private module wiring follows the scheduler file",
+          "I-PEER-CACHE-1": "cache ownership follows the scheduler transition contract",
+          "I-CLIENT-1": "client integration follows the completed wire contract"
+        }
+      },
+      {
+        "wave": 4,
+        "tasks": ["I-SERVICE-1"],
+        "serialization_reasons": {
+          "I-SERVICE-1": "server integration composes the completed scheduler, wire, module, and cache tasks"
+        }
+      },
+      {
+        "wave": 5,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing starts from the checked and scope-validated production boundary"
+        }
+      },
+      {
+        "wave": 6,
+        "tasks": ["I-1", "I-SCHEDULER-1", "I-CLIENT-1"],
+        "serialization_reasons": {
+          "I-1": "testing returned proposal-critical eligibility and replay defects to implementation",
+          "I-SCHEDULER-1": "stabilize authority when two QUIC tunnels coexist",
+          "I-CLIENT-1": "enforce QUIC, endpoint, generation, and request validation before UDP work"
+        }
+      },
+      {
+        "wave": 7,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing restarts from the corrected authority, eligibility, replay, and API-impact boundary"
+        }
+      },
+      {
+        "wave": 8,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance starts only after corrected implementation and successful unified task evidence"
+        }
+      },
+      {
+        "wave": 9,
+        "tasks": ["D-1"],
+        "serialization_reasons": {
+          "D-1": "acceptance exposed the need for an explicit old-client capability and bounded mixed-tunnel maintenance mapping"
+        }
+      },
+      {
+        "wave": 10,
+        "tasks": ["I-1", "I-SCHEDULER-1", "I-WIRE-1", "I-SERVICE-1", "I-CLIENT-1"],
+        "serialization_reasons": {
+          "I-1": "acceptance returned online gating, mixed-version retry, authority lifecycle, and capacity defects to implementation",
+          "I-SCHEDULER-1": "add negotiated capability, bounded global issuance, and complete authority lifecycle transitions",
+          "I-WIRE-1": "carry optional NAT probe control capability without changing legacy base decoding",
+          "I-SERVICE-1": "observe authenticated control traffic and promptly reconcile vanished QUIC authorities",
+          "I-CLIENT-1": "publish the active SN before executing a directive and keep result-report loss off the online path"
+        }
+      },
+      {
+        "wave": 11,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "post-implementation testing restarts after the capability, online ordering, control observation, maintenance, and capacity corrections compile and pass implementation scope"
+        }
+      },
+      {
+        "wave": 12,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance reruns only after all return-2 implementation fixes and the fresh 12-step unified artifact pass"
+        }
+      },
+      {
+        "wave": 13,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "acceptance returned the literal periodic directive-count and mixed-version runtime evidence requirements to post-implementation testing"
+        }
+      },
+      {
+        "wave": 14,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "independent acceptance restarts after both returned runtime-evidence cases pass in the fresh 14-step unified artifact"
+        }
+      },
+      {
+        "wave": 15,
+        "tasks": ["I-1"],
+        "serialization_reasons": {
+          "I-1": "testing scope returned two cfg(test) runtime seams to implementation admission before they could become the final testing baseline"
+        }
+      },
+      {
+        "wave": 16,
+        "tasks": ["T-1"],
+        "serialization_reasons": {
+          "T-1": "testing scope restarts from the implementation-admitted test-seam baseline while retaining the fresh 14-step artifact"
+        }
+      },
+      {
+        "wave": 17,
+        "tasks": ["A-1"],
+        "serialization_reasons": {
+          "A-1": "final independent acceptance resumes after implementation and testing scope both pass on the unchanged accepted runtime evidence"
+        }
+      }
+    ]
+  },
+  "testing_evidence": [
+    {"change_id": "sn_nat_probe_trigger_policy", "validation_id": "V-ODNP-SCHEDULER", "testplan_level": "unit", "testplan_step_id": "nat-probe-scheduler-unit", "evidence": "Fake-time scheduler cases cover first online, endpoint/config/control events, legacy capability absence, demand, global capacity, timeout, backoff, authority maintenance, stable reports and completion-based deadlines; real flow steps cover periodic issuance and legacy fallback.", "gap": "no", "gap_manual_reason": ""},
+    {"change_id": "sn_nat_probe_directive_protocol", "validation_id": "V-ODNP-WIRE", "testplan_level": "unit", "testplan_step_id": "nat-probe-wire-unit", "evidence": "Capability/result and directive roundtrip, legacy bases, existing optional tails and unsupported control payloads are exercised.", "gap": "no", "gap_manual_reason": ""},
+    {"change_id": "nat_profile_server_owned_validity", "validation_id": "V-ODNP-PROFILE", "testplan_level": "unit", "testplan_step_id": "nat-probe-peer-cache-unit", "evidence": "Registration refresh preserves the scheduler-owned profile beyond ten minutes and explicit invalidation removes publication.", "gap": "no", "gap_manual_reason": ""},
+    {"change_id": "sn_nat_probe_quic_eligibility", "validation_id": "V-ODNP-QUIC", "testplan_level": "unit", "testplan_step_id": "nat-probe-client-gate-unit", "evidence": "Server authority and client gates cover TCP rejection, real TCP zero-directive flow, QUIC identity, online-before-probe, concurrent tunnels, endpoint bounds and fail-closed input.", "gap": "no", "gap_manual_reason": ""},
+    {"change_id": "sn_nat_probe_two_hour_schedule", "validation_id": "V-ODNP-TWO-HOUR", "testplan_level": "dv", "testplan_step_id": "nat-probe-periodic-dv", "evidence": "Injected scheduler time proves the exact boundary, while the real QUIC flow forces that due state and proves exactly one directive, real UDP execution, correlated completion, and no immediate duplicate.", "gap": "no", "gap_manual_reason": ""}
+  ],
+  "testing_case_type_coverage": [
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"normal","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"boundary","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"negative","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"error","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"compatibility","required":"yes","validation_id":"V-ODNP-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"lifecycle","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_trigger_policy","case_type":"cross-module","required":"yes","validation_id":"V-ODNP-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"normal","required":"yes","validation_id":"V-ODNP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"boundary","required":"yes","validation_id":"V-ODNP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"negative","required":"yes","validation_id":"V-ODNP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"error","required":"yes","validation_id":"V-ODNP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"compatibility","required":"yes","validation_id":"V-ODNP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"lifecycle","required":"yes","validation_id":"V-ODNP-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_directive_protocol","case_type":"cross-module","required":"yes","validation_id":"V-ODNP-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"nat_profile_server_owned_validity","case_type":"normal","required":"yes","validation_id":"V-ODNP-PROFILE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_profile_server_owned_validity","case_type":"boundary","required":"yes","validation_id":"V-ODNP-PROFILE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_profile_server_owned_validity","case_type":"negative","required":"yes","validation_id":"V-ODNP-PROFILE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_profile_server_owned_validity","case_type":"error","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_profile_server_owned_validity","case_type":"compatibility","required":"yes","validation_id":"V-ODNP-WIRE","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_profile_server_owned_validity","case_type":"lifecycle","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"nat_profile_server_owned_validity","case_type":"cross-module","required":"yes","validation_id":"V-ODNP-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"normal","required":"yes","validation_id":"V-ODNP-QUIC","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"boundary","required":"yes","validation_id":"V-ODNP-QUIC","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"negative","required":"yes","validation_id":"V-ODNP-QUIC","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"error","required":"yes","validation_id":"V-ODNP-QUIC","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"compatibility","required":"yes","validation_id":"V-ODNP-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"lifecycle","required":"yes","validation_id":"V-ODNP-SCHEDULER","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_quic_eligibility","case_type":"cross-module","required":"yes","validation_id":"V-ODNP-FLOW","level":"dv","status":"covered","gap_manual_reason":""},
+
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"normal","required":"yes","validation_id":"V-ODNP-TWO-HOUR","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"boundary","required":"yes","validation_id":"V-ODNP-TWO-HOUR","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"negative","required":"yes","validation_id":"V-ODNP-TWO-HOUR","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"error","required":"yes","validation_id":"V-ODNP-TWO-HOUR","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"compatibility","required":"yes","validation_id":"V-ODNP-INTEGRATION","level":"integration","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"lifecycle","required":"yes","validation_id":"V-ODNP-TWO-HOUR","level":"unit","status":"covered","gap_manual_reason":""},
+    {"change_id":"sn_nat_probe_two_hour_schedule","case_type":"cross-module","required":"yes","validation_id":"V-ODNP-FLOW","level":"dv","status":"covered","gap_manual_reason":""}
+  ],
+  "evidence": {
+    "test_runs": ["test-results/test-runs/20260829T180059Z-p2p-frame+022-on-demand-nat-probing-all.json"],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "ODNP-CLIENT-AUTHORITY-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-CLIENT-1",
+      "reason": "client directive execution lacked local QUIC, endpoint, and replay validation; concurrent QUIC reports could flap authority",
+      "expected_fix_output": "validate client tunnel protocol, endpoint set, generation/request monotonicity and stabilize concurrent QUIC authority before restarting testing"
+    },
+    {
+      "issue_id": "ODNP-API-IMPACT-1",
+      "owning_stage": "design",
+      "count": 1,
+      "target_task": "D-1",
+      "reason": "public Rust struct literal consumers require source migration even though the wire tails are backward-compatible",
+      "expected_fix_output": "record migration-required public API impact and include repository compile closure"
+    },
+    {
+      "issue_id": "ODNP-ACCEPTANCE-RUNTIME-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-1",
+      "reason": "acceptance found directive execution gating initial online publication, no old-client capability negotiation, incomplete control/disconnect observation, and no global issuance capacity",
+      "expected_fix_output": "make initial online publication independent of UDP/result report, negotiate control support, reconcile authenticated control traffic and authority loss, bound global in-flight directives, then restart post-implementation testing"
+    },
+    {
+      "issue_id": "ODNP-CAPABILITY-DESIGN-1",
+      "owning_stage": "design",
+      "count": 1,
+      "target_task": "D-1",
+      "reason": "the original additive-tail mapping did not explicitly negotiate client support and therefore could not prove the old-client no-retry lifecycle",
+      "expected_fix_output": "bind optional client capability, online-before-probe ordering, global capacity, authenticated control observation, and bounded authority maintenance in the validated pipeline plan"
+    },
+    {
+      "issue_id": "ODNP-ACCEPTANCE-TEST-EVIDENCE-2",
+      "owning_stage": "testing",
+      "count": 1,
+      "target_task": "T-1",
+      "reason": "acceptance found the proposal-required real periodic directive count and mixed-version no-capability demand behavior were covered only by scheduler or wire units",
+      "expected_fix_output": "add real in-process periodic and legacy QUIC capability flows to the unified testplan, produce a fresh artifact, and restart acceptance"
+    },
+    {
+      "issue_id": "ODNP-TEST-SEAM-SCOPE-3",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-1",
+      "reason": "testing scope correctly rejected cfg(test) server/client runtime seams that had not yet been frozen in an implementation-admitted baseline",
+      "expected_fix_output": "rerun unchanged implementation admission and scope for the existing private test seams, snapshot them as implementation output, then rerun testing scope"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/022-on-demand-nat-probing/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

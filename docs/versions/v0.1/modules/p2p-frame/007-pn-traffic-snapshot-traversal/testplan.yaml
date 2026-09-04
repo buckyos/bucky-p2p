@@ -1,0 +1,81 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 007-pn-traffic-snapshot-traversal
+submodule: 007-pn-traffic-snapshot-traversal
+api_impact:
+  public_api: migration-required
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/pn/service/pn_server.rs", "p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs", "docs/versions/v0.1/modules/p2p-frame/007-pn-traffic-snapshot-traversal/proposal.md"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: pn-traffic-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile all p2p-frame targets against the extended snapshot and iterator API
+      change_ids: ["pn_traffic_snapshot_incremental_traversal", "pn_traffic_snapshot_interval_delta", "pn_traffic_disconnected_user_release"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+    - id: pn-traffic-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify migration closure for old snapshot construction and consuming diagnostic paths
+      change_ids: ["pn_traffic_snapshot_incremental_traversal", "pn_traffic_snapshot_interval_delta", "pn_traffic_disconnected_user_release"]
+      run: ["uv", "run", "--active", "python", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "007-pn-traffic-snapshot-traversal"]
+    - id: pn-traffic-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile affected repository consumers without executing broad test suites
+      change_ids: ["pn_traffic_snapshot_incremental_traversal", "pn_traffic_snapshot_interval_delta", "pn_traffic_disconnected_user_release"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--no-run", "--all-targets"]
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Ordered incremental traversal, shared delta baselines, non-consuming peek, acquisition and limit-setter concurrency serialization, active-session counts, same-user deduplication, ABA-safe release, retained policy/live-limiter alignment, and manager-drop branches.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server.rs
+      - p2p-frame/src/pn/service/pn_server/tests/traffic_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Dedicated test file is nested under the existing pn_server test module so it can exercise the private traffic-state owner without adding inline test bodies.
+        - Iterator removal between successive next calls is the lock-lifetime boundary check: dropping sessions must complete before the iterator advances.
+        - Concurrent limit setters are released together and the live limiter's observable unlimited weight must match the final retained config, covering the shared manager-lock ordering invariant.
+        - The defensive active_sessions-equals-zero branch is not mutated through production interfaces; debug assertions intentionally reject that corrupted internal state, while all legal count transitions are covered.
+    steps:
+      - id: pn-traffic-manager-unit
+        name: Run PN traffic manager traversal, delta, and lifecycle unit tests
+        change_ids: ["pn_traffic_snapshot_incremental_traversal", "pn_traffic_snapshot_interval_delta", "pn_traffic_disconnected_user_release"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "traffic_manager_tests", "--", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Real asynchronous PN data and control bridge paths expose active cumulative/delta snapshots, preserve source identity and limit direction, then remove source/target snapshots after the bridge disconnects.
+    test_targets:
+      - p2p-frame/src/pn/service/pn_server.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Existing bridge tests are migrated to query while their successful session is active and to assert absence after the service task exits.
+        - The filtered prefix covers both the control bridge accounting/limit path and normalized-source data bridge path without running the broad p2p-frame suite.
+    steps:
+      - id: pn-traffic-bridge-lifecycle-dv
+        name: Run PN data and control bridge active-snapshot and disconnect-cleanup checks
+        change_ids: ["pn_traffic_snapshot_interval_delta", "pn_traffic_disconnected_user_release"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "pn_service_tracks_", "--", "--nocapture"]
+
+  integration:
+    mode: disabled
+    summary: The new iterator and extended snapshot are p2p-frame public observation APIs, but no repository neighbor currently consumes them and PN wire/cross-crate data flow is unchanged.
+    change_ids: ["pn_traffic_snapshot_incremental_traversal", "pn_traffic_snapshot_interval_delta", "pn_traffic_disconnected_user_release"]
+    reason: "owner: testing; reason: repository search found no cyfs-p2p, cyfs-p2p-test, sn-miner-rust, or desc-tool consumer of the existing PN traffic API, while task-local external-positive and repository compile-closure checks validate the additive/migration-required Rust surface; risk: an out-of-repository exhaustive struct literal must add the two fields; acceptance impact: any discovered repository neighbor or PN wire change would require enabling integration coverage before acceptance."

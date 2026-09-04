@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-bind-rendezvous-response-owner"]
+source_bindings:
+  proposal: proposal.md
+  design_source: design.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["design.md#file-level-interfaces", "design.md#api-and-build-surface-impact", "design/sn-service.md#file-level-boundary"]
+    required_checks: ["same-IP different-port response acceptance", "unowned-IP response rejection without wire-format change"]
+  data:
+    applies: false
+    evidence: No persistent data, serialization layout, migration, or cache key changes are in scope.
+    required_checks: []
+  security:
+    applies: true
+    evidence: ["design.md#key-flows", "design.md#state-and-ownership", "design/sn-service.md#ownership-invariants"]
+    required_checks: ["third-party IP rejection", "self-reported-only IP rejection", "no-observation fail-closed behavior"]
+  runtime:
+    applies: true
+    evidence: ["design.md#module-relationship-uml", "design.md#key-flows", "design.md#risks-and-rollback"]
+    required_checks: ["same-SN target serving-boundary enforcement", "cross-SN target serving-boundary enforcement", "existing failure propagation and fallback compatibility"]
+  build:
+    applies: false
+    evidence: No dependency, feature, build graph, produced artifact, release, deployment, or public API surface change is planned.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing Harness workflow and task runner without changing rules, checkers, templates, or test infrastructure behavior.
+    required_checks: []

@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "4bf7540dd9b4943f061d422d276ce8c2036ea2b27bd0b9572d43f84f823f4529",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "running"},
+    "A-1": {"status": "pending"},
+    "I-CS-1": {"status": "complete"},
+    "I-CS-2": {"status": "complete"},
+    "I-CS-3": {"status": "complete"},
+    "I-CS-4": {"status": "complete"},
+    "I-CS-5": {"status": "complete"},
+    "I-CS-6": {"status": "complete"},
+    "I-CS-7": {"status": "complete"}
+  },
+  "testing_evidence": [
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::callback_can_wait_for_stream_data_without_blocking_control_receive",
+    "gap": "no",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::inbound_overflow_resets_only_the_full_stream_and_preserves_terminal_order",
+    "gap": "no",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::control_stream_rejects_invalid_and_duplicate_peer_ids; stream_id_allocation_skips_zero_and_live_ids",
+    "gap": "no",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::shutdown_waits_for_pending_data_before_sending_fin",
+    "gap": "no",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::inbound_overflow_resets_only_the_full_stream_and_preserves_terminal_order",
+    "gap": "no",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::runtime_close_fails_pending_and_subsequent_writes",
+    "gap": "no",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "validation_id": "V-CSRF-UNIT",
+    "testplan_level": "unit",
+    "testplan_step_id": "control-stream-runtime-unit",
+    "evidence": "p2p-frame/src/networks/control_stream/tests.rs::partial_reads_advance_an_offset_without_front_drain",
+    "gap": "no",
+    "gap_manual_reason": ""
+  }
+],
+  "testing_case_type_coverage": [
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_callback_dispatch",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_per_stream_overflow",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_id_validation",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_ordered_shutdown",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_terminal_delivery",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_tunnel_close_writes",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "normal",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "boundary",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "negative",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "error",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "compatibility",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "lifecycle",
+    "required": "yes",
+    "validation_id": "V-CSRF-UNIT",
+    "level": "unit",
+    "status": "covered",
+    "gap_manual_reason": ""
+  },
+  {
+    "change_id": "control_stream_read_buffer_performance",
+    "case_type": "cross-module",
+    "required": "yes",
+    "validation_id": "V-CSRF-INTEGRATION",
+    "level": "integration",
+    "status": "covered",
+    "gap_manual_reason": ""
+  }
+],
+  "evidence": {
+    "test_runs": [],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "pending",
+    "report": null
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": false,
+    "required_evidence_exists": false,
+    "testplan_present": false,
+    "change_coverage_complete": false,
+    "stage_scope_checks_passed": false,
+    "final_acceptance_passed": false
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "317c446e93d575a422837c6bf0b6ceec0055a27cd0eaf430ea5e014973fa68a6",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-PN-TRAVERSAL": {"status": "complete"},
+    "I-PN-DELTA": {"status": "complete"},
+    "I-PN-CLEANUP": {"status": "complete"}
+  },
+  "testing_evidence": [
+    {
+      "change_id": "pn_traffic_snapshot_incremental_traversal",
+      "validation_id": "V-PN-TRAFFIC-TRAVERSAL-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "pn-traffic-manager-unit",
+      "evidence": "Dedicated traffic_manager_tests.rs exercises empty traversal, ordered one-item advancement, removal between next calls, and exhaustion against the delivered BTreeMap cursor implementation without retaining a manager lock.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "pn_traffic_snapshot_interval_delta",
+      "validation_id": "V-PN-TRAFFIC-DELTA-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "pn-traffic-manager-unit",
+      "evidence": "Dedicated traffic_manager_tests.rs exercises first/subsequent/zero deltas, non-consuming peek, point/iterator shared baseline, concurrent acquisition serialization, and entry reset through the delivered snapshot implementation.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "pn_traffic_disconnected_user_release",
+      "validation_id": "V-PN-TRAFFIC-CLEANUP-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "pn-traffic-manager-unit",
+      "evidence": "Dedicated traffic_manager_tests.rs exercises one/many sessions, distinct and identical participants, final removal, stale-generation protection, retained limit configuration, live-limiter alignment after sequential and concurrent setters, fresh entry recreation, and missing-manager guard drop; DV exercises real data/control bridge completion.",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "normal", "required": "yes", "validation_id": "V-PN-TRAFFIC-TRAVERSAL-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "boundary", "required": "yes", "validation_id": "V-PN-TRAFFIC-TRAVERSAL-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "negative", "required": "yes", "validation_id": "V-PN-TRAFFIC-TRAVERSAL-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "error", "required": "yes", "validation_id": "V-PN-TRAFFIC-TRAVERSAL-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "compatibility", "required": "yes", "validation_id": "V-PN-TRAFFIC-CONTRACT", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "lifecycle", "required": "yes", "validation_id": "V-PN-TRAFFIC-TRAVERSAL-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_incremental_traversal", "case_type": "cross-module", "required": "yes", "validation_id": "V-PN-TRAFFIC-CONTRACT", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "normal", "required": "yes", "validation_id": "V-PN-TRAFFIC-DELTA-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "boundary", "required": "yes", "validation_id": "V-PN-TRAFFIC-DELTA-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "negative", "required": "yes", "validation_id": "V-PN-TRAFFIC-DELTA-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "error", "required": "yes", "validation_id": "V-PN-TRAFFIC-DELTA-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "compatibility", "required": "yes", "validation_id": "V-PN-TRAFFIC-CONTRACT", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "lifecycle", "required": "yes", "validation_id": "V-PN-TRAFFIC-DELTA-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_snapshot_interval_delta", "case_type": "cross-module", "required": "yes", "validation_id": "V-PN-TRAFFIC-CONTRACT", "level": "integration", "status": "covered", "gap_manual_reason": ""},
+
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "normal", "required": "yes", "validation_id": "V-PN-TRAFFIC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "boundary", "required": "yes", "validation_id": "V-PN-TRAFFIC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "negative", "required": "yes", "validation_id": "V-PN-TRAFFIC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "error", "required": "yes", "validation_id": "V-PN-TRAFFIC-CLEANUP-UNIT", "level": "unit", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "compatibility", "required": "yes", "validation_id": "V-PN-TRAFFIC-BRIDGE-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "lifecycle", "required": "yes", "validation_id": "V-PN-TRAFFIC-BRIDGE-DV", "level": "dv", "status": "covered", "gap_manual_reason": ""},
+    {"change_id": "pn_traffic_disconnected_user_release", "case_type": "cross-module", "required": "no", "validation_id": "V-PN-TRAFFIC-CROSS-MODULE-NA", "level": "integration", "status": "not-applicable", "gap_manual_reason": "No repository neighbor consumes PN traffic snapshots or limit setters, and the implementation changes neither PN wire data nor cross-crate runtime flow; repository compile closure remains the compatibility boundary."}
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260715T024857Z-p2p-frame+007-pn-traffic-snapshot-traversal-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/007-pn-traffic-snapshot-traversal/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

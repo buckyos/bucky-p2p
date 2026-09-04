@@ -1,0 +1,37 @@
+schema_version: 1
+
+# Canonical task manifest; tier remains pending until user confirmation.
+workflow_tier: high-risk
+version: v0.1
+packet_module: p2p-frame
+task_name: 040-execute-real-p2p-strategy-matrix
+stage: design
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+changed_paths_file: .harness/evidence/v0.1/stage-scope/040-execute-real-p2p-strategy-matrix.paths
+baseline_manifest:
+
+changes:
+  - id: CHG-040-nat-matrix-test-seam
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/**", "p2p-frame/Cargo.toml", "p2p-frame/Cargo.lock"]
+    changed_paths_file:
+  - id: CHG-040-nat-matrix-fixture
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/**"]
+    changed_paths_file:
+  - id: CHG-040-nat-matrix-execution
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/**"]
+    changed_paths_file:

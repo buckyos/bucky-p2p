@@ -1,0 +1,64 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 019-quic-punch-runtime-cadence-test
+submodule: 019-quic-punch-runtime-cadence-test
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/listener/tests.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/networks/quic/network/punch_owner_tests.rs", "docs/versions/v0.1/modules/p2p-frame/019-quic-punch-runtime-cadence-test/proposal.md", "docs/versions/v0.1/modules/p2p-frame/019-quic-punch-runtime-cadence-test/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task adds no public API, crate-root export, build surface, documentation example, wire behavior, or neighboring-module interface; focused unit/DV compilation and execution cover the private test-build observation and owner-test claim boundaries.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify that the corrected owner test claims only late connect completion, one connect poll, and owned punch-future cleanup without synthetic active/reverse cadence loops.
+    test_targets:
+      - p2p-frame/src/networks/quic/network.rs
+      - p2p-frame/src/networks/quic/network/punch_owner_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The full exact test path is required; a short name combined with --exact would execute zero tests and is not valid evidence.
+        - The test still completes after more than one second, polls the connect future once, and observes the owned punch future being dropped.
+    steps:
+      - id: quic-punch-owner-claim-accuracy-unit
+        name: Run the narrowed QUIC punch owner lifecycle claim
+        change_ids: ["quic_punch_owner_test_claim_accuracy"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--lib", "networks::quic::network::udp_punch_timeout_tests::ownership_regression::udp_punch_quic_nat_connect_success_after_one_second_polls_once_and_drops_owned_punch", "--", "--exact"]
+
+  dv:
+    mode: enabled
+    summary: Drive the real listener-owned punch loop for active and reverse intents after more than one second of elapsed attempt time and prove missed-tick recovery preserves non-zero send spacing.
+    test_targets:
+      - p2p-frame/src/networks/quic/listener.rs
+      - p2p-frame/src/networks/quic/listener/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The listener is actually bound and started, while the instance-scoped test observer removes external UDP receive and routing dependencies at the real send branch.
+        - Each intent uses started_at backdated 2s with a 10s deadline; the fixture waits for three actual send-branch observations before closing the listener, eliminating the former narrow pre-deadline race.
+        - Current missed-tick skipping leaves at least 25ms between the first three observed sends around the 50ms cadence; the old zero-wait catch-up loop would produce back-to-back observations.
+    steps:
+      - id: quic-punch-runtime-cadence-direct-dv
+        name: Run direct active/reverse QUIC punch runtime cadence regression
+        change_ids: ["quic_punch_runtime_cadence_direct_test"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "networks::quic::listener::udp_punch_tests::lifecycle_regression::udp_punch_runtime_skips_missed_ticks_for_active_and_reverse", "--", "--exact"]
+
+  integration:
+    mode: disabled
+    summary: Both corrections are private test-evidence boundaries inside p2p-frame and introduce no cross-module or exported interface behavior.
+    change_ids: ["quic_punch_runtime_cadence_direct_test", "quic_punch_owner_test_claim_accuracy"]
+    reason: Unit verifies owner lifecycle claim accuracy and DV executes the actual listener loop; an integration scenario would add external NAT/network variability without exposing a different task failure.

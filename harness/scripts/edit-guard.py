@@ -5,7 +5,7 @@ Wire this in `.claude/settings.json` (see harness/claude-settings-hooks.example.
 the hook receives the pending tool call as JSON on stdin and exits 2 to block it.
 It turns the implementation-admission gate from a prose rule into a mechanical
 one: editing production code is rejected until a valid admission stamp exists
-under docs/versions/<version>/evidence/admission/.
+under .harness/evidence/<version>/admission/.
 
 A stamp is valid only when admission-check.py wrote it for a today-dated
 evidence file and the recorded proposal.md/design.md hashes still match the
@@ -150,9 +150,9 @@ def main() -> int:
     if not scope:
         print(
             f"edit-guard: blocked edit to production file '{path}': no valid admission "
-            "stamp dated today exists under docs/versions/<version>/evidence/admission/. "
+            "stamp dated today exists under .harness/evidence/<version>/admission/. "
             "Complete implementation admission first: read the approved proposal.md "
-            "and design.md, create docs/versions/<version>/evidence/admission/<YYYYMMDD>-<task-slug>.md, "
+            "and design.md, create .harness/evidence/<version>/admission/<YYYYMMDD>-<task-slug>.md, "
             "and pass schema-check.py and admission-check.py (which writes the stamp). "
             "A stale stamp means a bound document changed after admission; rerun "
             "admission-check.py to regenerate it. "

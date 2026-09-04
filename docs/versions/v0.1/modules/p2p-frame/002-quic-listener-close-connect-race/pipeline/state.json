@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "plan_sha256": "a962a0f46e4891a683329016da94e09cf3a2635263365278b4c547efd787a76d",
+  "tasks": {
+    "D-1": {"status": "confirmed"},
+    "I-1": {"status": "complete"},
+    "T-1": {"status": "complete"},
+    "A-1": {"status": "complete"},
+    "I-QL-1": {"status": "complete"},
+    "I-QL-2": {"status": "complete"}
+  },
+  "testing_evidence": [
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "validation_id": "V-QLCCR-UNIT",
+      "testplan_level": "unit",
+      "testplan_step_id": "quic-listener-endpoint-guard-unit",
+      "evidence": "p2p-frame/src/networks/quic/listener/tests.rs included by listener::udp_punch_tests::lifecycle_regression",
+      "gap": "no",
+      "gap_manual_reason": ""
+    }
+  ],
+  "testing_case_type_coverage": [
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "normal",
+      "required": "yes",
+      "validation_id": "V-QLCCR-UNIT",
+      "level": "unit",
+      "status": "covered",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "boundary",
+      "required": "yes",
+      "validation_id": "V-QLCCR-UNIT",
+      "level": "unit",
+      "status": "covered",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "negative",
+      "required": "yes",
+      "validation_id": "V-QLCCR-UNIT",
+      "level": "unit",
+      "status": "covered",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "error",
+      "required": "yes",
+      "validation_id": "V-QLCCR-UNIT",
+      "level": "unit",
+      "status": "covered",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "compatibility",
+      "required": "yes",
+      "validation_id": "V-QLCCR-INTEGRATION",
+      "level": "integration",
+      "status": "covered",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "lifecycle",
+      "required": "yes",
+      "validation_id": "V-QLCCR-DV",
+      "level": "dv",
+      "status": "covered",
+      "gap_manual_reason": ""
+    },
+    {
+      "change_id": "quic_listener_close_connect_race",
+      "case_type": "cross-module",
+      "required": "yes",
+      "validation_id": "V-QLCCR-INTEGRATION",
+      "level": "integration",
+      "status": "covered",
+      "gap_manual_reason": ""
+    }
+  ],
+  "evidence": {
+    "test_runs": [
+      "test-results/test-runs/20260712T122128Z-p2p-frame+002-quic-listener-close-connect-race-all.json"
+    ],
+    "quality_runs": []
+  },
+  "return_records": [
+    {
+      "issue_id": "QLCCR-ERR-PROP-1",
+      "owning_stage": "implementation",
+      "count": 1,
+      "target_task": "I-QL-2",
+      "reason": "create_tunnel_with_local_ep swallowed fallible bound-local Interrupted/ErrorState during bound-address matching and could return NotFound instead",
+      "expected_fix_output": "propagate bound_local errors from the fallible create path, then regenerate task test evidence"
+    },
+    {
+      "issue_id": "QLCCR-ACTIVE-CONNECT-COVERAGE-1",
+      "owning_stage": "testing",
+      "count": 1,
+      "target_task": "T-1",
+      "reason": "the concurrency DV raced bound_local access but did not directly execute connect_with_owner_runtime random worker selection against close",
+      "expected_fix_output": "direct active-connect empty/normal/closed and connect-close interleaving regression through the task testplan"
+    }
+  ],
+  "acceptance": {
+    "status": "accepted",
+    "report": "docs/versions/v0.1/modules/p2p-frame/002-quic-listener-close-connect-race/acceptance-report.md"
+  },
+  "exit_conditions": {
+    "blocking_issues_closed": true,
+    "required_evidence_exists": true,
+    "testplan_present": true,
+    "change_coverage_complete": true,
+    "stage_scope_checks_passed": true,
+    "final_acceptance_passed": true
+  }
+}

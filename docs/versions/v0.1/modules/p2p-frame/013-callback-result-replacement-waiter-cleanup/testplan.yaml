@@ -1,0 +1,78 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 013-callback-result-replacement-waiter-cleanup
+submodule: 013-callback-result-replacement-waiter-cleanup
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["third-party/callback-result/src/lib.rs", "third-party/callback-result/tests/replacement_waiter.rs", "third-party/callback-result/tests/drop_cleanup.rs", "third-party/callback-result/Cargo.toml", "Cargo.toml", "Cargo.lock", "p2p-frame/Cargo.toml"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: callback-result-consumer-compile-closure
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: compile the p2p-frame library against the patched callback-result package
+      change_ids: ["callback_result_replacement_waiter_cleanup"]
+      run: ["cargo", "check", "-p", "p2p-frame", "--lib"]
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise every changed keyed waiter registration, conditional cleanup, delivery, duplicate, cache and timeout branch at the dependency-owned lowest level.
+    test_targets:
+      - third-party/callback-result/tests/replacement_waiter.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Tests serialize execution so same-ID lifecycle ordering remains deterministic.
+        - The first two cases are red on the key-only cleanup implementation because the second set_result returns NoWaiter.
+    steps:
+      - id: callback-result-replacement-ownership-unit
+        name: verify exact registration ownership across ready drop timeout cache and replacement paths
+        change_ids: ["callback_result_replacement_waiter_cleanup"]
+        run: ["cargo", "test", "-p", "callback-result", "--test", "replacement_waiter", "--", "--test-threads=1", "--nocapture"]
+
+  dv:
+    mode: enabled
+    summary: Run the complete callback-result crate suite to combine the replacement lifecycle with the prior bounded-retention, normal completion and timeout regressions.
+    test_targets:
+      - third-party/callback-result/tests/replacement_waiter.rs
+      - third-party/callback-result/tests/drop_cleanup.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - This intentionally repeats the focused cases inside the full dependency suite to catch shared allocator or package-level regressions.
+    steps:
+      - id: callback-result-full-regression-dv
+        name: run all vendored callback-result regression tests serially
+        change_ids: ["callback_result_replacement_waiter_cleanup"]
+        run: ["cargo", "test", "-p", "callback-result", "--", "--test-threads=1", "--nocapture"]
+
+  integration:
+    mode: enabled
+    summary: Verify the real p2p-frame consumer still compiles through sfo-cmd-server with the unchanged callback-result public API and package identity.
+    test_targets:
+      - third-party/callback-result/src/lib.rs
+      - p2p-frame/Cargo.toml
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Runtime response ownership is proven at the dependency boundary; this step verifies cross-crate source compatibility without running broad p2p-frame suites.
+    steps:
+      - id: callback-result-p2p-frame-consumer-integration
+        name: compile the concrete p2p-frame consumer against the patched dependency
+        change_ids: ["callback_result_replacement_waiter_cleanup"]
+        run: ["cargo", "check", "-p", "p2p-frame", "--lib"]

@@ -1,0 +1,37 @@
+schema_version: 1
+
+workflow_tier: high-risk
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 044-wan-mapped-reverse-connect
+stage: design
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+changed_paths_file: .harness/evidence/v0.1/stage-scope/044-wan-mapped-reverse-connect.paths
+baseline_manifest:
+
+changes:
+  - id: wan_mapped_reverse_connect_eligibility
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/endpoint.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/src/networks/quic/listener.rs"]
+    changed_paths_file:
+  - id: wan_mapped_rendezvous_protocol_validation
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/protocol/sn.rs"]
+    changed_paths_file:
+  - id: production_default_reverse_connect_regression_tests
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/endpoint.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/unit/endpoint/rendezvous_endpoint_policy_tests.rs", "p2p-frame/tests/unit/tunnel/rendezvous_endpoint_policy_tests.rs", "p2p-frame/tests/tunnel_rendezvous_protocol.rs", "p2p-frame/tests/real_p2p_tunnel_flow.rs", "p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs", "p2p-frame/Cargo.toml"]
+    changed_paths_file:

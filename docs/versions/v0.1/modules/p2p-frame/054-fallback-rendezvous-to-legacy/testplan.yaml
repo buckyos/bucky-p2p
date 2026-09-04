@@ -1,0 +1,70 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs"]
+contract_checks:
+  mode: disabled
+  reason: The compatibility change is private TunnelManager behavior with no public API, wire, crate-root export, build-surface, or documentation-example change; its positive, negative, and boundary semantics are exercised by the unit and DV steps below.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Exercise both changed error-branch outcomes and the shared total-deadline invariant at the private TunnelManager boundary.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The pre-green stale assertion was run with the corrected exact module path and failed with exit 101 after observing the restored legacy action; the originally suggested path matched zero tests and is not evidence.
+        - Tests use controlled in-crate network implementations and do not claim public-NAT, deployed SN, or multi-host coverage.
+    steps:
+      - id: rendezvous-legacy-order-unit
+        name: Prove deterministic rendezvous failure reaches viable legacy direct and reaches PN only after a failed legacy direct attempt
+        change_ids: ["CHG-fallback-rendezvous-to-legacy"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::rendezvous_deterministic_failure", "--", "--test-threads=1"]
+      - id: rendezvous-legacy-deadline-unit
+        name: Bound rendezvous and legacy fallback by the existing single total deadline
+        change_ids: ["CHG-fallback-rendezvous-to-legacy"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests::nat_type_aware_tests::rendezvous_and_legacy_fallback_share_one_bounded_total_deadline", "--", "--exact", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Run the complete x509-enabled TunnelManager test surface to detect stale inline expectations and interference with existing strategy, waiter, fallback, and lifecycle behavior.
+    test_targets:
+      - p2p-frame/src/tunnel/tunnel_manager.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - This intentionally includes the focused unit cases again within the full TunnelManager module because the DV purpose is to detect superseded inline expectations and regression interaction with neighboring TunnelManager behaviors.
+        - A diagnostic whole-library run reached 463 passing tests and 4 unrelated SN query/observation fixture failures; it is not counted as passing task evidence because those failures are outside this private TunnelManager fallback boundary.
+    steps:
+      - id: tunnel-manager-x509-lib-dv
+        name: Run the complete x509-enabled TunnelManager test surface
+        change_ids: ["CHG-fallback-rendezvous-to-legacy"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "tunnel::tunnel_manager::tests", "--", "--test-threads=1"]
+  integration:
+    mode: disabled
+    summary: No exported or neighboring-crate interface changes require a separate integration runtime.
+    change_ids: ["CHG-fallback-rendezvous-to-legacy"]
+    reason: "owner: testing; reason: the changed branch and all observable ordering are private to TunnelManager, while current real-socket suites cannot deterministically inject this final rendezvous failure and distinguish legacy-before-PN; risk: local doubles do not prove public-NAT or deployed multi-SN behavior; acceptance impact: acceptance may claim only private orchestration and bounded local runtime evidence."
+    test_targets: []
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes:
+        - The project custom rule prohibits cyfs-p2p-test as formal testing evidence, and it is not used.
+    steps: []

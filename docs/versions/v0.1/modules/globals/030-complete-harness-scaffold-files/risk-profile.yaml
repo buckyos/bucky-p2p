@@ -1,0 +1,35 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["complete_harness_scaffold_files", "validate_cross_module_harness_routing"]
+source_bindings:
+  proposal: proposal.md
+  design_source:
+risks:
+  contract:
+    applies: false
+    evidence: The task adds repository-local Harness CLIs but changes no product API, protocol, wire format, or user-facing product CLI.
+    required_checks: []
+  data:
+    applies: false
+    evidence: The task index is reconstructable Harness runtime state and introduces no product persistence schema or migration.
+    required_checks: []
+  security:
+    applies: false
+    evidence: The files parse repository-owned metadata and paths; no credential, authorization, privacy, or external trust boundary changes.
+    required_checks: []
+  runtime:
+    applies: false
+    evidence: No P2P product runtime, concurrency, lifecycle, retry, timeout, or network integration behavior changes.
+    required_checks: []
+  build:
+    applies: false
+    evidence: Python scripts use the standard library only and do not change Cargo, dependency, packaging, produced artifact, release, or deployment surfaces.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, navigation, accessibility, localization, or user workflow is changed.
+    required_checks: []
+  harness:
+    applies: true
+    evidence: The task installs the canonical rule router, unfinished-task index manager, shared task manifest parser, and standard change-record template used by repository workflow.
+    required_checks: ["context index and routing validation", "task-index lifecycle validation", "workspace Harness self-check"]

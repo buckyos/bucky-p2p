@@ -1,0 +1,66 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/service/service.rs", "p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs", "p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs"]
+contract_checks:
+  mode: disabled
+  reason: The runtime semantic contract has no public API, wire, build-surface, export, or documentation-example change and is exercised at unit, DV, and integration levels.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Reject a target-reported endpoint when no live authenticated target observation exists.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The test invokes the private service validator from its dedicated included unit-test file.
+    steps:
+      - id: response-owner-unit
+        name: Reject self-reported target IP without a live serving-SN observation
+        change_ids: ["CHG-bind-rendezvous-response-owner"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--lib", "sn::service::service::tests::rendezvous_response_owner_rejects_self_reported_ip_without_observation", "--", "--exact", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Exercise same-SN response ownership over real authenticated SN/client command tunnels.
+    test_targets:
+      - p2p-frame/tests/tunnel_rendezvous/sn_same_sn_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The real-socket test feature permits controlled loopback endpoint eligibility while production builds retain the public IPv4 rule.
+    steps:
+      - id: response-owner-same-sn-dv
+        name: Accept observed IP with predicted port and reject a mixed unowned list
+        change_ids: ["CHG-bind-rendezvous-response-owner"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--lib", "sn::tests::sn_same_sn_tests::same_sn_rendezvous_response_owner_", "--", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Verify an inter-SN request is rejected by the target serving SN after reaching the real target command transport.
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - This is in-process cross-SN service routing with a real target socket; it does not claim deployed multi-SN or public-NAT evidence.
+    steps:
+      - id: response-owner-cross-sn-integration
+        name: Reject an unowned target prediction at the cross-SN serving boundary
+        change_ids: ["CHG-bind-rendezvous-response-owner"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509,test-real-socket-matrix", "--lib", "sn::service::service::tests::cross_sn_rendezvous_rejects_unowned_target_prediction_at_serving_sn", "--", "--exact", "--test-threads=1"]

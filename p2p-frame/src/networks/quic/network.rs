@@ -1,14 +1,17 @@
-use super::listener::{QuicTunnelListener, connect_with_ep, udp_punch_burst_window};
+use super::listener::{
+    QuicTunnelListener, connect_with_ep, udp_punch_burst_window, udp_punch_enabled_for_endpoint,
+};
 use super::tunnel::QuicTunnel;
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::networks::{
     IncomingControlStream, IncomingDatagram, IncomingStream, IncomingTunnelCallback,
     QuicCongestionAlgorithm, TunnelConnectIntent, TunnelForm, TunnelListenerInfo, TunnelNetwork,
-    TunnelRef,
+    TunnelRef, UdpTunnelNetwork,
 };
 use crate::p2p_identity::{
-    P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityRef,
+    P2pId, P2pIdentityCertCacheRef, P2pIdentityCertFactoryRef, P2pIdentityCertRef,
+    P2pIdentityRef,
 };
 use crate::tls::ServerCertResolverRef;
 use crate::types::{TunnelCandidateId, TunnelId, TunnelIdGenerator};
@@ -227,8 +230,15 @@ impl QuicTunnelNetwork {
         })?;
         log::info!(
             "quic client endpoint created local={} remote_ip_version={}",
-            Endpoint::from((Protocol::Quic, created.local_addr().unwrap_or(*local.addr()))),
-            if remote.addr().is_ipv4() { "ipv4" } else { "ipv6" }
+            Endpoint::from((
+                Protocol::Quic,
+                created.local_addr().unwrap_or(*local.addr())
+            )),
+            if remote.addr().is_ipv4() {
+                "ipv4"
+            } else {
+                "ipv6"
+            }
         );
         *endpoint = Some(created.clone());
         Ok(created)
@@ -449,6 +459,10 @@ impl TunnelNetwork for QuicTunnelNetwork {
         true
     }
 
+    fn as_udp_tunnel_network(&self) -> Option<&dyn UdpTunnelNetwork> {
+        Some(self)
+    }
+
     fn set_reuse_address(&self, reuse_address: bool) {
         self.reuse_address.store(reuse_address, Ordering::Relaxed);
     }
@@ -544,14 +558,8 @@ impl TunnelNetwork for QuicTunnelNetwork {
         if let Some(err) = last_err {
             Err(err)
         } else {
-            self.open_with_client_endpoint(
-                local_identity,
-                remote,
-                remote_id,
-                remote_name,
-                intent,
-            )
-            .await
+            self.open_with_client_endpoint(local_identity, remote, remote_id, remote_name, intent)
+                .await
         }
     }
 
@@ -592,6 +600,109 @@ impl TunnelNetwork for QuicTunnelNetwork {
             "no listener found for local ep: {}",
             local_ep
         ))
+    }
+}
+
+#[async_trait::async_trait]
+impl UdpTunnelNetwork for QuicTunnelNetwork {
+    async fn punch_only(
+        &self,
+        remote: &Endpoint,
+        intent: TunnelConnectIntent,
+        max_duration: Duration,
+    ) -> P2pResult<()> {
+        if max_duration.is_zero() {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "punch-only duration must be greater than zero"
+            ));
+        }
+        if !udp_punch_enabled_for_endpoint(remote) {
+            return Err(p2p_err!(
+                P2pErrorCode::NotSupport,
+                "punch-only is not supported for endpoint: {}",
+                remote
+            ));
+        }
+
+        let listener = {
+            self.listeners
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|listener| listener.local().is_same_ip_version(remote))
+                .cloned()
+        }
+        .ok_or_else(|| {
+            p2p_err!(
+                P2pErrorCode::NotFound,
+                "no quic listener found for punch-only remote: {}",
+                remote
+            )
+        })?;
+
+        listener
+            .run_udp_punch_only(*remote, intent, max_duration)
+            .await;
+        Ok(())
+    }
+
+    async fn predict_traversal_endpoints(
+        &self,
+        probe_targets: &[Endpoint],
+        expected_signer: &P2pIdentityCertRef,
+        per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<crate::networks::TraversalEndpointPrediction> {
+        let listener = self
+            .listeners
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|listener| {
+                probe_targets
+                    .first()
+                    .map(|target| listener.local().is_same_ip_version(target))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::NotFound,
+                    "no QUIC listener available for traversal prediction"
+                )
+        })?;
+        listener
+            .predict_traversal_endpoints(
+                probe_targets,
+                expected_signer,
+                per_target_timeout,
+                ttl,
+            )
+            .await
+    }
+
+    fn validate_traversal_prediction(
+        &self,
+        prediction: &crate::networks::TraversalEndpointPrediction,
+        now: crate::types::Timestamp,
+    ) -> P2pResult<()> {
+        let listener = self
+            .listeners
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|listener| {
+                listener.socket_binding_generation() == prediction.socket_binding_generation
+            })
+            .cloned()
+            .ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::Expired,
+                    "traversal prediction QUIC listener generation is no longer current"
+                )
+            })?;
+        listener.validate_traversal_prediction(prediction, now)
     }
 }
 
@@ -691,12 +802,16 @@ mod tests {
         generate_rsa_x509_identity,
     };
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
     use std::sync::{Arc, LazyLock};
     use std::sync::{Mutex as StdMutex, Once};
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
     use tokio::time::timeout;
 
     static TLS_INIT: Once = Once::new();
+    const TEST_QUIC_PORT_LOW: u16 = 20_000;
+    const TEST_QUIC_PORT_HIGH: u16 = 24_999;
+    static NEXT_TEST_QUIC_PORT: AtomicU16 = AtomicU16::new(TEST_QUIC_PORT_LOW);
     type TestStreamRx = mpsc::Receiver<P2pResult<IncomingStream>>;
     type TestDatagramRx = mpsc::Receiver<P2pResult<IncomingDatagram>>;
     type TestControlStreamRx = mpsc::Receiver<P2pResult<IncomingControlStream>>;
@@ -882,7 +997,12 @@ mod tests {
     }
 
     fn loopback_quic_ep() -> Endpoint {
-        Endpoint::from((Protocol::Quic, "127.0.0.1:0".parse().unwrap()))
+        let port = NEXT_TEST_QUIC_PORT.fetch_add(1, AtomicOrdering::Relaxed);
+        assert!(
+            (TEST_QUIC_PORT_LOW..=TEST_QUIC_PORT_HIGH).contains(&port),
+            "exhausted QUIC test port range"
+        );
+        Endpoint::from((Protocol::Quic, "127.0.0.1".parse().unwrap(), port))
     }
 
     fn purpose_of(vport: u16) -> TunnelPurpose {
@@ -910,7 +1030,7 @@ mod tests {
                 QuicCongestionAlgorithm::Bbr,
                 Duration::from_secs(3),
                 Duration::from_secs(10),
-                ServerRuntime::start(sfo_reuseport::ServerRuntimeConfig::default())
+                ServerRuntime::start(sfo_reuseport::ServerRuntimeConfig::new().with_workers(1))
                     .expect("sfo reuseport server runtime should start"),
             ),
             resolver,
@@ -1438,12 +1558,7 @@ mod tests {
 
         client_network.close_all_listener().await.unwrap();
         let third = client_network
-            .create_tunnel(
-                &local_identity,
-                &server_ep,
-                &server_id,
-                Some(server_name),
-            )
+            .create_tunnel(&local_identity, &server_ep, &server_id, Some(server_name))
             .await
             .unwrap();
         let third_accepted = accept_incoming_rx(&mut server_incoming).await;

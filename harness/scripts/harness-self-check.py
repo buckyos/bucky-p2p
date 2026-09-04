@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import ast
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -20,20 +22,33 @@ REQUIRED_RULES = (
     "design-doc-rules.md",
     "testing-doc-rules.md",
     "test-design-rules.md",
-    "implementation-admission-rules.md",
+    "implementation-rules.md",
     "schema-validation-rules.md",
     "unified-test-entry-rules.md",
     "acceptance-task-rules.md",
     "acceptance-review-rules.md",
     "quality-gate-rules.md",
     "auto-pipeline-rules.md",
+    "triggers/contract-protocol.md",
+    "triggers/data-schema.md",
+    "triggers/security.md",
+    "triggers/runtime-integration.md",
+    "triggers/build-config-deployment.md",
+    "triggers/ui-workflow.md",
+    "triggers/harness-process.md",
 )
 
 REQUIRED_SCRIPTS = (
     "test-run.py",
+    "context.py",
+    "harness-check.py",
+    "lifecycle-check.py",
+    "task-transition.py",
+    "task_manifest.py",
     "schema-check.py",
     "task-seq.py",
-    "admission-check.py",
+    "task-index.py",
+    "risk-profile-check.py",
     "baseline-snapshot.py",
     "stage-scope-check.py",
     "harness-self-check.py",
@@ -42,6 +57,8 @@ REQUIRED_SCRIPTS = (
     "testing-coverage-check.py",
     "consumer-closure-check.py",
     "acceptance-report-check.py",
+    "completion-report-check.py",
+    "lower-tier-check.py",
     "pipeline-plan-check.py",
     "check-all.py",
     "quality-check.py",
@@ -134,6 +151,8 @@ def check_root(root: Path) -> None:
     require_path(root / "test-run.sh", directory=False)
     require_path(root / "docs", directory=True)
     require_path(root / "docs" / "architecture", directory=True)
+    require_path(root / "docs" / "changes", directory=True)
+    require_path(root / "docs" / "changes" / "_template.md", directory=False)
     require_path(root / "docs" / "modules", directory=True)
     require_path(root / "docs" / "versions", directory=True)
     require_path(root / "harness", directory=True)
@@ -141,36 +160,66 @@ def check_root(root: Path) -> None:
     require_path(root / "harness" / "custom-rules", directory=True)
     require_path(root / "harness" / "scripts", directory=True)
     require_path(root / "harness" / "process_rules", directory=True)
+    require_path(root / "harness" / "templates" / "evidence", directory=True)
+    require_path(
+        root / "harness" / "templates" / "evidence" / "stage-scope-manifest-meta.json",
+        directory=False,
+    )
+    require_path(root / "harness" / "templates" / "pipeline", directory=True)
+    require_path(
+        root / "harness" / "templates" / "pipeline" / "state.json",
+        directory=False,
+    )
     require_path(root / "harness" / "quality-gates.yaml", directory=False)
     require_path(root / ".harness", directory=True)
-    check_version_evidence_dirs(root)
+    check_version_scaffold(root)
     check_generated_output_ignored(root)
+    check_no_legacy_runtime_locations(root)
 
 
-def check_version_evidence_dirs(root: Path) -> None:
+def check_version_scaffold(root: Path) -> None:
     versions_dir = root / "docs" / "versions"
     version_dirs = [path for path in versions_dir.iterdir() if path.is_dir()]
     if not version_dirs:
         fail("docs/versions must contain at least one version directory")
     for version_dir in version_dirs:
-        require_path(version_dir / "modules" / "tasks.md", directory=False)
-        require_path(version_dir / "evidence" / "admission", directory=True)
-        require_path(version_dir / "evidence" / "stage-scope", directory=True)
-        require_path(
-            version_dir / "evidence" / "stage-scope-manifest-meta.template.json",
-            directory=False,
+        tasks_index = root / ".harness" / "tasks" / version_dir.name / "tasks.json"
+        require_path(tasks_index, directory=False)
+        task_index = root / "harness" / "scripts" / "task-index.py"
+        completed = subprocess.run(
+            [sys.executable, str(task_index), "--root", str(root), "validate", "--version", version_dir.name],
+            text=True,
+            capture_output=True,
         )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+            fail(f"unfinished-task index validation failed: {detail}")
+        task_template = version_dir / "modules" / "_template" / "task.yaml"
+        profile_template = version_dir / "modules" / "_template" / "risk-profile.yaml"
+        require_path(task_template, directory=False)
+        require_path(profile_template, directory=False)
+        require_contains(
+            task_template,
+            ("workflow_tier: pending", "risk_profile: risk-profile.yaml"),
+        )
+        if re.search(r"(?m)^\s+triggers:\s*", read_text(task_template)):
+            fail(f"{task_template} duplicates task risk triggers; use only risk-profile.yaml")
+        profile = read_text(profile_template)
+        for category in ("contract", "data", "security", "runtime", "build", "ui", "harness"):
+            if len(re.findall(rf"(?m)^  {category}:\s*$", profile)) != 1:
+                fail(f"{profile_template} must contain exactly one {category} risk category")
+
 
 def check_generated_output_ignored(root: Path) -> None:
-    """Generated run artifacts and local Harness state must stay untracked."""
+    """All generated Harness runtime state must stay untracked."""
     gitignore = root / ".gitignore"
     if not gitignore.is_file():
-        fail("missing .gitignore: test-results/ and .harness/ must be git-ignored")
+        fail("missing .gitignore: .harness/ must be git-ignored")
     entries = {
         line.strip().lstrip("/").rstrip("/")
         for line in read_text(gitignore).splitlines()
     }
-    missing = [entry for entry in ("test-results", ".harness") if entry not in entries]
+    missing = [entry for entry in (".harness",) if entry not in entries]
     if missing:
         fail(
             ".gitignore must ignore generated Harness output: "
@@ -178,15 +227,176 @@ def check_generated_output_ignored(root: Path) -> None:
         )
 
 
+def check_no_legacy_runtime_locations(root: Path) -> None:
+    """Report grandfathered runtime state outside the current `.harness/` tree."""
+    legacy: list[Path] = []
+    if (root / "test-results").exists():
+        legacy.append(root / "test-results")
+    versions = root / "docs" / "versions"
+    if versions.is_dir():
+        for version_dir in versions.iterdir():
+            if not version_dir.is_dir():
+                continue
+            if (version_dir / "evidence").exists():
+                legacy.append(version_dir / "evidence")
+            modules = version_dir / "modules"
+            if modules.is_dir():
+                if (modules / "tasks.json").exists():
+                    legacy.append(modules / "tasks.json")
+                legacy.extend(modules.glob("**/pipeline/state.json"))
+    if legacy:
+        warn(
+            "legacy Harness runtime state remains outside .harness/; "
+            "new runtime state must not use these locations: "
+            + ", ".join(str(path) for path in sorted(legacy)[:10])
+            + (" ..." if len(legacy) > 10 else "")
+        )
+
+
 def check_rules(root: Path) -> None:
     rules_dir = root / "harness" / "rules"
+    require_path(rules_dir / "index.yaml", directory=False)
     for name in REQUIRED_RULES:
         require_path(rules_dir / name, directory=False)
 
     custom_dir = root / "harness" / "custom-rules"
-    for path in custom_dir.glob("*.md"):
-        if path.name in REQUIRED_RULES:
+    reserved_names = {Path(name).name for name in REQUIRED_RULES}
+    for path in custom_dir.rglob("*.md"):
+        if path.name in reserved_names:
             fail(f"skill-managed rule appears under harness/custom-rules: {path}")
+
+
+def check_rule_index(root: Path) -> None:
+    context = root / "harness" / "scripts" / "context.py"
+    completed = subprocess.run(
+        [sys.executable, str(context), "--root", str(root), "--validate-index"],
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        fail(f"rule index validation failed: {detail}")
+
+
+def check_rule_script_contracts(root: Path) -> None:
+    """Ensure routed rules reference real scripts with the required CLI contract."""
+    referenced: set[str] = set()
+    for path in sorted((root / "harness" / "rules").rglob("*.md")):
+        referenced.update(
+            re.findall(r"(?<![A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*\.py)", read_text(path))
+        )
+    missing = [
+        name for name in sorted(referenced)
+        if not (root / "harness" / "scripts" / name).is_file()
+    ]
+    if missing:
+        fail("generated rules reference missing scripts: " + ", ".join(missing))
+
+    schema = root / "harness" / "scripts" / "schema-check.py"
+    help_run = subprocess.run(
+        [sys.executable, str(schema), "--help"],
+        text=True,
+        capture_output=True,
+    )
+    if help_run.returncode != 0 or "--require-approved" not in help_run.stdout:
+        fail("schema-check.py must expose --require-approved")
+
+    with tempfile.TemporaryDirectory(prefix="harness-schema-contract-") as tmp:
+        probe = Path(tmp)
+        task_rel = "docs/versions/v-probe/modules/probe/001-schema-contract/task.yaml"
+        packet = probe / Path(task_rel).parent
+        packet.mkdir(parents=True)
+        task_text = """schema_version: 1
+workflow_tier: high-risk
+version: v-probe
+packet_module: probe
+task_name: 001-schema-contract
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+changed_paths_file: .harness/evidence/v-probe/stage-scope/001-schema-contract.paths
+baseline_manifest:
+changes:
+  - id: CHG-schema-contract
+    target_module: probe
+    scope_paths: ["src/**"]
+    changed_paths_file:
+"""
+        (packet / "task.yaml").write_text(task_text, encoding="utf-8")
+        (packet / "proposal.md").write_text(
+            "---\ntask_manifest: task.yaml\nstatus: approved\n---\n",
+            encoding="utf-8",
+        )
+        index = probe / ".harness" / "tasks" / "v-probe" / "tasks.json"
+        index.parent.mkdir(parents=True)
+        index.write_text(
+            '{"schema_version":1,"version":"v-probe","tasks":['
+            '{"task_id":"001-schema-contract","task_manifest":"'
+            + task_rel
+            + '"}]}\n',
+            encoding="utf-8",
+        )
+        command = [
+            sys.executable,
+            str(schema),
+            "--root",
+            str(probe),
+            "--version",
+            "v-probe",
+            "--module",
+            "probe",
+            "--submodule",
+            "001-schema-contract",
+            "--require-approved",
+        ]
+        accepted = subprocess.run(command, text=True, capture_output=True)
+        if accepted.returncode != 0:
+            detail = accepted.stderr.strip() or accepted.stdout.strip()
+            fail(
+                "schema-check.py must accept approved manifest-bound proposal "
+                f"without repeated module/version: {detail}"
+            )
+        (packet / "proposal.md").write_text(
+            "---\ntask_manifest: task.yaml\nstatus: approved\n"
+            "module: probe\nversion: v-probe\n---\n",
+            encoding="utf-8",
+        )
+        rejected = subprocess.run(command, text=True, capture_output=True)
+        if rejected.returncode == 0 or "duplicates canonical task identity fields" not in (
+            rejected.stderr + rejected.stdout
+        ):
+            fail("schema-check.py must reject proposal module/version duplication")
+
+
+def check_generated_script_runtime_paths(root: Path) -> None:
+    """Reject active generated scripts that still write legacy runtime locations."""
+    violations: list[str] = []
+    scripts = root / "harness" / "scripts"
+    for path in sorted(scripts.glob("*.py")):
+        if path.name in {"harness-self-check.py"}:
+            continue
+        text = read_text(path)
+        checks = {
+            "docs/versions/<version>/evidence/": "legacy docs evidence path",
+            "docs/versions/{version}/evidence/": "legacy docs evidence path",
+            'root / "test-results"': "root test-results path",
+            'with_name("state.json")': "task-local pipeline state path",
+        }
+        for needle, description in checks.items():
+            if needle in text:
+                violations.append(f"{path}: {description}")
+    if violations:
+        fail("generated scripts contain legacy runtime paths: " + "; ".join(violations))
 
 
 def check_scripts(root: Path) -> None:
@@ -224,7 +434,22 @@ def check_scripts(root: Path) -> None:
     require_configured_module_suites(scripts_dir / "test-run.py")
     require_contains(
         scripts_dir / "test-run.py",
-        ("contract_steps_from_testplan", "contract_kind", "evidence_input_sha256"),
+        ("contract_steps_from_testplan", "contract_kind", "evidence_inputs"),
+    )
+    require_contains(
+        scripts_dir / "baseline-snapshot.py",
+        (
+            "working-tree-content-baseline",
+            "modified_tracked_paths",
+            "untracked_paths",
+            "EXCLUDED_ROOTS",
+            "capture_hybrid",
+            "diff_hybrid",
+        ),
+    )
+    require_contains(
+        scripts_dir / "harness-check.py",
+        ("baseline_pre_edit_command", "baseline_completion_command"),
     )
 
 
@@ -242,18 +467,34 @@ def check_agents_references(root: Path) -> None:
         agents,
         (
             "harness/rules/task-entry-gate-rules.md",
+            "harness/rules/index.yaml",
+            "harness/scripts/context.py",
+            "Harness rules never restrict reading or writing project files",
+            "router output as recommended starting context",
+            "## Harness Step Agent Mapping",
+            "## Rule Ownership",
+            "harness/scripts/harness-check.py",
+            "## Workflow Tiers",
+            "docs/changes/<change>.md",
             "harness/scripts/schema-check.py",
-            "harness/scripts/admission-check.py",
             "harness/scripts/stage-scope-check.py",
         ),
     )
+    agents_text = read_text(agents)
+    forbidden = (
+        "docs/versions/<version>/evidence/",
+        "docs/versions/v0.1/evidence/",
+        "pipeline/state.json",
+    )
+    present = [value for value in forbidden if value in agents_text]
+    if present:
+        fail("AGENTS.md references legacy runtime paths: " + ", ".join(present))
 
 
 def check_markdown_path_references(root: Path) -> None:
     """Catch obvious stale generated path references in default harness files."""
 
     checked_roots = [root / "AGENTS.md", root / "harness" / "rules", root / "harness" / "process_rules"]
-    optional_legacy_paths = {"docs/modules/tasks.md"}
     pattern = re.compile(r"`((?:harness|docs|test-run)[^`]+?)`")
     missing: list[tuple[Path, str]] = []
     for base in checked_roots:
@@ -263,8 +504,6 @@ def check_markdown_path_references(root: Path) -> None:
             for match in pattern.finditer(text):
                 raw = match.group(1).strip()
                 if any(token in raw for token in ("<", ">", "|", "*", " ", "\n")):
-                    continue
-                if raw in optional_legacy_paths:
                     continue
                 candidate = root / raw.replace("\\", "/")
                 if not candidate.exists() and raw.startswith(("harness/", "docs/")):
@@ -289,6 +528,9 @@ def main() -> int:
     check_root(root)
     check_rules(root)
     check_scripts(root)
+    check_rule_index(root)
+    check_rule_script_contracts(root)
+    check_generated_script_runtime_paths(root)
     check_process_templates(root)
     check_agents_references(root)
     if not args.skip_reference_check:

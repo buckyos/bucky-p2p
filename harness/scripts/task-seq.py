@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Allocate and validate version-local Harness task sequence names.
+"""Allocate version-local Harness task sequence names.
 
 Task packet names use <task-seq>-<task-slug>, for example 001-login-flow.
 The sequence is allocated per docs/versions/<version>/ across every project
 module and globals. This tool scans both existing packet directories and the
-unfinished-task index so agents do not hand-pick sequence numbers.
+machine-owned unfinished-task index so agents do not hand-pick sequence numbers.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -17,7 +18,6 @@ from pathlib import Path
 
 
 TASK_NAME_RE = re.compile(r"^(?P<seq>\d{3,})-(?P<slug>[a-z0-9][a-z0-9_.-]*)$")
-TASK_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>\d{3,}-[a-z0-9][a-z0-9_.-]*)(?![A-Za-z0-9_.-])")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 EXCLUDED_MODULE_DIRS = {"_template"}
 
@@ -43,14 +43,26 @@ def task_seq(task_name: str) -> int | None:
     return int(match.group("seq"))
 
 
-def collect_from_tasks_md(path: Path) -> dict[str, str]:
+def load_task_index_module():
+    path = Path(__file__).with_name("task-index.py")
+    if not path.is_file():
+        path = Path(__file__).with_name("task-index.template.py")
+    spec = importlib.util.spec_from_file_location("task_index", path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot load required sibling script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def collect_from_task_index(root: Path, version: str) -> dict[str, str]:
     found: dict[str, str] = {}
+    task_index = load_task_index_module()
+    path = task_index.index_path(root, version)
     if not path.is_file():
         return found
-    text = path.read_text(encoding="utf-8")
-    for match in TASK_TOKEN_RE.finditer(text):
-        name = match.group("name")
-        found.setdefault(name, path.as_posix())
+    for entry in task_index.selected_entries(root.resolve(), version, None):
+        found[entry["task_id"]] = entry["task_manifest"]
     return found
 
 
@@ -76,7 +88,7 @@ def collect_from_directories(modules_dir: Path) -> dict[str, str]:
 def collect_task_names(root: Path, version: str) -> dict[str, str]:
     modules_dir = root / "docs" / "versions" / version / "modules"
     found = collect_from_directories(modules_dir)
-    for name, source in collect_from_tasks_md(modules_dir / "tasks.md").items():
+    for name, source in collect_from_task_index(root, version).items():
         found.setdefault(name, source)
     return found
 
@@ -106,27 +118,6 @@ def command_next(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_check(args: argparse.Namespace) -> int:
-    root = Path(args.root)
-    match = TASK_NAME_RE.fullmatch(args.task_name)
-    if not match:
-        fail(f"task name must match <task-seq>-<task-slug>: {args.task_name}")
-    if len(match.group("seq")) < args.width:
-        fail(f"task sequence must be at least {args.width} digits: {args.task_name}")
-
-    names = collect_task_names(root, args.version)
-    if args.task_name in names and not args.allow_existing:
-        fail(f"task name already exists in {names[args.task_name]}: {args.task_name}")
-
-    sequence = int(match.group("seq"))
-    next_seq, _ = next_sequence(root, args.version, args.width)
-    if args.require_next and sequence != next_seq:
-        fail(f"task sequence must be the next unused value {next_seq:0{args.width}d}, got {match.group('seq')}")
-
-    print("task-seq: passed")
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")
@@ -138,14 +129,6 @@ def main() -> int:
     next_parser.add_argument("--width", type=int, default=3)
     next_parser.add_argument("--json", action="store_true")
     next_parser.set_defaults(func=command_next)
-
-    check_parser = subparsers.add_parser("check", help="validate a sequence-prefixed task name")
-    check_parser.add_argument("--version", required=True)
-    check_parser.add_argument("--task-name", required=True)
-    check_parser.add_argument("--width", type=int, default=3)
-    check_parser.add_argument("--allow-existing", action="store_true")
-    check_parser.add_argument("--require-next", action="store_true")
-    check_parser.set_defaults(func=command_check)
 
     args = parser.parse_args()
     if args.width < 1:

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/034-verify-p2p-tunnel-flow-real-sockets/proposal.md": "f0c67308f6effec4d5e4cf1fab428c6315978ae374964708ac3f3d44c2c6b0aa"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "54a39da59c8588737a4843ee38730635cfd3b3de9edbd8e7a19b91553df1a98b"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

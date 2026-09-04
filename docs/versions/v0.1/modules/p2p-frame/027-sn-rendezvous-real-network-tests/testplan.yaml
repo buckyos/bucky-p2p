@@ -1,0 +1,64 @@
+schema_version: 1
+version: v0.1
+module: p2p-frame
+task_name: 027-sn-rendezvous-real-network-tests
+submodule: 027-sn-rendezvous-real-network-tests
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/protocol/common.rs", "p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/protocol/v0.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/networks/tcp/network.rs", "p2p-frame/src/networks/tcp/listener.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/tests/sn_protocol_real_network.rs", "docs/versions/v0.1/modules/p2p-frame/027-sn-rendezvous-real-network-tests/proposal.md", "docs/versions/v0.1/modules/p2p-frame/027-sn-rendezvous-real-network-tests/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task changes no public API, crate-root export, build surface, documentation example or wire contract; the closed command inventory unit and real TCP/QUIC DV exercise the unchanged production contracts directly.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Prove every current PackageCmdCode value is present exactly once and classified by its real request, notification, acknowledgement or QA-response role.
+    test_targets:
+      - p2p-frame/tests/sn_protocol_real_network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Iterating the complete u8 domain through PackageCmdCode::try_from makes a future enum addition fail until the expected role inventory is updated.
+        - SnCallResp, ReportSnResp and SnQueryResp are asserted as QA response payload roles and are not fabricated as standalone inbound commands.
+    steps:
+      - id: sn-real-network-command-inventory-unit
+        name: Run the closed PackageCmdCode role inventory
+        change_ids: ["sn_all_command_real_transport_matrix"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "sn_protocol_real_network", "package_cmd_code_inventory_is_complete_and_roles_are_classified", "--", "--exact", "--test-threads=1"]
+
+  dv:
+    mode: enabled
+    summary: Start one real loopback SN and two real clients, then execute the complete Report, Query, Call/Called acknowledgement and Rendezvous command matrix independently over TCP and QUIC.
+    test_targets:
+      - p2p-frame/tests/sn_protocol_real_network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Each transport test allocates non-zero loopback ports, starts an authenticated SN listener and two independent client stacks, and runs serially to avoid listener lifecycle interference.
+        - TCP uses the production unspecified-local-listener classification so the outbound TLS command tunnel is selected by the loopback SN endpoint; QUIC retains its concrete local listener endpoint.
+        - Both cases assert online Report registration and non-zero classified command tunnel IDs before explicit command traffic.
+        - The shared matrix covers known and unknown Query, successful and missing Call, exact Called plus CalledResp, action-before-response Rendezvous, listener rejection, wrong-version rejection and malformed Report.
+        - Results are real local socket evidence only; public NAT, packet loss, multi-host routing, peer-to-peer tunnel transport and inter-SN transport remain outside this task.
+    steps:
+      - id: sn-real-network-tcp-quic-dv
+        name: Run complete real SN client/server protocol behavior over TCP and QUIC
+        change_ids: ["sn_rendezvous_real_socket_command_flow", "sn_rendezvous_tcp_quic_transport_matrix", "sn_all_command_real_transport_matrix"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "sn_protocol_real_network", "sn_protocol_real_network_", "--", "--test-threads=1"]
+
+  integration:
+    mode: disabled
+    summary: The requested topology remains within p2p-frame and deliberately excludes neighboring crates, cross-SN owner transport, PN and peer-to-peer tunnel establishment.
+    change_ids: ["sn_rendezvous_real_socket_command_flow", "sn_rendezvous_tcp_quic_transport_matrix", "sn_all_command_real_transport_matrix"]
+    reason: "owner: testing; reason: the real two-client SN DV already crosses protocol, client, service, TCP/QUIC network, TLS and command-server submodule boundaries, while no neighboring module interface changes or consumers require a separate integration topology; risk: loopback does not cover deployed multi-host or public NAT behavior; acceptance impact: any discovered cross-crate, inter-SN, PN or peer-tunnel requirement must return to proposal rather than be claimed by this task."

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/040-execute-real-p2p-strategy-matrix/proposal.md": "756c5b1abf779a5763962b055163f3bbb7c53286c88007f835d32fcbacdf31af"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "25115abe59041ccb0e44879a89e6b3bbe7c061296bfc257834123d11e9d9b0fb"
+    }
+  },
+  "task_manifest": "task.yaml"
+}
