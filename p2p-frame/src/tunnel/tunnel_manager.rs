@@ -1133,19 +1133,27 @@ impl TunnelManager {
         endpoints: &[Endpoint],
         operation: SnTunnelRendezvousOperation,
     ) -> Vec<Endpoint> {
-        let mut result = Vec::new();
-        for endpoint in endpoints.iter().copied().filter(|endpoint| {
-            let eligible_transport = if operation.punches() {
-                endpoint.protocol() == Protocol::Quic
-            } else {
-                matches!(endpoint.protocol(), Protocol::Quic | Protocol::Tcp)
-            };
-            let eligible_area = if operation.reverse_connects() {
+        let eligible_area = |endpoint: &Endpoint| {
+            if operation.reverse_connects() {
                 rendezvous_reverse_connect_eligible_area(endpoint)
             } else {
                 rendezvous_eligible_area(endpoint)
-            };
-            eligible_transport && eligible_area && endpoint.addr().port() != 0
+            }
+        };
+        let anchor = if operation.punches() {
+            Protocol::Quic
+        } else if endpoints.iter().any(|endpoint| {
+            endpoint.protocol() == Protocol::Quic
+                && eligible_area(endpoint)
+                && endpoint.addr().port() != 0
+        }) {
+            Protocol::Quic
+        } else {
+            Protocol::Tcp
+        };
+        let mut result = Vec::new();
+        for endpoint in endpoints.iter().copied().filter(|endpoint| {
+            endpoint.protocol() == anchor && eligible_area(endpoint) && endpoint.addr().port() != 0
         }) {
             Self::push_unique_endpoint(&mut result, endpoint);
             if result.len() >= MAX_NAT_PLAN_CANDIDATES {

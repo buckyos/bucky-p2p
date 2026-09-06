@@ -917,7 +917,7 @@ async fn sn_report_late_response_does_not_complete_next_tunnel_report() {
                     peer_info: None,
                     end_point_array: vec![endpoint],
                     receipt: None,
-                    nat_probe_endpoints: vec![],
+                    nat_probe_ports: vec![],
                     nat_probe_directive: None,
                 };
                 Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
@@ -1001,7 +1001,7 @@ async fn sn_report_rejects_wrong_business_seq_and_sn_identity() {
                     peer_info: None,
                     end_point_array: vec![localhost_quic_endpoint(next_port())],
                     receipt: None,
-                    nat_probe_endpoints: vec![],
+                    nat_probe_ports: vec![],
                     nat_probe_directive: None,
                 };
                 Ok(Some(CmdBody::from(resp.to_vec().unwrap())))

@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-nat-probe-port-only-directive"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["proposal.md#scope", "proposal.md#proposal-items", "proposal.md#risks"]
+    required_checks: ["ReportSnResp and NatProbeDirective round-trip only bounded u16 ports and no probe IP", "all repository consumers migrate to the breaking port-only fields and setters", "removed endpoint-bearing wire symbols have no remaining production or test callers"]
+  data:
+    applies: true
+    evidence: ["proposal.md#scope", "proposal.md#risks"]
+    required_checks: ["ActiveSN owns the selected SN endpoint and reconstructed snapshot for one exact connection", "stale report completion cannot overwrite a replacement ActiveSN entry", "port configuration generation changes invalidate old profile and in-flight work"]
+  security:
+    applies: true
+    evidence: ["proposal.md#requirement-review", "proposal.md#risks"]
+    required_checks: ["every reconstructed probe destination is bound to the selected authenticated SN IPv4", "trusted SN signer verification remains mandatory", "existing signed reflector response token and source validation remain effective"]
+  runtime:
+    applies: true
+    evidence: ["proposal.md#scope", "proposal.md#success-criteria", "proposal.md#risks"]
+    required_checks: ["reflectors bind wildcard IPv4 with valid ports and no static-WAN identity requirement", "bind failure starts no partial reflector task set", "immediate directive and later rendezvous prediction use the reconstructed active-SN endpoint snapshot", "TCP IPv6 missing-address and invalid-port inputs fail closed without probing"]
+  build:
+    applies: false
+    evidence: 不改变依赖、feature、构建图、产物、production default 或发布配置；旧 wire 兼容明确排除且不增加迁移组件。
+    required_checks: []
+  ui:
+    applies: false
+    evidence: 不涉及 UI、导航、无障碍、本地化或用户交互流程。
+    required_checks: []
+  harness:
+    applies: false
+    evidence: 仅消费现有 Harness auto-pipeline、测试入口和验收机制，不改变规则、checker 或测试基础设施语义。
+    required_checks: []

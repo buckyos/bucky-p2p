@@ -26,16 +26,7 @@ fn reverse_connect_request_candidates_accept_public_wan_and_mapped() {
         ],
         SnTunnelRendezvousOperation::ReverseConnectOnly,
     );
-    assert_eq!(
-        reverse,
-        vec![
-            server_reflexive,
-            quic_wan,
-            quic_mapped,
-            tcp_wan,
-            tcp_mapped
-        ]
-    );
+    assert_eq!(reverse, vec![server_reflexive, quic_wan, quic_mapped]);
 
     let punch = TunnelManager::rendezvous_base_endpoints(
         &[server_reflexive, quic_wan, quic_mapped, tcp_wan],
@@ -45,4 +36,36 @@ fn reverse_connect_request_candidates_accept_public_wan_and_mapped() {
     assert_eq!(punch, vec![server_reflexive]);
     #[cfg(feature = "test-real-socket-matrix")]
     assert_eq!(punch, vec![server_reflexive, quic_wan, quic_mapped]);
+}
+
+#[test]
+fn reverse_connect_falls_back_to_single_tcp_transport_when_no_quic_candidate() {
+    let tcp_wan = endpoint(Protocol::Tcp, 22020, EndpointArea::Wan);
+    let tcp_mapped = endpoint(Protocol::Tcp, 22021, EndpointArea::Mapped);
+    let tcp_lan = endpoint(Protocol::Tcp, 22022, EndpointArea::Lan);
+
+    let reverse = TunnelManager::rendezvous_base_endpoints(
+        &[tcp_wan, tcp_mapped, tcp_lan],
+        SnTunnelRendezvousOperation::ReverseConnectOnly,
+    );
+    // LAN is not reverse-connect eligible; the homogeneous array is TCP-only.
+    assert_eq!(reverse, vec![tcp_wan, tcp_mapped]);
+}
+
+#[test]
+fn reverse_connect_mixed_transport_with_no_quic_eligible_anchors_to_tcp() {
+    // A TCP endpoint appears first, but no QUIC endpoint is area-eligible, so the
+    // candidate set must fall back to a single TCP transport instead of mixing.
+    let tcp_wan = endpoint(Protocol::Tcp, 22025, EndpointArea::Wan);
+    let tcp_mapped = endpoint(Protocol::Tcp, 22026, EndpointArea::Mapped);
+    let quic_lan = endpoint(Protocol::Quic, 22027, EndpointArea::Lan);
+
+    let reverse = TunnelManager::rendezvous_base_endpoints(
+        &[tcp_wan, quic_lan, tcp_mapped],
+        SnTunnelRendezvousOperation::ReverseConnectOnly,
+    );
+    assert_eq!(reverse, vec![tcp_wan, tcp_mapped]);
+    for endpoint in &reverse {
+        assert_eq!(endpoint.protocol(), Protocol::Tcp);
+    }
 }

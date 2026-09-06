@@ -108,6 +108,19 @@ impl UdpTunnelNetwork for PredictionValidationNetwork {
         ))
     }
 
+    async fn probe_nat_profile(
+        &self,
+        _probe_targets: &[Endpoint],
+        _expected_signer: &P2pIdentityCertRef,
+        _per_target_timeout: Duration,
+        _ttl: Duration,
+    ) -> P2pResult<NatProfile> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "prediction validation mock does not probe profiles"
+        ))
+    }
+
     async fn predict_traversal_endpoints(
         &self,
         _probe_targets: &[Endpoint],
@@ -246,6 +259,19 @@ impl UdpTunnelNetwork for PendingPunchNetwork {
         Err(p2p_err!(
             P2pErrorCode::NotSupport,
             "pending punch mock does not predict"
+        ))
+    }
+
+    async fn probe_nat_profile(
+        &self,
+        _probe_targets: &[Endpoint],
+        _expected_signer: &P2pIdentityCertRef,
+        _per_target_timeout: Duration,
+        _ttl: Duration,
+    ) -> P2pResult<NatProfile> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "pending punch mock does not probe profiles"
         ))
     }
 

@@ -5,6 +5,7 @@ use crate::endpoint::{
 use crate::error::{P2pError, P2pErrorCode, P2pResult, p2p_err};
 use crate::nat_type::{NAT_TRAVERSAL_CONTEXT_VERSION, NatProfile, NatTraversalContext};
 use crate::p2p_identity::{EncodedP2pIdentityCert, P2pId, P2pIdentity, P2pSignature};
+use crate::sn::nat_probe::MAX_NAT_PROBE_ENDPOINTS;
 use crate::types::{Sequence, Timestamp, TunnelId};
 use bucky_raw_codec::{
     CodecError, CodecErrorCode, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes,
@@ -340,6 +341,12 @@ fn supported_nat_profile(profile: Option<NatProfile>) -> Option<NatProfile> {
     profile.filter(NatProfile::is_supported)
 }
 
+fn supported_nat_probe_ports(ports: &[u16]) -> bool {
+    (2..=MAX_NAT_PROBE_ENDPOINTS).contains(&ports.len())
+        && ports.iter().all(|port| *port != 0)
+        && ports.iter().copied().collect::<HashSet<_>>().len() == ports.len()
+}
+
 /// A single SN-authorized NAT-probe operation.
 ///
 /// All identity and generation fields are echoed by [`NatProbeResult`]. This
@@ -354,12 +361,12 @@ pub struct NatProbeDirective {
     pub request_id: u64,
     pub probe_config_generation: u64,
     pub expires_at: Timestamp,
-    pub endpoints: Vec<Endpoint>,
+    pub ports: Vec<u16>,
 }
 
 impl NatProbeDirective {
     pub fn is_supported(&self) -> bool {
-        self.version == NAT_PROBE_CONTROL_VERSION && !self.endpoints.is_empty()
+        self.version == NAT_PROBE_CONTROL_VERSION && supported_nat_probe_ports(&self.ports)
     }
 }
 
@@ -1219,7 +1226,7 @@ pub struct ReportSnResp {
     pub peer_info: Option<EncodedP2pIdentityCert>, //sn的设备信息
     pub end_point_array: Vec<Endpoint>,            //外网地址列表
     pub receipt: Option<SnServiceReceipt>,         //返回sn的一些连接信息，如当前连接的peer数量
-    pub nat_probe_endpoints: Vec<Endpoint>,
+    pub nat_probe_ports: Vec<u16>,
     pub nat_probe_directive: Option<NatProbeDirective>,
 }
 
@@ -1248,7 +1255,7 @@ impl From<&ReportSnResp> for LegacyReportSnResp {
 
 impl RawEncode for ReportSnResp {
     fn raw_measure(&self, purpose: &Option<RawEncodePurpose>) -> Result<usize, CodecError> {
-        let extension = (!self.nat_probe_endpoints.is_empty()).then_some(&self.nat_probe_endpoints);
+        let extension = (!self.nat_probe_ports.is_empty()).then_some(&self.nat_probe_ports);
         Ok(LegacyReportSnResp::from(self).raw_measure(purpose)?
             + extension_measure(extension, purpose)?
             + extension_measure(self.nat_probe_directive.as_ref(), purpose)?)
@@ -1260,7 +1267,7 @@ impl RawEncode for ReportSnResp {
         purpose: &Option<RawEncodePurpose>,
     ) -> Result<&'a mut [u8], CodecError> {
         let buf = LegacyReportSnResp::from(self).raw_encode(buf, purpose)?;
-        let extension = (!self.nat_probe_endpoints.is_empty()).then_some(&self.nat_probe_endpoints);
+        let extension = (!self.nat_probe_ports.is_empty()).then_some(&self.nat_probe_ports);
         let buf = extension_encode(extension, REPORT_SN_RESP_EXTENSION_MAGIC, buf, purpose)?;
         extension_encode(
             self.nat_probe_directive.as_ref(),
@@ -1274,8 +1281,11 @@ impl RawEncode for ReportSnResp {
 impl<'de> RawDecode<'de> for ReportSnResp {
     fn raw_decode(buf: &'de [u8]) -> Result<(Self, &'de [u8]), CodecError> {
         let (legacy, buf) = LegacyReportSnResp::raw_decode(buf)?;
-        let (nat_probe_endpoints, buf) =
-            extension_decode::<Vec<Endpoint>>(buf, REPORT_SN_RESP_EXTENSION_MAGIC);
+        let (nat_probe_ports, buf) =
+            extension_decode::<Vec<u16>>(buf, REPORT_SN_RESP_EXTENSION_MAGIC);
+        let nat_probe_ports = nat_probe_ports
+            .filter(|ports| supported_nat_probe_ports(ports))
+            .unwrap_or_default();
         let (nat_probe_directive, buf) = extension_decode::<NatProbeDirective>(
             buf,
             REPORT_SN_RESP_PROBE_DIRECTIVE_EXTENSION_MAGIC,
@@ -1289,7 +1299,7 @@ impl<'de> RawDecode<'de> for ReportSnResp {
                 peer_info: legacy.peer_info,
                 end_point_array: legacy.end_point_array,
                 receipt: legacy.receipt,
-                nat_probe_endpoints: nat_probe_endpoints.unwrap_or_default(),
+                nat_probe_ports,
                 nat_probe_directive,
             },
             buf,

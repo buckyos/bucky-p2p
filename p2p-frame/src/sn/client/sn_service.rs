@@ -1,4 +1,4 @@
-use crate::endpoint::{Endpoint, Protocol};
+use crate::endpoint::{Endpoint, EndpointArea, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
 use crate::nat_type::{NatProfile, NatTraversalContext};
@@ -12,9 +12,9 @@ use crate::sn::nat_probe::MAX_NAT_PROBE_ENDPOINTS;
 use crate::sn::protocol::v0::{SnCallResp, SnCalled, SnCalledResp, TunnelType};
 use crate::sn::protocol::{
     NatProbeDirective, NatProbeResult, Package, PackageCmdCode, ReportSn, ReportSnResp,
-    SN_PROTOCOL_VERSION, SN_TUNNEL_RENDEZVOUS_CMD_VERSION, SnCall, SnQuery, SnQueryResp,
-    SnTunnelRendezvous, SnTunnelRendezvousNotify, SnTunnelRendezvousOperation,
-    SnTunnelRendezvousResp,
+    NAT_PROBE_CONTROL_VERSION, SN_PROTOCOL_VERSION, SN_TUNNEL_RENDEZVOUS_CMD_VERSION, SnCall,
+    SnQuery, SnQueryResp, SnTunnelRendezvous, SnTunnelRendezvousNotify,
+    SnTunnelRendezvousOperation, SnTunnelRendezvousResp,
 };
 use crate::sn::types::{
     CmdTunnelId, SnCmdHeader, SnCmdPkgLen, SnTunnelClassification, SnTunnelRead, SnTunnelWrite,
@@ -108,6 +108,25 @@ fn publish_active_sn(active_sn_list: &mut Vec<ActiveSN>, active_sn: ActiveSN) ->
     true
 }
 
+fn update_active_sn_if_owner<F>(
+    active_sn_list: &mut [ActiveSN],
+    sn_peer_id: &P2pId,
+    conn_id: CmdTunnelId,
+    update: F,
+) -> bool
+where
+    F: FnOnce(&mut ActiveSN),
+{
+    let Some(active_sn) = active_sn_list
+        .iter_mut()
+        .find(|active_sn| &active_sn.sn_peer_id == sn_peer_id && active_sn.conn_id == conn_id)
+    else {
+        return false;
+    };
+    update(active_sn);
+    true
+}
+
 #[callback_trait::callback_trait]
 pub trait SNEvent: 'static + Send + Sync {
     async fn on_called(&self, called: SnCalled) -> P2pResult<()>;
@@ -147,6 +166,7 @@ pub struct ActiveSN {
     pub latest_time: u64,
     pub conn_id: CmdTunnelId,
     pub protocol: Protocol,
+    pub sn_endpoint: Endpoint,
     pub wan_ep_list: Vec<Endpoint>,
     pub nat_probe_endpoints: Vec<Endpoint>,
     pub nat_probe_signer: Option<P2pIdentityCertRef>,
@@ -174,34 +194,34 @@ const NAT_PROFILE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NatProbeDirectiveRejectReason {
     TransportNotQuic,
+    ActiveEndpointProtocol,
+    ActiveEndpointIpv4,
+    ActiveEndpointAddress,
     VersionUnsupported,
     SnMismatch,
     PeerMismatch,
     DeadlineExpired,
     Replay,
-    EndpointCount,
-    EndpointProtocol,
-    EndpointIpv4,
-    EndpointIpMismatch,
-    EndpointPort,
-    EndpointDuplicate,
+    PortCount,
+    PortZero,
+    PortDuplicate,
 }
 
 impl NatProbeDirectiveRejectReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::TransportNotQuic => "transport_not_quic",
+            Self::ActiveEndpointProtocol => "active_endpoint_protocol",
+            Self::ActiveEndpointIpv4 => "active_endpoint_not_ipv4",
+            Self::ActiveEndpointAddress => "active_endpoint_address_unusable",
             Self::VersionUnsupported => "version_unsupported",
             Self::SnMismatch => "sn_mismatch",
             Self::PeerMismatch => "peer_mismatch",
             Self::DeadlineExpired => "deadline_expired",
             Self::Replay => "replay",
-            Self::EndpointCount => "endpoint_count",
-            Self::EndpointProtocol => "endpoint_protocol",
-            Self::EndpointIpv4 => "endpoint_not_ipv4",
-            Self::EndpointIpMismatch => "endpoint_ip_mismatch",
-            Self::EndpointPort => "endpoint_port",
-            Self::EndpointDuplicate => "endpoint_duplicate",
+            Self::PortCount => "port_count",
+            Self::PortZero => "port_zero",
+            Self::PortDuplicate => "port_duplicate",
         }
     }
 }
@@ -586,6 +606,58 @@ impl SNClientService {
             endpoints: active.nat_probe_endpoints.clone(),
             expected_signer: active.nat_probe_signer.clone()?,
         })
+    }
+
+    fn validate_nat_probe_target(
+        active_protocol: Protocol,
+        sn_endpoint: &Endpoint,
+    ) -> Result<IpAddr, NatProbeDirectiveRejectReason> {
+        if active_protocol != Protocol::Quic {
+            return Err(NatProbeDirectiveRejectReason::TransportNotQuic);
+        }
+        if sn_endpoint.protocol() != Protocol::Quic {
+            return Err(NatProbeDirectiveRejectReason::ActiveEndpointProtocol);
+        }
+        let IpAddr::V4(ip) = sn_endpoint.addr().ip() else {
+            return Err(NatProbeDirectiveRejectReason::ActiveEndpointIpv4);
+        };
+        if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
+            return Err(NatProbeDirectiveRejectReason::ActiveEndpointAddress);
+        }
+        Ok(IpAddr::V4(ip))
+    }
+
+    fn validate_nat_probe_ports(ports: &[u16]) -> Result<(), NatProbeDirectiveRejectReason> {
+        if ports.len() < 2 || ports.len() > MAX_NAT_PROBE_ENDPOINTS {
+            return Err(NatProbeDirectiveRejectReason::PortCount);
+        }
+        let mut unique = HashSet::with_capacity(ports.len());
+        for port in ports {
+            if *port == 0 {
+                return Err(NatProbeDirectiveRejectReason::PortZero);
+            }
+            if !unique.insert(*port) {
+                return Err(NatProbeDirectiveRejectReason::PortDuplicate);
+            }
+        }
+        Ok(())
+    }
+
+    fn build_nat_probe_endpoints(
+        active_protocol: Protocol,
+        sn_endpoint: &Endpoint,
+        ports: &[u16],
+    ) -> Result<Vec<Endpoint>, NatProbeDirectiveRejectReason> {
+        let ip = Self::validate_nat_probe_target(active_protocol, sn_endpoint)?;
+        Self::validate_nat_probe_ports(ports)?;
+        Ok(ports
+            .iter()
+            .map(|port| {
+                let mut endpoint = Endpoint::from((Protocol::Quic, ip, *port));
+                endpoint.set_area(EndpointArea::Wan);
+                endpoint
+            })
+            .collect())
     }
 
     fn validate_nat_probe_signer(
@@ -1016,6 +1088,7 @@ impl SNClientService {
                                     .execute_probe_directive(
                                         active_sn.sn_peer_id.clone(),
                                         active_sn.protocol,
+                                        active_sn.sn_endpoint,
                                         active_sn.nat_probe_registration_generation,
                                         active_sn.last_nat_probe_request_id,
                                         nat_probe_signer.clone(),
@@ -1065,22 +1138,30 @@ impl SNClientService {
                                         }
                                     }
                                 }
+                                let nat_probe_endpoints = Self::build_nat_probe_endpoints(
+                                    active_sn.protocol,
+                                    &active_sn.sn_endpoint,
+                                    resp.nat_probe_ports.as_slice(),
+                                )
+                                .unwrap_or_default();
                                 let mut state = self.state.write().unwrap();
-                                if let Some(current) = state.active_sn_list.iter_mut().find(|sn| {
-                                    sn.sn_peer_id == active_sn.sn_peer_id
-                                        && sn.conn_id == active_sn.conn_id
-                                }) {
-                                    if let Some((generation, request_id)) = accepted_probe {
-                                        current.nat_probe_registration_generation = generation;
-                                        current.last_nat_probe_request_id = request_id;
-                                    }
-                                    if let Some(result) = completed_probe {
-                                        current.net_profile = result.profile;
-                                    }
-                                    current.nat_probe_endpoints = resp.nat_probe_endpoints;
-                                    current.nat_probe_signer = nat_probe_signer;
-                                    current.wan_ep_list = resp.end_point_array;
-                                }
+                                update_active_sn_if_owner(
+                                    &mut state.active_sn_list,
+                                    &active_sn.sn_peer_id,
+                                    active_sn.conn_id,
+                                    |current| {
+                                        if let Some((generation, request_id)) = accepted_probe {
+                                            current.nat_probe_registration_generation = generation;
+                                            current.last_nat_probe_request_id = request_id;
+                                        }
+                                        if let Some(result) = completed_probe {
+                                            current.net_profile = result.profile;
+                                        }
+                                        current.nat_probe_endpoints = nat_probe_endpoints;
+                                        current.nat_probe_signer = nat_probe_signer;
+                                        current.wan_ep_list = resp.end_point_array;
+                                    },
+                                );
                             }
                             Err(e) => {
                                 log::error!("ping to {} failed: {:?}", active_sn.sn_peer_id, e);
@@ -1150,13 +1231,20 @@ impl SNClientService {
                                 report_resp.peer_info.as_ref(),
                             );
                             let directive = report_resp.nat_probe_directive.take();
+                            let nat_probe_endpoints = Self::build_nat_probe_endpoints(
+                                protocol,
+                                sn_ep,
+                                report_resp.nat_probe_ports.as_slice(),
+                            )
+                            .unwrap_or_default();
                             let active_sn = ActiveSN {
                                 sn_peer_id: sn_cert.get_id(),
                                 latest_time: bucky_time_now(),
                                 conn_id: tunnel_id,
                                 protocol,
+                                sn_endpoint: *sn_ep,
                                 wan_ep_list: report_resp.end_point_array.clone(),
-                                nat_probe_endpoints: report_resp.nat_probe_endpoints.clone(),
+                                nat_probe_endpoints,
                                 nat_probe_signer: nat_probe_signer.clone(),
                                 net_profile: NatProfile::unknown(),
                                 nat_probe_registration_generation: 0,
@@ -1172,6 +1260,7 @@ impl SNClientService {
                                 .execute_probe_directive(
                                     sn_cert.get_id(),
                                     protocol,
+                                    *sn_ep,
                                     0,
                                     0,
                                     nat_probe_signer,
@@ -1181,16 +1270,16 @@ impl SNClientService {
                             {
                                 {
                                     let mut state = self.state.write().unwrap();
-                                    if let Some(current) =
-                                        state.active_sn_list.iter_mut().find(|sn| {
-                                            sn.sn_peer_id == sn_cert.get_id()
-                                                && sn.conn_id == tunnel_id
-                                        })
-                                    {
-                                        current.nat_probe_registration_generation =
-                                            result.registration_generation;
-                                        current.last_nat_probe_request_id = result.request_id;
-                                    }
+                                    update_active_sn_if_owner(
+                                        &mut state.active_sn_list,
+                                        &sn_cert.get_id(),
+                                        tunnel_id,
+                                        |current| {
+                                            current.nat_probe_registration_generation =
+                                                result.registration_generation;
+                                            current.last_nat_probe_request_id = result.request_id;
+                                        },
+                                    );
                                 }
                                 match self
                                     .report(tunnel_id, sn_cert.get_id(), Some(&result))
@@ -1211,19 +1300,25 @@ impl SNClientService {
                                             &sn_cert.get_id(),
                                             resp.peer_info.as_ref(),
                                         );
+                                        let nat_probe_endpoints =
+                                            Self::build_nat_probe_endpoints(
+                                                protocol,
+                                                sn_ep,
+                                                resp.nat_probe_ports.as_slice(),
+                                            )
+                                            .unwrap_or_default();
                                         let mut state = self.state.write().unwrap();
-                                        if let Some(current) =
-                                            state.active_sn_list.iter_mut().find(|sn| {
-                                                sn.sn_peer_id == sn_cert.get_id()
-                                                    && sn.conn_id == tunnel_id
-                                            })
-                                        {
-                                            current.net_profile = result.profile;
-                                            current.nat_probe_endpoints =
-                                                resp.nat_probe_endpoints;
-                                            current.nat_probe_signer = nat_probe_signer;
-                                            current.wan_ep_list = resp.end_point_array;
-                                        }
+                                        update_active_sn_if_owner(
+                                            &mut state.active_sn_list,
+                                            &sn_cert.get_id(),
+                                            tunnel_id,
+                                            |current| {
+                                                current.net_profile = result.profile;
+                                                current.nat_probe_endpoints = nat_probe_endpoints;
+                                                current.nat_probe_signer = nat_probe_signer;
+                                                current.wan_ep_list = resp.end_point_array;
+                                            },
+                                        );
                                     }
                                     Err(e) => {
                                         log::warn!(
@@ -1289,6 +1384,7 @@ impl SNClientService {
     async fn probe_endpoints(
         &self,
         directive: &NatProbeDirective,
+        endpoints: &[Endpoint],
         expected_signer: Option<P2pIdentityCertRef>,
     ) -> NatProfile {
         let started = Instant::now();
@@ -1299,7 +1395,7 @@ impl SNClientService {
             directive.registration_generation,
             directive.probe_config_generation,
             directive.request_id,
-            directive.endpoints.len()
+            endpoints.len()
         );
         log::debug!(
             "event=nat_probe_client_endpoints sn_id={} peer_id={} registration_generation={} config_generation={} request_id={} endpoints={:?}",
@@ -1308,7 +1404,7 @@ impl SNClientService {
             directive.registration_generation,
             directive.probe_config_generation,
             directive.request_id,
-            directive.endpoints
+            endpoints
         );
         let Some(expected_signer) = expected_signer else {
             log::warn!(
@@ -1324,18 +1420,19 @@ impl SNClientService {
         };
         let profile = match self.net_manager.get_network(Protocol::Quic) {
             Ok(network) => match network.as_udp_tunnel_network() {
-                Some(network) => network
-                    .predict_traversal_endpoints(
-                        directive.endpoints.as_slice(),
-                        &expected_signer,
-                        NAT_PROBE_TARGET_TIMEOUT,
-                        NAT_PROFILE_TTL,
-                    )
-                    .await
-                    .map(|prediction| prediction.profile),
+                Some(network) => {
+                    network
+                        .probe_nat_profile(
+                            endpoints,
+                            &expected_signer,
+                            NAT_PROBE_TARGET_TIMEOUT,
+                            NAT_PROFILE_TTL,
+                        )
+                        .await
+                }
                 None => Err(p2p_err!(
                     P2pErrorCode::NotSupport,
-                    "QUIC network does not support UDP traversal prediction"
+                    "QUIC network does not support UDP NAT profile probing"
                 )),
             },
             Err(err) => Err(err),
@@ -1374,6 +1471,7 @@ impl SNClientService {
         &self,
         active_sn_id: P2pId,
         active_protocol: Protocol,
+        active_sn_endpoint: Endpoint,
         last_registration_generation: u64,
         last_request_id: u64,
         expected_signer: Option<P2pIdentityCertRef>,
@@ -1381,27 +1479,31 @@ impl SNClientService {
     ) -> Option<NatProbeResult> {
         let directive = directive?;
         let now = bucky_time_now();
-        if let Err(reason) = Self::validate_probe_directive(
+        let endpoints = match Self::validate_probe_directive(
             &active_sn_id,
             &self.local_identity.get_id(),
             active_protocol,
+            &active_sn_endpoint,
             last_registration_generation,
             last_request_id,
             now,
             &directive,
         ) {
-            log::debug!(
-                "event=nat_probe_directive_rejected sn_id={} peer_id={} active_transport={:?} registration_generation={} config_generation={} request_id={} reason={}",
-                directive.sn_peer_id,
-                directive.peer_id,
-                active_protocol,
-                directive.registration_generation,
-                directive.probe_config_generation,
-                directive.request_id,
-                reason.as_str()
-            );
-            return None;
-        }
+            Ok(endpoints) => endpoints,
+            Err(reason) => {
+                log::debug!(
+                    "event=nat_probe_directive_rejected sn_id={} peer_id={} active_transport={:?} registration_generation={} config_generation={} request_id={} reason={}",
+                    directive.sn_peer_id,
+                    directive.peer_id,
+                    active_protocol,
+                    directive.registration_generation,
+                    directive.probe_config_generation,
+                    directive.request_id,
+                    reason.as_str()
+                );
+                return None;
+            }
+        };
         log::debug!(
             "event=nat_probe_directive_accepted sn_id={} peer_id={} active_transport={:?} registration_generation={} config_generation={} request_id={} expires_at={}",
             directive.sn_peer_id,
@@ -1412,7 +1514,9 @@ impl SNClientService {
             directive.request_id,
             directive.expires_at
         );
-        let profile = self.probe_endpoints(&directive, expected_signer).await;
+        let profile = self
+            .probe_endpoints(&directive, endpoints.as_slice(), expected_signer)
+            .await;
         Some(NatProbeResult::from_directive(&directive, profile))
     }
 
@@ -1425,15 +1529,17 @@ impl SNClientService {
         last_request_id: u64,
         directive: Option<NatProbeDirective>,
     ) -> Option<NatProbeResult> {
-        let expected_signer = self
-            .get_nat_probe_snapshot_for_sn(&active_sn_id)
-            .map(|snapshot| snapshot.expected_signer);
+        let active = self
+            .get_active_sn_list()
+            .into_iter()
+            .find(|active| active.sn_peer_id == active_sn_id)?;
         self.execute_probe_directive(
             active_sn_id,
             active_protocol,
+            active.sn_endpoint,
             last_registration_generation,
             last_request_id,
-            expected_signer,
+            active.nat_probe_signer,
             directive,
         )
         .await
@@ -1443,6 +1549,7 @@ impl SNClientService {
         active_sn_id: &P2pId,
         local_peer_id: &P2pId,
         active_protocol: Protocol,
+        active_sn_endpoint: &Endpoint,
         last_registration_generation: u64,
         last_request_id: u64,
         now: u64,
@@ -1452,6 +1559,7 @@ impl SNClientService {
             active_sn_id,
             local_peer_id,
             active_protocol,
+            active_sn_endpoint,
             last_registration_generation,
             last_request_id,
             now,
@@ -1464,18 +1572,19 @@ impl SNClientService {
         active_sn_id: &P2pId,
         local_peer_id: &P2pId,
         active_protocol: Protocol,
+        active_sn_endpoint: &Endpoint,
         last_registration_generation: u64,
         last_request_id: u64,
         now: u64,
         directive: &NatProbeDirective,
-    ) -> Result<(), NatProbeDirectiveRejectReason> {
+    ) -> Result<Vec<Endpoint>, NatProbeDirectiveRejectReason> {
         let replayed = directive.registration_generation < last_registration_generation
             || (directive.registration_generation == last_registration_generation
                 && directive.request_id <= last_request_id);
         if active_protocol != Protocol::Quic {
             return Err(NatProbeDirectiveRejectReason::TransportNotQuic);
         }
-        if !directive.is_supported() {
+        if directive.version != NAT_PROBE_CONTROL_VERSION {
             return Err(NatProbeDirectiveRejectReason::VersionUnsupported);
         }
         if &directive.sn_peer_id != active_sn_id {
@@ -1490,39 +1599,11 @@ impl SNClientService {
         if replayed {
             return Err(NatProbeDirectiveRejectReason::Replay);
         }
-        Self::validate_probe_directive_endpoints(directive.endpoints.as_slice())
-    }
-
-    fn valid_probe_directive_endpoints(endpoints: &[Endpoint]) -> bool {
-        Self::validate_probe_directive_endpoints(endpoints).is_ok()
-    }
-
-    fn validate_probe_directive_endpoints(
-        endpoints: &[Endpoint],
-    ) -> Result<(), NatProbeDirectiveRejectReason> {
-        if endpoints.len() < 2 || endpoints.len() > MAX_NAT_PROBE_ENDPOINTS {
-            return Err(NatProbeDirectiveRejectReason::EndpointCount);
-        }
-        let first_ip = endpoints[0].addr().ip();
-        let mut addresses = HashSet::with_capacity(endpoints.len());
-        for endpoint in endpoints {
-            if endpoint.protocol() != Protocol::Quic {
-                return Err(NatProbeDirectiveRejectReason::EndpointProtocol);
-            }
-            if !endpoint.addr().is_ipv4() {
-                return Err(NatProbeDirectiveRejectReason::EndpointIpv4);
-            }
-            if endpoint.addr().ip() != first_ip {
-                return Err(NatProbeDirectiveRejectReason::EndpointIpMismatch);
-            }
-            if endpoint.addr().port() == 0 {
-                return Err(NatProbeDirectiveRejectReason::EndpointPort);
-            }
-            if !addresses.insert(*endpoint.addr()) {
-                return Err(NatProbeDirectiveRejectReason::EndpointDuplicate);
-            }
-        }
-        Ok(())
+        Self::build_nat_probe_endpoints(
+            active_protocol,
+            active_sn_endpoint,
+            directive.ports.as_slice(),
+        )
     }
 
     async fn report(

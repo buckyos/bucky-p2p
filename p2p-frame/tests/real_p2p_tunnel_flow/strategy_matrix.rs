@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bucky_time::bucky_time_now;
 use p2p_frame::ConnectDirection;
-use p2p_frame::endpoint::{Endpoint, EndpointArea, Protocol};
+use p2p_frame::endpoint::{EndpointArea, Protocol};
 use p2p_frame::error::{P2pError, P2pErrorCode, P2pResult};
 use p2p_frame::nat_type::{NatMappingObservation, NatProfile};
 use p2p_frame::p2p_identity::{P2pId, P2pIdentityRef};
@@ -210,11 +210,11 @@ impl MappingProbeFixture {
         Ok(Self { sockets, tasks })
     }
 
-    fn endpoints(&self) -> Vec<Endpoint> {
+    fn ports(&self) -> Vec<u16> {
         self.sockets
             .iter()
             .filter_map(|socket| socket.local_addr().ok())
-            .map(|addr| Endpoint::from((Protocol::Quic, addr)))
+            .map(|addr| addr.port())
             .collect()
     }
 }
@@ -403,7 +403,7 @@ async fn start_nat_matrix_topology(
             Err(error) if retryable(&error) => continue,
             Err(error) => return Err(error),
         };
-        server.service().set_nat_probe_endpoints(probe.endpoints());
+        server.service().set_nat_probe_ports(probe.ports());
 
         let sn = match sn_entry(&sn_identity) {
             Ok(sn) => sn,

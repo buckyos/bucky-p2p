@@ -16,11 +16,8 @@ fn scheduler_endpoint(protocol: Protocol, port: u16) -> Endpoint {
     ))
 }
 
-fn scheduler_probe_endpoints(first_port: u16) -> Vec<Endpoint> {
-    vec![
-        scheduler_endpoint(Protocol::Quic, first_port),
-        scheduler_endpoint(Protocol::Quic, first_port + 1),
-    ]
+fn scheduler_probe_ports(first_port: u16) -> Vec<u16> {
+    vec![first_port, first_port + 1]
 }
 
 fn scheduler_profile(now: Timestamp) -> NatProfile {
@@ -45,10 +42,7 @@ fn nat_probe_scheduler_issues_once_and_reschedules_two_hours_from_completion() {
     let tunnel = CmdTunnelId::from(11);
     let remote = scheduler_endpoint(Protocol::Quic, 50000);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(vec![
-        scheduler_endpoint(Protocol::Quic, 32001),
-        scheduler_endpoint(Protocol::Quic, 32002),
-    ]);
+    scheduler.set_ports(vec![32001, 32002]);
 
     let initial = scheduler.observe_report(&peer, tunnel, remote, None, 1_000_000);
     let directive = initial.directive.expect("first QUIC report must probe");
@@ -92,7 +86,7 @@ fn nat_probe_scheduler_rejects_tcp_and_does_not_let_tcp_override_quic_authority(
     let quic_tunnel = CmdTunnelId::from(21);
     let tcp_tunnel = CmdTunnelId::from(22);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32101));
+    scheduler.set_ports(scheduler_probe_ports(32101));
 
     assert!(scheduler
         .observe_report(
@@ -133,10 +127,7 @@ fn nat_probe_scheduler_does_not_flap_between_concurrent_quic_tunnels() {
     let authority = CmdTunnelId::from(71);
     let concurrent = CmdTunnelId::from(72);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(vec![
-        scheduler_endpoint(Protocol::Quic, 32601),
-        scheduler_endpoint(Protocol::Quic, 32602),
-    ]);
+    scheduler.set_ports(vec![32601, 32602]);
     let first = scheduler
         .observe_report(
             &peer,
@@ -179,7 +170,7 @@ fn nat_probe_scheduler_address_and_config_events_invalidate_and_advance_generati
     let peer = scheduler_peer(6);
     let tunnel = CmdTunnelId::from(31);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32201));
+    scheduler.set_ports(scheduler_probe_ports(32201));
     let first = scheduler
         .observe_report(
             &peer,
@@ -202,7 +193,7 @@ fn nat_probe_scheduler_address_and_config_events_invalidate_and_advance_generati
     assert!(changed.profile_update == Some(None));
     assert!(changed_directive.registration_generation > first.registration_generation);
 
-    let affected = scheduler.set_endpoints(scheduler_probe_endpoints(32203));
+    let affected = scheduler.set_ports(scheduler_probe_ports(32203));
     assert_eq!(affected, vec![peer.clone()]);
     let config_changed = scheduler
         .observe_report(
@@ -215,7 +206,7 @@ fn nat_probe_scheduler_address_and_config_events_invalidate_and_advance_generati
         .directive
         .unwrap();
     assert!(config_changed.probe_config_generation > changed_directive.probe_config_generation);
-    assert_eq!(config_changed.endpoints, scheduler_probe_endpoints(32203));
+    assert_eq!(config_changed.ports, scheduler_probe_ports(32203));
 }
 
 #[test]
@@ -225,7 +216,7 @@ fn nat_probe_scheduler_demand_obeys_failure_backoff_and_current_request_does_not
     let tunnel = CmdTunnelId::from(41);
     let remote = scheduler_endpoint(Protocol::Quic, 53000);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32301));
+    scheduler.set_ports(scheduler_probe_ports(32301));
     let directive = scheduler
         .observe_report(&peer, tunnel, remote, None, 100)
         .directive
@@ -266,7 +257,7 @@ fn nat_probe_scheduler_rejects_late_result_after_observation_generation_changes(
     let peer = scheduler_peer(10);
     let tunnel = CmdTunnelId::from(51);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32401));
+    scheduler.set_ports(scheduler_probe_ports(32401));
     let old = scheduler
         .observe_report(
             &peer,
@@ -299,7 +290,7 @@ fn nat_probe_scheduler_timeout_ends_inflight_without_immediate_retry() {
     let remote = scheduler_endpoint(Protocol::Quic, 55000);
     let now = 1_000;
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32501));
+    scheduler.set_ports(scheduler_probe_ports(32501));
     let directive = scheduler
         .observe_report(&peer, tunnel, remote, None, now)
         .directive
@@ -327,7 +318,7 @@ fn nat_probe_scheduler_never_directs_a_client_without_control_capability() {
     let tunnel = CmdTunnelId::from(81);
     let remote = scheduler_endpoint(Protocol::Quic, 57000);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32701));
+    scheduler.set_ports(scheduler_probe_ports(32701));
 
     let legacy = scheduler.observe_capable_report(&peer, tunnel, remote, None, None, 1);
     assert!(legacy.directive.is_none());
@@ -364,7 +355,7 @@ fn nat_probe_scheduler_control_address_change_invalidates_before_next_report() {
     let tunnel = CmdTunnelId::from(91);
     let remote = scheduler_endpoint(Protocol::Quic, 58000);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32801));
+    scheduler.set_ports(scheduler_probe_ports(32801));
     let directive = scheduler
         .observe_report(&peer, tunnel, remote, None, 10)
         .directive
@@ -388,7 +379,7 @@ fn nat_probe_scheduler_control_address_change_invalidates_before_next_report() {
 fn nat_probe_scheduler_bounds_global_inflight_and_releases_capacity_on_timeout() {
     let sn = scheduler_peer(19);
     let mut scheduler = NatProbeScheduler::new(sn);
-    scheduler.set_endpoints(scheduler_probe_endpoints(32901));
+    scheduler.set_ports(scheduler_probe_ports(32901));
     let mut directives = Vec::new();
     for index in 0..=MAX_CONCURRENT_NAT_PROBES {
         let mut peer_bytes = vec![0u8; 32];
@@ -430,20 +421,16 @@ fn nat_probe_scheduler_bounds_global_inflight_and_releases_capacity_on_timeout()
 }
 
 #[test]
-fn nat_probe_scheduler_rejects_invalid_server_endpoint_sets() {
+fn nat_probe_scheduler_rejects_invalid_server_port_sets() {
     let mut scheduler = NatProbeScheduler::new(scheduler_peer(20));
-    scheduler.set_endpoints(vec![scheduler_endpoint(Protocol::Quic, 33001)]);
-    assert!(scheduler.endpoints().is_empty());
-    scheduler.set_endpoints(vec![
-        scheduler_endpoint(Protocol::Quic, 33001),
-        Endpoint::from((
-            Protocol::Quic,
-            "203.0.113.12:33002".parse().unwrap(),
-        )),
-    ]);
-    assert!(scheduler.endpoints().is_empty());
-    scheduler.set_endpoints(scheduler_probe_endpoints(33001));
-    assert_eq!(scheduler.endpoints().len(), 2);
+    scheduler.set_ports(vec![33001]);
+    assert!(scheduler.ports().is_empty());
+    scheduler.set_ports(vec![33001, 33001]);
+    assert!(scheduler.ports().is_empty());
+    scheduler.set_ports(vec![0, 33002]);
+    assert!(scheduler.ports().is_empty());
+    scheduler.set_ports(scheduler_probe_ports(33001));
+    assert_eq!(scheduler.ports(), scheduler_probe_ports(33001));
 }
 
 #[tokio::test]
@@ -453,7 +440,7 @@ async fn nat_probe_scheduler_maintenance_removes_a_vanished_quic_authority_witho
     let tunnel = CmdTunnelId::from(501);
     {
         let mut scheduler = service.nat_probe_scheduler.lock().unwrap();
-        scheduler.set_endpoints(scheduler_probe_endpoints(33101));
+        scheduler.set_ports(scheduler_probe_ports(33101));
         assert!(scheduler
             .observe_capable_report(
                 &peer,
@@ -486,7 +473,7 @@ fn nat_probe_scheduler_logs_correlated_lifecycle_reasons_without_stable_report_n
     let tunnel = CmdTunnelId::from(2301);
     let remote = scheduler_endpoint(Protocol::Quic, 60100);
     let mut scheduler = NatProbeScheduler::new(sn.clone());
-    scheduler.set_endpoints(scheduler_probe_endpoints(33201));
+    scheduler.set_ports(scheduler_probe_ports(33201));
 
     let online = scheduler
         .observe_report(&peer, tunnel, remote, None, 1_000)
@@ -576,4 +563,199 @@ fn nat_probe_scheduler_logs_correlated_lifecycle_reasons_without_stable_report_n
     assert!(has("event=nat_probe_authority_removed") && has("reason=peer_disconnected"));
     assert!(logs.iter().all(|message| message.contains("sn_id=")));
     assert!(logs.iter().all(|message| message.contains("peer_id=")));
+}
+
+#[test]
+fn remove_peer_if_authority_only_removes_a_matching_registration() {
+    let sn = scheduler_peer(30);
+    let peer = scheduler_peer(31);
+    let tunnel = CmdTunnelId::from(301);
+    let mut scheduler = NatProbeScheduler::new(sn);
+    scheduler.set_ports(scheduler_probe_ports(36001));
+    let first = scheduler
+        .observe_report(
+            &peer,
+            tunnel,
+            scheduler_endpoint(Protocol::Quic, 63000),
+            None,
+            1,
+        )
+        .directive
+        .unwrap();
+    let first_generation = first.registration_generation;
+
+    // A stale generation on an otherwise-matching tunnel must not delete the
+    // current registration (a concurrent re-registration bumped the generation).
+    assert!(!scheduler.remove_peer_if_authority(
+        &peer,
+        tunnel,
+        first_generation + 1,
+        NatProbeAuthorityRemovalReason::TunnelMissing
+    ));
+    assert_eq!(scheduler.authority_registration(&peer), Some((tunnel, first_generation)));
+
+    // A stale tunnel with the matching generation must also be refused.
+    assert!(!scheduler.remove_peer_if_authority(
+        &peer,
+        CmdTunnelId::from(399),
+        first_generation,
+        NatProbeAuthorityRemovalReason::TunnelMissing
+    ));
+    assert_eq!(scheduler.authority_registration(&peer), Some((tunnel, first_generation)));
+
+    // A snapshot that still matches removes the registration.
+    assert!(scheduler.remove_peer_if_authority(
+        &peer,
+        tunnel,
+        first_generation,
+        NatProbeAuthorityRemovalReason::TunnelMissing
+    ));
+    assert!(scheduler.authority_registration(&peer).is_none());
+
+    // Removing an already-absent registration is a no-op.
+    assert!(!scheduler.remove_peer_if_authority(
+        &peer,
+        tunnel,
+        first_generation,
+        NatProbeAuthorityRemovalReason::TunnelMissing
+    ));
+}
+
+#[tokio::test]
+async fn stale_reconcile_does_not_delete_a_registration_rebuilt_during_tunnel_scan() {
+    let service = test_sn_service(allow_all_sn_connection_validator());
+    let peer = test_id(70);
+    let identity = test_identity_for_id(peer.clone(), Vec::new());
+    let cert = identity.get_identity_cert().unwrap();
+    service.peer_mgr.add_or_update_peer(&peer, &Some(cert), 0, Vec::new(), &Vec::new());
+
+    let old_tunnel = CmdTunnelId::from(601);
+    let new_tunnel = CmdTunnelId::from(602);
+    let old_remote = scheduler_endpoint(Protocol::Quic, 59001);
+    let new_remote = scheduler_endpoint(Protocol::Quic, 59002);
+
+    // 1) First registration; capture the reconcile snapshot that the service
+    //    reads before it awaits the connection list.
+    {
+        let mut scheduler = service.nat_probe_scheduler.lock().unwrap();
+        scheduler.set_ports(scheduler_probe_ports(33111));
+        assert!(scheduler
+            .observe_capable_report(
+                &peer,
+                old_tunnel,
+                old_remote,
+                Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
+                None,
+                1,
+            )
+            .directive
+            .is_some());
+    }
+    let (old_tunnel_snapshot, old_generation) = service
+        .nat_probe_scheduler
+        .lock()
+        .unwrap()
+        .authority_registration(&peer)
+        .unwrap();
+
+    // 2) Concurrent disconnect + reconnect: drop the registration, re-register
+    //    on the new tunnel, and publish a fresh profile through a completed
+    //    probe while the stale scan is still in flight.
+    let completed = {
+        let mut scheduler = service.nat_probe_scheduler.lock().unwrap();
+        scheduler.remove_peer(&peer, NatProbeAuthorityRemovalReason::PeerDisconnected);
+        let directive = scheduler
+            .observe_capable_report(
+                &peer,
+                new_tunnel,
+                new_remote,
+                Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
+                None,
+                2_000_000,
+            )
+            .directive
+            .unwrap();
+        let result = NatProbeResult::from_directive(&directive, scheduler_profile(3_000_000));
+        scheduler.observe_capable_report(
+            &peer,
+            new_tunnel,
+            new_remote,
+            Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
+            Some(result),
+            3_000_000,
+        )
+    };
+    service.apply_nat_probe_transition(&peer, completed);
+
+    // 3) The stale reconciliation resumes after the reconnect finished: the
+    //    old snapshot no longer matches, so it must give up entirely.
+    service.finish_nat_probe_authority_reconcile(
+        &peer,
+        old_tunnel_snapshot,
+        old_generation,
+        false,
+    );
+
+    // The rebuilt registration and its published profile must both survive.
+    let (current_tunnel, current_generation) = service
+        .nat_probe_scheduler
+        .lock()
+        .unwrap()
+        .authority_registration(&peer)
+        .unwrap();
+    assert_eq!(current_tunnel, new_tunnel);
+    assert!(current_generation > old_generation);
+    assert!(service
+        .peer_mgr
+        .find_peer(&peer)
+        .and_then(|cached| cached.fresh_net_profile(3_000_000))
+        .is_some());
+}
+
+#[tokio::test]
+async fn stale_reconcile_still_removes_a_genuinely_missing_authority() {
+    let service = test_sn_service(allow_all_sn_connection_validator());
+    let peer = test_id(71);
+    let identity = test_identity_for_id(peer.clone(), Vec::new());
+    let cert = identity.get_identity_cert().unwrap();
+    service.peer_mgr.add_or_update_peer(&peer, &Some(cert), 0, Vec::new(), &Vec::new());
+
+    let tunnel = CmdTunnelId::from(603);
+    {
+        let mut scheduler = service.nat_probe_scheduler.lock().unwrap();
+        scheduler.set_ports(scheduler_probe_ports(33112));
+        assert!(scheduler
+            .observe_capable_report(
+                &peer,
+                tunnel,
+                scheduler_endpoint(Protocol::Quic, 59003),
+                Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
+                None,
+                1,
+            )
+            .directive
+            .is_some());
+    }
+    let (snapshot_tunnel, snapshot_generation) = service
+        .nat_probe_scheduler
+        .lock()
+        .unwrap()
+        .authority_registration(&peer)
+        .unwrap();
+
+    // The authority truly vanished and nothing replaced it, so reconciliation
+    // still removes the stale registration.
+    service.finish_nat_probe_authority_reconcile(
+        &peer,
+        snapshot_tunnel,
+        snapshot_generation,
+        false,
+    );
+
+    assert!(service
+        .nat_probe_scheduler
+        .lock()
+        .unwrap()
+        .authority_registration(&peer)
+        .is_none());
 }

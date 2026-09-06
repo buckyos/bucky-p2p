@@ -11,10 +11,7 @@ fn directive_test_value(sn: P2pId, peer: P2pId) -> NatProbeDirective {
         request_id: 9,
         probe_config_generation: 2,
         expires_at: 1_000,
-        endpoints: vec![
-            directive_test_endpoint(Protocol::Quic, "198.51.100.20:30001"),
-            directive_test_endpoint(Protocol::Quic, "198.51.100.20:30002"),
-        ],
+        ports: vec![30001, 30002],
     }
 }
 
@@ -23,10 +20,12 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
     let sn = P2pId::from(vec![31; 32]);
     let peer = P2pId::from(vec![32; 32]);
     let directive = directive_test_value(sn.clone(), peer.clone());
+    let sn_endpoint = directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630");
     assert!(SNClientService::valid_probe_directive(
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         4,
         8,
         1_000,
@@ -36,6 +35,7 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
         &sn,
         &peer,
         Protocol::Tcp,
+        &sn_endpoint,
         4,
         8,
         999,
@@ -45,6 +45,7 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         4,
         9,
         999,
@@ -54,6 +55,7 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         5,
         0,
         999,
@@ -63,6 +65,7 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         4,
         8,
         1_001,
@@ -72,6 +75,7 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
         &P2pId::from(vec![33; 32]),
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         4,
         8,
         999,
@@ -80,16 +84,18 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
 }
 
 #[test]
-fn nat_probe_directive_gate_rejects_invalid_or_amplifying_endpoint_sets() {
+fn nat_probe_directive_gate_rejects_invalid_or_amplifying_port_sets_and_active_sn_endpoints() {
     let sn = P2pId::from(vec![34; 32]);
     let peer = P2pId::from(vec![35; 32]);
     let mut directive = directive_test_value(sn.clone(), peer.clone());
+    let sn_endpoint = directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630");
 
-    directive.endpoints.truncate(1);
+    directive.ports.truncate(1);
     assert!(!SNClientService::valid_probe_directive(
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         0,
         0,
         999,
@@ -97,11 +103,12 @@ fn nat_probe_directive_gate_rejects_invalid_or_amplifying_endpoint_sets() {
     ));
 
     directive = directive_test_value(sn.clone(), peer.clone());
-    directive.endpoints[1] = directive_test_endpoint(Protocol::Quic, "203.0.113.21:30002");
+    directive.ports[1] = directive.ports[0];
     assert!(!SNClientService::valid_probe_directive(
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         0,
         0,
         999,
@@ -109,11 +116,12 @@ fn nat_probe_directive_gate_rejects_invalid_or_amplifying_endpoint_sets() {
     ));
 
     directive = directive_test_value(sn.clone(), peer.clone());
-    directive.endpoints[1] = directive.endpoints[0];
+    directive.ports[1] = 0;
     assert!(!SNClientService::valid_probe_directive(
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         0,
         0,
         999,
@@ -121,35 +129,66 @@ fn nat_probe_directive_gate_rejects_invalid_or_amplifying_endpoint_sets() {
     ));
 
     directive = directive_test_value(sn.clone(), peer.clone());
-    directive.endpoints[1] = directive_test_endpoint(Protocol::Tcp, "198.51.100.20:30002");
-    assert!(!SNClientService::valid_probe_directive(
-        &sn,
-        &peer,
-        Protocol::Quic,
-        0,
-        0,
-        999,
-        &directive,
-    ));
-
-    directive = directive_test_value(sn.clone(), peer.clone());
-    directive.endpoints = (0..=MAX_NAT_PROBE_ENDPOINTS)
-        .map(|index| {
-            directive_test_endpoint(
-                Protocol::Quic,
-                format!("198.51.100.20:{}", 31000 + index).as_str(),
-            )
-        })
+    directive.ports = (0..=MAX_NAT_PROBE_ENDPOINTS)
+        .map(|index| 31000 + index as u16)
         .collect();
     assert!(!SNClientService::valid_probe_directive(
         &sn,
         &peer,
         Protocol::Quic,
+        &sn_endpoint,
         0,
         0,
         999,
         &directive,
     ));
+
+    for invalid_endpoint in [
+        directive_test_endpoint(Protocol::Tcp, "198.51.100.20:3630"),
+        directive_test_endpoint(Protocol::Quic, "[2001:db8::1]:3630"),
+        directive_test_endpoint(Protocol::Quic, "0.0.0.0:3630"),
+        directive_test_endpoint(Protocol::Quic, "224.0.0.1:3630"),
+        directive_test_endpoint(Protocol::Quic, "255.255.255.255:3630"),
+    ] {
+        assert!(!SNClientService::valid_probe_directive(
+            &sn,
+            &peer,
+            Protocol::Quic,
+            &invalid_endpoint,
+            0,
+            0,
+            999,
+            &directive_test_value(sn.clone(), peer.clone()),
+        ));
+    }
+}
+
+#[test]
+fn nat_probe_directive_reconstructs_wan_targets_from_active_sn_ipv4_and_ports() {
+    let sn = P2pId::from(vec![41; 32]);
+    let peer = P2pId::from(vec![42; 32]);
+    let directive = directive_test_value(sn.clone(), peer.clone());
+    let active_endpoint = directive_test_endpoint(Protocol::Quic, "203.0.113.44:443");
+
+    let endpoints = SNClientService::validate_probe_directive(
+        &sn,
+        &peer,
+        Protocol::Quic,
+        &active_endpoint,
+        0,
+        0,
+        999,
+        &directive,
+    )
+    .unwrap();
+
+    assert_eq!(endpoints.len(), directive.ports.len());
+    for (endpoint, port) in endpoints.iter().zip(directive.ports.iter()) {
+        assert_eq!(endpoint.protocol(), Protocol::Quic);
+        assert_eq!(endpoint.addr().ip(), active_endpoint.addr().ip());
+        assert_eq!(endpoint.addr().port(), *port);
+        assert_eq!(endpoint.get_area(), EndpointArea::Wan);
+    }
 }
 
 #[test]
@@ -157,9 +196,11 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
     let sn = P2pId::from(vec![37; 32]);
     let peer = P2pId::from(vec![38; 32]);
     let directive = directive_test_value(sn.clone(), peer.clone());
+    let sn_endpoint = directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630");
     let validate = |active_sn: &P2pId,
                     local_peer: &P2pId,
                     protocol: Protocol,
+                    active_endpoint: &Endpoint,
                     last_generation: u64,
                     last_request: u64,
                     now: u64,
@@ -168,6 +209,7 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
             active_sn,
             local_peer,
             protocol,
+            active_endpoint,
             last_generation,
             last_request,
             now,
@@ -178,13 +220,13 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
     };
 
     assert_eq!(
-        validate(&sn, &peer, Protocol::Tcp, 4, 8, 999, &directive),
+        validate(&sn, &peer, Protocol::Tcp, &sn_endpoint, 4, 8, 999, &directive),
         "transport_not_quic"
     );
     let mut unsupported = directive.clone();
     unsupported.version = u8::MAX;
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 4, 8, 999, &unsupported),
+        validate(&sn, &peer, Protocol::Quic, &sn_endpoint, 4, 8, 999, &unsupported),
         "version_unsupported"
     );
     assert_eq!(
@@ -192,6 +234,7 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
             &P2pId::from(vec![39; 32]),
             &peer,
             Protocol::Quic,
+            &sn_endpoint,
             4,
             8,
             999,
@@ -204,6 +247,7 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
             &sn,
             &P2pId::from(vec![40; 32]),
             Protocol::Quic,
+            &sn_endpoint,
             4,
             8,
             999,
@@ -212,49 +256,70 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
         "peer_mismatch"
     );
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 4, 8, 1_001, &directive),
+        validate(&sn, &peer, Protocol::Quic, &sn_endpoint, 4, 8, 1_001, &directive),
         "deadline_expired"
     );
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 4, 9, 999, &directive),
+        validate(&sn, &peer, Protocol::Quic, &sn_endpoint, 4, 9, 999, &directive),
         "replay"
     );
 
     let mut invalid = directive.clone();
-    invalid.endpoints.truncate(1);
+    invalid.ports.truncate(1);
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 0, 0, 999, &invalid),
-        "endpoint_count"
+        validate(&sn, &peer, Protocol::Quic, &sn_endpoint, 0, 0, 999, &invalid),
+        "port_count"
     );
     invalid = directive.clone();
-    invalid.endpoints[1] = directive_test_endpoint(Protocol::Tcp, "198.51.100.20:30002");
+    invalid.ports[1] = 0;
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 0, 0, 999, &invalid),
-        "endpoint_protocol"
+        validate(&sn, &peer, Protocol::Quic, &sn_endpoint, 0, 0, 999, &invalid),
+        "port_zero"
     );
     invalid = directive.clone();
-    invalid.endpoints[1] = directive_test_endpoint(Protocol::Quic, "[2001:db8::1]:30002");
+    invalid.ports[1] = invalid.ports[0];
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 0, 0, 999, &invalid),
-        "endpoint_not_ipv4"
+        validate(&sn, &peer, Protocol::Quic, &sn_endpoint, 0, 0, 999, &invalid),
+        "port_duplicate"
     );
-    invalid = directive.clone();
-    invalid.endpoints[1] = directive_test_endpoint(Protocol::Quic, "203.0.113.21:30002");
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 0, 0, 999, &invalid),
-        "endpoint_ip_mismatch"
+        validate(
+            &sn,
+            &peer,
+            Protocol::Quic,
+            &directive_test_endpoint(Protocol::Tcp, "198.51.100.20:3630"),
+            0,
+            0,
+            999,
+            &directive,
+        ),
+        "active_endpoint_protocol"
     );
-    invalid = directive.clone();
-    invalid.endpoints[1] = directive_test_endpoint(Protocol::Quic, "198.51.100.20:0");
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 0, 0, 999, &invalid),
-        "endpoint_port"
+        validate(
+            &sn,
+            &peer,
+            Protocol::Quic,
+            &directive_test_endpoint(Protocol::Quic, "[2001:db8::1]:3630"),
+            0,
+            0,
+            999,
+            &directive,
+        ),
+        "active_endpoint_not_ipv4"
     );
-    invalid = directive.clone();
-    invalid.endpoints[1] = invalid.endpoints[0];
     assert_eq!(
-        validate(&sn, &peer, Protocol::Quic, 0, 0, 999, &invalid),
-        "endpoint_duplicate"
+        validate(
+            &sn,
+            &peer,
+            Protocol::Quic,
+            &directive_test_endpoint(Protocol::Quic, "0.0.0.0:3630"),
+            0,
+            0,
+            999,
+            &directive,
+        ),
+        "active_endpoint_address_unusable"
     );
 }
 
@@ -266,6 +331,7 @@ fn nat_probe_directive_does_not_gate_initial_online_publication() {
         latest_time: 1,
         conn_id: CmdTunnelId::from(41),
         protocol: Protocol::Quic,
+        sn_endpoint: directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630"),
         wan_ep_list: vec![],
         nat_probe_endpoints: vec![],
         nat_probe_signer: None,
@@ -275,13 +341,144 @@ fn nat_probe_directive_does_not_gate_initial_online_publication() {
     };
     let mut active_sn_list = Vec::new();
 
-    assert!(publish_active_sn(&mut active_sn_list, active));
+    assert!(publish_active_sn(&mut active_sn_list, active.clone()));
     assert_eq!(active_sn_list.len(), 1);
     assert_eq!(active_sn_list[0].sn_peer_id, sn);
     assert_eq!(
         active_sn_list[0].net_profile.observation,
         crate::nat_type::NatMappingObservation::Unknown
     );
+
+    let mut stale_replacement = active;
+    stale_replacement.conn_id = CmdTunnelId::from(42);
+    stale_replacement.sn_endpoint =
+        directive_test_endpoint(Protocol::Quic, "203.0.113.42:3630");
+    assert!(!publish_active_sn(&mut active_sn_list, stale_replacement));
+    assert_eq!(active_sn_list.len(), 1);
+    assert_eq!(active_sn_list[0].conn_id, CmdTunnelId::from(41));
+    assert_eq!(
+        active_sn_list[0].sn_endpoint,
+        directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630")
+    );
+}
+
+#[cfg(feature = "x509")]
+#[test]
+fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
+    use crate::x509::generate_rsa_x509_identity;
+
+    fn identity_cert(name: &str) -> P2pIdentityCertRef {
+        let identity: P2pIdentityRef =
+            Arc::new(generate_rsa_x509_identity(Some(name.to_owned())).unwrap());
+        identity.get_identity_cert().unwrap()
+    }
+
+    fn assert_active_sn_fields(actual: &ActiveSN, expected: &ActiveSN) {
+        assert_eq!(actual.sn_peer_id, expected.sn_peer_id);
+        assert_eq!(actual.latest_time, expected.latest_time);
+        assert_eq!(actual.conn_id, expected.conn_id);
+        assert_eq!(actual.protocol, expected.protocol);
+        assert_eq!(actual.sn_endpoint, expected.sn_endpoint);
+        assert_eq!(actual.wan_ep_list, expected.wan_ep_list);
+        assert_eq!(actual.nat_probe_endpoints, expected.nat_probe_endpoints);
+        assert_eq!(actual.net_profile, expected.net_profile);
+        assert_eq!(
+            actual.nat_probe_registration_generation,
+            expected.nat_probe_registration_generation
+        );
+        assert_eq!(
+            actual.last_nat_probe_request_id,
+            expected.last_nat_probe_request_id
+        );
+        assert_eq!(
+            actual
+                .nat_probe_signer
+                .as_ref()
+                .unwrap()
+                .get_encoded_cert()
+                .unwrap(),
+            expected
+                .nat_probe_signer
+                .as_ref()
+                .unwrap()
+                .get_encoded_cert()
+                .unwrap()
+        );
+    }
+
+    let sn = P2pId::from(vec![43; 32]);
+    let replacement_endpoint = directive_test_endpoint(Protocol::Quic, "203.0.113.43:3630");
+    let replacement_observation =
+        directive_test_endpoint(Protocol::Quic, "203.0.113.143:40100");
+    let replacement = ActiveSN {
+        sn_peer_id: sn.clone(),
+        latest_time: 200,
+        conn_id: CmdTunnelId::from(42),
+        protocol: Protocol::Quic,
+        sn_endpoint: replacement_endpoint,
+        wan_ep_list: vec![directive_test_endpoint(
+            Protocol::Quic,
+            "203.0.113.243:40200",
+        )],
+        nat_probe_endpoints: vec![
+            directive_test_endpoint(Protocol::Quic, "203.0.113.43:30001"),
+            directive_test_endpoint(Protocol::Quic, "203.0.113.43:30002"),
+        ],
+        nat_probe_signer: Some(identity_cert("nat-probe-owner-b")),
+        net_profile: NatProfile::from_observations(
+            &[replacement_observation, replacement_observation],
+            20,
+            Duration::from_secs(30),
+        ),
+        nat_probe_registration_generation: 8,
+        last_nat_probe_request_id: 9,
+    };
+    let replacement_snapshot = replacement.clone();
+    let mut active_sn_list = vec![replacement];
+
+    let stale_completion = ActiveSN {
+        sn_peer_id: P2pId::from(vec![44; 32]),
+        latest_time: 100,
+        conn_id: CmdTunnelId::from(41),
+        protocol: Protocol::Tcp,
+        sn_endpoint: directive_test_endpoint(Protocol::Tcp, "198.51.100.44:4630"),
+        wan_ep_list: vec![directive_test_endpoint(
+            Protocol::Tcp,
+            "198.51.100.144:40300",
+        )],
+        nat_probe_endpoints: vec![
+            directive_test_endpoint(Protocol::Quic, "198.51.100.44:31001"),
+            directive_test_endpoint(Protocol::Quic, "198.51.100.44:31002"),
+        ],
+        nat_probe_signer: Some(identity_cert("nat-probe-owner-a")),
+        net_profile: NatProfile::unknown(),
+        nat_probe_registration_generation: 3,
+        last_nat_probe_request_id: 4,
+    };
+    assert!(!update_active_sn_if_owner(
+        &mut active_sn_list,
+        &sn,
+        CmdTunnelId::from(41),
+        |active| *active = stale_completion,
+    ));
+    assert_active_sn_fields(&active_sn_list[0], &replacement_snapshot);
+
+    let current_endpoint = directive_test_endpoint(Protocol::Quic, "203.0.113.45:3630");
+    assert!(update_active_sn_if_owner(
+        &mut active_sn_list,
+        &sn,
+        CmdTunnelId::from(42),
+        |active| {
+            active.latest_time = 201;
+            active.sn_endpoint = current_endpoint;
+            active.nat_probe_registration_generation = 10;
+            active.last_nat_probe_request_id = 11;
+        },
+    ));
+    assert_eq!(active_sn_list[0].latest_time, 201);
+    assert_eq!(active_sn_list[0].sn_endpoint, current_endpoint);
+    assert_eq!(active_sn_list[0].nat_probe_registration_generation, 10);
+    assert_eq!(active_sn_list[0].last_nat_probe_request_id, 11);
 }
 
 #[cfg(feature = "x509")]

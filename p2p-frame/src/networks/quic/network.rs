@@ -647,6 +647,36 @@ impl UdpTunnelNetwork for QuicTunnelNetwork {
         Ok(())
     }
 
+    async fn probe_nat_profile(
+        &self,
+        probe_targets: &[Endpoint],
+        expected_signer: &P2pIdentityCertRef,
+        per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<crate::nat_type::NatProfile> {
+        let listener = self
+            .listeners
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|listener| {
+                probe_targets
+                    .first()
+                    .map(|target| listener.local().is_same_ip_version(target))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::NotFound,
+                    "no QUIC listener available for NAT profile probing"
+                )
+            })?;
+        listener
+            .probe_nat_profile(probe_targets, expected_signer, per_target_timeout, ttl)
+            .await
+    }
+
     async fn predict_traversal_endpoints(
         &self,
         probe_targets: &[Endpoint],

@@ -310,12 +310,9 @@ impl SnService {
             inter_sn_client.map(|client| client as SnInterClientRef);
     }
 
-    pub fn set_nat_probe_endpoints(&self, endpoints: Vec<Endpoint>) {
-        let affected = self
-            .nat_probe_scheduler
-            .lock()
-            .unwrap()
-            .set_endpoints(endpoints);
+    pub fn set_nat_probe_ports(&self, ports: Vec<u16>) {
+        let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+        let affected = scheduler.set_ports(ports);
         for peer_id in affected {
             self.peer_mgr.invalidate_net_profile(&peer_id);
         }
@@ -1458,31 +1455,66 @@ impl SnService {
             .nat_probe_scheduler
             .lock()
             .unwrap()
-            .authority_tunnel(peer_id);
-        let Some(authority) = authority else {
+            .authority_registration(peer_id);
+        let Some((authority_tunnel, registration_generation)) = authority else {
             return;
         };
         let cmd_peer_id = PeerId::from(peer_id.as_slice());
         let tunnels = self.cmd_server.get_peer_tunnels(&cmd_peer_id).await;
-        if tunnels.iter().any(|tunnel| tunnel.conn_id == authority) {
+        self.finish_nat_probe_authority_reconcile(
+            peer_id,
+            authority_tunnel,
+            registration_generation,
+            tunnels.iter().any(|tunnel| tunnel.conn_id == authority_tunnel),
+        );
+    }
+
+    /// Applies a reconcile decision captured before an await point. The
+    /// snapshot must still match the current registration: a concurrent task
+    /// may have removed the old registration and re-registered the peer on a
+    /// new tunnel while the connection list was queried. Removal and profile
+    /// invalidation share one scheduler-lock scope so a newer registration can
+    /// neither be deleted nor lose its published profile to stale cleanup.
+    fn finish_nat_probe_authority_reconcile(
+        &self,
+        peer_id: &P2pId,
+        authority_tunnel: CmdTunnelId,
+        registration_generation: u64,
+        authority_present: bool,
+    ) {
+        if authority_present {
             return;
         }
-        self.nat_probe_scheduler
-            .lock()
-            .unwrap()
-            .remove_peer(peer_id, NatProbeAuthorityRemovalReason::TunnelMissing);
+        let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+        if !scheduler.remove_peer_if_authority(
+            peer_id,
+            authority_tunnel,
+            registration_generation,
+            NatProbeAuthorityRemovalReason::TunnelMissing,
+        ) {
+            return;
+        }
         self.peer_mgr.invalidate_net_profile(peer_id);
     }
 
+    /// Applies a probe transition's publication while holding the scheduler
+    /// lock. Profile writes for a peer must serialize with authority removal
+    /// so a removed registration's invalidation can never erase a profile
+    /// published by a newer registration.
     fn apply_nat_probe_transition(
         &self,
         peer_id: &P2pId,
         transition: super::nat_probe_scheduler::ProbeTransition,
     ) -> Option<NatProbeDirective> {
+        let scheduler = self.nat_probe_scheduler.lock().unwrap();
         if let Some(profile_update) = transition.profile_update {
             match profile_update {
-                Some(profile) => self.peer_mgr.set_net_profile(peer_id, profile),
-                None => self.peer_mgr.invalidate_net_profile(peer_id),
+                Some(profile) => {
+                    self.peer_mgr.set_net_profile(peer_id, profile);
+                }
+                None => {
+                    self.peer_mgr.invalidate_net_profile(peer_id);
+                }
             };
         }
         transition.directive
@@ -1518,11 +1550,8 @@ impl SnService {
         for (peer_id, _) in authorities {
             self.reconcile_nat_probe_authority(&peer_id).await;
         }
-        let invalidated = self
-            .nat_probe_scheduler
-            .lock()
-            .unwrap()
-            .expire_due(bucky_time_now());
+        let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+        let invalidated = scheduler.expire_due(bucky_time_now());
         for peer_id in invalidated {
             self.peer_mgr.invalidate_net_profile(&peer_id);
         }
@@ -1593,7 +1622,6 @@ impl SnService {
             .get_peer_wan_classied_ep(peer_id, reported_eps.as_slice())
             .await;
 
-        let mut nat_probe_directive = None;
         self.peer_mgr.add_or_update_peer(
             &authenticated_peer_id,
             &report_sn
@@ -1606,9 +1634,9 @@ impl SnService {
 
         self.reconcile_nat_probe_authority(&authenticated_peer_id)
             .await;
-        if let Some(observed_tunnel) = observed_tunnel {
-            let transition = {
-                let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+        let (nat_probe_transition, nat_probe_ports) = {
+            let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+            let transition = observed_tunnel.map(|observed_tunnel| {
                 scheduler.set_sn_peer_id(local_id);
                 scheduler.observe_capable_report(
                     &authenticated_peer_id,
@@ -1618,10 +1646,12 @@ impl SnService {
                     report_sn.nat_probe_result.take(),
                     bucky_time_now(),
                 )
-            };
-            nat_probe_directive =
-                self.apply_nat_probe_transition(&authenticated_peer_id, transition);
-        }
+            });
+            (transition, scheduler.ports().to_vec())
+        };
+        let nat_probe_directive = nat_probe_transition.and_then(|transition| {
+            self.apply_nat_probe_transition(&authenticated_peer_id, transition)
+        });
         Ok(ReportSnResp {
             seq: report_sn.seq,
             sn_peer_id: local_id.clone(),
@@ -1629,12 +1659,7 @@ impl SnService {
             peer_info,
             end_point_array: remote_ep,
             receipt: None,
-            nat_probe_endpoints: self
-                .nat_probe_scheduler
-                .lock()
-                .unwrap()
-                .endpoints()
-                .to_vec(),
+            nat_probe_ports,
             nat_probe_directive,
         })
     }
@@ -1828,7 +1853,6 @@ impl SnServer {
         reuse_address: bool,
         server_runtime: ServerRuntime,
         nat_probe_ports: Vec<u16>,
-        nat_probe_advertised_ipv4: Option<Ipv4Addr>,
     ) -> SnServerRef {
         init_tls(identity_factory);
 
@@ -1897,22 +1921,7 @@ impl SnServer {
             Some(local_identity.get_id()),
         );
         service.set_local_identity(local_identity.clone());
-        let nat_probe_endpoints = nat_probe_advertised_ipv4
-            .map(|ip| {
-                nat_probe_ports
-                    .iter()
-                    .map(|port| {
-                        let mut endpoint = Endpoint::from((
-                            Protocol::Quic,
-                            SocketAddr::V4(SocketAddrV4::new(ip, *port)),
-                        ));
-                        endpoint.set_area(EndpointArea::Wan);
-                        endpoint
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        service.set_nat_probe_endpoints(nat_probe_endpoints);
+        service.set_nat_probe_ports(nat_probe_ports.clone());
         if owner_client_override.is_none() {
             if let Some(membership) = owner_client_membership.as_ref() {
                 let ttp_node = TtpNode::new_with_runtime(ttp_server.runtime());
@@ -2237,24 +2246,8 @@ impl SnServiceConfig {
     }
 }
 
-fn unique_static_wan_ipv4(identity: &P2pIdentityRef) -> Option<Ipv4Addr> {
-    let mut addresses = identity
-        .endpoints()
-        .into_iter()
-        .filter(|endpoint| endpoint.is_static_wan())
-        .filter_map(|endpoint| match endpoint.addr() {
-            SocketAddr::V4(address) => Some(*address.ip()),
-            SocketAddr::V6(_) => None,
-        })
-        .collect::<Vec<_>>();
-    addresses.sort_unstable();
-    addresses.dedup();
-    (addresses.len() == 1).then(|| addresses[0])
-}
-
 pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef> {
-    let nat_probe_advertised_ipv4 = unique_static_wan_ipv4(&config.local_identity);
-    validate_nat_probe_config(config.nat_probe_ports.as_slice(), nat_probe_advertised_ipv4)?;
+    validate_nat_probe_config(config.nat_probe_ports.as_slice())?;
     let service = SnServer::new(
         config.local_identity,
         config.identity_factory,
@@ -2267,13 +2260,12 @@ pub async fn create_sn_service(config: SnServiceConfig) -> P2pResult<SnServerRef
         config.reuse_address,
         config.server_runtime,
         config.nat_probe_ports,
-        nat_probe_advertised_ipv4,
     )
     .await;
     Ok(service)
 }
 
-fn validate_nat_probe_config(ports: &[u16], advertised_ipv4: Option<Ipv4Addr>) -> P2pResult<()> {
+fn validate_nat_probe_config(ports: &[u16]) -> P2pResult<()> {
     if ports.is_empty() {
         return Ok(());
     }
@@ -2289,18 +2281,6 @@ fn validate_nat_probe_config(ports: &[u16], advertised_ipv4: Option<Ipv4Addr>) -
         return Err(p2p_err!(
             P2pErrorCode::InvalidParam,
             "NAT probe ports must be non-zero and unique"
-        ));
-    }
-    let Some(ip) = advertised_ipv4 else {
-        return Err(p2p_err!(
-            P2pErrorCode::InvalidParam,
-            "NAT probe ports require one advertised static-WAN IPv4"
-        ));
-    };
-    if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
-        return Err(p2p_err!(
-            P2pErrorCode::InvalidParam,
-            "NAT probe advertised IPv4 is not usable"
         ));
     }
     Ok(())

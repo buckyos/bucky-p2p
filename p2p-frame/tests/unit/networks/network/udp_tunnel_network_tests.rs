@@ -139,6 +139,16 @@ impl UdpTunnelNetwork for UdpCapableTunnelNetwork {
         Err(p2p_err!(P2pErrorCode::NotSupport, "test network"))
     }
 
+    async fn probe_nat_profile(
+        &self,
+        _probe_targets: &[Endpoint],
+        _expected_signer: &crate::p2p_identity::P2pIdentityCertRef,
+        _per_target_timeout: std::time::Duration,
+        _ttl: std::time::Duration,
+    ) -> P2pResult<crate::nat_type::NatProfile> {
+        Err(p2p_err!(P2pErrorCode::NotSupport, "test network"))
+    }
+
     async fn predict_traversal_endpoints(
         &self,
         _probe_targets: &[Endpoint],

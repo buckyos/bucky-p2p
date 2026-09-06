@@ -32,6 +32,7 @@ fn active_sn_profiles_are_kept_per_sn_id() {
                 latest_time: now,
                 conn_id: 1u32.into(),
                 protocol: Protocol::Quic,
+                sn_endpoint: localhost_quic_endpoint(46001),
                 wan_ep_list: vec![],
                 nat_probe_endpoints: vec![],
                 nat_probe_signer: None,
@@ -44,6 +45,7 @@ fn active_sn_profiles_are_kept_per_sn_id() {
                 latest_time: now,
                 conn_id: 2u32.into(),
                 protocol: Protocol::Quic,
+                sn_endpoint: localhost_quic_endpoint(46002),
                 wan_ep_list: vec![],
                 nat_probe_endpoints: vec![],
                 nat_probe_signer: None,
@@ -75,6 +77,42 @@ fn active_sn_profiles_are_kept_per_sn_id() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_reflectors_bind_all_wildcard_ports_before_spawning_any_task() {
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let sn_identity = build_identity(
+        "nat-probe-atomic-bind-sn",
+        localhost_quic_endpoint(next_port()),
+    );
+    let first_reservation = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let first_port = first_reservation.local_addr().unwrap().port();
+    let second_reservation = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let second_port = second_reservation.local_addr().unwrap().port();
+    drop(first_reservation);
+
+    let server = create_sn_service(
+        SnServiceConfig::new(
+            sn_identity,
+            identity_factory,
+            cert_factory,
+            test_server_runtime(),
+        )
+        .set_nat_probe_ports(vec![first_port, second_port]),
+    )
+    .await
+    .unwrap();
+    let error = server.start().await.unwrap_err();
+    assert_eq!(error.code(), P2pErrorCode::IoError);
+
+    let first_rebind = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, first_port))
+        .expect("a failed later bind must release the earlier wildcard reflector socket");
+    assert_eq!(first_rebind.local_addr().unwrap().port(), first_port);
+    drop(first_rebind);
+    drop(second_reservation);
+    server.stop();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn first_query_returns_remote_profile_and_call_forwards_exact_snapshot() {
     let identity_factory = Arc::new(X509IdentityFactory);
@@ -91,7 +129,7 @@ async fn first_query_returns_remote_profile_and_call_forwards_exact_snapshot() {
             cert_factory.clone(),
             test_server_runtime(),
         )
-        .set_nat_probe_ports(probe_ports),
+        .set_nat_probe_ports(probe_ports.clone()),
     )
     .await
     .unwrap();
@@ -116,14 +154,32 @@ async fn first_query_returns_remote_profile_and_call_forwards_exact_snapshot() {
     caller.wait_online(Some(ONLINE_TIMEOUT)).await.unwrap();
     callee.wait_online(Some(ONLINE_TIMEOUT)).await.unwrap();
 
-    let active_signer = caller
+    let active = caller
         .sn_client()
         .get_active_sn_list()
         .into_iter()
         .find(|active| active.sn_peer_id == sn_id)
-        .and_then(|active| active.nat_probe_signer)
+        .expect("authenticated SN report must publish an ActiveSN");
+    let active_signer = active
+        .nat_probe_signer
         .expect("authenticated SN report must publish a trusted PNAT signer");
     assert_eq!(active_signer.get_id(), sn_id);
+    assert_eq!(active.sn_endpoint, sn_endpoint);
+    assert_eq!(active.nat_probe_endpoints.len(), probe_ports.len());
+    for endpoint in &active.nat_probe_endpoints {
+        assert_eq!(endpoint.protocol(), Protocol::Quic);
+        assert_eq!(endpoint.addr().ip(), sn_endpoint.addr().ip());
+        assert_eq!(endpoint.get_area(), EndpointArea::Wan);
+    }
+    let mut actual_ports: Vec<u16> = active
+        .nat_probe_endpoints
+        .iter()
+        .map(|endpoint| endpoint.addr().port())
+        .collect();
+    actual_ports.sort_unstable();
+    let mut expected_ports = probe_ports;
+    expected_ports.sort_unstable();
+    assert_eq!(actual_ports, expected_ports);
 
     let query = caller
         .sn_client()
@@ -394,10 +450,7 @@ async fn initial_probe_and_result_report_failure_do_not_gate_online() {
                     request_id: 1,
                     probe_config_generation: 1,
                     expires_at: bucky_time_now() + Duration::from_secs(30).as_micros() as u64,
-                    endpoints: vec![
-                        Endpoint::from((Protocol::Quic, "198.51.100.20:39001".parse().unwrap())),
-                        Endpoint::from((Protocol::Quic, "198.51.100.20:39002".parse().unwrap())),
-                    ],
+                    ports: vec![39001, 39002],
                 };
                 let response = ReportSnResp {
                     seq: report.seq,
@@ -406,7 +459,7 @@ async fn initial_probe_and_result_report_failure_do_not_gate_online() {
                     peer_info: None,
                     end_point_array: vec![],
                     receipt: None,
-                    nat_probe_endpoints: vec![],
+                    nat_probe_ports: vec![],
                     nat_probe_directive: Some(directive),
                 };
                 Ok(Some(CmdBody::from(response.to_vec().unwrap())))

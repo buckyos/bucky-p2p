@@ -1,0 +1,107 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: breaking
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/service/nat_probe_scheduler.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/nat_probe_config_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs", "p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs", "p2p-frame/tests/nat_probe_ports_api_check.py", "sn-miner-rust/src/main.rs", "sn-miner-rust/tests/unit/nat_probe_config_tests.rs", "sn-miner-rust/tests/real_process.rs"]
+contract_checks:
+  mode: enabled
+  steps:
+    - id: nat-probe-ports-external-positive
+      kind: external-positive
+      assertion: new-path-compiles
+      name: Compile an external consumer using port-only directive response and service APIs
+      change_ids: ["CHG-nat-probe-port-only-directive"]
+      run: ["python3", "p2p-frame/tests/nat_probe_ports_api_check.py", "--mode", "positive"]
+    - id: nat-probe-ports-external-negative
+      kind: external-negative
+      assertion: old-path-rejected-for-removed-symbol
+      name: Prove endpoint-bearing fields and service setter fail with expected diagnostics
+      change_ids: ["CHG-nat-probe-port-only-directive"]
+      run: ["python3", "p2p-frame/tests/nat_probe_ports_api_check.py", "--mode", "negative"]
+    - id: nat-probe-ports-removed-symbol-scan
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      name: Verify repository consumers no longer use endpoint-bearing NAT probe APIs
+      change_ids: ["CHG-nat-probe-port-only-directive"]
+      run: ["python3", "./harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "060-nat-probe-port-only-directive"]
+    - id: nat-probe-ports-repository-compile
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      name: Compile p2p-frame and sn-miner consumers including the real socket matrix
+      change_ids: ["CHG-nat-probe-port-only-directive"]
+      run: ["cargo", "test", "-p", "p2p-frame", "-p", "sn-miner", "--no-run", "--all-targets", "--features", "p2p-frame/x509,p2p-frame/test-real-socket-matrix"]
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 验证端口-only wire 边界、客户端地址重建和拒绝原因、scheduler 状态迁移、service 配置及 sn-miner wildcard 规范化。
+    test_targets:
+      - p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs
+      - p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs
+      - p2p-frame/tests/unit/sn_tests/service/service/nat_probe_config_tests.rs
+      - p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs
+      - sn-miner-rust/tests/unit/nat_probe_config_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 非法端口集合和不可用 ActiveSN endpoint 必须 fail closed，不发送探测。
+    steps:
+      - id: nat-probe-ports-unit
+        name: Run port wire client scheduler and service regressions
+        change_ids: ["CHG-nat-probe-port-only-directive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "nat_probe_", "--", "--test-threads=1"]
+      - id: nat-probe-miner-unit
+        name: Run sn-miner port parsing and wildcard identity regressions
+        change_ids: ["CHG-nat-probe-port-only-directive"]
+        run: ["cargo", "test", "-p", "sn-miner", "--bin", "sn-miner", "nat_probe_", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: 验证 reflector 通配端口原子绑定、probe-enabled sn-miner 真实进程启动，以及完整生产策略真实 socket 矩阵。
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+      - p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs
+      - sn-miner-rust/tests/real_process.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 用例使用本机真实 TCP/UDP/QUIC socket，并串行运行存在端口竞争的路径。
+    steps:
+      - id: nat-probe-wildcard-bind-dv
+        name: Prove reflector bind failure releases every previously bound wildcard socket
+        change_ids: ["CHG-nat-probe-port-only-directive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::probe_reflectors_bind_all_wildcard_ports_before_spawning_any_task", "--", "--exact", "--test-threads=1"]
+      - id: nat-probe-miner-process-dv
+        name: Prove probe-enabled sn-miner starts with wildcard-normalized identity
+        change_ids: ["CHG-nat-probe-port-only-directive"]
+        run: ["cargo", "test", "-p", "sn-miner", "--test", "real_process", "sn_miner_probe_enabled_serving_identity_still_listens_on_wildcard_address", "--", "--exact", "--test-threads=1"]
+      - id: nat-probe-strategy-matrix-dv
+        name: Run every production tunnel strategy branch with port-configured reflectors
+        change_ids: ["CHG-nat-probe-port-only-directive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--test", "real_p2p_tunnel_flow", "--features", "x509,test-real-socket-matrix", "strategy_matrix::real_strategy_matrix_executes_production_branches", "--", "--exact", "--nocapture", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: 通过认证 SN report 和两个真实 reflector 验证端口下发、ActiveSN IPv4 重建、即时画像及后续 query/call 快照流。
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - 本地 loopback 证明真实协议和 socket 路径，不声明公网 NAT 或跨主机防火墙结果。
+    steps:
+      - id: nat-probe-active-sn-integration
+        name: Prove clients reconstruct probe targets from authenticated ActiveSN IP and response ports
+        change_ids: ["CHG-nat-probe-port-only-directive"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::tests::sn_profile_flow_tests::first_query_returns_remote_profile_and_call_forwards_exact_snapshot", "--", "--exact", "--test-threads=1"]

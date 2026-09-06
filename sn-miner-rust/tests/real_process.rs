@@ -6,7 +6,7 @@ use bucky_raw_codec::FileEncoder;
 use cyfs_p2p::endpoint::{Endpoint, Protocol};
 use cyfs_p2p::p2p_identity::P2pId;
 use std::fs::{self, File};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -52,11 +52,18 @@ fn loopback(port: u16) -> SocketAddr {
 }
 
 fn write_identity(base: &Path, tcp_port: u16) {
+    write_identity_with_ip(base, tcp_port, Ipv4Addr::LOCALHOST);
+}
+
+fn write_identity_with_ip(base: &Path, tcp_port: u16, ip: Ipv4Addr) {
     let private_key = PrivateKey::generate_rsa(1024).unwrap();
     let device = Device::new(
         None,
         UniqueId::default(),
-        vec![DeviceEndpoint::from((DeviceProtocol::Tcp, loopback(tcp_port)))],
+        vec![DeviceEndpoint::from((
+            DeviceProtocol::Tcp,
+            SocketAddr::V4(SocketAddrV4::new(ip, tcp_port)),
+        ))],
         vec![],
         vec![],
         private_key.public(),
@@ -280,6 +287,45 @@ route_publish_interval_secs=2
             serving_desc.display(),
             p2p_id(4),
             endpoint(reserve_tcp_port())
+        ),
+    );
+
+    assert_role_ready(&config, "serving", &[loopback(serving_port)]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn sn_miner_probe_enabled_serving_identity_still_listens_on_wildcard_address() {
+    let dir = temp_dir("serving-probe-wildcard");
+    let serving_port = reserve_tcp_port();
+    let serving_desc = dir.join("serving-sn");
+    write_identity_with_ip(
+        &serving_desc,
+        serving_port,
+        Ipv4Addr::new(198, 51, 100, 9),
+    );
+    let first_probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let second_probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let first_probe_port = first_probe.local_addr().unwrap().port();
+    let second_probe_port = second_probe.local_addr().unwrap().port();
+    drop(first_probe);
+    drop(second_probe);
+    let config = write_config(
+        &dir,
+        "serving.conf",
+        &format!(
+            "\
+role=serving
+desc={}
+owner_members={}
+owner_serving_endpoints={}
+nat_probe_ports={},{}
+",
+            serving_desc.display(),
+            p2p_id(44),
+            endpoint(reserve_tcp_port()),
+            first_probe_port,
+            second_probe_port,
         ),
     );
 

@@ -38,6 +38,14 @@ async fn use_udp_capability(
             .punch_only(remote, TunnelConnectIntent::default(), Duration::from_secs(1))
             .await;
         let _ = udp
+            .probe_nat_profile(
+                targets,
+                expected_signer,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+            )
+            .await;
+        let _ = udp
             .predict_traversal_endpoints(
                 targets,
                 expected_signer,

@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: high-risk
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 060-nat-probe-port-only-directive
+stage: design
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/060-nat-probe-port-only-directive.paths
+baseline_manifest:
+
+changes:
+  - id: CHG-nat-probe-port-only-directive
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/protocol/sn.rs", "p2p-frame/src/sn/service/nat_probe_scheduler.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests/unit/sn_tests/protocol/common/nat_type_wire_tests.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/nat_probe_config_tests.rs", "p2p-frame/tests/unit/sn_tests/service/service/nat_probe_scheduler_tests.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs", "p2p-frame/tests/real_p2p_tunnel_flow/strategy_matrix.rs", "sn-miner-rust/src/main.rs", "sn-miner-rust/tests/unit/nat_probe_config_tests.rs", "sn-miner-rust/tests/real_process.rs"]
+    changed_paths_file:

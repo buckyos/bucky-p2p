@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/060-nat-probe-port-only-directive/proposal.md": "3c67108caefe63c022eb8a3d4813cb2be091763ec5468cf2048f944dc2eeaada"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "fc1a1f3f7824c986e4f1d11b4077f8e13bb6eddf9edb11ae9dece9cb3ea428ff"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

@@ -116,7 +116,7 @@ pub(super) struct ProbeTransition {
 
 pub(super) struct NatProbeScheduler {
     sn_peer_id: P2pId,
-    endpoints: Vec<Endpoint>,
+    ports: Vec<u16>,
     config_generation: u64,
     next_registration_generation: u64,
     next_request_id: u64,
@@ -127,7 +127,7 @@ impl NatProbeScheduler {
     pub fn new(sn_peer_id: P2pId) -> Self {
         Self {
             sn_peer_id,
-            endpoints: Vec::new(),
+            ports: Vec::new(),
             config_generation: 1,
             next_registration_generation: 1,
             next_request_id: 1,
@@ -135,32 +135,19 @@ impl NatProbeScheduler {
         }
     }
 
-    pub fn set_endpoints(&mut self, mut endpoints: Vec<Endpoint>) -> Vec<P2pId> {
-        let configured_count = endpoints.len();
-        endpoints.retain(|endpoint| {
-            endpoint.protocol() == Protocol::Quic
-                && endpoint.addr().is_ipv4()
-                && endpoint.addr().port() != 0
-                && !endpoint.addr().ip().is_unspecified()
-        });
-        endpoints.sort();
-        endpoints.dedup_by_key(|endpoint| *endpoint.addr());
-        let valid = (2..=MAX_NAT_PROBE_ENDPOINTS).contains(&endpoints.len())
-            && endpoints
-                .first()
-                .map(|first| {
-                    endpoints
-                        .iter()
-                        .all(|endpoint| endpoint.addr().ip() == first.addr().ip())
-                })
-                .unwrap_or(false);
+    pub fn set_ports(&mut self, mut ports: Vec<u16>) -> Vec<P2pId> {
+        let configured_count = ports.len();
+        ports.sort_unstable();
+        let valid = (2..=MAX_NAT_PROBE_ENDPOINTS).contains(&ports.len())
+            && ports.iter().all(|port| *port != 0)
+            && ports.windows(2).all(|ports| ports[0] != ports[1]);
         if !valid {
-            endpoints.clear();
+            ports.clear();
         }
-        if endpoints == self.endpoints {
+        if ports == self.ports {
             if configured_count > 0 && !valid {
                 log::warn!(
-                    "event=nat_probe_config_invalid sn_id={} config_generation={} configured_endpoint_count={} effective_changed=false",
+                    "event=nat_probe_config_invalid sn_id={} config_generation={} configured_port_count={} effective_changed=false",
                     self.sn_peer_id,
                     self.config_generation,
                     configured_count
@@ -169,26 +156,18 @@ impl NatProbeScheduler {
             return Vec::new();
         }
 
-        self.endpoints = endpoints;
+        self.ports = ports;
         self.config_generation = self.config_generation.wrapping_add(1).max(1);
         if valid || configured_count == 0 {
             log::info!(
-                "event=nat_probe_config_changed sn_id={} config_generation={} endpoint_count={}",
+                "event=nat_probe_config_changed sn_id={} config_generation={} port_count={}",
                 self.sn_peer_id,
                 self.config_generation,
-                self.endpoints.len()
+                self.ports.len()
             );
-            if valid {
-                log::debug!(
-                    "event=nat_probe_config_endpoints sn_id={} config_generation={} endpoints={:?}",
-                    self.sn_peer_id,
-                    self.config_generation,
-                    self.endpoints
-                );
-            }
         } else {
             log::warn!(
-                "event=nat_probe_config_invalid sn_id={} config_generation={} configured_endpoint_count={}",
+                "event=nat_probe_config_invalid sn_id={} config_generation={} configured_port_count={}",
                 self.sn_peer_id,
                 self.config_generation,
                 configured_count
@@ -242,8 +221,8 @@ impl NatProbeScheduler {
         self.peers.clear();
     }
 
-    pub fn endpoints(&self) -> &[Endpoint] {
-        &self.endpoints
+    pub fn ports(&self) -> &[u16] {
+        &self.ports
     }
 
     pub fn observe_capable_report(
@@ -749,8 +728,8 @@ impl NatProbeScheduler {
             }
             return None;
         };
-        let suppression = if self.endpoints.is_empty() {
-            Some("no_probe_endpoints")
+        let suppression = if self.ports.is_empty() {
+            Some("no_probe_ports")
         } else if !state.control_supported {
             Some("capability_unsupported")
         } else if state.in_flight.is_some() {
@@ -785,7 +764,7 @@ impl NatProbeScheduler {
         state.pending_trigger = None;
         state.pending_demand = false;
         log::info!(
-            "event=nat_probe_directive_issued sn_id={} peer_id={} tunnel_id={:?} transport=quic registration_generation={} config_generation={} request_id={} trigger={} expires_at={} endpoint_count={}",
+            "event=nat_probe_directive_issued sn_id={} peer_id={} tunnel_id={:?} transport=quic registration_generation={} config_generation={} request_id={} trigger={} expires_at={} port_count={}",
             self.sn_peer_id,
             peer_id,
             state.authority_tunnel_id,
@@ -794,7 +773,7 @@ impl NatProbeScheduler {
             request_id,
             trigger.as_str(),
             expires_at,
-            self.endpoints.len()
+            self.ports.len()
         );
         Some(NatProbeDirective {
             version: NAT_PROBE_CONTROL_VERSION,
@@ -804,7 +783,7 @@ impl NatProbeScheduler {
             request_id,
             probe_config_generation: state.config_generation,
             expires_at,
-            endpoints: self.endpoints.clone(),
+            ports: self.ports.clone(),
         })
     }
 
@@ -831,6 +810,16 @@ impl NatProbeScheduler {
         self.peers
             .get(peer_id)
             .map(|state| state.authority_tunnel_id)
+    }
+
+    /// Snapshot of the current registration identity for a peer. Callers that
+    /// observe the connection list across an await point must re-validate this
+    /// snapshot with [`Self::remove_peer_if_authority`] before removing state,
+    /// because a concurrent task may replace the registration in between.
+    pub fn authority_registration(&self, peer_id: &P2pId) -> Option<(CmdTunnelId, u64)> {
+        self.peers
+            .get(peer_id)
+            .map(|state| (state.authority_tunnel_id, state.registration_generation))
     }
 
     pub fn authorities(&self) -> Vec<(P2pId, CmdTunnelId)> {
@@ -886,6 +875,39 @@ impl NatProbeScheduler {
             );
         }
         true
+    }
+
+    /// Removes the peer's registration only when it still matches the
+    /// `(authority_tunnel_id, registration_generation)` snapshot the caller
+    /// captured before an await point. A mismatch means another task already
+    /// replaced the registration (for example after a reconnect), so the stale
+    /// reconciliation must give up instead of deleting the newer registration.
+    pub fn remove_peer_if_authority(
+        &mut self,
+        peer_id: &P2pId,
+        expected_tunnel_id: CmdTunnelId,
+        expected_registration_generation: u64,
+        reason: NatProbeAuthorityRemovalReason,
+    ) -> bool {
+        let matches_snapshot = self
+            .peers
+            .get(peer_id)
+            .map(|state| {
+                state.authority_tunnel_id == expected_tunnel_id
+                    && state.registration_generation == expected_registration_generation
+            })
+            .unwrap_or(false);
+        if !matches_snapshot {
+            log::debug!(
+                "event=nat_probe_authority_reconcile_skipped sn_id={} peer_id={} tunnel_id={:?} registration_generation={} reason=stale_snapshot",
+                self.sn_peer_id,
+                peer_id,
+                expected_tunnel_id,
+                expected_registration_generation
+            );
+            return false;
+        }
+        self.remove_peer(peer_id, reason)
     }
 
     #[cfg(test)]

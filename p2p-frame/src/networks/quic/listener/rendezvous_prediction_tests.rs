@@ -455,3 +455,202 @@ async fn rendezvous_prediction_uses_the_bound_quic_listener_socket_and_generatio
     task_a.abort();
     task_b.abort();
 }
+
+async fn respond_with_observed_ports(
+    listener: &QuicTunnelListener,
+    observed_ports: &HashMap<SocketAddr, u16>,
+    signer: &P2pIdentityRef,
+    expected_registrations: usize,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut answered: Vec<[u8; NAT_PROBE_TOKEN_LEN]> = Vec::new();
+    while answered.len() < expected_registrations {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "NAT probe registration never appeared"
+        );
+        let snapshot: Vec<([u8; NAT_PROBE_TOKEN_LEN], SocketAddr)> = {
+            let pending = listener.nat_probe_waiters.pending.lock().unwrap();
+            pending
+                .iter()
+                .map(|(token, waiter)| (*token, waiter.expected_source))
+                .collect()
+        };
+        let mut dispatched = false;
+        for (token, source) in snapshot {
+            if answered.contains(&token) {
+                continue;
+            }
+            let Some(&port) = observed_ports.get(&source) else {
+                continue;
+            };
+            let observed: SocketAddr = format!("198.51.100.7:{port}").parse().unwrap();
+            let packet = signed_probe_response(token, observed, signer);
+            listener
+                .nat_probe_waiters
+                .dispatch(decode_response_datagram(&packet).unwrap(), source);
+            answered.push(token);
+            dispatched = true;
+            break;
+        }
+        if !dispatched {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+}
+
+fn fake_reflector_targets() -> (Vec<std::net::UdpSocket>, Vec<Endpoint>) {
+    let mut sockets = Vec::new();
+    let mut targets = Vec::new();
+    for _ in 0..3 {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        targets.push(Endpoint::from((
+            Protocol::Quic,
+            socket.local_addr().unwrap(),
+        )));
+        sockets.push(socket);
+    }
+    (sockets, targets)
+}
+
+async fn symmetric_probe_listener() -> Arc<QuicTunnelListener> {
+    let listener = new_listener();
+    listener
+        .bind(
+            Endpoint::from((Protocol::Quic, "127.0.0.1:0".parse().unwrap())),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    listener.start().await.unwrap();
+    listener
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nat_profile_probe_keeps_symmetric_classification_without_prediction_hint() {
+    let signer = probe_identity("pnat-unpredicted-symmetric");
+    let cert = signer.get_identity_cert().unwrap();
+    let (_reflectors, targets) = fake_reflector_targets();
+    let observed_ports: HashMap<SocketAddr, u16> = targets
+        .iter()
+        .zip([40000u16, 40003, 40007])
+        .map(|(target, port)| (*target.addr(), port))
+        .collect();
+    let listener = symmetric_probe_listener().await;
+
+    let responder = tokio::spawn({
+        let listener = listener.clone();
+        let signer = signer.clone();
+        let observed_ports = observed_ports.clone();
+        async move {
+            respond_with_observed_ports(&listener, &observed_ports, &signer, 3).await;
+        }
+    });
+    let profile = listener
+        .probe_nat_profile(
+            &targets,
+            &cert,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    responder.await.unwrap();
+    assert_eq!(
+        profile.observation,
+        NatMappingObservation::SymmetricLike,
+        "unpredictable symmetric ports must keep the symmetric classification"
+    );
+    assert!(
+        profile.prediction_hint.is_none(),
+        "non-arithmetic port deltas must not produce a prediction hint"
+    );
+    assert_eq!(profile.observed_endpoint.unwrap().addr().port(), 40007);
+
+    let responder = tokio::spawn({
+        let listener = listener.clone();
+        let signer = signer.clone();
+        let observed_ports = observed_ports.clone();
+        async move {
+            respond_with_observed_ports(&listener, &observed_ports, &signer, 3).await;
+        }
+    });
+    let prediction = listener
+        .predict_traversal_endpoints(
+            &targets,
+            &cert,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_err();
+    responder.await.unwrap();
+    assert_eq!(
+        prediction.code(),
+        P2pErrorCode::NotFound,
+        "rendezvous prediction keeps requiring candidates for the same observation"
+    );
+
+    listener.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nat_profile_probe_and_prediction_keep_arithmetic_symmetric_ports_usable() {
+    let signer = probe_identity("pnat-predictable-symmetric");
+    let cert = signer.get_identity_cert().unwrap();
+    let (_reflectors, targets) = fake_reflector_targets();
+    let observed_ports: HashMap<SocketAddr, u16> = targets
+        .iter()
+        .zip([40000u16, 40003, 40006])
+        .map(|(target, port)| (*target.addr(), port))
+        .collect();
+    let listener = symmetric_probe_listener().await;
+
+    let responder = tokio::spawn({
+        let listener = listener.clone();
+        let signer = signer.clone();
+        let observed_ports = observed_ports.clone();
+        async move {
+            respond_with_observed_ports(&listener, &observed_ports, &signer, 3).await;
+        }
+    });
+    let profile = listener
+        .probe_nat_profile(
+            &targets,
+            &cert,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    responder.await.unwrap();
+    assert_eq!(profile.observation, NatMappingObservation::SymmetricLike);
+    assert!(profile.prediction_hint.is_some());
+
+    let responder = tokio::spawn({
+        let listener = listener.clone();
+        let signer = signer.clone();
+        let observed_ports = observed_ports.clone();
+        async move {
+            respond_with_observed_ports(&listener, &observed_ports, &signer, 3).await;
+        }
+    });
+    let prediction = listener
+        .predict_traversal_endpoints(
+            &targets,
+            &cert,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    responder.await.unwrap();
+    assert_eq!(prediction.profile.observation, NatMappingObservation::SymmetricLike);
+    assert_eq!(prediction.endpoints.len(), MAX_NAT_PREDICTION_PORTS);
+    assert_eq!(prediction.endpoints[0].addr().port(), 40009);
+    assert_eq!(prediction.endpoints[1].addr().port(), 40012);
+
+    listener.close();
+}

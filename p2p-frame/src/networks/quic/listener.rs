@@ -633,13 +633,13 @@ impl QuicTunnelListener {
         Ok(())
     }
 
-    pub(crate) async fn predict_traversal_endpoints(
+    pub(crate) async fn probe_nat_profile(
         &self,
         probe_targets: &[Endpoint],
         expected_signer: &P2pIdentityCertRef,
         per_target_timeout: Duration,
         ttl: Duration,
-    ) -> P2pResult<TraversalEndpointPrediction> {
+    ) -> P2pResult<NatProfile> {
         if probe_targets.len() < 2
             || probe_targets.len() > MAX_NAT_PREDICTION_PORTS
             || per_target_timeout.is_zero()
@@ -734,6 +734,25 @@ impl QuicTunnelListener {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "quic listener closed"));
         }
         let profile = NatProfile::from_observations(&observations, observed_at, ttl);
+        if profile.observed_endpoint.is_none() {
+            return Err(p2p_err!(
+                P2pErrorCode::NotFound,
+                "listener NAT probe produced no observed endpoint"
+            ));
+        }
+        Ok(profile)
+    }
+
+    pub(crate) async fn predict_traversal_endpoints(
+        &self,
+        probe_targets: &[Endpoint],
+        expected_signer: &P2pIdentityCertRef,
+        per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<TraversalEndpointPrediction> {
+        let profile = self
+            .probe_nat_profile(probe_targets, expected_signer, per_target_timeout, ttl)
+            .await?;
         let base = profile.observed_endpoint.ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::NotFound,
@@ -744,7 +763,7 @@ impl QuicTunnelListener {
         match profile.observation {
             NatMappingObservation::NonSymmetricLike => endpoints.push(base),
             NatMappingObservation::SymmetricLike => {
-                for port in profile.predicted_ports(observed_at, MAX_NAT_PREDICTION_PORTS) {
+                for port in profile.predicted_ports(profile.observed_at, MAX_NAT_PREDICTION_PORTS) {
                     let mut endpoint = Endpoint::from((Protocol::Quic, base.addr().ip(), port));
                     endpoint.set_area(EndpointArea::ServerReflexive);
                     if !endpoints.contains(&endpoint) {

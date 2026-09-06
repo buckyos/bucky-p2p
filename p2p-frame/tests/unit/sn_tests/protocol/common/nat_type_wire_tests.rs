@@ -61,7 +61,7 @@ fn legacy_query_detail_and_report_bases_decode_without_extensions() {
         receipt: None,
     };
     let decoded = ReportSnResp::clone_from_slice(&report.to_vec().unwrap()).unwrap();
-    assert!(decoded.nat_probe_endpoints.is_empty());
+    assert!(decoded.nat_probe_ports.is_empty());
     assert!(decoded.nat_probe_directive.is_none());
 }
 
@@ -77,7 +77,7 @@ fn nat_probe_directive_and_result_roundtrip_after_existing_optional_tails() {
         request_id: 8,
         probe_config_generation: 9,
         expires_at: 10_000_000,
-        endpoints: vec![endpoint(4500), endpoint(4501)],
+        ports: vec![4500, 4501],
     };
     let response = ReportSnResp {
         seq: 20u32.into(),
@@ -86,13 +86,13 @@ fn nat_probe_directive_and_result_roundtrip_after_existing_optional_tails() {
         peer_info: None,
         end_point_array: vec![],
         receipt: None,
-        nat_probe_endpoints: vec![endpoint(4400)],
+        nat_probe_ports: vec![4400, 4401],
         nat_probe_directive: Some(directive.clone()),
     };
     let response_bytes = response.to_vec().unwrap();
     let decoded_response = ReportSnResp::clone_from_slice(&response_bytes).unwrap();
     assert_eq!(decoded_response.nat_probe_directive, Some(directive.clone()));
-    assert_eq!(decoded_response.nat_probe_endpoints, response.nat_probe_endpoints);
+    assert_eq!(decoded_response.nat_probe_ports, response.nat_probe_ports);
     assert_eq!(
         LegacyReportSnResp::clone_from_slice(&response_bytes)
             .unwrap()
@@ -143,7 +143,7 @@ fn unsupported_nat_probe_control_payloads_fail_closed() {
         request_id: 2,
         probe_config_generation: 3,
         expires_at: 9_000_000,
-        endpoints: vec![endpoint(4600)],
+        ports: vec![4600, 4601],
     };
     let response = ReportSnResp {
         seq: 22u32.into(),
@@ -152,7 +152,7 @@ fn unsupported_nat_probe_control_payloads_fail_closed() {
         peer_info: None,
         end_point_array: vec![],
         receipt: None,
-        nat_probe_endpoints: vec![],
+        nat_probe_ports: vec![],
         nat_probe_directive: Some(directive.clone()),
     };
     assert!(ReportSnResp::clone_from_slice(&response.to_vec().unwrap())
@@ -161,7 +161,7 @@ fn unsupported_nat_probe_control_payloads_fail_closed() {
         .is_none());
 
     directive.version = NAT_PROBE_CONTROL_VERSION;
-    directive.endpoints.clear();
+    directive.ports.clear();
     let response = ReportSnResp {
         nat_probe_directive: Some(directive),
         ..response
@@ -193,6 +193,148 @@ fn unsupported_nat_probe_control_payloads_fail_closed() {
 }
 
 #[test]
+fn malformed_nat_probe_port_sets_fail_closed_on_both_report_and_directive_extensions() {
+    let sn_peer_id = P2pId::from(vec![25; 32]);
+    let peer_id = P2pId::from(vec![26; 32]);
+    for ports in [vec![4700], vec![0, 4701], vec![4702, 4702]] {
+        let directive = NatProbeDirective {
+            version: NAT_PROBE_CONTROL_VERSION,
+            sn_peer_id: sn_peer_id.clone(),
+            peer_id: peer_id.clone(),
+            registration_generation: 1,
+            request_id: 2,
+            probe_config_generation: 3,
+            expires_at: 9_000_000,
+            ports: ports.clone(),
+        };
+        let response = ReportSnResp {
+            seq: 24u32.into(),
+            sn_peer_id: sn_peer_id.clone(),
+            result: 0,
+            peer_info: None,
+            end_point_array: vec![],
+            receipt: None,
+            nat_probe_ports: ports,
+            nat_probe_directive: Some(directive),
+        };
+        let decoded = ReportSnResp::clone_from_slice(&response.to_vec().unwrap()).unwrap();
+        assert!(decoded.nat_probe_ports.is_empty());
+        assert!(decoded.nat_probe_directive.is_none());
+    }
+}
+
+#[derive(Clone, Debug, RawEncode, RawDecode)]
+struct LegacyEndpointNatProbeDirective {
+    version: u8,
+    sn_peer_id: P2pId,
+    peer_id: P2pId,
+    registration_generation: u64,
+    request_id: u64,
+    probe_config_generation: u64,
+    expires_at: Timestamp,
+    endpoints: Vec<Endpoint>,
+}
+
+#[test]
+fn nat_probe_legacy_endpoint_extensions_fail_closed_under_reused_magics() {
+    let sn_peer_id = P2pId::from(vec![27; 32]);
+    let peer_id = P2pId::from(vec![28; 32]);
+    let legacy = LegacyReportSnResp {
+        seq: 25u32.into(),
+        sn_peer_id: sn_peer_id.clone(),
+        result: 0,
+        peer_info: None,
+        end_point_array: vec![],
+        receipt: None,
+    };
+    let legacy_report_endpoints = vec![endpoint(4800), endpoint(4801)];
+    let legacy_directive = LegacyEndpointNatProbeDirective {
+        version: NAT_PROBE_CONTROL_VERSION,
+        sn_peer_id,
+        peer_id,
+        registration_generation: 1,
+        request_id: 2,
+        probe_config_generation: 3,
+        expires_at: 9_000_000,
+        endpoints: vec![endpoint(4900), endpoint(4901)],
+    };
+    let purpose = None;
+    let mut bytes = vec![
+        0;
+        legacy.raw_measure(&purpose).unwrap()
+            + extension_measure(Some(&legacy_report_endpoints), &purpose).unwrap()
+            + extension_measure(Some(&legacy_directive), &purpose).unwrap()
+    ];
+    let remainder = legacy.raw_encode(&mut bytes, &purpose).unwrap();
+    let remainder = extension_encode(
+        Some(&legacy_report_endpoints),
+        REPORT_SN_RESP_EXTENSION_MAGIC,
+        remainder,
+        &purpose,
+    )
+    .unwrap();
+    let remainder = extension_encode(
+        Some(&legacy_directive),
+        REPORT_SN_RESP_PROBE_DIRECTIVE_EXTENSION_MAGIC,
+        remainder,
+        &purpose,
+    )
+    .unwrap();
+    assert!(remainder.is_empty());
+
+    let decoded = ReportSnResp::clone_from_slice(&bytes).unwrap();
+    assert!(decoded.nat_probe_ports.is_empty());
+    assert!(decoded.nat_probe_directive.is_none());
+}
+
+#[test]
+fn nat_probe_over_limit_current_port_extensions_fail_closed_independently() {
+    let sn_peer_id = P2pId::from(vec![29; 32]);
+    let peer_id = P2pId::from(vec![30; 32]);
+    let too_many_ports = (0..=MAX_NAT_PROBE_ENDPOINTS)
+        .map(|index| 50_000 + index as u16)
+        .collect::<Vec<_>>();
+    let report = ReportSnResp {
+        seq: 26u32.into(),
+        sn_peer_id: sn_peer_id.clone(),
+        result: 0,
+        peer_info: None,
+        end_point_array: vec![],
+        receipt: None,
+        nat_probe_ports: too_many_ports.clone(),
+        nat_probe_directive: None,
+    };
+    assert!(
+        ReportSnResp::clone_from_slice(&report.to_vec().unwrap())
+            .unwrap()
+            .nat_probe_ports
+            .is_empty()
+    );
+
+    let directive = NatProbeDirective {
+        version: NAT_PROBE_CONTROL_VERSION,
+        sn_peer_id: sn_peer_id.clone(),
+        peer_id,
+        registration_generation: 1,
+        request_id: 2,
+        probe_config_generation: 3,
+        expires_at: 9_000_000,
+        ports: too_many_ports,
+    };
+    let response = ReportSnResp {
+        nat_probe_ports: vec![],
+        nat_probe_directive: Some(directive),
+        ..report
+    };
+    assert!(
+        ReportSnResp::clone_from_slice(&response.to_vec().unwrap())
+            .unwrap()
+            .nat_probe_directive
+            .is_none()
+    );
+}
+
+#[test]
 fn new_query_report_detail_and_call_extensions_roundtrip_and_old_decoders_ignore_them() {
     let now = 2_000_000;
     let query = SnQueryResp {
@@ -219,15 +361,15 @@ fn new_query_report_detail_and_call_extensions_roundtrip_and_old_decoders_ignore
         peer_info: None,
         end_point_array: vec![],
         receipt: None,
-        nat_probe_endpoints: vec![endpoint(4400), endpoint(4401)],
+        nat_probe_ports: vec![4400, 4401],
         nat_probe_directive: None,
     };
     let bytes = report.to_vec().unwrap();
     assert_eq!(
         ReportSnResp::clone_from_slice(&bytes)
             .unwrap()
-            .nat_probe_endpoints,
-        report.nat_probe_endpoints
+            .nat_probe_ports,
+        report.nat_probe_ports
     );
     assert_eq!(
         LegacyReportSnResp::clone_from_slice(&bytes)
