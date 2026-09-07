@@ -190,6 +190,26 @@ pub struct SnQueryResult {
 
 const NAT_PROBE_TARGET_TIMEOUT: Duration = Duration::from_secs(2);
 const NAT_PROFILE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+const SN_ACTIVE_REPORT_REFRESH_INTERVAL: u64 = 600 * 1000 * 1000;
+
+fn active_sn_due_report(force_initial_report: bool, latest_time: u64, now: u64) -> bool {
+    force_initial_report || now.saturating_sub(latest_time) > SN_ACTIVE_REPORT_REFRESH_INTERVAL
+}
+
+fn collect_due_active_sns(
+    active_sn_list: &mut Vec<ActiveSN>,
+    force_initial_report: bool,
+    now: u64,
+) -> Vec<ActiveSN> {
+    let mut due = Vec::new();
+    for active_sn in active_sn_list.iter_mut() {
+        if active_sn_due_report(force_initial_report, active_sn.latest_time, now) {
+            active_sn.latest_time = now;
+            due.push(active_sn.clone());
+        }
+    }
+    due
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NatProbeDirectiveRejectReason {
@@ -230,6 +250,7 @@ pub struct SNServiceState {
     pub pinging_handle: Option<SpawnHandle<()>>,
     pub active_sn_list: Vec<ActiveSN>,
     pub latest_sn_interval: u64,
+    pub first_report_pending: bool,
 }
 
 pub struct SnList {
@@ -535,6 +556,7 @@ impl SNClientService {
                 pinging_handle: None,
                 active_sn_list: vec![],
                 latest_sn_interval: 0,
+                first_report_pending: false,
             }),
             listener: Mutex::new(None),
             rendezvous_listener: Mutex::new(None),
@@ -994,6 +1016,10 @@ impl SNClientService {
     }
 
     pub async fn start(self: &Arc<Self>) -> P2pResult<()> {
+        {
+            let mut state = self.state.write().unwrap();
+            state.first_report_pending = true;
+        }
         let this = self.clone();
         let handle = Executor::spawn_with_handle(async move {
             this.ping_proc().await;
@@ -1029,14 +1055,18 @@ impl SNClientService {
     async fn ping_proc(self: &Arc<Self>) {
         loop {
             {
-                let (active_sn_count, latest_sn_interval, cur_sn_interval) = {
+                let (active_sn_count, latest_sn_interval, cur_sn_interval, force_initial_report) = {
                     let mut state = self.state.write().unwrap();
+                    let force_initial_report = state.first_report_pending;
+                    state.first_report_pending = false;
                     if state.active_sn_list.len() > 0 {
                         state.latest_sn_interval = 10;
+                        let cur_sn_interval = if force_initial_report { 0 } else { 10 };
                         (
                             state.active_sn_list.len(),
                             state.latest_sn_interval,
-                            state.latest_sn_interval,
+                            cur_sn_interval,
+                            force_initial_report,
                         )
                     } else {
                         let cur_sn_interval = state.latest_sn_interval;
@@ -1054,6 +1084,7 @@ impl SNClientService {
                             state.active_sn_list.len(),
                             cur_sn_interval,
                             state.latest_sn_interval,
+                            force_initial_report,
                         )
                     }
                 };
@@ -1061,16 +1092,14 @@ impl SNClientService {
                     runtime::sleep(Duration::from_secs(cur_sn_interval)).await;
                 }
                 if active_sn_count > 0 {
-                    let mut ping_sn_list = Vec::new();
-                    {
+                    let ping_sn_list = {
                         let mut state = self.state.write().unwrap();
-                        for active_sn in state.active_sn_list.iter_mut() {
-                            if bucky_time_now() - active_sn.latest_time > 600 * 1000 * 1000 {
-                                active_sn.latest_time = bucky_time_now();
-                                ping_sn_list.push(active_sn.clone());
-                            }
-                        }
-                    }
+                        collect_due_active_sns(
+                            &mut state.active_sn_list,
+                            force_initial_report,
+                            bucky_time_now(),
+                        )
+                    };
 
                     for active_sn in ping_sn_list.iter() {
                         match self

@@ -894,3 +894,55 @@ async fn periodic_report_update_clears_and_restores_live_active_sn_signer() {
     service.stop();
     server.stop();
 }
+
+#[test]
+fn active_sn_due_report_force_initial_probe_bypasses_refresh_gate() {
+    let now = 10_000 * 1000 * 1000;
+
+    assert!(super::active_sn_due_report(true, now, now));
+    assert!(!super::active_sn_due_report(false, now, now));
+
+    assert!(!super::active_sn_due_report(
+        false,
+        now.saturating_sub(599 * 1000 * 1000),
+        now,
+    ));
+    assert!(!super::active_sn_due_report(
+        false,
+        now.saturating_sub(600 * 1000 * 1000),
+        now,
+    ));
+    assert!(super::active_sn_due_report(
+        false,
+        now.saturating_sub(601 * 1000 * 1000 + 1),
+        now,
+    ));
+}
+
+#[test]
+fn collect_due_active_sns_force_initial_reports_recent_active_sn() {
+    let now = 10_000 * 1000 * 1000;
+    let active = ActiveSN {
+        sn_peer_id: P2pId::from(vec![45; 32]),
+        latest_time: now,
+        conn_id: 41u32.into(),
+        protocol: Protocol::Quic,
+        sn_endpoint: directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630"),
+        wan_ep_list: vec![],
+        nat_probe_endpoints: vec![],
+        nat_probe_signer: None,
+        net_profile: NatProfile::unknown(),
+        nat_probe_registration_generation: 0,
+        last_nat_probe_request_id: 0,
+    };
+
+    let mut periodic = vec![active.clone()];
+    assert!(super::collect_due_active_sns(&mut periodic, false, now).is_empty());
+    assert_eq!(periodic[0].latest_time, now);
+
+    let mut initial = vec![active.clone()];
+    let due = super::collect_due_active_sns(&mut initial, true, now);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].sn_peer_id, active.sn_peer_id);
+    assert_eq!(initial[0].latest_time, now);
+}

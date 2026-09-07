@@ -11,7 +11,7 @@ use std::time::Duration;
 pub(super) const NAT_PROBE_PERIOD: Duration = Duration::from_secs(2 * 60 * 60);
 pub(super) const NAT_PROBE_DIRECTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const NAT_PROBE_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
-pub(super) const MAX_CONCURRENT_NAT_PROBES: usize = 256;
+pub(super) const MAX_CONCURRENT_NAT_PROBES: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NatProbeTriggerReason {

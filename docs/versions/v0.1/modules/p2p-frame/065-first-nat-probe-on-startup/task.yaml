@@ -1,0 +1,33 @@
+schema_version: 1
+workflow_tier: pending
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 065-first-nat-probe-on-startup
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record: docs/changes/065-first-nat-probe-on-startup.md
+design:
+testing:
+testplan:
+acceptance_report:
+pipeline_plan:
+risk_profile:
+lifecycle_state:
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/065-first-nat-probe-on-startup.paths
+baseline_manifest: .harness/baselines/v0.1/065-first-nat-probe-on-startup-delivery/manifest.json
+
+changes:
+  - id: CHG-startup-first-nat-probe
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs"]
+    changed_paths_file:
+  - id: CHG-first-probe-deferred-directive-retry
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/tests/unit/sn_tests/client/nat_probe_directive_tests.rs", "p2p-frame/tests/nat_type_aware/sn_profile_flow_tests.rs"]
+    changed_paths_file:
