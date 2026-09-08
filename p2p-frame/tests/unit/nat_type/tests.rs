@@ -82,6 +82,54 @@ fn prediction_hint_requires_consistent_delta_and_obeys_bounds() {
     assert!(irregular.prediction_hint.is_none());
 }
 
+fn fresh_symmetric_with_hint(now: u64, hint: NatPredictionHint) -> NatProfile {
+    NatProfile {
+        version: NAT_PROFILE_VERSION,
+        observation: NatMappingObservation::SymmetricLike,
+        observed_at: now,
+        valid_until: now.saturating_add(Duration::from_secs(10).as_micros() as u64),
+        prediction_hint: Some(hint),
+    }
+}
+
+#[test]
+fn fresh_symmetric_profile_rejects_invalid_hints() {
+    let now = 4_000_000;
+    let invalid_hints = [
+        NatPredictionHint {
+            first_observed: endpoint("198.51.100.1:5000"),
+            last_observed: endpoint("198.51.100.1:5002"),
+            sample_count: 1,
+            port_delta: 2,
+            parity: NatPortParityRelation::Same,
+        },
+        NatPredictionHint {
+            first_observed: endpoint("198.51.100.1:5000"),
+            last_observed: endpoint("198.51.100.1:5000"),
+            sample_count: 2,
+            port_delta: 0,
+            parity: NatPortParityRelation::Same,
+        },
+        NatPredictionHint {
+            first_observed: endpoint("198.51.100.1:5000"),
+            last_observed: endpoint("198.51.100.1:5002"),
+            sample_count: 2,
+            port_delta: 2,
+            parity: NatPortParityRelation::Alternating,
+        },
+    ];
+
+    for hint in invalid_hints {
+        let profile = fresh_symmetric_with_hint(now, hint.clone());
+        assert!(profile.is_fresh(now));
+        assert_eq!(profile.mapping_at(now), NatMappingObservation::SymmetricLike);
+        assert!(
+            profile.usable_prediction_hint(now).is_none(),
+            "invalid hint must not be usable: {hint:?}"
+        );
+    }
+}
+
 #[test]
 fn freshness_and_context_roles_fail_closed_at_boundaries() {
     let now = 3_000_000;

@@ -157,7 +157,6 @@ impl NatPredictionHint {
 pub struct NatProfile {
     pub version: u8,
     pub observation: NatMappingObservation,
-    pub observed_endpoint: Option<Endpoint>,
     pub observed_at: Timestamp,
     pub valid_until: Timestamp,
     pub prediction_hint: Option<NatPredictionHint>,
@@ -174,7 +173,6 @@ impl NatProfile {
         Self {
             version: NAT_PROFILE_VERSION,
             observation: NatMappingObservation::Unknown,
-            observed_endpoint: None,
             observed_at: 0,
             valid_until: 0,
             prediction_hint: None,
@@ -193,7 +191,6 @@ impl NatProfile {
         }
 
         let valid_until = observed_at.saturating_add(duration_to_bucky_time(ttl));
-        let observed_endpoint = observations.last().copied();
         if observations
             .iter()
             .all(|ep| ep.addr() == observations[0].addr())
@@ -201,7 +198,6 @@ impl NatProfile {
             return Self {
                 version: NAT_PROFILE_VERSION,
                 observation: NatMappingObservation::NonSymmetricLike,
-                observed_endpoint,
                 observed_at,
                 valid_until,
                 prediction_hint: None,
@@ -211,7 +207,6 @@ impl NatProfile {
         Self {
             version: NAT_PROFILE_VERSION,
             observation: NatMappingObservation::SymmetricLike,
-            observed_endpoint,
             observed_at,
             valid_until,
             prediction_hint: NatPredictionHint::from_observations(observations),
@@ -225,7 +220,6 @@ impl NatProfile {
     pub fn is_fresh(&self, now: Timestamp) -> bool {
         self.is_supported()
             && self.observation != NatMappingObservation::Unknown
-            && self.observed_endpoint.is_some()
             && self.valid_until >= self.observed_at
             && now >= self.observed_at
             && now <= self.valid_until
@@ -245,20 +239,9 @@ impl NatProfile {
         if self.mapping_at(now) != NatMappingObservation::SymmetricLike {
             return None;
         }
-
-        let base = self.observed_endpoint.as_ref()?;
         self.prediction_hint
             .as_ref()
-            .filter(|hint| hint.is_usable_with(base))
-    }
-
-    pub fn predicted_ports(&self, now: Timestamp, limit: usize) -> Vec<u16> {
-        let Some(base) = self.observed_endpoint.as_ref() else {
-            return Vec::new();
-        };
-        self.usable_prediction_hint(now)
-            .map(|hint| hint.predicted_ports(base, limit))
-            .unwrap_or_default()
+            .filter(|hint| hint.is_usable_with(&hint.last_observed))
     }
 }
 

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "acceptance": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/071-remove-nat-profile-observed-endpoint/acceptance-report.md": "e8d7ae60b47283719b0a9f8c618db6fcf82dc3a49708d7275cfdeee86022da90"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "df6672bcc045bbf8135f982b9d306d713471154e3e0c226841668f29cbe9641d"
+    },
+    "design": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/071-remove-nat-profile-observed-endpoint/design.md": "19f586058e36e991d618e30694c2551339bfe894e5bb00e7ce09e08119e91c53",
+        "docs/versions/v0.1/modules/p2p-frame/071-remove-nat-profile-observed-endpoint/risk-profile.yaml": "bfa245ead5759ad040baff741c74083f1214de30cfce80c211dfd49028ca50ae"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "df6672bcc045bbf8135f982b9d306d713471154e3e0c226841668f29cbe9641d"
+    },
+    "implementation": {
+      "inputs": {},
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "df6672bcc045bbf8135f982b9d306d713471154e3e0c226841668f29cbe9641d"
+    },
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/071-remove-nat-profile-observed-endpoint/proposal.md": "0b4b25db2c196ab014014aa64127efec841c300a9c3108aff33fac0e8ca618f9"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "df6672bcc045bbf8135f982b9d306d713471154e3e0c226841668f29cbe9641d"
+    },
+    "testing": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/071-remove-nat-profile-observed-endpoint/testing.md": "da67f2c5f4d5260658b4fc2e449ed704f72faeab43d1dfff3a438e1efaccdea4",
+        "docs/versions/v0.1/modules/p2p-frame/071-remove-nat-profile-observed-endpoint/testplan.yaml": "447109c8c2908cd6ecf453e7f4f5a684d3d0ac528d230864e9c953230814f14f"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "df6672bcc045bbf8135f982b9d306d713471154e3e0c226841668f29cbe9641d",
+      "test_run": ".harness/test-results/test-runs/20260908T092424Z-p2p-frame+071-remove-nat-profile-observed-endpoint-all.json",
+      "test_run_sha256": "4e8e848e6cc2a3ffb35e13bb1bab528a97dd4d362be3789e4ff75bc0e9780392"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

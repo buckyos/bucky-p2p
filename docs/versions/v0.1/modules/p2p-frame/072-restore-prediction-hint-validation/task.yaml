@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: standard
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 072-restore-prediction-hint-validation
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record: docs/changes/072-restore-prediction-hint-validation.md
+design:
+testing:
+testplan:
+acceptance_report:
+pipeline_plan:
+risk_profile:
+lifecycle_state:
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/072-restore-prediction-hint-validation.paths
+baseline_manifest: .harness/baselines/v0.1/072-restore-prediction-hint-validation-delivery/manifest.json
+
+changes:
+  - id: CHG-usable-prediction-hint-validity
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/nat_type.rs", "p2p-frame/tests/unit/nat_type/tests.rs", "p2p-frame/tests/unit/tunnel/nat_connect_plan/tests.rs"]
+    changed_paths_file:

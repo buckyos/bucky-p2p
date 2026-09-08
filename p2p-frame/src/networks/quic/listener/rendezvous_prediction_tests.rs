@@ -567,8 +567,6 @@ async fn nat_profile_probe_keeps_symmetric_classification_without_prediction_hin
         profile.prediction_hint.is_none(),
         "non-arithmetic port deltas must not produce a prediction hint"
     );
-    assert_eq!(profile.observed_endpoint.unwrap().addr().port(), 40007);
-
     let responder = tokio::spawn({
         let listener = listener.clone();
         let signer = signer.clone();

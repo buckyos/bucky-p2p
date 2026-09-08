@@ -1,0 +1,100 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+
+api_impact:
+  public_api: breaking
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+
+evidence_inputs: ["p2p-frame/src/nat_type.rs", "p2p-frame/src/networks/quic/listener.rs", "p2p-frame/src/networks/quic/network.rs", "p2p-frame/src/networks/udp_network.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/nat_probe_scheduler.rs", "p2p-frame/src/sn/service/peer_manager.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests"]
+
+defaults:
+  workdir: .
+  timeout_sec: 1200
+  env: {}
+
+contract_checks:
+  mode: enabled
+  steps:
+    - id: external-positive-compile
+      name: New NatProfile public API compiles
+      kind: external-positive
+      change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+      assertion: new-path-compiles
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "nat_profile_public_api"]
+    - id: external-negative-reject-old
+      name: Old observed_endpoint path is rejected
+      kind: external-negative
+      change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+      assertion: old-path-rejected-for-removed-symbol
+      run: ["bash", "-lc", "! rg -n 'NatProfile\\s*\\{[^}]*observed_endpoint' p2p-frame/src p2p-frame/tests -g '*.rs'"]
+    - id: removed-field-scan
+      name: NatProfile observed_endpoint removed scan
+      kind: removed-symbol-scan
+      change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+      assertion: no-unallowlisted-old-symbol-references
+      run: ["python3", "harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "071-remove-nat-profile-observed-endpoint"]
+    - id: repo-compile-closure
+      name: Repository consumers compile after removal
+      kind: repository-compile-closure
+      change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+      assertion: repository-consumers-compile
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+
+levels:
+  unit:
+    mode: enabled
+    summary: Lib NAT profile, prediction and tunnel-manager unit tests with x509 features.
+    test_targets:
+      - p2p-frame/src/nat_type.rs
+      - p2p-frame/src/networks/quic/listener/rendezvous_prediction_tests.rs
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Full p2p-frame lib suite runs with x509 to cover all unit-level NAT profile and tunnel consumers.
+    steps:
+      - id: nat-profile-unit-lib
+        name: Run p2p-frame lib tests with x509
+        change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "--", "--test-threads=4"]
+  dv:
+    mode: enabled
+    summary: Targeted duplicated fallback and prediction validation tests already inside the lib suite; kept as an explicit step for traceability.
+    test_targets:
+      - p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The lib suite covers these tests; this step records the same evidence in the task-local plan.
+    steps:
+      - id: fallback-failclosed-unit
+        name: Cached predicted candidate fail-closed tests
+        change_ids: ["CHG-live-prediction-only"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "predicted_candidates", "--", "--nocapture"]
+  integration:
+    mode: enabled
+    summary: Public API, rendezvous protocol and offline contract suites.
+    test_targets:
+      - p2p-frame/tests/nat_profile_public_api.rs
+      - p2p-frame/tests/tunnel_rendezvous_protocol.rs
+      - p2p-frame/tests/nat_probe_logging_contract.rs
+      - p2p-frame/tests/sn_protocol_version_public_api.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The public API suite asserts NatProfile constructibility after the breaking field removal.
+        - Real public NAT/multi-host flow remains outside this local environment.
+    steps:
+      - id: profile-public-api
+        name: Run p2p-frame public and protocol integration suites
+        change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "nat_profile_public_api", "--test", "nat_probe_logging_contract", "--test", "tunnel_rendezvous_protocol", "--test", "sn_protocol_version_public_api"]

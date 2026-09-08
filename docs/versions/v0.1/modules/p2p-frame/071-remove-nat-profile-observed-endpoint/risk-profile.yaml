@@ -1,0 +1,37 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-remove-observed-endpoint", "CHG-live-prediction-only"]
+source_bindings:
+  proposal: proposal.md
+  design_source: design.md
+
+risks:
+  contract:
+    applies: true
+    evidence: ["proposal.md#scope", "proposal.md#proposal-items", "proposal.md#unresolved-questions"]
+    required_checks: ["NatProfile has no observed_endpoint field or encoded field", "NatProfile wire round-trip parity without old wire compatibility", "all repository production and test consumers migrated after removed field", "no cached-profile prediction expansion remains in nat_candidates(Predicted)"]
+  data:
+    applies: true
+    evidence: ["proposal.md#scope", "proposal.md#requirement-review"]
+    required_checks: ["freshness uses only version, observation and observed_at/valid_until", "SN peer-manager and scheduler profile publication no longer preserves observed_endpoint", "inter-SN profile payload drops the field"]
+  security:
+    applies: false
+    evidence: 不改变身份认证、探测签名、token、来源校验或信任边界；删除字段只影响 profile 内容与预测候选来源。
+    required_checks: []
+  runtime:
+    applies: true
+    evidence: ["proposal.md#scope", "proposal.md#success-criteria", "proposal.md#risks"]
+    required_checks: ["live predict_traversal_endpoints still produces candidates from the same probe result", "fallback Prediction path fails closed rather than expanding cached profile candidates", "query/profile absence no longer prevents NonSymmetricLike plans from using endpoint_array", "rendezvous prediction TTL and probe timeout behavior unchanged"]
+  build:
+    applies: false
+    evidence: 不改变依赖、feature、构建图、产物、production default 或发布配置；wire break 明确排除兼容层。
+    required_checks: []
+  ui:
+    applies: false
+    evidence: 不涉及 UI、导航、无障碍、本地化或用户交互流程。
+    required_checks: []
+  harness:
+    applies: false
+    evidence: 仅消费现有 Harness 流程与检查器，不改变规则、checker 或测试基础设施语义。
+    required_checks: []

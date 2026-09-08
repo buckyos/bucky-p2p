@@ -1,6 +1,6 @@
 use super::*;
 use crate::endpoint::{Endpoint, EndpointArea, Protocol};
-use crate::nat_type::NatProfile;
+use crate::nat_type::{NAT_PROFILE_VERSION, NatPredictionHint, NatPortParityRelation, NatProfile};
 use std::time::Duration;
 
 fn endpoint(port: u16) -> Endpoint {
@@ -27,6 +27,23 @@ fn symmetric(now: u64) -> NatProfile {
         now,
         Duration::from_secs(10),
     )
+}
+
+fn symmetric_with_invalid_hint(now: u64) -> NatProfile {
+    let base = endpoint(5000);
+    NatProfile {
+        version: NAT_PROFILE_VERSION,
+        observation: crate::nat_type::NatMappingObservation::SymmetricLike,
+        observed_at: now,
+        valid_until: now.saturating_add(Duration::from_secs(10).as_micros() as u64),
+        prediction_hint: Some(NatPredictionHint {
+            first_observed: base,
+            last_observed: endpoint(5002),
+            sample_count: 2,
+            port_delta: 2,
+            parity: NatPortParityRelation::Alternating,
+        }),
+    }
 }
 
 fn context(caller: NatProfile, callee: NatProfile) -> NatTraversalContext {
@@ -131,6 +148,35 @@ fn public_unknown_and_unpredictable_profiles_choose_explicit_fallbacks() {
     assert_eq!(best_effort.strategy, ConnectStrategy::BoundedBestEffort);
     assert_eq!(best_effort.connector_candidates, CandidateMode::Base);
     assert_eq!(best_effort.peer_candidates, Some(CandidateMode::Base));
+}
+
+#[test]
+fn symmetric_profiles_with_invalid_hints_keep_base_plan() {
+    let now = 3_000_000;
+    let invalid = symmetric_with_invalid_hint(now);
+    assert!(invalid.is_fresh(now));
+    assert!(
+        invalid.usable_prediction_hint(now).is_none(),
+        "invalid hint must not be considered usable"
+    );
+
+    let plan = select_connect_plan(&context(invalid.clone(), invalid), now, false, false);
+    assert_eq!(plan.strategy, ConnectStrategy::BoundedBestEffort);
+    assert_eq!(plan.connector_candidates, CandidateMode::Base);
+    assert_eq!(plan.peer_candidates, Some(CandidateMode::Base));
+    assert_eq!(
+        plan.action_for(PlanParty::Caller),
+        PlanAction::Connect {
+            candidates: CandidateMode::Base,
+            reverse: false,
+        }
+    );
+    assert_eq!(
+        plan.action_for(PlanParty::Callee),
+        PlanAction::PunchThenWait {
+            candidates: CandidateMode::Base,
+        }
+    );
 }
 
 include!("rendezvous_tests.rs");

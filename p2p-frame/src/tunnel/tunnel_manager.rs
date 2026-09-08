@@ -1090,10 +1090,10 @@ impl TunnelManager {
 
     fn nat_candidates(
         base_endpoints: &[Endpoint],
-        profile: &NatProfile,
+        _profile: &NatProfile,
         mode: NatCandidateMode,
-        now: u64,
-    ) -> Vec<Endpoint> {
+        _now: u64,
+    ) -> P2pResult<Vec<Endpoint>> {
         let mut candidates = Vec::new();
         match mode {
             NatCandidateMode::Base => {
@@ -1102,31 +1102,14 @@ impl TunnelManager {
                 }
             }
             NatCandidateMode::Predicted => {
-                let hint = profile.usable_prediction_hint(now);
-                for base in base_endpoints.iter().copied().filter(|endpoint| {
-                    endpoint.protocol() == Protocol::Quic
-                        && rendezvous_eligible_area(endpoint)
-                        && endpoint.addr().port() != 0
-                }) {
-                    Self::push_unique_endpoint(&mut candidates, base);
-                    let Some(hint) = hint else {
-                        continue;
-                    };
-                    let remaining = MAX_NAT_PLAN_CANDIDATES.saturating_sub(candidates.len());
-                    for port in hint.predicted_ports(&base, remaining) {
-                        let mut predicted =
-                            Endpoint::from((Protocol::Quic, base.addr().ip(), port));
-                        predicted.set_area(EndpointArea::ServerReflexive);
-                        Self::push_unique_endpoint(&mut candidates, predicted);
-                    }
-                    if candidates.len() >= MAX_NAT_PLAN_CANDIDATES {
-                        break;
-                    }
-                }
+                return Err(p2p_err!(
+                    P2pErrorCode::NotFound,
+                    "predicted candidates require a live rendezvous prediction"
+                ));
             }
         }
         candidates.truncate(MAX_NAT_PLAN_CANDIDATES);
-        candidates
+        Ok(candidates)
     }
 
     fn rendezvous_base_endpoints(
@@ -2109,7 +2092,7 @@ impl TunnelManager {
                     remote_profile,
                     candidates,
                     bucky_time_now(),
-                );
+                )?;
                 let intent = if reverse {
                     TunnelConnectIntent::reverse_logical(tunnel_id)
                 } else {
@@ -2124,7 +2107,7 @@ impl TunnelManager {
                     remote_profile,
                     candidates,
                     bucky_time_now(),
-                );
+                )?;
                 self.punch_and_wait_incoming(
                     candidates,
                     remote_id,

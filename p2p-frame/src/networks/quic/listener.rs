@@ -640,6 +640,19 @@ impl QuicTunnelListener {
         per_target_timeout: Duration,
         ttl: Duration,
     ) -> P2pResult<NatProfile> {
+        let (profile, _) = self
+            .probe_nat_profile_with_base(probe_targets, expected_signer, per_target_timeout, ttl)
+            .await?;
+        Ok(profile)
+    }
+
+    pub(crate) async fn probe_nat_profile_with_base(
+        &self,
+        probe_targets: &[Endpoint],
+        expected_signer: &P2pIdentityCertRef,
+        per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<(NatProfile, Endpoint)> {
         if probe_targets.len() < 2
             || probe_targets.len() > MAX_NAT_PREDICTION_PORTS
             || per_target_timeout.is_zero()
@@ -734,13 +747,13 @@ impl QuicTunnelListener {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "quic listener closed"));
         }
         let profile = NatProfile::from_observations(&observations, observed_at, ttl);
-        if profile.observed_endpoint.is_none() {
-            return Err(p2p_err!(
+        let base = observations.last().ok_or_else(|| {
+            p2p_err!(
                 P2pErrorCode::NotFound,
                 "listener NAT probe produced no observed endpoint"
-            ));
-        }
-        Ok(profile)
+            )
+        })?;
+        Ok((profile, *base))
     }
 
     pub(crate) async fn predict_traversal_endpoints(
@@ -750,20 +763,21 @@ impl QuicTunnelListener {
         per_target_timeout: Duration,
         ttl: Duration,
     ) -> P2pResult<TraversalEndpointPrediction> {
-        let profile = self
-            .probe_nat_profile(probe_targets, expected_signer, per_target_timeout, ttl)
+        let (profile, last_observed) = self
+            .probe_nat_profile_with_base(probe_targets, expected_signer, per_target_timeout, ttl)
             .await?;
-        let base = profile.observed_endpoint.ok_or_else(|| {
-            p2p_err!(
-                P2pErrorCode::NotFound,
-                "listener NAT probe produced no observed endpoint"
-            )
-        })?;
         let mut endpoints = Vec::new();
         match profile.observation {
-            NatMappingObservation::NonSymmetricLike => endpoints.push(base),
+            NatMappingObservation::NonSymmetricLike => endpoints.push(last_observed),
             NatMappingObservation::SymmetricLike => {
-                for port in profile.predicted_ports(profile.observed_at, MAX_NAT_PREDICTION_PORTS) {
+                let hint = profile.prediction_hint.as_ref().ok_or_else(|| {
+                    p2p_err!(
+                        P2pErrorCode::NotFound,
+                        "listener NAT prediction hint is unavailable"
+                    )
+                })?;
+                let base = hint.last_observed;
+                for port in hint.predicted_ports(&base, MAX_NAT_PREDICTION_PORTS) {
                     let mut endpoint = Endpoint::from((Protocol::Quic, base.addr().ip(), port));
                     endpoint.set_area(EndpointArea::ServerReflexive);
                     if !endpoints.contains(&endpoint) {

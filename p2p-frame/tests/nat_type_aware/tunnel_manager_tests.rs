@@ -697,14 +697,9 @@ fn predicted_candidates_apply_hint_to_current_sn_base_and_obey_total_cap() {
     let base = observed_endpoint(5000);
     let candidates =
         TunnelManager::nat_candidates(&[base], &profile, NatCandidateMode::Predicted, now);
-    assert_eq!(candidates.len(), MAX_NAT_PLAN_CANDIDATES);
-    assert_eq!(candidates[0], base);
-    assert_eq!(candidates[1].addr().port(), 5002);
-    assert_eq!(candidates.last().unwrap().addr().port(), 5014);
-    assert!(
-        candidates
-            .iter()
-            .all(|candidate| candidate.get_area() == EndpointArea::ServerReflexive)
+    assert_eq!(
+        candidates.expect_err("predicted candidates must fail closed without a live prediction").code(),
+        P2pErrorCode::NotFound
     );
 }
 
@@ -728,13 +723,17 @@ fn predicted_candidates_reject_non_server_reflexive_and_lan_bases() {
     ));
     lan.set_area(EndpointArea::ServerReflexive);
 
-    assert!(
+    assert_eq!(
         TunnelManager::nat_candidates(&[wan], &profile, NatCandidateMode::Predicted, now)
-            .is_empty()
+            .expect_err("predicted candidates must fail closed without a live prediction")
+            .code(),
+        P2pErrorCode::NotFound
     );
-    assert!(
+    assert_eq!(
         TunnelManager::nat_candidates(&[lan], &profile, NatCandidateMode::Predicted, now)
-            .is_empty()
+            .expect_err("predicted candidates must fail closed without a live prediction")
+            .code(),
+        P2pErrorCode::NotFound
     );
 }
 
@@ -865,7 +864,7 @@ async fn nat_action_failure_reaches_proxy_fallback_even_when_sn_call_fails() {
 }
 
 #[tokio::test]
-async fn rendezvous_deterministic_failure_uses_legacy_predicted_direct_without_proxy() {
+async fn rendezvous_deterministic_failure_rejects_cached_predicted_without_proxy() {
     use crate::sn::client::SNClientService;
     use crate::types::SequenceGenerator;
 
@@ -880,7 +879,6 @@ async fn rendezvous_deterministic_failure_uses_legacy_predicted_direct_without_p
         Duration::from_secs(30),
     );
     let base = observed_endpoint(5200);
-    let predicted = observed_endpoint(5202);
 
     let local = new_identity("predicted-hit-local");
     let remote = new_identity("predicted-hit-remote");
@@ -888,13 +886,7 @@ async fn rendezvous_deterministic_failure_uses_legacy_predicted_direct_without_p
     let hit_dial = MockDialNetwork::new(
         Protocol::Quic,
         local.get_id(),
-        HashMap::from([(
-            predicted,
-            MockDialBehavior {
-                delay: Duration::from_millis(10),
-                result: Ok(()),
-            },
-        )]),
+        HashMap::new(),
     );
     let hit_net_manager = crate::networks::NetManager::new(
         vec![hit_dial.clone()],
@@ -934,7 +926,7 @@ async fn rendezvous_deterministic_failure_uses_legacy_predicted_direct_without_p
         profile.clone(),
     );
     let hit_plan = select_connect_plan(&hit_context, now, false, false);
-    let hit = hit_manager
+    let hit = match hit_manager
         .open_nat_aware_tunnel(
             vec![base],
             &remote_id,
@@ -944,15 +936,14 @@ async fn rendezvous_deterministic_failure_uses_legacy_predicted_direct_without_p
             hit_plan,
         )
         .await
-        .expect("legacy predicted direct action must remain viable without PN");
-    assert_eq!(hit.form(), TunnelForm::Active);
+    {
+        Ok(_) => panic!("cached predicted candidates must fail closed without live prediction"),
+        Err(err) => err,
+    };
+    assert_eq!(hit.code(), P2pErrorCode::NotSupport);
     assert!(
-        hit_dial.intent_for(&predicted).is_some(),
-        "legacy fallback must derive predicted candidates from the original endpoint"
-    );
-    assert!(
-        hit_dial.call_count() > 0,
-        "deterministic rendezvous failure must enter the legacy caller action"
+        hit_dial.call_count() == 0,
+        "cached predicted candidates must not be dialed"
     );
 }
 
