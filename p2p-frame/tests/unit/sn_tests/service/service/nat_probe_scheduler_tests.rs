@@ -1,6 +1,5 @@
 use crate::sn::service::nat_probe_scheduler::{
-    MAX_CONCURRENT_NAT_PROBES, NAT_PROBE_FAILURE_BACKOFF, NAT_PROBE_PERIOD,
-    NatProbeAuthorityRemovalReason,
+    MAX_CONCURRENT_NAT_PROBES, NAT_PROBE_PERIOD, NatProbeAuthorityRemovalReason,
 };
 
 fn scheduler_peer(byte: u8) -> P2pId {
@@ -36,7 +35,7 @@ fn scheduler_duration(duration: Duration) -> Timestamp {
 }
 
 #[test]
-fn nat_probe_scheduler_issues_once_and_reschedules_two_hours_from_completion() {
+fn nat_probe_scheduler_issues_once_and_does_not_reschedule_periodically() {
     let sn = scheduler_peer(1);
     let peer = scheduler_peer(2);
     let tunnel = CmdTunnelId::from(11);
@@ -76,7 +75,9 @@ fn nat_probe_scheduler_issues_once_and_reschedules_two_hours_from_completion() {
     assert!(scheduler
         .observe_report(&peer, tunnel, remote, None, deadline)
         .directive
-        .is_some());
+        .is_none(),
+        "server must not issue periodic directives after a completed probe"
+    );
 }
 
 #[test]
@@ -165,7 +166,7 @@ fn nat_probe_scheduler_does_not_flap_between_concurrent_quic_tunnels() {
 }
 
 #[test]
-fn nat_probe_scheduler_address_and_config_events_invalidate_and_advance_generation() {
+fn nat_probe_scheduler_address_change_defers_profile_clearing_and_advances_generation() {
     let sn = scheduler_peer(5);
     let peer = scheduler_peer(6);
     let tunnel = CmdTunnelId::from(31);
@@ -190,18 +191,27 @@ fn nat_probe_scheduler_address_and_config_events_invalidate_and_advance_generati
         20,
     );
     let changed_directive = changed.directive.unwrap();
-    assert!(changed.profile_update == Some(None));
+    assert!(changed.profile_update.is_none());
     assert!(changed_directive.registration_generation > first.registration_generation);
 
     let affected = scheduler.set_ports(scheduler_probe_ports(32203));
     assert_eq!(affected, vec![peer.clone()]);
-    let config_changed = scheduler
+    let config_report = scheduler
         .observe_report(
             &peer,
             tunnel,
             scheduler_endpoint(Protocol::Quic, 52001),
             None,
             30,
+    );
+    assert!(config_report.directive.is_none());
+    let config_changed = scheduler
+        .observe_report(
+            &peer,
+            tunnel,
+            scheduler_endpoint(Protocol::Quic, 52002),
+            None,
+            40,
         )
         .directive
         .unwrap();
@@ -210,7 +220,7 @@ fn nat_probe_scheduler_address_and_config_events_invalidate_and_advance_generati
 }
 
 #[test]
-fn nat_probe_scheduler_demand_obeys_failure_backoff_and_current_request_does_not_wait() {
+fn nat_probe_scheduler_failed_result_does_not_reissue_without_address_change() {
     let sn = scheduler_peer(7);
     let peer = scheduler_peer(8);
     let tunnel = CmdTunnelId::from(41);
@@ -228,27 +238,30 @@ fn nat_probe_scheduler_demand_obeys_failure_backoff_and_current_request_does_not
     assert!(transition.profile_update == Some(None));
     assert!(transition.directive.is_none());
 
-    scheduler.mark_demand(&peer, failed_at);
     assert!(scheduler
         .observe_report(
             &peer,
             tunnel,
             remote,
             None,
-            failed_at + scheduler_duration(NAT_PROBE_FAILURE_BACKOFF) - 1,
+            failed_at + scheduler_duration(NAT_PROBE_PERIOD),
         )
         .directive
-        .is_none());
+        .is_none(),
+        "no demand/periodic re-probe after a failed result"
+    );
     assert!(scheduler
         .observe_report(
             &peer,
             tunnel,
-            remote,
+            scheduler_endpoint(Protocol::Quic, 53001),
             None,
-            failed_at + scheduler_duration(NAT_PROBE_FAILURE_BACKOFF),
+            failed_at + scheduler_duration(NAT_PROBE_PERIOD) + 1,
         )
         .directive
-        .is_some());
+        .is_some(),
+        "only an observed address change can issue a fresh directive"
+    );
 }
 
 #[test]
@@ -308,7 +321,9 @@ fn nat_probe_scheduler_timeout_ends_inflight_without_immediate_retry() {
             after_timeout + scheduler_duration(NAT_PROBE_PERIOD),
         )
         .directive
-        .is_some());
+        .is_none(),
+        "a timeout must not reschedule a periodic server directive"
+    );
 }
 
 #[test]
@@ -322,7 +337,6 @@ fn nat_probe_scheduler_never_directs_a_client_without_control_capability() {
 
     let legacy = scheduler.observe_capable_report(&peer, tunnel, remote, None, None, 1);
     assert!(legacy.directive.is_none());
-    scheduler.mark_demand(&peer, 2);
     assert!(scheduler
         .observe_capable_report(
             &peer,
@@ -330,7 +344,7 @@ fn nat_probe_scheduler_never_directs_a_client_without_control_capability() {
             remote,
             None,
             None,
-            scheduler_duration(NAT_PROBE_PERIOD) + 2,
+            2,
         )
         .directive
         .is_none());
@@ -342,14 +356,14 @@ fn nat_probe_scheduler_never_directs_a_client_without_control_capability() {
             remote,
             Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
             None,
-            scheduler_duration(NAT_PROBE_PERIOD) + 3,
+            3,
         )
         .directive
         .is_some());
 }
 
 #[test]
-fn nat_probe_scheduler_control_address_change_invalidates_before_next_report() {
+fn nat_probe_scheduler_control_address_change_preserves_profile_until_report() {
     let sn = scheduler_peer(17);
     let peer = scheduler_peer(18);
     let tunnel = CmdTunnelId::from(91);
@@ -366,13 +380,69 @@ fn nat_probe_scheduler_control_address_change_invalidates_before_next_report() {
 
     let changed_remote = scheduler_endpoint(Protocol::Quic, 58001);
     let changed = scheduler.observe_control(&peer, tunnel, changed_remote, 30);
-    assert_eq!(changed.profile_update, Some(None));
+    assert!(changed.profile_update.is_none());
     assert!(changed.directive.is_none());
-    assert!(scheduler.current_profile(&peer, 30).is_none());
+    assert!(scheduler.current_profile(&peer, 30).is_some());
     assert!(scheduler
         .observe_report(&peer, tunnel, changed_remote, None, 31)
         .directive
         .is_some());
+    assert!(scheduler.current_profile(&peer, 31).is_some());
+}
+
+#[test]
+fn nat_probe_scheduler_external_address_report_keeps_old_profile_until_new_result() {
+    let sn = scheduler_peer(199);
+    let peer = scheduler_peer(200);
+    let tunnel = CmdTunnelId::from(1901);
+    let remote = scheduler_endpoint(Protocol::Quic, 59100);
+    let mut scheduler = NatProbeScheduler::new(sn);
+    scheduler.set_ports(scheduler_probe_ports(33301));
+
+    let first = scheduler
+        .observe_report(&peer, tunnel, remote, None, 1_000_000)
+        .directive
+        .unwrap();
+    let old_profile = scheduler_profile(2_000_000);
+    let accepted = NatProbeResult::from_directive(&first, old_profile.clone());
+    scheduler.observe_report(&peer, tunnel, remote, Some(accepted), 2_000_000);
+    assert!(scheduler.current_profile(&peer, 2_000_001).is_some());
+
+    let changed_remote = scheduler_endpoint(Protocol::Quic, 59101);
+    let changed = scheduler.observe_report(&peer, tunnel, changed_remote, None, 3_000_000);
+    assert!(changed.directive.is_some());
+    assert!(changed.profile_update.is_none(), "address change must not clear the published profile");
+    assert!(scheduler.current_profile(&peer, 3_000_000).is_some());
+
+    // Same request's net_profile is the old profile, so it only confirms the
+    // profile already retained by the scheduler; no clearing is overwritten.
+    let reported = scheduler.observe_reported_profile(
+        &peer,
+        tunnel,
+        changed_remote,
+        old_profile.clone(),
+        3_000_000,
+    );
+    assert!(reported
+        .profile_update
+        .as_ref()
+        .and_then(|profile| profile.as_ref())
+        .is_some());
+    assert_eq!(
+        scheduler.current_profile(&peer, 3_000_000),
+        Some(old_profile.clone())
+    );
+
+    let new_profile = scheduler_profile(4_000_000);
+    let completed = NatProbeResult::from_directive(&changed.directive.unwrap(), new_profile.clone());
+    scheduler.observe_report(
+        &peer,
+        tunnel,
+        changed_remote,
+        Some(completed),
+        4_000_000,
+    );
+    assert_eq!(scheduler.current_profile(&peer, 4_000_000), Some(new_profile));
 }
 
 #[test]
@@ -495,48 +565,33 @@ fn nat_probe_scheduler_logs_correlated_lifecycle_reasons_without_stable_report_n
             .filter(|(level, message)| {
                 *level <= log::Level::Info && message.contains(&peer.to_string())
             })
-            .count(),
+        .count(),
         quiet_start,
         "a stable report with no due work must not add info/warn logs"
     );
 
-    scheduler.mark_demand(&peer, 1_002);
-    assert!(scheduler
-        .observe_report(&peer, tunnel, remote, None, 1_003)
+    let changed_remote = scheduler_endpoint(Protocol::Quic, 60101);
+    let changed = scheduler.observe_report(&peer, tunnel, changed_remote, None, 1_500);
+    let changed_directive = changed
         .directive
-        .is_none());
-    assert!(scheduler
-        .observe_report(&peer, tunnel, remote, None, online.expires_at + 1)
-        .directive
-        .is_none());
+        .expect("an observed address change must issue a fresh directive");
+    assert!(changed.profile_update.is_none());
 
-    let retry_at = online.expires_at
-        + 1
-        + scheduler_duration(NAT_PROBE_FAILURE_BACKOFF);
-    let demand = scheduler
-        .observe_report(&peer, tunnel, remote, None, retry_at)
-        .directive
-        .expect("queued demand must run after failure backoff");
-    let accepted_at = retry_at + 1;
-    let accepted = NatProbeResult::from_directive(&demand, scheduler_profile(accepted_at));
-    scheduler.observe_report(&peer, tunnel, remote, Some(accepted), accepted_at);
+    let after_timeout = changed_directive.expires_at + 1;
+    let timed_out = scheduler.observe_report(&peer, tunnel, changed_remote, None, after_timeout);
+    assert!(timed_out.profile_update == Some(None));
+    assert!(timed_out.directive.is_none());
 
-    assert!(scheduler.force_periodic_due(&peer, accepted_at + 1));
-    let periodic = scheduler
-        .observe_report(&peer, tunnel, remote, None, accepted_at + 1)
-        .directive
-        .expect("forced deadline must issue a periodic directive");
-    let mut rejected = NatProbeResult::from_directive(
-        &periodic,
-        scheduler_profile(accepted_at + 2),
-    );
-    rejected.request_id = rejected.request_id.wrapping_add(1);
+    let reboot_remote = scheduler_endpoint(Protocol::Quic, 60102);
+    let fresh = scheduler.observe_report(&peer, tunnel, reboot_remote, None, after_timeout + 1);
+    assert!(fresh.directive.is_some());
+    let accepted = NatProbeResult::from_directive(&fresh.directive.unwrap(), scheduler_profile(after_timeout + 2));
     scheduler.observe_report(
         &peer,
         tunnel,
-        remote,
-        Some(rejected),
-        accepted_at + 2,
+        reboot_remote,
+        Some(accepted),
+        after_timeout + 2,
     );
     assert!(scheduler.remove_peer(
         &peer,
@@ -553,13 +608,8 @@ fn nat_probe_scheduler_logs_correlated_lifecycle_reasons_without_stable_report_n
     let has = |needle: &str| logs.iter().any(|message| message.contains(needle));
     assert!(has("event=nat_probe_authority_established"));
     assert!(has("event=nat_probe_directive_issued") && has("trigger=online"));
-    assert!(has("event=nat_probe_directive_suppressed") && has("reason=in_flight"));
     assert!(has("event=nat_probe_directive_timeout"));
-    assert!(has("reason=failure_backoff"));
-    assert!(has("trigger=demand"));
-    assert!(has("event=nat_probe_result_accepted"));
-    assert!(has("trigger=periodic"));
-    assert!(has("event=nat_probe_result_rejected") && has("reason=request_mismatch"));
+    assert!(has("event=nat_probe_directive_issued") && has("trigger=external_address"));
     assert!(has("event=nat_probe_authority_removed") && has("reason=peer_disconnected"));
     assert!(logs.iter().all(|message| message.contains("sn_id=")));
     assert!(logs.iter().all(|message| message.contains("peer_id=")));
@@ -758,4 +808,142 @@ async fn stale_reconcile_still_removes_a_genuinely_missing_authority() {
         .unwrap()
         .authority_registration(&peer)
         .is_none());
+}
+
+#[test]
+fn scheduler_publishes_fresh_client_profile_and_ignores_stale_or_unknown() {
+    let sn = scheduler_peer(88);
+    let peer = scheduler_peer(89);
+    let tunnel = CmdTunnelId::from(899);
+    let remote = scheduler_endpoint(Protocol::Quic, 59900);
+    let mut scheduler = NatProbeScheduler::new(sn);
+    scheduler.set_ports(vec![34001, 34002]);
+
+    let registered = scheduler.observe_report(&peer, tunnel, remote, None, 12_000_000);
+    assert!(registered.directive.is_some());
+
+    let observed_at = 13_000_000;
+    let profile = scheduler_profile(observed_at);
+    let accepted = scheduler.observe_reported_profile(
+        &peer,
+        tunnel,
+        remote,
+        profile.clone(),
+        observed_at,
+    );
+    assert!(accepted
+        .profile_update
+        .as_ref()
+        .and_then(|profile| profile.as_ref())
+        .is_some());
+    assert_eq!(
+        scheduler.current_profile(&peer, observed_at),
+        Some(profile.clone())
+    );
+
+    let older = scheduler_profile(observed_at - 1);
+    let ignored = scheduler.observe_reported_profile(&peer, tunnel, remote, older, observed_at);
+    assert!(ignored.profile_update.is_none());
+    assert_eq!(
+        scheduler.current_profile(&peer, observed_at),
+        Some(profile.clone())
+    );
+
+    let unknown = NatProfile::unknown();
+    let ignored_unknown =
+        scheduler.observe_reported_profile(&peer, tunnel, remote, unknown, observed_at);
+    assert!(ignored_unknown.profile_update.is_none());
+    assert_eq!(
+        scheduler.current_profile(&peer, observed_at),
+        Some(profile.clone())
+    );
+}
+
+#[test]
+fn nat_probe_scheduler_client_profile_requires_udp_authority_tunnel() {
+    let sn = scheduler_peer(90);
+    let peer = scheduler_peer(91);
+    let authority_tunnel = CmdTunnelId::from(901);
+    let concurrent_tunnel = CmdTunnelId::from(902);
+    let authority_remote = scheduler_endpoint(Protocol::Quic, 60001);
+    let mut scheduler = NatProbeScheduler::new(sn);
+    scheduler.set_ports(vec![34101, 34102]);
+
+    scheduler
+        .observe_report(&peer, authority_tunnel, authority_remote, None, 20_000_000)
+        .directive
+        .unwrap();
+    let observed_at = 21_000_000;
+    let authority_profile = scheduler_profile(observed_at);
+    let accepted = scheduler.observe_reported_profile(
+        &peer,
+        authority_tunnel,
+        authority_remote,
+        authority_profile.clone(),
+        observed_at,
+    );
+    assert!(accepted
+        .profile_update
+        .as_ref()
+        .and_then(|profile| profile.as_ref())
+        .is_some());
+
+    let concurrent_remote = scheduler_endpoint(Protocol::Quic, 60002);
+    let concurrent_profile = scheduler_profile(observed_at + 1);
+    let ignored_quic = scheduler.observe_reported_profile(
+        &peer,
+        concurrent_tunnel,
+        concurrent_remote,
+        concurrent_profile.clone(),
+        observed_at + 1,
+    );
+    assert!(ignored_quic.profile_update.is_none());
+    assert_eq!(
+        scheduler.current_profile(&peer, observed_at + 1),
+        Some(authority_profile.clone())
+    );
+
+    let tcp_remote = scheduler_endpoint(Protocol::Tcp, 60003);
+    let ignored_tcp = scheduler.observe_reported_profile(
+        &peer,
+        concurrent_tunnel,
+        tcp_remote,
+        concurrent_profile.clone(),
+        observed_at + 2,
+    );
+    assert!(ignored_tcp.profile_update.is_none());
+    assert_eq!(
+        scheduler.current_profile(&peer, observed_at + 2),
+        Some(authority_profile)
+    );
+}
+
+#[test]
+fn nat_probe_scheduler_accepts_any_udp_protocol_as_authority_client_profile() {
+    let sn = scheduler_peer(92);
+    let peer = scheduler_peer(93);
+    let tunnel = CmdTunnelId::from(903);
+    let remote = scheduler_endpoint(Protocol::Ext(1), 60011);
+    let mut scheduler = NatProbeScheduler::new(sn);
+    scheduler.set_ports(vec![34111, 34112]);
+
+    let registered = scheduler.observe_report(&peer, tunnel, remote, None, 30_000_000);
+    assert!(registered.directive.is_some());
+    assert_eq!(scheduler.authority_tunnel(&peer), Some(tunnel));
+
+    let observed_at = 31_000_000;
+    let profile = scheduler_profile(observed_at);
+    let accepted = scheduler.observe_reported_profile(
+        &peer,
+        tunnel,
+        remote,
+        profile.clone(),
+        observed_at,
+    );
+    assert!(accepted
+        .profile_update
+        .as_ref()
+        .and_then(|profile| profile.as_ref())
+        .is_some());
+    assert_eq!(scheduler.current_profile(&peer, observed_at), Some(profile));
 }

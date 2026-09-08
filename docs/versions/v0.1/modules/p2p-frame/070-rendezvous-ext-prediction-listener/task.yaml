@@ -1,0 +1,29 @@
+schema_version: 1
+workflow_tier: standard
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 070-rendezvous-ext-prediction-listener
+stage: proposal
+mode: manual
+auto_pipeline_start_stage:
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record: docs/changes/070-rendezvous-ext-prediction-listener.md
+design:
+testing:
+testplan:
+acceptance_report:
+pipeline_plan:
+risk_profile:
+lifecycle_state:
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/070-rendezvous-ext-prediction-listener.paths
+baseline_manifest: .harness/baselines/v0.1/070-rendezvous-ext-prediction-listener-delivery/manifest.json
+
+changes:
+  - id: CHG-rendezvous-ext-prediction-listener
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/tunnel/tunnel_manager.rs", "p2p-frame/tests/nat_type_aware/tunnel_manager_tests.rs", "p2p-frame/src/sn/client/sn_service.rs"]
+    changed_paths_file:

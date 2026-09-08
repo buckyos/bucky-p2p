@@ -158,6 +158,179 @@ impl UdpTunnelNetwork for PredictionValidationNetwork {
     }
 }
 
+struct ExtPredictionNetwork {
+    protocol: Protocol,
+    generation: u64,
+    predict_calls: AtomicUsize,
+    validate_calls: AtomicUsize,
+    last_probe_targets: Mutex<Vec<Endpoint>>,
+}
+
+impl ExtPredictionNetwork {
+    fn new(protocol: Protocol) -> Arc<Self> {
+        Arc::new(Self {
+            protocol,
+            generation: 71,
+            predict_calls: AtomicUsize::new(0),
+            validate_calls: AtomicUsize::new(0),
+            last_probe_targets: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn predict_calls(&self) -> usize {
+        self.predict_calls.load(Ordering::SeqCst)
+    }
+
+    fn validate_calls(&self) -> usize {
+        self.validate_calls.load(Ordering::SeqCst)
+    }
+
+    fn last_probe_targets(&self) -> Vec<Endpoint> {
+        self.last_probe_targets.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TunnelNetwork for ExtPredictionNetwork {
+    fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    fn is_udp(&self) -> bool {
+        true
+    }
+
+    fn as_udp_tunnel_network(&self) -> Option<&dyn UdpTunnelNetwork> {
+        Some(self)
+    }
+
+    async fn listen(
+        &self,
+        _local: &Endpoint,
+        _out: Option<Endpoint>,
+        _mapping_port: Option<u16>,
+        _on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> P2pResult<()> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "ext prediction mock listen not supported"
+        ))
+    }
+
+    async fn close_all_listener(&self) -> P2pResult<()> {
+        Ok(())
+    }
+
+    fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
+        vec![]
+    }
+
+    async fn create_tunnel_with_intent(
+        &self,
+        _local_identity: &P2pIdentityRef,
+        _remote: &Endpoint,
+        _remote_id: &P2pId,
+        _remote_name: Option<String>,
+        _intent: TunnelConnectIntent,
+    ) -> P2pResult<TunnelRef> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "ext prediction mock connect not supported"
+        ))
+    }
+
+    async fn create_tunnel_with_local_ep_and_intent(
+        &self,
+        local_identity: &P2pIdentityRef,
+        _local_ep: &Endpoint,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        intent: TunnelConnectIntent,
+    ) -> P2pResult<TunnelRef> {
+        self.create_tunnel_with_intent(
+            local_identity,
+            remote,
+            remote_id,
+            remote_name,
+            intent,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl UdpTunnelNetwork for ExtPredictionNetwork {
+    async fn punch_only(
+        &self,
+        _remote: &Endpoint,
+        _intent: TunnelConnectIntent,
+        _max_duration: Duration,
+    ) -> P2pResult<()> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "ext prediction mock does not punch"
+        ))
+    }
+
+    async fn probe_nat_profile(
+        &self,
+        _probe_targets: &[Endpoint],
+        _expected_signer: &P2pIdentityCertRef,
+        _per_target_timeout: Duration,
+        _ttl: Duration,
+    ) -> P2pResult<NatProfile> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "ext prediction mock does not probe profiles"
+        ))
+    }
+
+    async fn predict_traversal_endpoints(
+        &self,
+        probe_targets: &[Endpoint],
+        _expected_signer: &P2pIdentityCertRef,
+        _per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<crate::networks::TraversalEndpointPrediction> {
+        self.predict_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_probe_targets.lock().unwrap() = probe_targets.to_vec();
+        if probe_targets.len() < 2 {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "ext prediction mock requires at least two probe targets"
+            ));
+        }
+        let now = bucky_time_now();
+        let profile =
+            NatProfile::from_observations(&[probe_targets[0].clone(), probe_targets[1].clone()], now, ttl);
+        let mut predicted =
+            Endpoint::from((self.protocol, probe_targets[0].addr().ip(), 47_001));
+        predicted.set_area(EndpointArea::ServerReflexive);
+        Ok(crate::networks::TraversalEndpointPrediction {
+            endpoints: vec![predicted],
+            socket_binding_generation: self.generation,
+            valid_until: profile.valid_until,
+            profile,
+        })
+    }
+
+    fn validate_traversal_prediction(
+        &self,
+        prediction: &crate::networks::TraversalEndpointPrediction,
+        _now: crate::types::Timestamp,
+    ) -> P2pResult<()> {
+        self.validate_calls.fetch_add(1, Ordering::SeqCst);
+        if prediction.socket_binding_generation != self.generation {
+            return Err(p2p_err!(
+                P2pErrorCode::Expired,
+                "ext prediction belongs to a different generation"
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PendingPunchNetwork {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -295,6 +468,153 @@ fn observed_endpoint(port: u16) -> Endpoint {
     ));
     endpoint.set_area(EndpointArea::ServerReflexive);
     endpoint
+}
+
+fn ext_wan_endpoint(protocol: Protocol, port: u16) -> Endpoint {
+    let mut endpoint = Endpoint::from((
+        protocol,
+        "198.51.100.7".parse::<std::net::IpAddr>().unwrap(),
+        port,
+    ));
+    endpoint.set_area(EndpointArea::Wan);
+    endpoint
+}
+
+#[tokio::test]
+async fn rendezvous_ext_prediction_uses_snapshot_protocol_network() {
+    use crate::sn::client::{ActiveSN, SNClientService};
+    use crate::sn::types::CmdTunnelId;
+    use crate::types::SequenceGenerator;
+
+    init_tls_once();
+    let local = new_identity("ext-pred-local");
+    let sn_id = P2pId::from(vec![72; 32]);
+    let ext_network = ExtPredictionNetwork::new(Protocol::Ext(1));
+    let net_manager = crate::networks::NetManager::new(
+        vec![ext_network.clone() as TunnelNetworkRef],
+        DefaultTlsServerCertResolver::new(),
+    )
+    .unwrap();
+    let sn_client = SNClientService::new(
+        net_manager.clone(),
+        vec![],
+        local.clone(),
+        Arc::new(SequenceGenerator::new()),
+        Arc::new(TunnelIdGenerator::new()),
+        Arc::new(X509IdentityCertFactory),
+        1,
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+    );
+    let probe_targets = vec![
+        ext_wan_endpoint(Protocol::Ext(1), 7100),
+        ext_wan_endpoint(Protocol::Ext(1), 7101),
+    ];
+    sn_client.set_active_sn_list_for_test(vec![ActiveSN {
+        sn_peer_id: sn_id.clone(),
+        latest_time: bucky_time_now(),
+        conn_id: CmdTunnelId::from(700u32),
+        protocol: Protocol::Ext(1),
+        sn_endpoint: ext_wan_endpoint(Protocol::Ext(1), 7001),
+        wan_ep_list: vec![],
+        nat_probe_endpoints: probe_targets.clone(),
+        nat_probe_signer: Some(local.get_identity_cert().unwrap()),
+        net_profile: NatProfile::unknown(),
+        nat_probe_registration_generation: 0,
+        last_nat_probe_request_id: 0,
+        next_probe_at: 0,
+    }]);
+    let manager = TunnelManager::new(
+        local.clone(),
+        None,
+        net_manager,
+        Some(sn_client),
+        Arc::new(X509IdentityCertFactory),
+        None,
+        DefaultP2pConnectionInfoCache::new(),
+        Arc::new(TunnelIdGenerator::new()),
+        Duration::from_millis(100),
+        Duration::from_secs(30),
+        PROXY_UPGRADE_INITIAL_INTERVAL,
+    )
+    .unwrap();
+
+    let prediction = manager
+        .predict_owned_rendezvous_endpoints(&sn_id)
+        .await
+        .unwrap();
+
+    assert_eq!(ext_network.predict_calls(), 1);
+    assert_eq!(ext_network.validate_calls(), 1);
+    assert_eq!(ext_network.last_probe_targets(), probe_targets);
+    assert_eq!(prediction.endpoints.len(), 1);
+    assert_eq!(prediction.endpoints[0].protocol(), Protocol::Ext(1));
+}
+
+#[tokio::test]
+async fn rendezvous_ext_prediction_fails_closed_when_snapshot_protocol_network_missing() {
+    use crate::sn::client::{ActiveSN, SNClientService};
+    use crate::sn::types::CmdTunnelId;
+    use crate::types::SequenceGenerator;
+
+    init_tls_once();
+    let local = new_identity("ext-pred-missing-local");
+    let sn_id = P2pId::from(vec![73; 32]);
+    let net_manager = crate::networks::NetManager::new(
+        vec![] as Vec<TunnelNetworkRef>,
+        DefaultTlsServerCertResolver::new(),
+    )
+    .unwrap();
+    let sn_client = SNClientService::new(
+        net_manager.clone(),
+        vec![],
+        local.clone(),
+        Arc::new(SequenceGenerator::new()),
+        Arc::new(TunnelIdGenerator::new()),
+        Arc::new(X509IdentityCertFactory),
+        1,
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+    );
+    sn_client.set_active_sn_list_for_test(vec![ActiveSN {
+        sn_peer_id: sn_id.clone(),
+        latest_time: bucky_time_now(),
+        conn_id: CmdTunnelId::from(701u32),
+        protocol: Protocol::Ext(1),
+        sn_endpoint: ext_wan_endpoint(Protocol::Ext(1), 7002),
+        wan_ep_list: vec![],
+        nat_probe_endpoints: vec![
+            ext_wan_endpoint(Protocol::Ext(1), 7200),
+            ext_wan_endpoint(Protocol::Ext(1), 7201),
+        ],
+        nat_probe_signer: Some(local.get_identity_cert().unwrap()),
+        net_profile: NatProfile::unknown(),
+        nat_probe_registration_generation: 0,
+        last_nat_probe_request_id: 0,
+        next_probe_at: 0,
+    }]);
+    let manager = TunnelManager::new(
+        local.clone(),
+        None,
+        net_manager,
+        Some(sn_client),
+        Arc::new(X509IdentityCertFactory),
+        None,
+        DefaultP2pConnectionInfoCache::new(),
+        Arc::new(TunnelIdGenerator::new()),
+        Duration::from_millis(100),
+        Duration::from_secs(30),
+        PROXY_UPGRADE_INITIAL_INTERVAL,
+    )
+    .unwrap();
+
+    let err = manager
+        .predict_owned_rendezvous_endpoints(&sn_id)
+        .await
+        .expect_err("missing Ext network must fail closed before prediction");
+    assert_eq!(err.code(), P2pErrorCode::NotFound);
 }
 
 #[test]

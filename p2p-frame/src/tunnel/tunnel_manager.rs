@@ -1163,6 +1163,25 @@ impl TunnelManager {
         result
     }
 
+    fn udp_prediction_network(
+        &self,
+        endpoints: &[Endpoint],
+        capability: &str,
+    ) -> P2pResult<TunnelNetworkRef> {
+        let protocol = endpoints
+            .first()
+            .ok_or_else(|| p2p_err!(P2pErrorCode::NotFound, "no {capability} endpoints"))?
+            .protocol();
+        let network = self.net_manager.get_network(protocol)?;
+        if network.as_udp_tunnel_network().is_none() {
+            return Err(p2p_err!(
+                P2pErrorCode::NotSupport,
+                "{protocol:?} network does not support UDP {capability}"
+            ));
+        }
+        Ok(network)
+    }
+
     async fn predict_owned_rendezvous_endpoints(
         &self,
         sn_peer_id: &P2pId,
@@ -1185,11 +1204,15 @@ impl TunnelManager {
                 "active SN has no traversal prediction reflectors"
             ));
         }
-        let network = self.net_manager.get_network(Protocol::Quic)?;
+        let network = self.udp_prediction_network(
+            &probe_snapshot.endpoints,
+            "traversal prediction",
+        )?;
         let udp_network = network.as_udp_tunnel_network().ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::NotSupport,
-                "QUIC network does not support UDP traversal prediction"
+                "{:?} network does not support UDP traversal prediction",
+                network.protocol()
             )
         })?;
         let prediction = udp_network
@@ -1473,11 +1496,15 @@ impl TunnelManager {
             plan.need_predict_endpoint,
         )?;
         if let Some(prediction) = request_prediction.as_ref() {
-            let network = self.net_manager.get_network(Protocol::Quic)?;
+            let network = self.udp_prediction_network(
+                &prediction.endpoints,
+                "traversal prediction validation",
+            )?;
             let udp_network = network.as_udp_tunnel_network().ok_or_else(|| {
                 p2p_err!(
                     P2pErrorCode::NotSupport,
-                    "QUIC network does not support UDP traversal prediction validation"
+                    "{:?} network does not support UDP traversal prediction validation",
+                    network.protocol()
                 )
             })?;
             udp_network.validate_traversal_prediction(prediction, bucky_time_now())?;
@@ -1707,11 +1734,15 @@ impl TunnelManager {
             SnTunnelRendezvousActionAck::without_prediction()
         };
         if let Some(prediction) = prediction.as_ref() {
-            let network = self.net_manager.get_network(Protocol::Quic)?;
+            let network = self.udp_prediction_network(
+                &prediction.endpoints,
+                "traversal prediction validation",
+            )?;
             let udp_network = network.as_udp_tunnel_network().ok_or_else(|| {
                 p2p_err!(
                     P2pErrorCode::NotSupport,
-                    "QUIC network does not support UDP traversal prediction validation"
+                    "{:?} network does not support UDP traversal prediction validation",
+                    network.protocol()
                 )
             })?;
             udp_network.validate_traversal_prediction(prediction, bucky_time_now())?;

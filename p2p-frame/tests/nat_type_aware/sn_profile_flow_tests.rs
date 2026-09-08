@@ -39,6 +39,7 @@ fn active_sn_profiles_are_kept_per_sn_id() {
                 net_profile: first_profile.clone(),
                 nat_probe_registration_generation: 1,
                 last_nat_probe_request_id: 1,
+                next_probe_at: 0,
             },
             ActiveSN {
                 sn_peer_id: second_sn.clone(),
@@ -52,6 +53,7 @@ fn active_sn_profiles_are_kept_per_sn_id() {
                 net_profile: second_profile.clone(),
                 nat_probe_registration_generation: 1,
                 last_nat_probe_request_id: 1,
+                next_probe_at: 0,
             },
         ],
         latest_sn_interval: 0,
@@ -235,7 +237,7 @@ async fn first_query_returns_remote_profile_and_call_forwards_exact_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn periodic_deadline_issues_exactly_one_real_probe_directive() {
+async fn initial_online_probe_and_stable_report_do_not_issue_server_periodic() {
     super::enable_nat_probe_test_logging();
     let log_start = super::nat_probe_test_logs().len();
     let identity_factory = Arc::new(X509IdentityFactory);
@@ -309,49 +311,13 @@ async fn periodic_deadline_issues_exactly_one_real_probe_directive() {
             active.nat_probe_registration_generation
         )) && message.contains(&format!("request_id={}", active.last_nat_probe_request_id))
     }));
-    let forced_at = bucky_time_now();
-    assert!(
-        sn_service
-            .service()
-            .force_nat_probe_period_due_for_test(&client_id, forced_at)
-    );
-
-    let mut due = client
-        .sn_client()
-        .report_for_test(active.conn_id, sn_id.clone(), None)
-        .await
-        .unwrap();
-    let directive = due
-        .nat_probe_directive
-        .take()
-        .expect("forced periodic deadline must issue one directive");
-    let result = client
-        .sn_client()
-        .execute_probe_directive_for_test(
-            sn_id.clone(),
-            active.protocol,
-            active.nat_probe_registration_generation,
-            active.last_nat_probe_request_id,
-            Some(directive),
-        )
-        .await
-        .expect("periodic directive must pass the client gate");
-    assert_ne!(result.profile.observation, NatMappingObservation::Unknown);
-    let completed = client
-        .sn_client()
-        .report_for_test(active.conn_id, sn_id.clone(), Some(&result))
-        .await
-        .unwrap();
-    assert!(completed.nat_probe_directive.is_none());
     let lifecycle_logs: Vec<(log::Level, String)> = super::nat_probe_test_logs()[log_start..]
         .iter()
         .filter(|(_, message)| message.contains(&peer_text))
         .cloned()
         .collect();
-    assert!(lifecycle_logs.iter().any(|(_, message)| {
-        message.contains("event=nat_probe_directive_issued")
-            && message.contains("trigger=periodic")
-            && message.contains(&format!("request_id={}", result.request_id))
+    assert!(!lifecycle_logs.iter().any(|(_, message)| {
+        message.contains("event=nat_probe_directive_issued") && message.contains("trigger=periodic")
     }));
     for (level, message) in &lifecycle_logs {
         for forbidden in [
@@ -507,6 +473,370 @@ async fn initial_probe_and_result_report_failure_do_not_gate_online() {
     .await
     .expect("failed result report must emit a correlated warn event");
     assert_eq!(client.sn_client().get_active_sn_list().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_report_without_server_directive_runs_client_local_probe() {
+    super::enable_nat_probe_test_logging();
+    let log_start = super::nat_probe_test_logs().len();
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let mut sn_endpoint = localhost_quic_endpoint(next_port());
+    sn_endpoint.set_area(EndpointArea::Wan);
+    let sn_identity = build_identity("nat-local-probe-sn", sn_endpoint);
+    let sn_id = sn_identity.get_id();
+    let probe_ports = vec![next_port(), next_port()];
+    let sn_service = create_sn_service(
+        SnServiceConfig::new(
+            sn_identity.clone(),
+            identity_factory.clone(),
+            cert_factory.clone(),
+            test_server_runtime(),
+        )
+        .set_nat_probe_ports(probe_ports.clone()),
+    )
+    .await
+    .unwrap();
+    let reports_seen = Arc::new(AtomicUsize::new(0));
+    let handler_reports_seen = reports_seen.clone();
+    let handler_sn_id = sn_id.clone();
+    let handler_identity = sn_identity.clone();
+    let handler_ports = probe_ports.clone();
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::ReportSn as u8,
+        move |_local_id,
+              _peer_id: sfo_cmd_server::PeerId,
+              _tunnel_id,
+              _header,
+              mut body: CmdBody| {
+            let handler_reports_seen = handler_reports_seen.clone();
+            let sn_id = handler_sn_id.clone();
+            let handler_identity = handler_identity.clone();
+            let handler_ports = handler_ports.clone();
+            async move {
+                handler_reports_seen.fetch_add(1, Ordering::SeqCst);
+                let report = ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                let response = ReportSnResp {
+                    seq: report.seq,
+                    sn_peer_id: sn_id,
+                    result: P2pErrorCode::Ok.as_u8(),
+                    peer_info: Some(
+                        handler_identity
+                            .get_identity_cert()
+                            .unwrap()
+                            .get_encoded_cert()
+                            .unwrap(),
+                    ),
+                    end_point_array: vec![],
+                    receipt: None,
+                    nat_probe_ports: handler_ports,
+                    nat_probe_directive: None,
+                };
+                Ok(Some(CmdBody::from(response.to_vec().unwrap())))
+            }
+        },
+    );
+    sn_service.start().await.unwrap();
+
+    let client_identity =
+        build_identity("nat-local-probe-client", localhost_quic_endpoint(next_port()));
+    let client_id = client_identity.get_id();
+    let client = start_client_stack(
+        client_identity,
+        vec![build_sn_entry(&sn_identity)],
+        identity_factory,
+        cert_factory,
+    )
+    .await
+    .unwrap();
+    client.wait_online(Some(ONLINE_TIMEOUT)).await.unwrap();
+
+    let startup_active = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let active = client.sn_client().get_active_sn_list();
+            if let Some(active) = active.iter().find(|active| active.sn_peer_id == sn_id) {
+                if active.net_profile.observation != NatMappingObservation::Unknown
+                    && active.next_probe_at > bucky_time_now()
+                {
+                    break active.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("startup local probe must complete and backfill profile and schedule");
+
+    let now = bucky_time_now();
+    assert_ne!(
+        startup_active.net_profile.observation,
+        NatMappingObservation::Unknown,
+        "startup local probe must publish a measured profile, not unknown/failed"
+    );
+    assert!(
+        startup_active.next_probe_at > now,
+        "startup local probe must advance next_probe_at"
+    );
+    assert!(
+        startup_active.next_probe_at
+            >= now.saturating_add(Duration::from_secs(2 * 60 * 60 - 60).as_micros() as u64),
+        "next_probe_at must arm the next local probe roughly 2h after completion"
+    );
+    let startup_next_probe_at = startup_active.next_probe_at;
+
+    let initial_local_logs: Vec<String> = super::nat_probe_test_logs()[log_start..]
+        .iter()
+        .map(|(_, message)| message.clone())
+        .filter(|message| {
+            message.contains(&client_id.to_string())
+                && message.contains("event=nat_probe_client_local_")
+        })
+        .collect();
+    assert!(
+        initial_local_logs
+            .iter()
+            .any(|message| message.contains("event=nat_probe_client_local_completed")),
+        "startup local probe must log a successful completion, not only start"
+    );
+    assert!(
+        !initial_local_logs
+            .iter()
+            .any(|message| message.contains("event=nat_probe_client_local_failed")),
+        "startup local probe must not fail"
+    );
+    assert_eq!(
+        initial_local_logs
+            .iter()
+            .filter(|message| message.contains("event=nat_probe_client_local_started"))
+            .count(),
+        1,
+        "startup must start the local probe exactly once before it is due again"
+    );
+
+    // A report cycle that becomes due before next_probe_at must not rerun the
+    // local probe: the probe deadline is the scheduling boundary.
+    let reports_before = reports_seen.load(Ordering::SeqCst);
+    assert!(
+        client
+            .sn_client()
+            .force_active_sn_report_due_for_test(&sn_id)
+    );
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while reports_seen.load(Ordering::SeqCst) <= reports_before {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("forcing the report deadline must produce another report cycle");
+    assert_eq!(
+        super::nat_probe_test_logs()[log_start..]
+            .iter()
+            .filter(|(_, message)| {
+                message.contains(&client_id.to_string())
+                    && message.contains("event=nat_probe_client_local_started")
+            })
+            .count(),
+        1,
+        "a report cycle before next_probe_at must not run another local probe"
+    );
+
+    // Once the probe deadline is reachable, the next report cycle reruns the
+    // local probe and re-arms next_probe_at for the following round.
+    assert!(
+        client
+            .sn_client()
+            .force_active_sn_probe_due_for_test(&sn_id)
+    );
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let active = client.sn_client().get_active_sn_list();
+            if let Some(active) = active.iter().find(|active| active.sn_peer_id == sn_id) {
+                if active.net_profile.observation != NatMappingObservation::Unknown
+                    && active.next_probe_at > bucky_time_now()
+                    && active.next_probe_at > startup_next_probe_at
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a reachable probe deadline must rerun the local probe and re-arm next_probe_at");
+
+    let second_round_logs: Vec<String> = super::nat_probe_test_logs()[log_start..]
+        .iter()
+        .map(|(_, message)| message.clone())
+        .filter(|message| {
+            message.contains(&client_id.to_string())
+                && message.contains("event=nat_probe_client_local_")
+        })
+        .collect();
+    assert!(
+        second_round_logs
+            .iter()
+            .filter(|message| message.contains("event=nat_probe_client_local_started"))
+            .count()
+            >= 2,
+        "reachable probe deadline must run a second local probe"
+    );
+    assert!(
+        second_round_logs
+            .iter()
+            .any(|message| message.contains("event=nat_probe_client_local_completed")),
+        "second local probe must complete successfully"
+    );
+    assert!(
+        !second_round_logs
+            .iter()
+            .any(|message| message.contains("event=nat_probe_client_local_failed")),
+        "second local probe must not fail"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn periodic_local_probe_runs_before_report_and_preserves_local_profile_on_report_failure() {
+    use std::sync::atomic::AtomicBool;
+
+    super::enable_nat_probe_test_logging();
+    let log_start = super::nat_probe_test_logs().len();
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let mut sn_endpoint = localhost_quic_endpoint(next_port());
+    sn_endpoint.set_area(EndpointArea::Wan);
+    let sn_identity = build_identity("nat-periodic-probe-sn", sn_endpoint);
+    let sn_id = sn_identity.get_id();
+    let probe_ports = vec![next_port(), next_port()];
+    let sn_service = create_sn_service(
+        SnServiceConfig::new(
+            sn_identity.clone(),
+            identity_factory.clone(),
+            cert_factory.clone(),
+            test_server_runtime(),
+        )
+        .set_nat_probe_ports(probe_ports.clone()),
+    )
+    .await
+    .unwrap();
+    let report_with_profile_seen = Arc::new(AtomicBool::new(false));
+    let fail_reports = Arc::new(AtomicBool::new(false));
+    let handler_fail_reports = fail_reports.clone();
+    let handler_seen = report_with_profile_seen.clone();
+    let handler_sn_id = sn_id.clone();
+    let handler_identity = sn_identity.clone();
+    let handler_ports = probe_ports.clone();
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::ReportSn as u8,
+        move |_local_id,
+              _peer_id: sfo_cmd_server::PeerId,
+              _tunnel_id,
+              _header,
+              mut body: CmdBody| {
+            let handler_seen = handler_seen.clone();
+            let handler_fail_reports = handler_fail_reports.clone();
+            let sn_id = handler_sn_id.clone();
+            let handler_identity = handler_identity.clone();
+            let handler_ports = handler_ports.clone();
+            async move {
+                let report =
+                    ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                if report.net_profile.is_some() && report.nat_probe_result.is_none() {
+                    handler_seen.store(true, Ordering::SeqCst);
+                }
+                if handler_fail_reports.load(Ordering::SeqCst) {
+                    return Ok(Some(CmdBody::from(
+                        ReportSnResp {
+                            seq: Sequence::from(0),
+                            sn_peer_id: sn_id,
+                            result: P2pErrorCode::Ok.as_u8(),
+                            peer_info: None,
+                            end_point_array: vec![],
+                            receipt: None,
+                            nat_probe_ports: vec![],
+                            nat_probe_directive: None,
+                        }
+                        .to_vec()
+                        .unwrap(),
+                    )));
+                }
+                let response = ReportSnResp {
+                    seq: report.seq,
+                    sn_peer_id: sn_id,
+                    result: P2pErrorCode::Ok.as_u8(),
+                    peer_info: Some(
+                        handler_identity
+                            .get_identity_cert()
+                            .unwrap()
+                            .get_encoded_cert()
+                            .unwrap(),
+                    ),
+                    end_point_array: vec![],
+                    receipt: None,
+                    nat_probe_ports: handler_ports,
+                    nat_probe_directive: None,
+                };
+                Ok(Some(CmdBody::from(response.to_vec().unwrap())))
+            }
+        },
+    );
+    sn_service.start().await.unwrap();
+
+    let client_identity =
+        build_identity("nat-periodic-probe-client", localhost_quic_endpoint(next_port()));
+    let client_id = client_identity.get_id();
+    let client = start_client_stack(
+        client_identity,
+        vec![build_sn_entry(&sn_identity)],
+        identity_factory,
+        cert_factory,
+    )
+    .await
+    .unwrap();
+    client.wait_online(Some(ONLINE_TIMEOUT)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let active = client.sn_client().get_active_sn_list();
+            if let Some(active) = active.iter().find(|active| active.sn_peer_id == sn_id) {
+                if active.next_probe_at > bucky_time_now() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("startup local probe must complete before forcing the periodic due state");
+    fail_reports.store(true, Ordering::SeqCst);
+    assert!(client
+        .sn_client()
+        .force_active_sn_probe_due_for_test(&sn_id));
+
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while !report_with_profile_seen.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("periodic report must carry the locally measured profile");
+
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let active = client.sn_client().get_active_sn_list();
+            if let Some(active) = active.iter().find(|active| active.sn_peer_id == sn_id) {
+                if active.next_probe_at > bucky_time_now() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("completed local probe must advance next_probe_at even when the report fails");
+
+    assert!(super::nat_probe_test_logs()[log_start..]
+        .iter()
+        .any(|(_, message)| message.contains("event=nat_probe_client_local_completed")
+            && message.contains(&client_id.to_string())));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

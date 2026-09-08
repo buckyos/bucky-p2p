@@ -22,6 +22,8 @@ fn nat_probe_log_events_cover_the_operational_lifecycle() {
         "nat_probe_result_report_failed",
         "nat_probe_result_accepted",
         "nat_probe_result_rejected",
+        "nat_probe_client_profile_accepted",
+        "nat_probe_client_profile_ignored",
         "nat_probe_directive_timeout",
         "nat_probe_profile_invalidated",
         "nat_probe_authority_removed",

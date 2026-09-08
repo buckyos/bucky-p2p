@@ -1,3 +1,10 @@
+use crate::p2p_identity::P2pIdentity;
+use crate::NatMappingObservation;
+use crate::networks::{
+    IncomingTunnelCallback, TraversalEndpointPrediction, TunnelConnectIntent, TunnelListenerInfo,
+    TunnelNetwork, TunnelNetworkRef, UdpTunnelNetwork,
+};
+
 fn directive_test_endpoint(protocol: Protocol, addr: &str) -> Endpoint {
     Endpoint::from((protocol, addr.parse().unwrap()))
 }
@@ -16,7 +23,7 @@ fn directive_test_value(sn: P2pId, peer: P2pId) -> NatProbeDirective {
 }
 
 #[test]
-fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
+fn nat_probe_directive_gate_requires_udp_identity_deadline_and_new_request() {
     let sn = P2pId::from(vec![31; 32]);
     let peer = P2pId::from(vec![32; 32]);
     let directive = directive_test_value(sn.clone(), peer.clone());
@@ -26,6 +33,17 @@ fn nat_probe_directive_gate_requires_quic_identity_deadline_and_new_request() {
         &peer,
         Protocol::Quic,
         &sn_endpoint,
+        4,
+        8,
+        1_000,
+        &directive,
+    ));
+    let ext_endpoint = directive_test_endpoint(Protocol::Ext(1), "198.51.100.20:3630");
+    assert!(SNClientService::valid_probe_directive(
+        &sn,
+        &peer,
+        Protocol::Ext(1),
+        &ext_endpoint,
         4,
         8,
         1_000,
@@ -192,6 +210,35 @@ fn nat_probe_directive_reconstructs_wan_targets_from_active_sn_ipv4_and_ports() 
 }
 
 #[test]
+fn nat_probe_directive_reconstructs_wan_targets_for_any_udp_protocol() {
+    let sn = P2pId::from(vec![46; 32]);
+    let peer = P2pId::from(vec![47; 32]);
+    let directive = directive_test_value(sn.clone(), peer.clone());
+    let active_protocol = Protocol::Ext(1);
+    let active_endpoint = directive_test_endpoint(active_protocol, "203.0.113.45:443");
+
+    let endpoints = SNClientService::validate_probe_directive(
+        &sn,
+        &peer,
+        active_protocol,
+        &active_endpoint,
+        0,
+        0,
+        999,
+        &directive,
+    )
+    .unwrap();
+
+    assert_eq!(endpoints.len(), directive.ports.len());
+    for (endpoint, port) in endpoints.iter().zip(directive.ports.iter()) {
+        assert_eq!(endpoint.protocol(), active_protocol);
+        assert_eq!(endpoint.addr().ip(), active_endpoint.addr().ip());
+        assert_eq!(endpoint.addr().port(), *port);
+        assert_eq!(endpoint.get_area(), EndpointArea::Wan);
+    }
+}
+
+#[test]
 fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
     let sn = P2pId::from(vec![37; 32]);
     let peer = P2pId::from(vec![38; 32]);
@@ -221,7 +268,7 @@ fn nat_probe_directive_rejection_reasons_are_specific_and_stable() {
 
     assert_eq!(
         validate(&sn, &peer, Protocol::Tcp, &sn_endpoint, 4, 8, 999, &directive),
-        "transport_not_quic"
+        "transport_not_udp"
     );
     let mut unsupported = directive.clone();
     unsupported.version = u8::MAX;
@@ -338,6 +385,7 @@ fn nat_probe_directive_does_not_gate_initial_online_publication() {
         net_profile: NatProfile::unknown(),
         nat_probe_registration_generation: 0,
         last_nat_probe_request_id: 0,
+        next_probe_at: 0,
     };
     let mut active_sn_list = Vec::new();
 
@@ -432,6 +480,7 @@ fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
         ),
         nat_probe_registration_generation: 8,
         last_nat_probe_request_id: 9,
+        next_probe_at: 0,
     };
     let replacement_snapshot = replacement.clone();
     let mut active_sn_list = vec![replacement];
@@ -454,6 +503,7 @@ fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
         net_profile: NatProfile::unknown(),
         nat_probe_registration_generation: 3,
         last_nat_probe_request_id: 4,
+        next_probe_at: 0,
     };
     assert!(!update_active_sn_if_owner(
         &mut active_sn_list,
@@ -542,6 +592,7 @@ impl crate::p2p_identity::P2pIdentityCertFactory for SelfInvalidCertFactory {
         }))
     }
 }
+
 
 #[cfg(feature = "x509")]
 fn signer_validation_service(
@@ -934,6 +985,7 @@ fn collect_due_active_sns_force_initial_reports_recent_active_sn() {
         net_profile: NatProfile::unknown(),
         nat_probe_registration_generation: 0,
         last_nat_probe_request_id: 0,
+        next_probe_at: 0,
     };
 
     let mut periodic = vec![active.clone()];
@@ -945,4 +997,239 @@ fn collect_due_active_sns_force_initial_reports_recent_active_sn() {
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].sn_peer_id, active.sn_peer_id);
     assert_eq!(initial[0].latest_time, now);
+}
+
+#[cfg(feature = "x509")]
+struct ExtUdpProbeNetwork {
+    probes: Mutex<Vec<Vec<Endpoint>>>,
+}
+
+#[cfg(feature = "x509")]
+impl ExtUdpProbeNetwork {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            probes: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn probe_count(&self) -> usize {
+        self.probes.lock().unwrap().len()
+    }
+}
+
+#[cfg(feature = "x509")]
+#[async_trait::async_trait]
+impl TunnelNetwork for ExtUdpProbeNetwork {
+    fn protocol(&self) -> Protocol {
+        Protocol::Ext(1)
+    }
+
+    fn is_udp(&self) -> bool {
+        true
+    }
+
+    fn as_udp_tunnel_network(&self) -> Option<&dyn UdpTunnelNetwork> {
+        Some(self)
+    }
+
+    async fn listen(
+        &self,
+        _local: &Endpoint,
+        _out: Option<Endpoint>,
+        _mapping_port: Option<u16>,
+        _on_incoming_tunnel: IncomingTunnelCallback,
+    ) -> P2pResult<()> {
+        Err(p2p_err!(P2pErrorCode::NotSupport, "mock ext listen"))
+    }
+
+    async fn close_all_listener(&self) -> P2pResult<()> {
+        Ok(())
+    }
+
+    fn listener_infos(&self) -> Vec<TunnelListenerInfo> {
+        vec![]
+    }
+
+    async fn create_tunnel_with_intent(
+        &self,
+        _local_identity: &P2pIdentityRef,
+        _remote: &Endpoint,
+        _remote_id: &P2pId,
+        _remote_name: Option<String>,
+        _intent: TunnelConnectIntent,
+    ) -> P2pResult<crate::networks::TunnelRef> {
+        Err(p2p_err!(P2pErrorCode::NotSupport, "mock ext connect"))
+    }
+
+    async fn create_tunnel_with_local_ep_and_intent(
+        &self,
+        local_identity: &P2pIdentityRef,
+        _local_ep: &Endpoint,
+        remote: &Endpoint,
+        remote_id: &P2pId,
+        remote_name: Option<String>,
+        intent: TunnelConnectIntent,
+    ) -> P2pResult<crate::networks::TunnelRef> {
+        self.create_tunnel_with_intent(local_identity, remote, remote_id, remote_name, intent)
+            .await
+    }
+}
+
+#[cfg(feature = "x509")]
+#[async_trait::async_trait]
+impl UdpTunnelNetwork for ExtUdpProbeNetwork {
+    async fn punch_only(
+        &self,
+        _remote: &Endpoint,
+        _intent: TunnelConnectIntent,
+        _max_duration: Duration,
+    ) -> P2pResult<()> {
+        Err(p2p_err!(P2pErrorCode::NotSupport, "mock ext punch"))
+    }
+
+    async fn probe_nat_profile(
+        &self,
+        probe_targets: &[Endpoint],
+        _expected_signer: &P2pIdentityCertRef,
+        _per_target_timeout: Duration,
+        ttl: Duration,
+    ) -> P2pResult<NatProfile> {
+        self.probes.lock().unwrap().push(probe_targets.to_vec());
+        if probe_targets.len() < 2 {
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidParam,
+                "ext udp probe requires at least two targets"
+            ));
+        }
+        Ok(NatProfile::from_observations(
+            probe_targets,
+            bucky_time_now(),
+            ttl,
+        ))
+    }
+
+    async fn predict_traversal_endpoints(
+        &self,
+        _probe_targets: &[Endpoint],
+        _expected_signer: &P2pIdentityCertRef,
+        _per_target_timeout: Duration,
+        _ttl: Duration,
+    ) -> P2pResult<TraversalEndpointPrediction> {
+        Err(p2p_err!(P2pErrorCode::NotSupport, "mock ext prediction"))
+    }
+
+    fn validate_traversal_prediction(
+        &self,
+        _prediction: &TraversalEndpointPrediction,
+        _now: crate::types::Timestamp,
+    ) -> P2pResult<()> {
+        Err(p2p_err!(
+            P2pErrorCode::NotSupport,
+            "mock ext prediction validation"
+        ))
+    }
+}
+
+#[cfg(feature = "x509")]
+fn ext_udp_probe_test_service(
+    sn: P2pIdentityRef,
+) -> (Arc<SNClientService>, Arc<ExtUdpProbeNetwork>, P2pIdentityCertRef) {
+    use crate::networks::NetManager;
+    use crate::tls::DefaultTlsServerCertResolver;
+    use crate::types::{SequenceGenerator, TunnelIdGenerator};
+    use crate::x509::{X509IdentityCertFactory, generate_rsa_x509_identity};
+
+    let fake = ExtUdpProbeNetwork::new();
+    let networks: Vec<TunnelNetworkRef> = vec![fake.clone() as TunnelNetworkRef];
+    let net_manager = NetManager::new(networks, DefaultTlsServerCertResolver::new()).unwrap();
+    let local_identity: P2pIdentityRef =
+        Arc::new(generate_rsa_x509_identity(Some("ext-probe-client".to_owned())).unwrap());
+    let service = SNClientService::new(
+        net_manager,
+        Vec::new(),
+        local_identity,
+        Arc::new(SequenceGenerator::new()),
+        Arc::new(TunnelIdGenerator::new()),
+        Arc::new(X509IdentityCertFactory),
+        1,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    let sn_cert = sn.get_identity_cert().unwrap();
+    let sn_endpoint = directive_test_endpoint(Protocol::Ext(1), "198.51.100.20:3630");
+    {
+        let mut state = service.state.write().unwrap();
+        state.active_sn_list.push(ActiveSN {
+            sn_peer_id: sn.get_id(),
+            latest_time: 1,
+            conn_id: CmdTunnelId::from(42),
+            protocol: Protocol::Ext(1),
+            sn_endpoint,
+            wan_ep_list: vec![],
+            nat_probe_endpoints: vec![],
+            nat_probe_signer: Some(sn_cert.clone()),
+            net_profile: NatProfile::unknown(),
+            nat_probe_registration_generation: 0,
+            last_nat_probe_request_id: 0,
+            next_probe_at: 0,
+        });
+    }
+    (service, fake, sn_cert)
+}
+
+#[cfg(feature = "x509")]
+#[tokio::test]
+async fn nat_probe_directive_ext_udp_executes_on_registered_network() {
+    use crate::x509::generate_rsa_x509_identity;
+
+    let sn: P2pIdentityRef = Arc::new(
+        generate_rsa_x509_identity(Some("ext-probe-directive-sn".to_owned())).unwrap(),
+    );
+    let (service, fake, _signer) = ext_udp_probe_test_service(sn.clone());
+    let mut directive = directive_test_value(sn.get_id(), service.local_identity.get_id());
+    directive.expires_at = bucky_time_now() + 1_000_000;
+    let result = service
+        .execute_probe_directive_for_test(sn.get_id(), Protocol::Ext(1), 4, 8, Some(directive.clone()))
+        .await
+        .expect("Ext UDP directive must execute on the registered Ext network");
+    assert_ne!(result.profile.observation, NatMappingObservation::Unknown);
+
+    let calls = fake.probes.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let targets = calls.first().unwrap();
+    assert_eq!(targets.len(), directive.ports.len());
+    for (endpoint, port) in targets.iter().zip(directive.ports.iter()) {
+        assert_eq!(endpoint.protocol(), Protocol::Ext(1));
+        assert_eq!(endpoint.addr().port(), *port);
+        assert_eq!(endpoint.get_area(), EndpointArea::Wan);
+    }
+}
+
+#[cfg(feature = "x509")]
+#[tokio::test]
+async fn nat_probe_directive_ext_udp_local_fallback_uses_registered_network() {
+    use crate::x509::generate_rsa_x509_identity;
+
+    let sn: P2pIdentityRef = Arc::new(
+        generate_rsa_x509_identity(Some("ext-probe-local-sn".to_owned())).unwrap(),
+    );
+    let (service, fake, signer) = ext_udp_probe_test_service(sn.clone());
+    let sn_endpoint = directive_test_endpoint(Protocol::Ext(1), "198.51.100.21:3630");
+    let ports = vec![30011, 30012];
+    let endpoints =
+        SNClientService::build_nat_probe_endpoints(Protocol::Ext(1), &sn_endpoint, &ports)
+            .unwrap();
+    let profile = service.probe_local(&sn.get_id(), &endpoints, Some(signer)).await;
+    assert_ne!(profile.observation, NatMappingObservation::Unknown);
+
+    let calls = fake.probes.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let targets = calls.first().unwrap();
+    assert_eq!(targets, &endpoints);
+    for (endpoint, port) in targets.iter().zip(ports.iter()) {
+        assert_eq!(endpoint.protocol(), Protocol::Ext(1));
+        assert_eq!(endpoint.addr().port(), *port);
+        assert_eq!(endpoint.get_area(), EndpointArea::Wan);
+    }
 }

@@ -318,18 +318,6 @@ impl SnService {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn force_nat_probe_period_due_for_test(
-        &self,
-        peer_id: &P2pId,
-        now: Timestamp,
-    ) -> bool {
-        self.nat_probe_scheduler
-            .lock()
-            .unwrap()
-            .force_periodic_due(peer_id, now)
-    }
-
     fn inter_sn_client(&self) -> Option<SnInterClientRef> {
         self.inter_sn_client.lock().unwrap().clone()
     }
@@ -1218,19 +1206,6 @@ impl SnService {
         let local_sn_id = self.effective_local_sn_id(local_id);
         self.reconcile_nat_probe_authority(&call_req.to_peer_id)
             .await;
-        let now = bucky_time_now();
-        if self
-            .nat_probe_scheduler
-            .lock()
-            .unwrap()
-            .current_profile(&call_req.to_peer_id, now)
-            .is_none()
-        {
-            self.nat_probe_scheduler
-                .lock()
-                .unwrap()
-                .mark_demand(&call_req.to_peer_id, now);
-        }
 
         let from_peer_id = &call_req.from_peer_id;
         let log_key = format!(
@@ -1636,6 +1611,7 @@ impl SnService {
             .await;
         let (nat_probe_transition, nat_probe_ports) = {
             let mut scheduler = self.nat_probe_scheduler.lock().unwrap();
+            let now = bucky_time_now();
             let transition = observed_tunnel.map(|observed_tunnel| {
                 scheduler.set_sn_peer_id(local_id);
                 scheduler.observe_capable_report(
@@ -1644,9 +1620,35 @@ impl SnService {
                     observed_tunnel,
                     report_sn.nat_probe_control_version,
                     report_sn.nat_probe_result.take(),
-                    bucky_time_now(),
+                    now,
                 )
             });
+            let transition = if let Some(profile) = report_sn.net_profile.take() {
+                let profile_transition = observed_tunnel
+                    .map(|observed_tunnel| {
+                        scheduler.observe_reported_profile(
+                            &authenticated_peer_id,
+                            tunnel_id,
+                            observed_tunnel,
+                            profile,
+                            now,
+                        )
+                    })
+                    .unwrap_or_default();
+                if profile_transition.profile_update.is_some() {
+                    Some(match transition {
+                        Some(mut transition) => {
+                            transition.profile_update = profile_transition.profile_update;
+                            transition
+                        }
+                        None => profile_transition,
+                    })
+                } else {
+                    transition
+                }
+            } else {
+                transition
+            };
             (transition, scheduler.ports().to_vec())
         };
         let nat_probe_directive = nat_probe_transition.and_then(|transition| {
@@ -1681,12 +1683,6 @@ impl SnService {
             .lock()
             .unwrap()
             .current_profile(&query.query_id, now);
-        if local_net_profile.is_none() {
-            self.nat_probe_scheduler
-                .lock()
-                .unwrap()
-                .mark_demand(&query.query_id, now);
-        }
         let device_info = self.peer_mgr.find_peer(&query.query_id);
         let remote = self
             .query_remote_details(&requester_sn_id, &query.query_id)
