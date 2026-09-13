@@ -206,6 +206,34 @@ impl NatProbeScheduler {
         &self.ports
     }
 
+    /// Canonical "same registered observed path" comparison, shared by the
+    /// report-acceptance gate and the server-side liveness reconciliation so
+    /// both judge authority identity with one rule.
+    ///
+    /// The transport protocol is part of the identity: a registration
+    /// describes one observed path, so a command stream on the same address but
+    /// a different protocol is not that path.
+    pub fn same_observed_path(registered: &Endpoint, reported: &Endpoint) -> bool {
+        registered.protocol() == reported.protocol() && registered.addr() == reported.addr()
+    }
+
+    /// A report is authoritative when it arrives either on the command stream
+    /// that established the registration or on any command stream multiplexed
+    /// over the same observed peer path. The client opens extra command streams
+    /// on demand over one bearer, so those streams share the server-observed
+    /// peer endpoint while carrying different command stream ids. A report from
+    /// a different observed path must not take over the registration, and the
+    /// establishing stream stays authoritative so an observed address change is
+    /// still accepted from it.
+    fn is_authoritative_report(
+        state: &PeerProbeState,
+        tunnel_id: CmdTunnelId,
+        remote_endpoint: &Endpoint,
+    ) -> bool {
+        state.authority_tunnel_id == tunnel_id
+            || Self::same_observed_path(&state.remote_endpoint, remote_endpoint)
+    }
+
     pub fn observe_capable_report(
         &mut self,
         peer_id: &P2pId,
@@ -220,22 +248,19 @@ impl NatProbeScheduler {
         }
 
         let mut transition = ProbeTransition::default();
-        if self
-            .peers
-            .get(peer_id)
-            .map(|state| state.authority_tunnel_id != tunnel_id)
-            .unwrap_or(false)
-        {
-            // The service reconciles a missing authority before this call. If
-            // it is still present, a concurrently reporting UDP tunnel must
-            // not flap the authoritative registration generation.
-            log::debug!(
-                "event=nat_probe_authority_observation_ignored sn_id={} peer_id={} tunnel_id={:?} reason=non_authority_udp_tunnel",
-                self.sn_peer_id,
-                peer_id,
-                tunnel_id
-            );
-            return transition;
+        if let Some(state) = self.peers.get(peer_id) {
+            if !Self::is_authoritative_report(state, tunnel_id, &remote_endpoint) {
+                // The service reconciles a missing authority before this call.
+                // A report over a different observed path must not flap the
+                // authoritative registration generation.
+                log::debug!(
+                    "event=nat_probe_authority_observation_ignored sn_id={} peer_id={} tunnel_id={:?} reason=non_authority_observed_path",
+                    self.sn_peer_id,
+                    peer_id,
+                    tunnel_id
+                );
+                return transition;
+            }
         }
         let had_registration = self.peers.contains_key(peer_id);
         let needs_registration = self
@@ -396,9 +421,9 @@ impl NatProbeScheduler {
             );
             return transition;
         }
-        if state.authority_tunnel_id != tunnel_id {
+        if !Self::is_authoritative_report(state, tunnel_id, &remote_endpoint) {
             log::debug!(
-                "event=nat_probe_client_profile_ignored sn_id={} peer_id={} tunnel_id={:?} reason=non_authority_tunnel",
+                "event=nat_probe_client_profile_ignored sn_id={} peer_id={} tunnel_id={:?} reason=non_authority_observed_path",
                 self.sn_peer_id,
                 peer_id,
                 tunnel_id
@@ -458,19 +483,19 @@ impl NatProbeScheduler {
         }
 
         let mut transition = ProbeTransition::default();
-        if self
-            .peers
-            .get(peer_id)
-            .map(|state| state.authority_tunnel_id != tunnel_id)
-            .unwrap_or(false)
-        {
-            log::debug!(
-                "event=nat_probe_authority_observation_ignored sn_id={} peer_id={} tunnel_id={:?} reason=non_authority_control_tunnel",
-                self.sn_peer_id,
-                peer_id,
-                tunnel_id
-            );
-            return transition;
+        if let Some(state) = self.peers.get(peer_id) {
+            if !Self::is_authoritative_report(state, tunnel_id, &remote_endpoint) {
+                // Same rule as a capable report: a multiplexed control stream
+                // on the registered observed path is authoritative, a report
+                // from another path is not.
+                log::debug!(
+                    "event=nat_probe_authority_observation_ignored sn_id={} peer_id={} tunnel_id={:?} reason=non_authority_control_path",
+                    self.sn_peer_id,
+                    peer_id,
+                    tunnel_id
+                );
+                return transition;
+            }
         }
         let had_registration = self.peers.contains_key(peer_id);
         let needs_registration = self
@@ -829,6 +854,17 @@ impl NatProbeScheduler {
         self.peers
             .get(peer_id)
             .map(|state| (state.authority_tunnel_id, state.registration_generation))
+    }
+
+    /// Server-observed remote endpoint bound to the current registration.
+    /// Callers that reconcile the connection list across an await point must
+    /// read this together with [`Self::authority_registration`] under one
+    /// scheduler lock and re-validate the snapshot with
+    /// [`Self::remove_peer_if_authority`] before removing state.
+    pub fn authority_observed_endpoint(&self, peer_id: &P2pId) -> Option<Endpoint> {
+        self.peers
+            .get(peer_id)
+            .map(|state| state.remote_endpoint.clone())
     }
 
     pub fn authorities(&self) -> Vec<(P2pId, CmdTunnelId)> {

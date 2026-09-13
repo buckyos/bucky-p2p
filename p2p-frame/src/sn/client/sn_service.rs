@@ -26,12 +26,12 @@ use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use chrono::Utc;
 use sfo_cmd_server::client::{
-    ClassifiedCmdClient, ClassifiedCmdTunnel, ClassifiedCmdTunnelFactory, CmdClient, CmdSend,
-    DefaultClassifiedCmdClient,
+    ClassifiedClientSendGuard, ClassifiedCmdClient, ClassifiedCmdTunnel,
+    ClassifiedCmdTunnelFactory, CmdClient, CmdSend, DefaultClassifiedCmdClient,
 };
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::ops::Add;
 use std::sync::{Arc, Mutex, RwLock};
@@ -196,6 +196,11 @@ const NAT_PROBE_TARGET_TIMEOUT: Duration = Duration::from_secs(2);
 const NAT_PROFILE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 const NAT_CLIENT_PROBE_PERIOD: u64 = 2 * 60 * 60 * 1000 * 1000;
 const SN_ACTIVE_REPORT_REFRESH_INTERVAL: u64 = 600 * 1000 * 1000;
+/// Consecutive report command-stream acquisition failures required before the
+/// registration is treated as unusable. The first failure can be caused by the
+/// pool opening an extra stream while a healthy matching stream is busy, so a
+/// single failure must not evict the registration.
+const SN_REPORT_STREAM_FAILURE_EVICT_THRESHOLD: u32 = 2;
 
 fn nat_probe_network_protocol(endpoints: &[Endpoint]) -> Protocol {
     endpoints
@@ -263,6 +268,8 @@ pub struct SNServiceState {
     pub active_sn_list: Vec<ActiveSN>,
     pub latest_sn_interval: u64,
     pub first_report_pending: bool,
+    /// Consecutive report command-stream acquisition failures per SN peer id.
+    pub report_stream_failures: HashMap<P2pId, u32>,
 }
 
 pub struct SnList {
@@ -436,6 +443,16 @@ pub type SnCmdClient = DefaultClassifiedCmdClient<
 
 pub type SnCmdClientRef = Arc<SnCmdClient>;
 
+pub type SnCmdSendGuard = ClassifiedClientSendGuard<
+    SnTunnelClassification,
+    (),
+    SnTunnelRead,
+    SnTunnelWrite,
+    SnClientTunnelFactory,
+    SnCmdPkgLen,
+    u8,
+>;
+
 pub trait SnLocalIpProvider: 'static + Send + Sync {
     fn get_local_ips(&self) -> Vec<IpAddr>;
 }
@@ -569,6 +586,7 @@ impl SNClientService {
                 active_sn_list: vec![],
                 latest_sn_interval: 0,
                 first_report_pending: false,
+                report_stream_failures: HashMap::new(),
             }),
             listener: Mutex::new(None),
             rendezvous_listener: Mutex::new(None),
@@ -813,15 +831,25 @@ impl SNClientService {
         body: &[u8],
         timeout: Duration,
     ) -> P2pResult<SnQaResponse> {
+        let send = self.acquire_sn_send(classification, sn_peer_id).await?;
+        self.send_sn_qa_on(send, cmd, version, body, timeout).await
+    }
+
+    /// Acquire one command stream for a SN QA.
+    ///
+    /// A failure here only proves that this request could not obtain a command
+    /// stream. The pool opens an extra stream when the matching one is busy, and
+    /// that creation can fail while an existing stream is still healthy, so
+    /// this function never treats it as whole-SN unavailability. Callers that
+    /// own online state decide eviction from bounded failure evidence.
+    async fn acquire_sn_send(
+        &self,
+        classification: SnTunnelClassification,
+        sn_peer_id: &P2pId,
+    ) -> P2pResult<SnCmdSendGuard> {
         let mut send = match self.cmd_client.get_send_by_classified(classification).await {
             Ok(send) => send,
             Err(err) => {
-                // No command stream to this SN endpoint could be reused or
-                // created, so the registration itself is no longer usable.
-                // Evict it so the registration loop can resolve and register
-                // the serving SN again instead of reporting online while every
-                // command fails against a dead endpoint.
-                self.remove_active_sn(sn_peer_id);
                 log::warn!(
                     "event=sn_command_stream_unavailable sn={} err={:?}",
                     sn_peer_id,
@@ -842,10 +870,19 @@ impl SNClientService {
                 sn_peer_id
             ));
         }
+        Ok(send)
+    }
+
+    async fn send_sn_qa_on(
+        &self,
+        mut send: SnCmdSendGuard,
+        cmd: PackageCmdCode,
+        version: u8,
+        body: &[u8],
+        timeout: Duration,
+    ) -> P2pResult<SnQaResponse> {
         let stream_id = send.get_tunnel_id();
-        let result = send
-            .send_with_resp(cmd as u8, version, body, timeout)
-            .await;
+        let result = send.send_with_resp(cmd as u8, version, body, timeout).await;
         if result.is_err() {
             send.set_disable();
             return Err(into_p2p_err!(
@@ -875,6 +912,53 @@ impl SNClientService {
         state
             .active_sn_list
             .retain(|active| &active.sn_peer_id != sn_peer_id);
+        state.report_stream_failures.remove(sn_peer_id);
+    }
+
+    /// Record one failed command-stream acquisition for a SN report.
+    ///
+    /// A single failure is not evidence that the registration is unusable: when
+    /// the matching command stream is busy and the configured stream limit is
+    /// not reached, the pool opens an extra stream, and that creation can fail
+    /// while the existing stream is still healthy. The first failure only makes
+    /// the next ping iteration retry early; a second consecutive failure is
+    /// treated as whole-SN unavailability, so the registration is evicted and
+    /// the ping loop re-registers the serving SN.
+    fn record_report_stream_failure(&self, sn_peer_id: &P2pId) {
+        let evict = {
+            let mut state = self.state.write().unwrap();
+            let failures = state
+                .report_stream_failures
+                .entry(sn_peer_id.clone())
+                .or_insert(0);
+            *failures = failures.saturating_add(1);
+            let evict = *failures >= SN_REPORT_STREAM_FAILURE_EVICT_THRESHOLD;
+            if !evict {
+                if let Some(active_sn) = state
+                    .active_sn_list
+                    .iter_mut()
+                    .find(|active_sn| &active_sn.sn_peer_id == sn_peer_id)
+                {
+                    active_sn.latest_time =
+                        bucky_time_now().saturating_sub(SN_ACTIVE_REPORT_REFRESH_INTERVAL + 1);
+                }
+            }
+            evict
+        };
+        if !evict {
+            return;
+        }
+        log::warn!(
+            "event=sn_command_stream_unavailable sn={} consecutive_failures={} evict=true",
+            sn_peer_id,
+            SN_REPORT_STREAM_FAILURE_EVICT_THRESHOLD
+        );
+        self.remove_active_sn(sn_peer_id);
+    }
+
+    fn clear_report_stream_failure(&self, sn_peer_id: &P2pId) {
+        let mut state = self.state.write().unwrap();
+        state.report_stream_failures.remove(sn_peer_id);
     }
 
     async fn on_rendezvous_notify(
@@ -988,7 +1072,12 @@ impl SNClientService {
                 bytes.as_slice(),
                 self.call_timeout,
             )
-            .await?;
+            // The SN notify may already have reached the peer before the QA
+            // response was lost or timed out. Keep the ambiguous failure code
+            // so the caller can still run its local punch/wait remedy with the
+            // same tunnel_id/waiter instead of aborting the attempt.
+            .await
+            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
         let response = SnTunnelRendezvousResp::clone_from_slice(
             qa.body
                 .read_all()
@@ -1115,6 +1204,7 @@ impl SNClientService {
         {
             let mut state = self.state.write().unwrap();
             state.active_sn_list.clear();
+            state.report_stream_failures.clear();
             if let Some(handle) = state.pinging_handle.take() {
                 handle.abort();
             }
@@ -1824,6 +1914,27 @@ impl SNClientService {
         net_profile: Option<&NatProfile>,
         nat_probe_result: Option<&NatProbeResult>,
     ) -> P2pResult<ReportSnResp> {
+        let send = match self.acquire_sn_send(classification, &sn_peer_id).await {
+            Ok(send) => {
+                self.clear_report_stream_failure(&sn_peer_id);
+                send
+            }
+            Err(err) => {
+                self.record_report_stream_failure(&sn_peer_id);
+                return Err(err);
+            }
+        };
+        self.report_on_send(send, sn_peer_id, net_profile, nat_probe_result)
+            .await
+    }
+
+    async fn report_on_send(
+        &self,
+        send: SnCmdSendGuard,
+        sn_peer_id: P2pId,
+        net_profile: Option<&NatProfile>,
+        nat_probe_result: Option<&NatProbeResult>,
+    ) -> P2pResult<ReportSnResp> {
         let seq = self.gen_seq.generate();
         let local_ips = self.local_ip_provider.get_local_ips();
 
@@ -1872,9 +1983,8 @@ impl SNClientService {
             .to_vec()
             .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
         let mut qa = self
-            .send_sn_qa(
-                classification,
-                &sn_peer_id,
+            .send_sn_qa_on(
+                send,
                 PackageCmdCode::ReportSn,
                 self.cmd_version,
                 report_body.as_slice(),
@@ -1965,7 +2075,9 @@ impl SNClientService {
 
     #[cfg(test)]
     pub(crate) fn set_active_sn_list_for_test(&self, active_sn_list: Vec<ActiveSN>) {
-        self.state.write().unwrap().active_sn_list = active_sn_list;
+        let mut state = self.state.write().unwrap();
+        state.active_sn_list = active_sn_list;
+        state.report_stream_failures.clear();
     }
 
     pub async fn call(

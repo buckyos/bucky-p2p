@@ -1472,21 +1472,46 @@ impl SnService {
     }
 
     async fn reconcile_nat_probe_authority(&self, peer_id: &P2pId) {
-        let authority = self
-            .nat_probe_scheduler
-            .lock()
-            .unwrap()
-            .authority_registration(peer_id);
-        let Some((authority_tunnel, registration_generation)) = authority else {
-            return;
+        let (authority_tunnel, registration_generation, observed_endpoint) = {
+            let scheduler = self.nat_probe_scheduler.lock().unwrap();
+            let Some((authority_tunnel, registration_generation)) =
+                scheduler.authority_registration(peer_id)
+            else {
+                return;
+            };
+            (
+                authority_tunnel,
+                registration_generation,
+                scheduler.authority_observed_endpoint(peer_id),
+            )
         };
         let cmd_peer_id = PeerId::from(peer_id.as_slice());
         let tunnels = self.cmd_server.get_peer_tunnels(&cmd_peer_id).await;
+        // Authority identity is the authenticated peer plus its registered
+        // observed path, so the registration stays alive while any command
+        // stream on that path exists. The establishing stream can be closed on
+        // its own (for example by a single command QA timeout) without
+        // invalidating a healthy multiplexed stream on the same bearer.
+        let mut authority_path_present = false;
+        for tunnel in tunnels.iter() {
+            if tunnel.conn_id == authority_tunnel {
+                authority_path_present = true;
+                break;
+            }
+            let Some(observed_endpoint) = observed_endpoint.as_ref() else {
+                continue;
+            };
+            let tunnel_remote = tunnel.send.get().await.remote();
+            if NatProbeScheduler::same_observed_path(observed_endpoint, &tunnel_remote) {
+                authority_path_present = true;
+                break;
+            }
+        }
         self.finish_nat_probe_authority_reconcile(
             peer_id,
             authority_tunnel,
             registration_generation,
-            tunnels.iter().any(|tunnel| tunnel.conn_id == authority_tunnel),
+            authority_path_present,
         );
     }
 
@@ -1501,9 +1526,9 @@ impl SnService {
         peer_id: &P2pId,
         authority_tunnel: CmdTunnelId,
         registration_generation: u64,
-        authority_present: bool,
+        authority_path_present: bool,
     ) {
-        if authority_present {
+        if authority_path_present {
             return;
         }
         let mut scheduler = self.nat_probe_scheduler.lock().unwrap();

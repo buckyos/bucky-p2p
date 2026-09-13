@@ -7,16 +7,20 @@ use tokio::sync::mpsc;
 
 use crate::endpoint::{Endpoint, Protocol};
 use crate::error::{P2pErrorCode, P2pResult};
+use crate::nat_type::NatProfile;
 use crate::p2p_identity::{P2pId, P2pIdentityCertFactory, P2pIdentityRef, P2pSn};
 use crate::sn::protocol::v0::{SnCallResp, SnCalled, TunnelType};
-use crate::sn::protocol::{PackageCmdCode, ReportSn, ReportSnResp, SnCall, SnQuery, SnQueryResp};
+use crate::sn::protocol::{
+    NAT_PROBE_CONTROL_VERSION, PackageCmdCode, ReportSn, ReportSnResp, SN_PROTOCOL_VERSION, SnCall,
+    SnQuery, SnQueryResp, SnTunnelRendezvousOperation,
+};
 use crate::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
-use crate::sn::types::{SnTunnelClassification, SnTunnelRead};
+use crate::sn::types::{CmdTunnelId, SnTunnelClassification, SnTunnelRead};
 use crate::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use crate::types::{Sequence, TunnelId};
 use crate::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
 use bucky_raw_codec::{RawConvertTo, RawFrom};
-use sfo_cmd_server::CmdBody;
+use sfo_cmd_server::{CmdBody, PeerId};
 use sfo_cmd_server::client::{ClassifiedCmdClient, ClassifiedCmdTunnelRead, CmdClient};
 use sfo_cmd_server::server::CmdServer;
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
@@ -465,7 +469,7 @@ async fn setup_tcp_sn_and_one_client(
     panic!("setup tcp sn and one client failed after retries");
 }
 
-async fn setup_sn_and_two_clients() -> (
+pub(crate) async fn setup_sn_and_two_clients() -> (
     SnServerRef,
     P2pStackRef,
     P2pId,
@@ -1274,8 +1278,21 @@ async fn unreachable_sn_command_stream_evicts_stale_active_sn_and_recovers() {
         .unwrap_err();
     assert_eq!(err.code(), P2pErrorCode::ConnectFailed);
     assert!(
+        !stack.sn_client().get_active_sn_list().is_empty(),
+        "a single failed command-stream acquisition must not evict the registration"
+    );
+
+    // Only a repeated acquisition failure is evidence that the whole SN
+    // registration is unusable.
+    let err = stack
+        .sn_client()
+        .report_for_test(&stale_active, sn_id.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), P2pErrorCode::ConnectFailed);
+    assert!(
         stack.sn_client().get_active_sn_list().is_empty(),
-        "an unusable SN registration must be evicted so it can be re-registered"
+        "a repeated command-stream acquisition failure must evict the registration so it can be re-registered"
     );
 
     // The client is not stuck: the ping loop re-registers the serving SN from
@@ -1293,4 +1310,106 @@ async fn unreachable_sn_command_stream_evicts_stale_active_sn_and_recovers() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sn_report_send_failure_does_not_evict_healthy_active_sn() {
+    let (sn_service, caller, _caller_id, _query_client, _query_id, sn_id, _cert_factory) =
+        setup_sn_and_two_clients().await;
+
+    // The report stalls past the client call timeout, so the request reached a
+    // command stream and then lost it while the SN stayed reachable.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let handler_attempts = attempts.clone();
+    let handler_sn_id = sn_id.clone();
+    sn_service.get_cmd_server().register_cmd_handler(
+        PackageCmdCode::ReportSn as u8,
+        move |_local_id, _peer_id, _tunnel_id, _header, mut body: CmdBody| {
+            let attempts = handler_attempts.clone();
+            let sn_id = handler_sn_id.clone();
+            async move {
+                let report = ReportSn::clone_from_slice(body.read_all().await?.as_slice()).unwrap();
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                }
+                let resp = ReportSnResp {
+                    seq: report.seq,
+                    sn_peer_id: sn_id,
+                    result: P2pErrorCode::Ok.into_u8(),
+                    peer_info: None,
+                    end_point_array: vec![],
+                    receipt: None,
+                    nat_probe_ports: vec![],
+                    nat_probe_directive: None,
+                };
+                Ok(Some(CmdBody::from(resp.to_vec().unwrap())))
+            }
+        },
+    );
+
+    let active_sn = caller.sn_client().get_active_sn_list().remove(0);
+    assert_eq!(active_sn.sn_peer_id, sn_id);
+
+    let err = caller
+        .sn_client()
+        .report_for_test(&active_sn, sn_id.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), P2pErrorCode::ConnectFailed);
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a send or response failure must not trigger another report attempt"
+    );
+    let remaining = caller.sn_client().get_active_sn_list();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "a failed report over an existing command stream must not evict the healthy ActiveSN"
+    );
+    assert_eq!(remaining[0].sn_peer_id, sn_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sn_rendezvous_command_failure_keeps_ambiguous_error_code() {
+    let (_sn_service, stack, _caller_id, _query_client, _query_id, sn_id, _cert_factory) =
+        setup_sn_and_two_clients().await;
+
+    // Point the registration at an endpoint that cannot carry a command stream
+    // so the rendezvous QA fails before it can reach the serving SN.
+    let mut active_list = stack.sn_client().get_active_sn_list();
+    assert_eq!(active_list.len(), 1);
+    let mut stale_active = active_list.remove(0);
+    let dead_port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    stale_active.sn_endpoint = Endpoint::from((
+        Protocol::Tcp,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, dead_port)),
+    ));
+    stack
+        .sn_client()
+        .set_active_sn_list_for_test(vec![stale_active]);
+
+    let request = stack
+        .sn_client()
+        .new_rendezvous_request(
+            TunnelId::from(0x2403),
+            &sn_id,
+            SnTunnelRendezvousOperation::WaitIncoming,
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+    let err = stack
+        .sn_client()
+        .rendezvous_via_sn(&sn_id, &request)
+        .await
+        .unwrap_err();
+    // The SN notify may already have reached the peer before the QA response
+    // was lost, so the failure must stay in the ambiguous set that triggers the
+    // caller's local punch/wait remedy instead of a hard `ConnectFailed` exit.
+    assert_eq!(err.code(), P2pErrorCode::IoError);
 }

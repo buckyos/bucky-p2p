@@ -56,6 +56,7 @@ fn active_sn_profiles_are_kept_per_sn_id() {
         ],
         latest_sn_interval: 0,
         first_report_pending: false,
+        report_stream_failures: Default::default(),
     };
 
     assert_eq!(

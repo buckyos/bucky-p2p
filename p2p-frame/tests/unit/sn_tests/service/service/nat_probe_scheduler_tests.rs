@@ -1,5 +1,5 @@
 use crate::sn::service::nat_probe_scheduler::{
-    MAX_CONCURRENT_NAT_PROBES, NAT_PROBE_PERIOD, NatProbeAuthorityRemovalReason,
+    MAX_CONCURRENT_NAT_PROBES, NAT_PROBE_PERIOD, NatProbeAuthorityRemovalReason, NatProbeScheduler,
 };
 
 fn scheduler_peer(byte: u8) -> P2pId {
@@ -534,6 +534,109 @@ async fn nat_probe_scheduler_maintenance_removes_a_vanished_quic_authority_witho
         .is_none());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nat_probe_authority_liveness_keeps_registration_while_a_same_path_stream_is_alive() {
+    let (sn_service, _caller, caller_id, _observer, _observer_id, _sn_id, _cert_factory) =
+        crate::sn::tests::setup_sn_and_two_clients().await;
+
+    // Real authenticated command stream of that peer. Its server-observed
+    // endpoint is the registered observed path the authority check must use.
+    let cmd_peer_id = sfo_cmd_server::PeerId::from(caller_id.as_slice());
+    let tunnels = sn_service
+        .get_cmd_server()
+        .get_peer_tunnels(&cmd_peer_id)
+        .await;
+    assert_eq!(
+        tunnels.len(),
+        1,
+        "the setup must leave exactly one accepted command stream for the client"
+    );
+    let live_observed = tunnels[0].send.get().await.remote();
+    assert!(live_observed.is_udp());
+
+    // The authority registration points at a command stream that is no longer
+    // accepted by the SN (for example one closed by a single command QA
+    // timeout) while a multiplexed stream on the same observed path is still
+    // alive. The missing authority identity is injected because the command
+    // client never signals a per-stream close, so the reported state cannot be
+    // produced end to end through the public client API.
+    let missing_authority = CmdTunnelId::from(0x7511);
+    let now = bucky_time::bucky_time_now();
+    let profile = scheduler_profile(now);
+    {
+        let mut scheduler = sn_service.service().nat_probe_scheduler.lock().unwrap();
+        assert!(scheduler.remove_peer(&caller_id, NatProbeAuthorityRemovalReason::PeerDisconnected));
+        assert!(scheduler
+            .observe_capable_report(
+                &caller_id,
+                missing_authority,
+                live_observed,
+                Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
+                None,
+                now,
+            )
+            .directive
+            .is_none());
+        assert_eq!(
+            scheduler.authority_tunnel(&caller_id),
+            Some(missing_authority)
+        );
+        assert!(scheduler
+            .observe_reported_profile(
+                &caller_id,
+                missing_authority,
+                live_observed,
+                profile.clone(),
+                now,
+            )
+            .profile_update
+            .is_some());
+    }
+
+    sn_service.service().maintain_nat_probe_state().await;
+
+    {
+        let scheduler = sn_service.service().nat_probe_scheduler.lock().unwrap();
+        assert_eq!(
+            scheduler.authority_tunnel(&caller_id),
+            Some(missing_authority),
+            "the registration must survive while a command stream on the same observed path is alive"
+        );
+        assert_eq!(
+            scheduler.current_profile(&caller_id, now),
+            Some(profile.clone()),
+            "the published profile must survive the same reconcile"
+        );
+    }
+
+    // Control: a registration whose observed path has no accepted command
+    // stream is still recycled instead of lingering forever.
+    let absent_path = scheduler_endpoint(Protocol::Quic, 61001);
+    {
+        let mut scheduler = sn_service.service().nat_probe_scheduler.lock().unwrap();
+        assert_eq!(
+            scheduler.authority_tunnel(&caller_id),
+            Some(missing_authority)
+        );
+        scheduler.observe_capable_report(
+            &caller_id,
+            missing_authority,
+            absent_path,
+            Some(crate::sn::protocol::NAT_PROBE_CONTROL_VERSION),
+            None,
+            now + 1,
+        );
+    }
+    sn_service.service().maintain_nat_probe_state().await;
+    assert!(sn_service
+        .service()
+        .nat_probe_scheduler
+        .lock()
+        .unwrap()
+        .authority_tunnel(&caller_id)
+        .is_none());
+}
+
 #[test]
 fn nat_probe_scheduler_logs_correlated_lifecycle_reasons_without_stable_report_noise() {
     crate::sn::tests::enable_nat_probe_test_logging();
@@ -946,4 +1049,99 @@ fn nat_probe_scheduler_accepts_any_udp_protocol_as_authority_client_profile() {
         .and_then(|profile| profile.as_ref())
         .is_some());
     assert_eq!(scheduler.current_profile(&peer, observed_at), Some(profile));
+}
+
+#[test]
+fn nat_probe_scheduler_accepts_multiplexed_stream_on_registered_observed_path() {
+    let sn = scheduler_peer(94);
+    let peer = scheduler_peer(95);
+    let authority_tunnel = CmdTunnelId::from(904);
+    let multiplexed_tunnel = CmdTunnelId::from(905);
+    let remote = scheduler_endpoint(Protocol::Quic, 60021);
+    let mut scheduler = NatProbeScheduler::new(sn);
+    scheduler.set_ports(vec![34121, 34122]);
+
+    let directive = scheduler
+        .observe_report(&peer, authority_tunnel, remote, None, 40_000_000)
+        .directive
+        .unwrap();
+    assert_eq!(scheduler.authority_tunnel(&peer), Some(authority_tunnel));
+
+    // The client multiplexes probe results and periodic profiles over any
+    // command stream opened on the same bearer, so a different command stream
+    // id on the registered observed path must stay authoritative.
+    let completed_at = 41_000_000;
+    let result = NatProbeResult::from_directive(&directive, scheduler_profile(completed_at));
+    let completed = scheduler.observe_report(
+        &peer,
+        multiplexed_tunnel,
+        remote,
+        Some(result),
+        completed_at,
+    );
+    assert!(completed.directive.is_none());
+    assert!(completed
+        .profile_update
+        .as_ref()
+        .and_then(|profile| profile.as_ref())
+        .is_some());
+    assert_eq!(scheduler.authority_tunnel(&peer), Some(authority_tunnel));
+
+    let reported_at = completed_at + 1_000_000;
+    let profile = scheduler_profile(reported_at);
+    let reported = scheduler.observe_reported_profile(
+        &peer,
+        multiplexed_tunnel,
+        remote,
+        profile.clone(),
+        reported_at,
+    );
+    assert!(reported
+        .profile_update
+        .as_ref()
+        .and_then(|profile| profile.as_ref())
+        .is_some());
+    assert_eq!(scheduler.current_profile(&peer, reported_at), Some(profile));
+
+    // A command stream on a different observed path still must not take over
+    // the registration.
+    let other_path = scheduler.observe_report(
+        &peer,
+        CmdTunnelId::from(906),
+        scheduler_endpoint(Protocol::Quic, 60022),
+        None,
+        reported_at + 1_000_000,
+    );
+    assert!(other_path.directive.is_none());
+    assert!(other_path.profile_update.is_none());
+    assert_eq!(scheduler.authority_tunnel(&peer), Some(authority_tunnel));
+
+    // The same address on a different transport protocol is a different path.
+    let other_protocol = scheduler.observe_report(
+        &peer,
+        CmdTunnelId::from(907),
+        scheduler_endpoint(Protocol::Ext(1), 60021),
+        None,
+        reported_at + 2_000_000,
+    );
+    assert!(other_protocol.directive.is_none());
+    assert!(other_protocol.profile_update.is_none());
+    assert_eq!(scheduler.authority_tunnel(&peer), Some(authority_tunnel));
+}
+
+#[test]
+fn nat_probe_scheduler_observed_path_identity_requires_protocol_and_address() {
+    let quic = scheduler_endpoint(Protocol::Quic, 60031);
+    let same_address_ext = scheduler_endpoint(Protocol::Ext(1), 60031);
+    let other_address = scheduler_endpoint(Protocol::Quic, 60032);
+
+    assert!(NatProbeScheduler::same_observed_path(&quic, &quic));
+    assert!(!NatProbeScheduler::same_observed_path(
+        &quic,
+        &same_address_ext
+    ));
+    assert!(!NatProbeScheduler::same_observed_path(
+        &quic,
+        &other_address
+    ));
 }
