@@ -18,11 +18,12 @@ use p2p_frame::sn::protocol::{
     NAT_PROBE_CONTROL_VERSION, PackageCmdCode, ReportSn, ReportSnResp, SN_PROTOCOL_VERSION,
     SnTunnelRendezvousOperation,
 };
+use p2p_frame::sn::types::SnTunnelClassification;
 use p2p_frame::sn::service::{SnServerRef, SnServiceConfig, create_sn_service};
 use p2p_frame::stack::{P2pConfig, P2pStackConfig, P2pStackRef, create_p2p_env, create_p2p_stack};
 use p2p_frame::types::TunnelId;
 use p2p_frame::x509::{X509IdentityCertFactory, X509IdentityFactory};
-use sfo_cmd_server::client::CmdClient;
+use sfo_cmd_server::client::ClassifiedCmdClient;
 
 use super::fixture::{
     AbsoluteDeadline, ConnectionInfoRecorder, DEFAULT_FLOW_TIMEOUT, DEFAULT_SETUP_TIMEOUT,
@@ -646,8 +647,8 @@ async fn send_cross_sn_report_with_local_endpoints(
     let mut response = stack
         .sn_client()
         .get_cmd_client()
-        .send_by_specify_tunnel_with_resp(
-            active.conn_id,
+        .send_by_classified_tunnel_with_resp(
+            SnTunnelClassification::new(None, active.sn_endpoint),
             PackageCmdCode::ReportSn as u8,
             0,
             body.as_slice(),

@@ -274,6 +274,10 @@ struct TunnelActivityState {
     pending_open_count: usize,
     work_instance_num: usize,
     latest_active_at: Instant,
+    /// Most recent business activity (a stream/datagram/control channel was
+    /// successfully opened or accepted). Establishment, heartbeats, listener
+    /// registration and failed open attempts do not count.
+    latest_business_activity_at: Option<Instant>,
 }
 
 pub(crate) struct TunnelActivity {
@@ -288,8 +292,14 @@ impl TunnelActivity {
                 pending_open_count: 0,
                 work_instance_num: 0,
                 latest_active_at: Instant::now(),
+                latest_business_activity_at: None,
             }),
         })
+    }
+
+    /// `None` until this tunnel carries real business traffic.
+    pub(crate) fn latest_business_activity_at(&self) -> Option<Instant> {
+        self.state.lock().unwrap().latest_business_activity_at
     }
 
     fn interrupted_error() -> P2pError {
@@ -337,6 +347,7 @@ impl TunnelActivity {
         }
         state.work_instance_num += work_instance_num;
         state.latest_active_at = Instant::now();
+        state.latest_business_activity_at = Some(state.latest_active_at);
         Ok((0..work_instance_num)
             .map(|_| TunnelWorkActivity {
                 activity: self.clone(),
@@ -466,6 +477,7 @@ impl PendingTunnelActivity {
         }
         state.work_instance_num += work_instance_num;
         state.latest_active_at = Instant::now();
+        state.latest_business_activity_at = Some(state.latest_active_at);
         Ok((0..work_instance_num)
             .map(|_| TunnelWorkActivity {
                 activity: self.activity.clone(),
@@ -584,6 +596,13 @@ pub trait Tunnel: Send + Sync + 'static {
         false
     }
 
+    /// Time of the most recent business activity confirmed on this tunnel, or
+    /// `None` when it has never carried traffic. Used by tunnel selection to
+    /// prefer candidates that proved usable over freshly established ones.
+    fn latest_business_activity_at(&self) -> Option<Instant> {
+        None
+    }
+
     async fn listen_stream(
         &self,
         vports: ListenVPortsRef,
@@ -646,6 +665,34 @@ mod activity_tests {
             base + timeout + Duration::from_nanos(1),
             timeout
         ));
+    }
+
+    #[test]
+    fn business_activity_is_recorded_only_for_an_established_channel() {
+        let activity = TunnelActivity::new();
+        assert!(activity.latest_business_activity_at().is_none());
+
+        // Establishment, an aborted/failed open and listener registration are
+        // not business activity: they must not make a candidate look proven.
+        let pending = activity.begin_pending().unwrap();
+        assert!(activity.latest_business_activity_at().is_none());
+        drop(pending);
+        assert!(activity.latest_business_activity_at().is_none());
+
+        let (read, write) = stream_handles();
+        let before_promote = Instant::now();
+        let pending = activity.begin_pending().unwrap();
+        let (read, write) = pending.promote_stream(read, write).unwrap();
+        let promoted_at = activity
+            .latest_business_activity_at()
+            .expect("a promoted stream is confirmed business activity");
+        assert!(promoted_at >= before_promote);
+
+        // Releasing the channel leases only refreshes idle activity, it does not
+        // move the recorded business activity.
+        drop(read);
+        drop(write);
+        assert_eq!(activity.latest_business_activity_at(), Some(promoted_at));
     }
 
     #[test]

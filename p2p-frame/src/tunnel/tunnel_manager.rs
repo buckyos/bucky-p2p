@@ -17,6 +17,7 @@ use notify_future::Notify;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
@@ -55,6 +56,12 @@ const PROXY_UPGRADE_SHORT_INTERVALS: [Duration; 4] = [
 const MAX_NAT_PLAN_CANDIDATES: usize = 8;
 const RENDEZVOUS_PREDICTION_TIMEOUT: Duration = Duration::from_secs(2);
 const RENDEZVOUS_PREDICTION_TTL: Duration = Duration::from_secs(30);
+
+/// One in-flight direct-path candidate dial. Registration/publish is owned by
+/// `open_direct_path`, so a candidate that loses the race is never handed out
+/// and is closed explicitly once its attempt finishes.
+type DirectCandidateAttempt =
+    Pin<Box<dyn Future<Output = P2pResult<(Endpoint, TunnelRef)>> + Send + 'static>>;
 
 async fn race_with_delay<T, FD, FR>(
     direct_future: FD,
@@ -704,21 +711,39 @@ impl TunnelManager {
         let mut latest_non_proxy = None;
         let mut latest_proxy = None;
         for entry in entries {
-            if entry.tunnel.form() == TunnelForm::Proxy {
-                if latest_proxy
-                    .map(|latest: &TunnelEntry| entry.updated_at > latest.updated_at)
-                    .unwrap_or(true)
-                {
-                    latest_proxy = Some(entry);
-                }
-            } else if latest_non_proxy
-                .map(|latest: &TunnelEntry| entry.updated_at > latest.updated_at)
+            let slot = if entry.tunnel.form() == TunnelForm::Proxy {
+                &mut latest_proxy
+            } else {
+                &mut latest_non_proxy
+            };
+            if slot
+                .map(|latest: &TunnelEntry| Self::preferred_tunnel_entry(entry, latest))
                 .unwrap_or(true)
             {
-                latest_non_proxy = Some(entry);
+                *slot = Some(entry);
             }
         }
         latest_non_proxy.or(latest_proxy)
+    }
+
+    /// Candidate ordering for tunnel reuse.
+    ///
+    /// A candidate that already carried business traffic is preferred over a
+    /// freshly established one, because during a direct-path race the last
+    /// candidate to register is often a loser the dialer is about to abandon.
+    /// Among proven candidates the most recently used one wins; among
+    /// never-used candidates the historical "newest registration first" order
+    /// is preserved.
+    fn preferred_tunnel_entry(candidate: &TunnelEntry, current: &TunnelEntry) -> bool {
+        match (
+            candidate.tunnel.latest_business_activity_at(),
+            current.tunnel.latest_business_activity_at(),
+        ) {
+            (Some(candidate_at), Some(current_at)) => candidate_at > current_at,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => candidate.updated_at > current.updated_at,
+        }
     }
 
     fn only_published_proxy_candidates(entries: &[TunnelEntry]) -> bool {
@@ -2237,7 +2262,7 @@ impl TunnelManager {
         let local_identity = self.local_identity.clone();
         let connect_remote_id = remote_id.clone();
         let manager_weak = self.self_weak.clone();
-        let mut connect_futures = FuturesUnordered::new();
+        let mut connect_futures: FuturesUnordered<DirectCandidateAttempt> = FuturesUnordered::new();
 
         log::debug!(
             "direct path start remote={} tunnel_id={:?} reverse={} eps_count={} eps={:?}",
@@ -2290,31 +2315,14 @@ impl TunnelManager {
                     Ok(tunnel) => {
                         if let Some(manager) = manager_weak.upgrade() {
                             manager.on_direct_connect_result(&remote_ep, true);
-                            match manager.register_tunnel_and_publish(tunnel).await {
-                                Ok(tunnel) => {
-                                    manager
-                                        .conn_info_cache
-                                        .add(
-                                            remote_id,
-                                            P2pConnectionInfo {
-                                                direct: ConnectDirection::Direct,
-                                                local_ep: tunnel.local_ep().unwrap_or_default(),
-                                                remote_ep,
-                                            },
-                                        )
-                                        .await;
-                                    log::debug!(
-                                        "direct path success remote={} tunnel_id={:?} candidate_id={:?} ep={:?}",
-                                        connect_remote_id,
-                                        intent.tunnel_id,
-                                        intent.candidate_id,
-                                        remote_ep
-                                    );
-                                    Ok((remote_ep, tunnel))
-                                }
-                                Err(err) => Err(err),
-                            }
+                            // Registration/publish is owned by the caller of this
+                            // race: only the selected candidate becomes a usable
+                            // tunnel, so an abandoned candidate is never handed out.
+                            Ok((remote_ep, tunnel))
                         } else {
+                            // Nothing can own this candidate any more; close it
+                            // explicitly instead of dropping the connection.
+                            let _ = tunnel.close();
                             Err(p2p_err!(
                                 P2pErrorCode::Interrupted,
                                 "tunnel manager dropped during direct connect"
@@ -2343,12 +2351,55 @@ impl TunnelManager {
         while let Some(result) = connect_futures.next().await {
             match result {
                 Ok((remote_ep, tunnel)) => {
-                    log::debug!(
-                        "direct path selected remote={} ep={:?}",
-                        remote_id,
-                        remote_ep
-                    );
-                    return Ok(tunnel);
+                    match self.register_tunnel_and_publish(tunnel.clone()).await {
+                        Ok(tunnel) => {
+                            log::debug!(
+                                "direct path selected remote={} ep={:?}",
+                                remote_id,
+                                remote_ep
+                            );
+                            // Every other candidate is now a loser. Keep the
+                            // in-flight attempts alive and close whatever they
+                            // produce explicitly, so the peer observes a normal
+                            // close reason instead of quinn's implicit
+                            // application close (error code 0, empty reason).
+                            Self::spawn_abandoned_direct_candidate_cleanup(
+                                connect_futures,
+                                remote_id.clone(),
+                            );
+                            self.conn_info_cache
+                                .add(
+                                    remote_id.clone(),
+                                    P2pConnectionInfo {
+                                        direct: ConnectDirection::Direct,
+                                        local_ep: tunnel.local_ep().unwrap_or_default(),
+                                        remote_ep,
+                                    },
+                                )
+                                .await;
+                            log::debug!(
+                                "direct path success remote={} tunnel_id={:?} candidate_id={:?} ep={:?}",
+                                remote_id,
+                                tunnel.tunnel_id(),
+                                tunnel.candidate_id(),
+                                remote_ep
+                            );
+                            return Ok(tunnel);
+                        }
+                        Err(err) => {
+                            let _ = tunnel.close();
+                            log::warn!(
+                                "direct path candidate not registered remote={} tunnel_id={:?} candidate_id={:?} ep={:?} code={:?} msg={}",
+                                remote_id,
+                                tunnel.tunnel_id(),
+                                tunnel.candidate_id(),
+                                remote_ep,
+                                err.code(),
+                                err.msg()
+                            );
+                            last_err = Some(err);
+                        }
+                    }
                 }
                 Err(err) => {
                     last_err = Some(err);
@@ -2358,6 +2409,39 @@ impl TunnelManager {
 
         Err(last_err
             .unwrap_or_else(|| p2p_err!(P2pErrorCode::ConnectFailed, "direct connect failed")))
+    }
+
+    /// Drains the candidate attempts that lost the direct-path race and closes
+    /// every tunnel they still produce. Abandoned candidates must not stay
+    /// registered, and they must not be torn down by dropping the connection:
+    /// quinn reports that as an application close with code 0 and an empty
+    /// reason, which the peer cannot distinguish from a real failure.
+    fn spawn_abandoned_direct_candidate_cleanup(
+        mut abandoned: FuturesUnordered<DirectCandidateAttempt>,
+        remote_id: P2pId,
+    ) {
+        Executor::spawn_ok(async move {
+            while let Some(result) = abandoned.next().await {
+                if let Ok((remote_ep, tunnel)) = result {
+                    log::debug!(
+                        "direct path abandoned candidate close remote={} tunnel_id={:?} candidate_id={:?} ep={:?}",
+                        remote_id,
+                        tunnel.tunnel_id(),
+                        tunnel.candidate_id(),
+                        remote_ep
+                    );
+                    if let Err(err) = tunnel.close() {
+                        log::warn!(
+                            "direct path abandoned candidate close failed remote={} ep={:?} code={:?} msg={}",
+                            remote_id,
+                            remote_ep,
+                            err.code(),
+                            err.msg()
+                        );
+                    }
+                }
+            }
+        });
     }
 
     fn hedged_reverse_delay_for_endpoints(_endpoints: &[Endpoint]) -> Duration {
@@ -4275,6 +4359,7 @@ mod tests {
         start_offsets: Mutex<HashMap<Endpoint, Duration>>,
         intents: Mutex<HashMap<Endpoint, TunnelConnectIntent>>,
         dial_counts: Mutex<HashMap<Endpoint, usize>>,
+        close_counts: Mutex<HashMap<Endpoint, Arc<AtomicUsize>>>,
         call_count: AtomicUsize,
     }
 
@@ -4292,6 +4377,7 @@ mod tests {
                 start_offsets: Mutex::new(HashMap::new()),
                 intents: Mutex::new(HashMap::new()),
                 dial_counts: Mutex::new(HashMap::new()),
+                close_counts: Mutex::new(HashMap::new()),
                 call_count: AtomicUsize::new(0),
             })
         }
@@ -4310,6 +4396,15 @@ mod tests {
                 .unwrap()
                 .get(endpoint)
                 .copied()
+                .unwrap_or(0)
+        }
+
+        fn close_count(&self, endpoint: &Endpoint) -> usize {
+            self.close_counts
+                .lock()
+                .unwrap()
+                .get(endpoint)
+                .map(|counter| counter.load(Ordering::SeqCst))
                 .unwrap_or(0)
         }
 
@@ -4520,6 +4615,7 @@ mod tests {
                     remote_id: remote_id.clone(),
                     state: TunnelState::Connected,
                     is_reverse: false,
+                    close_count: Arc::new(AtomicUsize::new(0)),
                 })),
                 Err(code) => Err(P2pError::new(
                     code,
@@ -4606,15 +4702,23 @@ mod tests {
             runtime::sleep(behavior.delay).await;
 
             match behavior.result {
-                Ok(()) => Ok(Arc::new(MockTunnel {
-                    tunnel_id: intent.tunnel_id,
-                    candidate_id: intent.candidate_id,
-                    form: TunnelForm::Active,
-                    local_id: self.local_id.clone(),
-                    remote_id: remote_id.clone(),
-                    state: TunnelState::Connected,
-                    is_reverse: intent.is_reverse,
-                })),
+                Ok(()) => {
+                    let close_count = Arc::new(AtomicUsize::new(0));
+                    self.close_counts
+                        .lock()
+                        .unwrap()
+                        .insert(*remote, close_count.clone());
+                    Ok(Arc::new(MockTunnel {
+                        tunnel_id: intent.tunnel_id,
+                        candidate_id: intent.candidate_id,
+                        form: TunnelForm::Active,
+                        local_id: self.local_id.clone(),
+                        remote_id: remote_id.clone(),
+                        state: TunnelState::Connected,
+                        is_reverse: intent.is_reverse,
+                        close_count,
+                    }))
+                }
                 Err(code) => Err(P2pError::new(
                     code,
                     format!("mock connect failed for {remote}"),
@@ -4644,6 +4748,7 @@ mod tests {
         remote_id: P2pId,
         state: TunnelState,
         is_reverse: bool,
+        close_count: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -4693,6 +4798,7 @@ mod tests {
         }
 
         fn close(&self) -> P2pResult<()> {
+            self.close_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -4739,6 +4845,7 @@ mod tests {
         remote_ep: Option<Endpoint>,
         state: Mutex<TunnelState>,
         close_count: AtomicUsize,
+        business_activity_at: Mutex<Option<Instant>>,
     }
 
     impl TrackableTunnel {
@@ -4781,11 +4888,18 @@ mod tests {
                 remote_ep: Some(loopback_tcp_ep()),
                 state: Mutex::new(state),
                 close_count: AtomicUsize::new(0),
+                business_activity_at: Mutex::new(None),
             })
         }
 
         fn close_count(&self) -> usize {
             self.close_count.load(Ordering::SeqCst)
+        }
+
+        /// Simulate a confirmed business activity (a stream/datagram channel was
+        /// opened or accepted) on this test tunnel.
+        fn mark_business_activity(&self, at: Instant) {
+            *self.business_activity_at.lock().unwrap() = Some(at);
         }
     }
 
@@ -4839,6 +4953,10 @@ mod tests {
             self.close_count.fetch_add(1, Ordering::SeqCst);
             *self.state.lock().unwrap() = TunnelState::Closed;
             Ok(())
+        }
+
+        fn latest_business_activity_at(&self) -> Option<Instant> {
+            *self.business_activity_at.lock().unwrap()
         }
 
         async fn listen_stream(
@@ -4998,6 +5116,7 @@ mod tests {
             remote_id: remote_identity.get_id(),
             state: TunnelState::Connected,
             is_reverse: true,
+            close_count: Arc::new(AtomicUsize::new(0)),
         });
 
         let (notify, waiter) = Notify::new();
@@ -5041,6 +5160,7 @@ mod tests {
             remote_id: remote_identity.get_id(),
             state: TunnelState::Connected,
             is_reverse: false,
+            close_count: Arc::new(AtomicUsize::new(0)),
         });
 
         let (notify, waiter) = Notify::new();
@@ -5111,6 +5231,7 @@ mod tests {
             remote_id: remote_identity.get_id(),
             state: TunnelState::Connected,
             is_reverse: true,
+            close_count: Arc::new(AtomicUsize::new(0)),
         });
 
         // The failed duplicate construction must not delete the incumbent's
@@ -6047,6 +6168,204 @@ mod tests {
             .unwrap();
         assert_eq!(info.remote_ep, fast_ep);
         assert_eq!(info.direct, ConnectDirection::Direct);
+    }
+
+    /// Candidates that lose the direct-path race must not be dropped while their
+    /// dial is still in flight (quinn reports that as `ApplicationClose { error
+    /// code: 0, reason: b"" }`), must never be registered as usable tunnels, and
+    /// must be closed explicitly once their attempt finishes.
+    #[tokio::test]
+    async fn open_direct_path_closes_abandoned_candidates_explicitly() {
+        init_tls_once();
+
+        let local_identity = new_identity("local-abandoned");
+        let remote_identity = new_identity("remote-abandoned");
+        let winner_ep = Endpoint::from((Protocol::Ext(1), "127.0.0.1:12001".parse().unwrap()));
+        let slow_ep = Endpoint::from((Protocol::Ext(1), "127.0.0.1:12002".parse().unwrap()));
+        let slower_ep = Endpoint::from((Protocol::Ext(1), "127.0.0.1:12003".parse().unwrap()));
+        let network = MockDialNetwork::new(
+            Protocol::Ext(1),
+            local_identity.get_id(),
+            HashMap::from([
+                (
+                    winner_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(5),
+                        result: Ok(()),
+                    },
+                ),
+                (
+                    slow_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(40),
+                        result: Ok(()),
+                    },
+                ),
+                (
+                    slower_ep,
+                    MockDialBehavior {
+                        delay: Duration::from_millis(80),
+                        result: Ok(()),
+                    },
+                ),
+            ]),
+        );
+        let manager = new_test_manager_with_networks(
+            local_identity,
+            HashMap::new(),
+            None,
+            vec![network.clone()],
+        );
+
+        let winner = manager
+            .open_direct_tunnel(vec![slower_ep, slow_ep, winner_ep], &remote_identity.get_id())
+            .await
+            .unwrap();
+
+        let winner_ref: TunnelRef = winner.clone();
+        assert!(Arc::ptr_eq(
+            &manager.get_tunnel(&remote_identity.get_id()).unwrap(),
+            &winner_ref
+        ));
+        assert_eq!(
+            manager
+                .tunnels
+                .read()
+                .unwrap()
+                .get(&remote_identity.get_id())
+                .map(|entries| entries.len()),
+            Some(1),
+            "only the selected candidate may be registered"
+        );
+        assert_eq!(network.close_count(&winner_ep), 0);
+
+        assert!(wait_for_close_count(&network, &slow_ep, 1).await);
+        assert!(wait_for_close_count(&network, &slower_ep, 1).await);
+        assert_eq!(network.close_count(&winner_ep), 0);
+    }
+
+    async fn wait_for_close_count(
+        network: &Arc<MockDialNetwork>,
+        endpoint: &Endpoint,
+        expected: usize,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if network.close_count(endpoint) >= expected {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            runtime::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// A candidate that never confirmed usable must not win over one that already
+    /// carried business traffic: during a direct-path race the newest registration
+    /// is often a candidate the dialer is abandoning.
+    #[test]
+    fn select_preferred_tunnel_entry_prefers_confirmed_business_activity() {
+        let base = Instant::now();
+        let reused = TrackableTunnel::new(
+            TunnelForm::Active,
+            P2pId::default(),
+            P2pId::default(),
+            TunnelState::Connected,
+        );
+        reused.mark_business_activity(base);
+        let reused_ref: TunnelRef = reused.clone();
+        let fresh = TrackableTunnel::new(
+            TunnelForm::Active,
+            P2pId::default(),
+            P2pId::default(),
+            TunnelState::Connected,
+        );
+        let fresh_ref: TunnelRef = fresh.clone();
+        let entries = vec![
+            TunnelEntry {
+                tunnel: reused_ref.clone(),
+                updated_at: base,
+                published: true,
+            },
+            TunnelEntry {
+                tunnel: fresh_ref.clone(),
+                updated_at: base + Duration::from_millis(50),
+                published: true,
+            },
+        ];
+
+        let selected = TunnelManager::select_preferred_tunnel_entry(entries.iter()).unwrap();
+
+        assert!(Arc::ptr_eq(&selected.tunnel, &reused_ref));
+    }
+
+    /// Among proven candidates the most recently used one wins; among candidates
+    /// that never carried traffic the historical newest-registration order stays.
+    #[test]
+    fn select_preferred_tunnel_entry_orders_proven_then_unused_candidates() {
+        let base = Instant::now();
+        let older_used = TrackableTunnel::new(
+            TunnelForm::Active,
+            P2pId::default(),
+            P2pId::default(),
+            TunnelState::Connected,
+        );
+        older_used.mark_business_activity(base);
+        let older_used_ref: TunnelRef = older_used.clone();
+        let newer_used = TrackableTunnel::new(
+            TunnelForm::Active,
+            P2pId::default(),
+            P2pId::default(),
+            TunnelState::Connected,
+        );
+        newer_used.mark_business_activity(base + Duration::from_millis(10));
+        let newer_used_ref: TunnelRef = newer_used.clone();
+        let entries = vec![
+            TunnelEntry {
+                tunnel: older_used_ref.clone(),
+                updated_at: base + Duration::from_secs(1),
+                published: true,
+            },
+            TunnelEntry {
+                tunnel: newer_used_ref.clone(),
+                updated_at: base,
+                published: true,
+            },
+        ];
+
+        let selected = TunnelManager::select_preferred_tunnel_entry(entries.iter()).unwrap();
+        assert!(Arc::ptr_eq(&selected.tunnel, &newer_used_ref));
+
+        let older_unused = TrackableTunnel::new(
+            TunnelForm::Active,
+            P2pId::default(),
+            P2pId::default(),
+            TunnelState::Connected,
+        );
+        let older_unused_ref: TunnelRef = older_unused.clone();
+        let newer_unused = TrackableTunnel::new(
+            TunnelForm::Active,
+            P2pId::default(),
+            P2pId::default(),
+            TunnelState::Connected,
+        );
+        let newer_unused_ref: TunnelRef = newer_unused.clone();
+        let entries = vec![
+            TunnelEntry {
+                tunnel: older_unused_ref.clone(),
+                updated_at: base,
+                published: true,
+            },
+            TunnelEntry {
+                tunnel: newer_unused_ref.clone(),
+                updated_at: base + Duration::from_millis(1),
+                published: true,
+            },
+        ];
+
+        let selected = TunnelManager::select_preferred_tunnel_entry(entries.iter()).unwrap();
+        assert!(Arc::ptr_eq(&selected.tunnel, &newer_unused_ref));
     }
 
     #[tokio::test]

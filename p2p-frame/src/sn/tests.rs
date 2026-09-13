@@ -1183,8 +1183,8 @@ async fn sn_call_and_query_timeouts_preserve_healthy_active_sn() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sn_call_and_query_closed_tunnels_remove_stale_active_sn() {
-    let (_sn_service, caller, _caller_id, query_client, query_id, _sn_id, _cert_factory) =
+async fn sn_call_and_query_recreate_closed_command_tunnels_without_dropping_active_sn() {
+    let (_sn_service, caller, _caller_id, query_client, query_id, sn_id, _cert_factory) =
         setup_sn_and_two_clients().await;
 
     caller.sn_client().get_cmd_client().clear_all_tunnel().await;
@@ -1194,7 +1194,10 @@ async fn sn_call_and_query_closed_tunnels_remove_stale_active_sn() {
         .clear_all_tunnel()
         .await;
 
-    let call_err = caller
+    // Command streams are per-request transport state now: closing every cached
+    // command stream does not invalidate the authenticated active SN, and the
+    // next command opens a fresh command stream on demand.
+    let call_resp = caller
         .sn_client()
         .call(
             0x3004u32.into(),
@@ -1204,11 +1207,90 @@ async fn sn_call_and_query_closed_tunnels_remove_stale_active_sn() {
             b"closed-call-tunnel".to_vec(),
         )
         .await
-        .unwrap_err();
-    let query_err = query_client.sn_client().query(&query_id).await.unwrap_err();
+        .unwrap();
+    query_client.sn_client().query(&query_id).await.unwrap();
 
-    assert_eq!(call_err.code(), P2pErrorCode::ConnectFailed);
-    assert_eq!(query_err.code(), P2pErrorCode::ConnectFailed);
-    assert!(caller.sn_client().get_active_sn_list().is_empty());
-    assert!(query_client.sn_client().get_active_sn_list().is_empty());
+    assert_eq!(call_resp.sn_peer_id, sn_id);
+    assert!(call_resp.to_peer_info.is_some());
+    let caller_active = caller.sn_client().get_active_sn_list();
+    assert_eq!(caller_active.len(), 1);
+    assert_eq!(caller_active[0].sn_peer_id, sn_id);
+    let query_active = query_client.sn_client().get_active_sn_list();
+    assert_eq!(query_active.len(), 1);
+    assert_eq!(query_active[0].sn_peer_id, sn_id);
+    // Each client replaced its closed command stream instead of dropping the
+    // authenticated active SN registration.
+    let caller_tunnel = caller
+        .sn_client()
+        .get_cmd_client()
+        .find_tunnel_id_by_classified(SnTunnelClassification::new(
+            None,
+            caller_active[0].sn_endpoint,
+        ))
+        .await
+        .unwrap();
+    assert_ne!(caller_tunnel.value(), 0);
+    let query_tunnel = query_client
+        .sn_client()
+        .get_cmd_client()
+        .find_tunnel_id_by_classified(SnTunnelClassification::new(
+            None,
+            query_active[0].sn_endpoint,
+        ))
+        .await
+        .unwrap();
+    assert_ne!(query_tunnel.value(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreachable_sn_command_stream_evicts_stale_active_sn_and_recovers() {
+    let (_sn_service, stack, _caller_id, _query_client, _query_id, sn_id, _cert_factory) =
+        setup_sn_and_two_clients().await;
+
+    let mut active_list = stack.sn_client().get_active_sn_list();
+    assert_eq!(active_list.len(), 1);
+    let live_active = active_list.remove(0);
+
+    // Point the registration at a closed loopback port so no command stream
+    // can be reused or created, like a SN that moved or disappeared.
+    let dead_port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut stale_active = live_active.clone();
+    stale_active.sn_endpoint = Endpoint::from((
+        Protocol::Tcp,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, dead_port)),
+    ));
+    stack
+        .sn_client()
+        .set_active_sn_list_for_test(vec![stale_active.clone()]);
+
+    let err = stack
+        .sn_client()
+        .report_for_test(&stale_active, sn_id.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), P2pErrorCode::ConnectFailed);
+    assert!(
+        stack.sn_client().get_active_sn_list().is_empty(),
+        "an unusable SN registration must be evicted so it can be re-registered"
+    );
+
+    // The client is not stuck: the ping loop re-registers the serving SN from
+    // its configured SN list once the stale record is gone.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let recovered = stack.sn_client().get_active_sn_list();
+        if recovered.len() == 1 && recovered[0].sn_peer_id == sn_id {
+            assert_eq!(recovered[0].sn_endpoint, live_active.sn_endpoint);
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "client did not re-register the serving SN after evicting the unreachable registration"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }

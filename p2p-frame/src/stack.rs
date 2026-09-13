@@ -494,7 +494,7 @@ impl P2pStackConfig {
             sn_call_timeout: Duration::from_secs(10),
             sn_query_interval: Duration::from_secs(300),
             device_finder: None,
-            sn_tunnel_count: 5,
+            sn_tunnel_count: 10,
             support_proxy: false,
             proxy_stream_encrypted: false,
             proxy_client: None,

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "acceptance": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/073-sn-client-multi-channel-commands/acceptance-report.md": "8e4e25608ae3d9abd1fe38dc7a975d58d3f189f28417faa34f77fb4f3cc29fb6"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "5463ffb8730c4c4b70bc1d4bb7d62d7f662d5be125d590929c3a15aa818e4910"
+    },
+    "design": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/073-sn-client-multi-channel-commands/design.md": "6d719a3fa1ce871ebffb10a3aaccb773a7b215ce68df5328a326e2a78cccc77f",
+        "docs/versions/v0.1/modules/p2p-frame/073-sn-client-multi-channel-commands/risk-profile.yaml": "717899bc6875ac3bb2670ce19123b0498b6abaf795d3abcf8af97d9a52d3e13f"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "5463ffb8730c4c4b70bc1d4bb7d62d7f662d5be125d590929c3a15aa818e4910"
+    },
+    "implementation": {
+      "inputs": {},
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "5463ffb8730c4c4b70bc1d4bb7d62d7f662d5be125d590929c3a15aa818e4910"
+    },
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/073-sn-client-multi-channel-commands/proposal.md": "fa37165674e22d3ed8613d77cfd3603713530d30b53ab51e5ebd42305dfd167c"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "5463ffb8730c4c4b70bc1d4bb7d62d7f662d5be125d590929c3a15aa818e4910"
+    },
+    "testing": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/073-sn-client-multi-channel-commands/testing.md": "e58a0ddba30d70dee10192257d1564f901b923f8f0d1e39a2b910115d31e393b",
+        "docs/versions/v0.1/modules/p2p-frame/073-sn-client-multi-channel-commands/testplan.yaml": "2ab1bb71607497ed102923dea1758510cf7db82164682ad4fbb88bda7731f0a6"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "5463ffb8730c4c4b70bc1d4bb7d62d7f662d5be125d590929c3a15aa818e4910",
+      "test_run": ".harness/test-results/test-runs/20260913T083951Z-p2p-frame+073-sn-client-multi-channel-commands-all.json",
+      "test_run_sha256": "77aa79746dfcfb4049760ba3556c3e2a4ae7add6477f5ce5b8434015b79630bd"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

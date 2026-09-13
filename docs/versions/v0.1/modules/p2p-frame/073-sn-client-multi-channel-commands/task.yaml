@@ -1,0 +1,46 @@
+schema_version: 1
+
+workflow_tier: high-risk
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 073-sn-client-multi-channel-commands
+stage: acceptance
+mode: manual
+auto_pipeline_start_stage:
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan:
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/073-sn-client-multi-channel-commands.paths
+baseline_manifest:
+
+changes:
+  - id: CHG-sn-client-classified-command-channel
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/types.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests"]
+    changed_paths_file:
+  - id: CHG-sn-command-active-identity-lifecycle
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/types.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests"]
+    changed_paths_file:
+  - id: CHG-sn-server-command-stream-selection
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/service/service.rs", "p2p-frame/tests"]
+    changed_paths_file:
+  - id: CHG-qa-timeout-command-stream-close
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/service/service.rs", "p2p-frame/tests"]
+    changed_paths_file:
+  - id: CHG-remove-active-sn-conn-id
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/tests.rs", "p2p-frame/tests"]
+    changed_paths_file:

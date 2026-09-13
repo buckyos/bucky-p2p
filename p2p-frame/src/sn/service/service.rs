@@ -52,7 +52,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
         Arc, Mutex,
-        atomic::{self, AtomicBool},
+        atomic::{self, AtomicBool, AtomicUsize},
     },
     time::Duration,
 };
@@ -210,6 +210,7 @@ pub struct SnService {
     local_identity: Mutex<Option<P2pIdentityRef>>,
     nat_probe_scheduler: Mutex<NatProbeScheduler>,
     rendezvous_state: Mutex<RendezvousState>,
+    notify_stream_cursor: AtomicUsize,
     cmd_version: u8,
 }
 
@@ -269,6 +270,7 @@ impl SnService {
             local_identity: Mutex::new(None),
             nat_probe_scheduler: Mutex::new(NatProbeScheduler::new(scheduler_sn_id)),
             rendezvous_state: Mutex::new(RendezvousState::new()),
+            notify_stream_cursor: AtomicUsize::new(0),
             cmd_version: 0,
         });
         service.register_sn_cmd_handler();
@@ -895,43 +897,87 @@ impl SnService {
         let bytes = notify
             .to_vec()
             .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-        // The command server deliberately suppresses re-entrant QA sends from
-        // the task currently handling A -> SN. Run SN -> B QA in a distinct
-        // task while still awaiting it here so B's response remains ordered
-        // before the response returned to A.
         let cmd_server = self.cmd_server.clone();
         let target = PeerId::from(target_peer_id.as_slice());
-        let mut body = tokio::spawn(async move {
-            cmd_server
-                .send_with_resp(
-                    &target,
-                    PackageCmdCode::SnTunnelRendezvousNotify as u8,
-                    SN_TUNNEL_RENDEZVOUS_CMD_VERSION,
-                    bytes.as_slice(),
-                    Duration::from_secs(10),
+        // The command server owns command-stream liveness: a stream is listed
+        // while its receive task runs and removed once that task finishes, so
+        // the returned list already contains only usable streams.
+        let streams = cmd_server.get_peer_tunnels(&target).await;
+        if streams.is_empty() {
+            return Err(p2p_err!(
+                P2pErrorCode::NotConnected,
+                "rendezvous target has no live command stream"
+            ));
+        }
+        let start = self
+            .notify_stream_cursor
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            % streams.len();
+        let mut last_err = None;
+        for offset in 0..streams.len() {
+            let conn = streams[(start + offset) % streams.len()].clone();
+            let conn_id = conn.conn_id;
+            // The command server deliberately suppresses re-entrant QA sends
+            // from the task currently handling A -> SN. Run SN -> B QA in a
+            // distinct task while still awaiting it here so B's response
+            // remains ordered before the response returned to A.
+            let cmd_server = cmd_server.clone();
+            let target = target.clone();
+            let bytes = bytes.clone();
+            let result = match tokio::spawn(async move {
+                cmd_server
+                    .send_by_specify_tunnel_with_resp(
+                        &target,
+                        conn_id,
+                        PackageCmdCode::SnTunnelRendezvousNotify as u8,
+                        SN_TUNNEL_RENDEZVOUS_CMD_VERSION,
+                        bytes.as_slice(),
+                        Duration::from_secs(10),
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    let mut send = conn.send.get().await;
+                    let _ = runtime::AsyncWriteExt::shutdown(&mut **send).await;
+                    return Err(p2p_err!(
+                        P2pErrorCode::Aborted,
+                        "SN rendezvous target QA task failed: {}",
+                        err
+                    ));
+                }
+            };
+            match result {
+                Ok(mut body) => {
+                    let response = SnTunnelRendezvousResp::clone_from_slice(
+                        body.read_all()
+                            .await
+                            .map_err(into_p2p_err!(P2pErrorCode::IoError))?
+                            .as_slice(),
+                    )
+                    .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
+                    response.validate(notify.seq, notify.need_predict_endpoint)?;
+                    self.validate_rendezvous_response_owner(target_peer_id, &response)
+                        .await?;
+                    return Ok(response);
+                }
+                Err(err) => {
+                    let mut send = conn.send.get().await;
+                    let _ = runtime::AsyncWriteExt::shutdown(&mut **send).await;
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err
+            .map(|err| into_p2p_err!(P2pErrorCode::IoError, "SN rendezvous target QA failed")(err))
+            .unwrap_or_else(|| {
+                p2p_err!(
+                    P2pErrorCode::NotConnected,
+                    "SN rendezvous target has no usable command stream"
                 )
-                .await
-        })
-        .await
-        .map_err(|err| {
-            p2p_err!(
-                P2pErrorCode::Aborted,
-                "SN rendezvous target QA task failed: {}",
-                err
-            )
-        })?
-        .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
-        let response = SnTunnelRendezvousResp::clone_from_slice(
-            body.read_all()
-                .await
-                .map_err(into_p2p_err!(P2pErrorCode::IoError))?
-                .as_slice(),
-        )
-        .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-        response.validate(notify.seq, notify.need_predict_endpoint)?;
-        self.validate_rendezvous_response_owner(target_peer_id, &response)
-            .await?;
-        Ok(response)
+            }))
     }
 
     async fn relay_rendezvous_to_serving_sn(

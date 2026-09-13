@@ -26,8 +26,8 @@ use bucky_raw_codec::{RawConvertTo, RawFrom};
 use bucky_time::bucky_time_now;
 use chrono::Utc;
 use sfo_cmd_server::client::{
-    ClassifiedCmdClient, ClassifiedCmdSend, ClassifiedCmdTunnel, ClassifiedCmdTunnelFactory,
-    CmdClient, DefaultClassifiedCmdClient,
+    ClassifiedCmdClient, ClassifiedCmdTunnel, ClassifiedCmdTunnelFactory, CmdClient, CmdSend,
+    DefaultClassifiedCmdClient,
 };
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use sfo_cmd_server::{CmdBody, CmdTunnel, PeerId};
@@ -108,10 +108,9 @@ fn publish_active_sn(active_sn_list: &mut Vec<ActiveSN>, active_sn: ActiveSN) ->
     true
 }
 
-fn update_active_sn_if_owner<F>(
+fn update_active_sn<F>(
     active_sn_list: &mut [ActiveSN],
     sn_peer_id: &P2pId,
-    conn_id: CmdTunnelId,
     update: F,
 ) -> bool
 where
@@ -119,7 +118,7 @@ where
 {
     let Some(active_sn) = active_sn_list
         .iter_mut()
-        .find(|active_sn| &active_sn.sn_peer_id == sn_peer_id && active_sn.conn_id == conn_id)
+        .find(|active_sn| &active_sn.sn_peer_id == sn_peer_id)
     else {
         return false;
     };
@@ -164,7 +163,6 @@ pub type SNRendezvousEventRef = Arc<dyn SNRendezvousEvent>;
 pub struct ActiveSN {
     pub sn_peer_id: P2pId,
     pub latest_time: u64,
-    pub conn_id: CmdTunnelId,
     pub protocol: Protocol,
     pub sn_endpoint: Endpoint,
     pub wan_ep_list: Vec<Endpoint>,
@@ -174,6 +172,11 @@ pub struct ActiveSN {
     pub nat_probe_registration_generation: u64,
     pub last_nat_probe_request_id: u64,
     pub next_probe_at: u64,
+}
+
+struct SnQaResponse {
+    stream_id: CmdTunnelId,
+    body: CmdBody,
 }
 
 #[derive(Clone)]
@@ -801,24 +804,88 @@ impl SNClientService {
         );
     }
 
-    fn active_sn_matches(&self, sn_peer_id: &P2pId, conn_id: CmdTunnelId) -> bool {
+    async fn send_sn_qa(
+        &self,
+        classification: SnTunnelClassification,
+        sn_peer_id: &P2pId,
+        cmd: PackageCmdCode,
+        version: u8,
+        body: &[u8],
+        timeout: Duration,
+    ) -> P2pResult<SnQaResponse> {
+        let mut send = match self.cmd_client.get_send_by_classified(classification).await {
+            Ok(send) => send,
+            Err(err) => {
+                // No command stream to this SN endpoint could be reused or
+                // created, so the registration itself is no longer usable.
+                // Evict it so the registration loop can resolve and register
+                // the serving SN again instead of reporting online while every
+                // command fails against a dead endpoint.
+                self.remove_active_sn(sn_peer_id);
+                log::warn!(
+                    "event=sn_command_stream_unavailable sn={} err={:?}",
+                    sn_peer_id,
+                    err
+                );
+                return Err(into_p2p_err!(
+                    P2pErrorCode::ConnectFailed,
+                    "acquire sn command stream failed sn={}",
+                    sn_peer_id
+                )(err));
+            }
+        };
+        if send.get_remote_peer_id() != PeerId::from(sn_peer_id.as_slice()) {
+            send.set_disable();
+            return Err(p2p_err!(
+                P2pErrorCode::InvalidData,
+                "sn command stream peer mismatch expected={}",
+                sn_peer_id
+            ));
+        }
+        let stream_id = send.get_tunnel_id();
+        let result = send
+            .send_with_resp(cmd as u8, version, body, timeout)
+            .await;
+        if result.is_err() {
+            send.set_disable();
+            return Err(into_p2p_err!(
+                P2pErrorCode::ConnectFailed,
+                "sn command qa failed stream={:?} cmd={:?}",
+                stream_id,
+                cmd
+            )(result.unwrap_err()));
+        }
+        Ok(SnQaResponse {
+            stream_id,
+            body: result.unwrap(),
+        })
+    }
+
+    fn active_sn_matches(&self, sn_peer_id: &P2pId) -> bool {
         self.state
             .read()
             .unwrap()
             .active_sn_list
             .iter()
-            .any(|active| &active.sn_peer_id == sn_peer_id && active.conn_id == conn_id)
+            .any(|active| &active.sn_peer_id == sn_peer_id)
+    }
+
+    fn remove_active_sn(&self, sn_peer_id: &P2pId) {
+        let mut state = self.state.write().unwrap();
+        state
+            .active_sn_list
+            .retain(|active| &active.sn_peer_id != sn_peer_id);
     }
 
     async fn on_rendezvous_notify(
         &self,
-        conn_id: CmdTunnelId,
+        _conn_id: CmdTunnelId,
         sn_peer: &PeerId,
         notify: SnTunnelRendezvousNotify,
     ) -> SnTunnelRendezvousResp {
         let failure = || SnTunnelRendezvousResp::failure(notify.seq);
         let serving_sn_id = P2pId::from(sn_peer.as_slice());
-        if !self.active_sn_matches(&serving_sn_id, conn_id) {
+        if !self.active_sn_matches(&serving_sn_id) {
             return failure();
         }
         if notify.validate().is_err() {
@@ -912,19 +979,19 @@ impl SNClientService {
         let bytes = request
             .to_vec()
             .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-        let mut body = self
-            .cmd_client
-            .send_by_specify_tunnel_with_resp(
-                active_sn.conn_id,
-                PackageCmdCode::SnTunnelRendezvous as u8,
+        let mut qa = self
+            .send_sn_qa(
+                SnTunnelClassification::new(None, active_sn.sn_endpoint),
+                &active_sn.sn_peer_id,
+                PackageCmdCode::SnTunnelRendezvous,
                 SN_TUNNEL_RENDEZVOUS_CMD_VERSION,
                 bytes.as_slice(),
                 self.call_timeout,
             )
-            .await
-            .map_err(into_p2p_err!(P2pErrorCode::IoError))?;
+            .await?;
         let response = SnTunnelRendezvousResp::clone_from_slice(
-            body.read_all()
+            qa.body
+                .read_all()
                 .await
                 .map_err(into_p2p_err!(P2pErrorCode::IoError))?
                 .as_slice(),
@@ -1117,7 +1184,7 @@ impl SNClientService {
                             .unwrap_or_else(|| active_sn.net_profile.clone());
                         match self
                             .report(
-                                active_sn.conn_id,
+                                SnTunnelClassification::new(None, active_sn.sn_endpoint),
                                 active_sn.sn_peer_id.clone(),
                                 Some(&report_profile),
                                 None,
@@ -1143,14 +1210,13 @@ impl SNClientService {
                                 {
                                     self.apply_completed_probe(
                                         &active_sn.sn_peer_id,
-                                        active_sn.conn_id,
                                         Some(result.registration_generation),
                                         Some(result.request_id),
                                         result.profile.clone(),
                                     );
                                     match self
                                         .report(
-                                            active_sn.conn_id,
+                                            SnTunnelClassification::new(None, active_sn.sn_endpoint),
                                             active_sn.sn_peer_id.clone(),
                                             Some(&result.profile),
                                             Some(&result),
@@ -1162,7 +1228,7 @@ impl SNClientService {
                                                 "event=nat_probe_result_reported sn_id={} peer_id={} tunnel_id={:?} registration_generation={} config_generation={} request_id={} observation={:?}",
                                                 active_sn.sn_peer_id,
                                                 self.local_identity.get_id(),
-                                                active_sn.conn_id,
+                                                active_sn.sn_endpoint,
                                                 result.registration_generation,
                                                 result.probe_config_generation,
                                                 result.request_id,
@@ -1179,7 +1245,7 @@ impl SNClientService {
                                                 "event=nat_probe_result_report_failed sn_id={} peer_id={} tunnel_id={:?} registration_generation={} config_generation={} request_id={} err={:?}",
                                                 active_sn.sn_peer_id,
                                                 self.local_identity.get_id(),
-                                                active_sn.conn_id,
+                                                active_sn.sn_endpoint,
                                                 result.registration_generation,
                                                 result.probe_config_generation,
                                                 result.request_id,
@@ -1195,10 +1261,9 @@ impl SNClientService {
                                 )
                                 .unwrap_or_default();
                                 let mut state = self.state.write().unwrap();
-                                update_active_sn_if_owner(
+                                update_active_sn(
                                     &mut state.active_sn_list,
                                     &active_sn.sn_peer_id,
-                                    active_sn.conn_id,
                                     |current| {
                                         current.nat_probe_endpoints = nat_probe_endpoints;
                                         current.nat_probe_signer = nat_probe_signer;
@@ -1228,44 +1293,22 @@ impl SNClientService {
                             continue;
                         }
                         for local_ep in local_eps.iter() {
-                            let tunnel_id = match self
-                                .cmd_client
-                                .find_tunnel_id_by_classified(SnTunnelClassification::new(
-                                    *local_ep,
-                                    sn_ep.clone(),
-                                ))
-                                .await
-                            {
-                                Ok(tunnel_id) => tunnel_id,
-                                Err(e) => {
-                                    log::warn!(
-                                        "sn client candidate tunnel failed sn_id={} protocol={:?} local_ep={:?} remote_ep={} err={:?}",
-                                        sn_cert.get_id(),
-                                        protocol,
-                                        local_ep,
-                                        sn_ep,
-                                        e
-                                    );
-                                    continue;
-                                }
-                            };
-
+                            let classification = SnTunnelClassification::new(*local_ep, sn_ep.clone());
                             let mut report_resp = match self
-                                .report(tunnel_id, sn_cert.get_id(), None, None)
+                                .report(classification, sn_cert.get_id(), None, None)
                                 .await
-                            {
-                                Ok(resp) => resp,
-                                Err(e) => {
-                                    log::warn!(
-                                        "sn client candidate report failed sn_id={} protocol={:?} local_ep={:?} remote_ep={} tunnel_id={:?} err={:?}",
-                                        sn_cert.get_id(),
-                                        protocol,
-                                        local_ep,
-                                        sn_ep,
-                                        tunnel_id,
-                                        e
-                                    );
-                                    continue;
+                                {
+                                    Ok(resp) => resp,
+                                    Err(e) => {
+                                        log::warn!(
+                                            "sn client candidate report failed sn_id={} protocol={:?} local_ep={:?} remote_ep={} err={:?}",
+                                            sn_cert.get_id(),
+                                            protocol,
+                                            local_ep,
+                                            sn_ep,
+                                            e
+                                        );
+                                        continue;
                                 }
                             };
 
@@ -1283,7 +1326,6 @@ impl SNClientService {
                             let active_sn = ActiveSN {
                                 sn_peer_id: sn_cert.get_id(),
                                 latest_time: bucky_time_now(),
-                                conn_id: tunnel_id,
                                 protocol,
                                 sn_endpoint: *sn_ep,
                                 wan_ep_list: report_resp.end_point_array.clone(),
@@ -1314,14 +1356,13 @@ impl SNClientService {
                             if let Some(result) = accepted {
                                 self.apply_completed_probe(
                                     &sn_cert.get_id(),
-                                    tunnel_id,
                                     Some(result.registration_generation),
                                     Some(result.request_id),
                                     result.profile.clone(),
                                 );
                                 match self
                                     .report(
-                                        tunnel_id,
+                                        SnTunnelClassification::new(*local_ep, sn_ep.clone()),
                                         sn_cert.get_id(),
                                         Some(&result.profile),
                                         Some(&result),
@@ -1333,7 +1374,7 @@ impl SNClientService {
                                             "event=nat_probe_result_reported sn_id={} peer_id={} tunnel_id={:?} registration_generation={} config_generation={} request_id={} observation={:?}",
                                             sn_cert.get_id(),
                                             self.local_identity.get_id(),
-                                            tunnel_id,
+                                            sn_ep,
                                             result.registration_generation,
                                             result.probe_config_generation,
                                             result.request_id,
@@ -1351,10 +1392,9 @@ impl SNClientService {
                                             )
                                             .unwrap_or_default();
                                         let mut state = self.state.write().unwrap();
-                                        update_active_sn_if_owner(
+                                        update_active_sn(
                                             &mut state.active_sn_list,
                                             &sn_cert.get_id(),
-                                            tunnel_id,
                                             |current| {
                                                 current.nat_probe_endpoints = nat_probe_endpoints;
                                                 current.nat_probe_signer = nat_probe_signer;
@@ -1367,7 +1407,7 @@ impl SNClientService {
                                             "event=nat_probe_result_report_failed sn_id={} peer_id={} tunnel_id={:?} registration_generation={} config_generation={} request_id={} err={:?}",
                                             sn_cert.get_id(),
                                             self.local_identity.get_id(),
-                                            tunnel_id,
+                                            sn_ep,
                                             result.registration_generation,
                                             result.probe_config_generation,
                                             result.request_id,
@@ -1391,7 +1431,6 @@ impl SNClientService {
                                     .await;
                                 self.apply_completed_probe(
                                     &sn_cert.get_id(),
-                                    tunnel_id,
                                     None,
                                     None,
                                     local_profile,
@@ -1409,11 +1448,6 @@ impl SNClientService {
                 }
             }
         }
-    }
-
-    fn remove_sn_conn(&self, conn_id: CmdTunnelId) {
-        let mut state = self.state.write().unwrap();
-        state.active_sn_list.retain(|sn| sn.conn_id != conn_id);
     }
 
     pub async fn wait_online(&self, timeout: Option<Duration>) -> P2pResult<()> {
@@ -1616,7 +1650,6 @@ impl SNClientService {
             .await;
         self.apply_completed_probe(
             &active_sn.sn_peer_id,
-            active_sn.conn_id,
             None,
             None,
             profile.clone(),
@@ -1627,14 +1660,13 @@ impl SNClientService {
     fn apply_completed_probe(
         &self,
         sn_peer_id: &P2pId,
-        conn_id: CmdTunnelId,
         registration_generation: Option<u64>,
         request_id: Option<u64>,
         profile: NatProfile,
     ) {
         let now = bucky_time_now();
         let mut state = self.state.write().unwrap();
-        update_active_sn_if_owner(&mut state.active_sn_list, sn_peer_id, conn_id, |current| {
+        update_active_sn(&mut state.active_sn_list, sn_peer_id, |current| {
             if let (Some(registration_generation), Some(request_id)) =
                 (registration_generation, request_id)
             {
@@ -1787,7 +1819,7 @@ impl SNClientService {
 
     async fn report(
         &self,
-        tunnel_id: CmdTunnelId,
+        classification: SnTunnelClassification,
         sn_peer_id: P2pId,
         net_profile: Option<&NatProfile>,
         nat_probe_result: Option<&NatProbeResult>,
@@ -1839,33 +1871,18 @@ impl SNClientService {
         let report_body = report
             .to_vec()
             .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-        let mut resp_body = match self
-            .cmd_client
-            .send_by_specify_tunnel_with_resp(
-                tunnel_id,
-                PackageCmdCode::ReportSn as u8,
+        let mut qa = self
+            .send_sn_qa(
+                classification,
+                &sn_peer_id,
+                PackageCmdCode::ReportSn,
                 self.cmd_version,
                 report_body.as_slice(),
                 self.call_timeout,
             )
-            .await
-        {
-            Ok(resp_body) => resp_body,
-            Err(e) => {
-                if e.code() != CmdErrorCode::Timeout {
-                    self.remove_sn_conn(tunnel_id);
-                }
-                return Err(p2p_err!(
-                    P2pErrorCode::ConnectFailed,
-                    "report qa failed sn={} tunnel_id={:?} err={:?}",
-                    sn_peer_id,
-                    tunnel_id,
-                    e
-                ));
-            }
-        };
+            .await?;
         let resp = ReportSnResp::clone_from_slice(
-            resp_body
+            qa.body
                 .read_all()
                 .await
                 .map_err(into_p2p_err!(
@@ -1881,8 +1898,8 @@ impl SNClientService {
         if resp.seq != seq || resp.sn_peer_id != sn_peer_id {
             return Err(p2p_err!(
                 P2pErrorCode::InvalidData,
-                "report qa response mismatch tunnel_id={:?} expected_seq={} actual_seq={} expected_sn={} actual_sn={}",
-                tunnel_id,
+                "report qa response mismatch stream_id={:?} expected_seq={} actual_seq={} expected_sn={} actual_sn={}",
+                qa.stream_id,
                 seq.value(),
                 resp.seq.value(),
                 sn_peer_id,
@@ -1892,7 +1909,7 @@ impl SNClientService {
         log::debug!(
             "event=sn_report_response_received sn_id={} tunnel_id={:?} observed_endpoint_count={} nat_probe_directive={}",
             resp.sn_peer_id,
-            tunnel_id,
+            qa.stream_id,
             resp.end_point_array.len(),
             resp.nat_probe_directive.is_some()
         );
@@ -1902,11 +1919,16 @@ impl SNClientService {
     #[cfg(test)]
     pub(crate) async fn report_for_test(
         &self,
-        tunnel_id: CmdTunnelId,
+        active_sn: &ActiveSN,
         sn_peer_id: P2pId,
         nat_probe_result: Option<&NatProbeResult>,
     ) -> P2pResult<ReportSnResp> {
-        self.report(tunnel_id, sn_peer_id, None, nat_probe_result)
+        self.report(
+            SnTunnelClassification::new(None, active_sn.sn_endpoint),
+            sn_peer_id,
+            None,
+            nat_probe_result,
+        )
             .await
     }
 
@@ -2036,11 +2058,9 @@ impl SNClientService {
             };
 
             log::debug!(
-                "sn call send sn={} conn_id={:?} seq={} tunnel_id={:?} remote={} reverse_eps={:?} payload_len={} call_type={:?}",
+                "sn call send sn={} seq={} remote={} reverse_eps={:?} payload_len={} call_type={:?}",
                 active.sn_peer_id,
-                active.conn_id,
                 seq.value(),
-                tunnel_id,
                 remote,
                 call.reverse_endpoint_array,
                 call.payload.len(),
@@ -2050,26 +2070,22 @@ impl SNClientService {
             let call_body = call
                 .to_vec()
                 .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            let mut resp_body = match self
-                .cmd_client
-                .send_by_specify_tunnel_with_resp(
-                    active.conn_id,
-                    PackageCmdCode::SnCall as u8,
+            let mut qa = match self
+                .send_sn_qa(
+                    SnTunnelClassification::new(None, active.sn_endpoint),
+                    &active.sn_peer_id,
+                    PackageCmdCode::SnCall,
                     self.cmd_version,
                     call_body.as_slice(),
                     self.call_timeout,
                 )
                 .await
             {
-                Ok(resp_body) => resp_body,
+                Ok(qa) => qa,
                 Err(e) => {
-                    if e.code() != CmdErrorCode::Timeout {
-                        self.remove_sn_conn(active.conn_id);
-                    }
                     log::warn!(
-                        "sn call qa failed sn={} conn_id={:?} seq={} remote={} timeout_ms={} err={:?}",
+                        "sn call qa failed sn={} seq={} remote={} timeout_ms={} err={:?}",
                         active.sn_peer_id,
-                        active.conn_id,
                         seq.value(),
                         remote,
                         self.call_timeout.as_millis(),
@@ -2078,7 +2094,7 @@ impl SNClientService {
                     continue;
                 }
             };
-            let resp = match resp_body.read_all().await {
+            let resp = match qa.body.read_all().await {
                 Ok(body) => match SnCallResp::clone_from_slice(body.as_slice()) {
                     Ok(resp) => resp,
                     Err(e) => {
@@ -2093,8 +2109,8 @@ impl SNClientService {
             };
             if resp.seq != seq || resp.sn_peer_id != active.sn_peer_id {
                 log::error!(
-                    "sn call qa response mismatch conn_id={:?} expected_seq={} actual_seq={} expected_sn={} actual_sn={}",
-                    active.conn_id,
+                    "sn call qa response mismatch stream_id={:?} expected_seq={} actual_seq={} expected_sn={} actual_sn={}",
+                    qa.stream_id,
                     seq.value(),
                     resp.seq.value(),
                     active.sn_peer_id,
@@ -2105,7 +2121,7 @@ impl SNClientService {
             log::debug!(
                 "sn call resp sn={} conn_id={:?} seq={} result={}",
                 active.sn_peer_id,
-                active.conn_id,
+                qa.stream_id,
                 resp.seq.value(),
                 resp.result
             );
@@ -2132,27 +2148,28 @@ impl SNClientService {
             let query_body = query
                 .to_vec()
                 .map_err(into_p2p_err!(P2pErrorCode::RawCodecError))?;
-            let mut resp_body = match self
-                .cmd_client
-                .send_by_specify_tunnel_with_resp(
-                    active.conn_id,
-                    PackageCmdCode::SnQuery as u8,
+            let mut qa = match self
+                .send_sn_qa(
+                    SnTunnelClassification::new(None, active.sn_endpoint),
+                    &active.sn_peer_id,
+                    PackageCmdCode::SnQuery,
                     self.cmd_version,
                     query_body.as_slice(),
                     self.call_timeout,
                 )
                 .await
             {
-                Ok(resp_body) => resp_body,
+                Ok(qa) => qa,
                 Err(e) => {
-                    if e.code() != CmdErrorCode::Timeout {
-                        self.remove_sn_conn(active.conn_id);
-                    }
-                    log::error!("query qa to {} failed: {:?}", active.sn_peer_id, e);
+                    log::error!(
+                        "query qa to {} failed err={:?}",
+                        active.sn_peer_id,
+                        e
+                    );
                     continue;
                 }
             };
-            let resp = match resp_body.read_all().await {
+            let resp = match qa.body.read_all().await {
                 Ok(body) => match SnQueryResp::clone_from_slice(body.as_slice()) {
                     Ok(resp) => resp,
                     Err(e) => {
@@ -2167,8 +2184,8 @@ impl SNClientService {
             };
             if resp.seq != seq {
                 log::error!(
-                    "sn query qa response mismatch conn_id={:?} expected_seq={} actual_seq={}",
-                    active.conn_id,
+                    "sn query qa response mismatch stream_id={:?} expected_seq={} actual_seq={}",
+                    qa.stream_id,
                     seq.value(),
                     resp.seq.value()
                 );

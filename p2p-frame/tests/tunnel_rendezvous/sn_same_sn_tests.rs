@@ -5,6 +5,8 @@ use crate::sn::protocol::{
     NAT_PROBE_CONTROL_VERSION, ReportSnResp, SN_PROTOCOL_VERSION, SnTunnelRendezvousNotify,
     SnTunnelRendezvousOperation,
 };
+use crate::sn::types::SnTunnelClassification;
+use sfo_cmd_server::client::ClassifiedCmdClient;
 use tokio::sync::Semaphore;
 
 async fn send_report_with_local_endpoints(
@@ -46,8 +48,8 @@ async fn send_report_with_local_endpoints(
     let mut response_body = stack
         .sn_client()
         .get_cmd_client()
-        .send_by_specify_tunnel_with_resp(
-            active.conn_id,
+        .send_by_classified_tunnel_with_resp(
+            SnTunnelClassification::new(None, active.sn_endpoint),
             PackageCmdCode::ReportSn as u8,
             0,
             report_body.as_slice(),

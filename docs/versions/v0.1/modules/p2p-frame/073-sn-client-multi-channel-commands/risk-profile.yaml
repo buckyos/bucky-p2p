@@ -1,0 +1,60 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-sn-server-command-stream-selection", "CHG-qa-timeout-command-stream-close", "CHG-remove-active-sn-conn-id"]
+source_bindings:
+  proposal: proposal.md
+  design_source: design.md
+
+risks:
+  contract:
+    applies: true
+    evidence:
+      - p2p-frame/src/sn/client/sn_service.rs exports ActiveSN with a public conn_id field that this task removes.
+      - p2p-frame/src/sn/types.rs owns SnTunnelClassification used to select classified command streams.
+      - SN command codes and QA response correlation remain wire-compatible.
+    required_checks:
+      - ActiveSN public-source consumer migration compiles without conn_id.
+      - SN command wire formats and command codes remain unchanged.
+      - Classified command-stream selection and QA response correlation preserve authenticated SN peer identity.
+  data:
+    applies: false
+    evidence: The task adds no persistence, schema, serialization layout, migration, cache key, or durable data changes.
+    required_checks: []
+  security:
+    applies: true
+    evidence:
+      - p2p-frame/src/sn/client/sn_service.rs validates authenticated SN peer identity for report, call, query, and rendezvous responses.
+      - Inbound SN notifications and server-initiated QA must remain bound to the authenticated peer even when any command stream is accepted.
+    required_checks:
+      - Inbound SN commands are accepted only on authenticated command streams of the matching peer.
+      - Late, mismatched-sequence, wrong-command, and wrong-peer messages cannot complete or mutate active-SN state.
+  runtime:
+    applies: true
+    evidence:
+      - p2p-frame/src/sn/client/sn_service.rs currently pins all client-initiated SN commands to one ActiveSN.conn_id and holds that guard across QA response waits.
+      - sfo-cmd-server already provides classified command-stream pooling, on-demand creation, per-stream QA correlation, and a guard set_disable operation.
+      - QA timeout must close the selected command stream while preserving the bearer TTP tunnel and other healthy streams.
+    required_checks:
+      - Concurrent SN commands use distinct command streams and do not block behind one slow QA.
+      - The same bearer TTP tunnel can carry multiple concurrent SN command streams.
+      - Idle streams are reused; new streams are created only below sn_tunnel_count; at the cap requests wait rather than create unbounded streams.
+      - Every client-initiated QA timeout closes its selected command stream and rejects late responses.
+      - Closing or failing one stream does not remove an active SN that still has healthy streams.
+  build:
+    applies: true
+    evidence:
+      - p2p-frame/src/sn/client/sn_service.rs removes the public ActiveSN.conn_id field.
+      - p2p-frame/tests contains the repository consumers that must migrate and compile.
+      - Cargo.toml and Cargo.lock remain intentionally unchanged.
+    required_checks:
+      - Compile and migrate every repository consumer of ActiveSN.conn_id.
+      - Verify no dependency version, Cargo lockfile, feature default, or build-surface change beyond the required source migration.
+  ui:
+    applies: false
+    evidence: SN command transport has no UI, navigation, accessibility, localization, or user-workflow surface.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes existing Harness stages and unified test runner without changing Harness rules, scripts, templates, or runner behavior.
+    required_checks: []

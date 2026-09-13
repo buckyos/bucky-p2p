@@ -30,7 +30,6 @@ fn active_sn_profiles_are_kept_per_sn_id() {
             ActiveSN {
                 sn_peer_id: first_sn.clone(),
                 latest_time: now,
-                conn_id: 1u32.into(),
                 protocol: Protocol::Quic,
                 sn_endpoint: localhost_quic_endpoint(46001),
                 wan_ep_list: vec![],
@@ -44,7 +43,6 @@ fn active_sn_profiles_are_kept_per_sn_id() {
             ActiveSN {
                 sn_peer_id: second_sn.clone(),
                 latest_time: now,
-                conn_id: 2u32.into(),
                 protocol: Protocol::Quic,
                 sn_endpoint: localhost_quic_endpoint(46002),
                 wan_ep_list: vec![],
@@ -349,7 +347,7 @@ async fn initial_online_probe_and_stable_report_do_not_issue_server_periodic() {
         .count();
     let stable = client
         .sn_client()
-        .report_for_test(active.conn_id, sn_id, None)
+        .report_for_test(&active, sn_id, None)
         .await
         .unwrap();
     assert!(stable.nat_probe_directive.is_none());

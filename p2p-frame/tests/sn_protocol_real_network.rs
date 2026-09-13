@@ -290,15 +290,11 @@ fn assert_registered_on_selected_transport(topology: &RealSnTopology, protocol: 
     assert!(topology.sn_endpoint.addr().ip().is_loopback());
     assert_ne!(topology.sn_endpoint.addr().port(), 0);
 
-    for (stack, expected_tunnel) in [
-        (&topology.caller, topology.caller_cmd_tunnel),
-        (&topology.target, topology.target_cmd_tunnel),
-    ] {
+    for stack in [&topology.caller, &topology.target] {
         let active = stack.sn_client().get_active_sn_list();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].sn_peer_id, topology.sn_id);
         assert_eq!(active[0].protocol, protocol);
-        assert_eq!(active[0].conn_id, expected_tunnel);
         let listeners = stack.get_listen_eps(protocol).unwrap();
         assert!(listeners.iter().any(|(endpoint, _)| {
             endpoint.protocol() == protocol

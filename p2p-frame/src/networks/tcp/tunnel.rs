@@ -3710,6 +3710,10 @@ impl Tunnel for TcpTunnel {
         self.activity.try_retire_idle(now, idle_timeout)
     }
 
+    fn latest_business_activity_at(&self) -> Option<Instant> {
+        self.activity.latest_business_activity_at()
+    }
+
     async fn listen_stream(
         &self,
         vports: ListenVPortsRef,

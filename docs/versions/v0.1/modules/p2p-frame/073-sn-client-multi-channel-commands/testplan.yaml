@@ -1,0 +1,99 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+
+api_impact:
+  public_api: breaking
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+
+evidence_inputs: ["p2p-frame/src/sn", "p2p-frame/tests"]
+
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+
+contract_checks:
+  mode: enabled
+  steps:
+    - id: active-sn-external-positive
+      name: Delivered active SN identity surface compiles for an external consumer
+      kind: external-positive
+      assertion: new-path-compiles
+      change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-sn-server-command-stream-selection", "CHG-qa-timeout-command-stream-close", "CHG-remove-active-sn-conn-id"]
+      run: ["python3", "p2p-frame/tests/sn_active_sn_api_check.py", "--mode", "positive"]
+    - id: active-sn-external-negative
+      name: Removed conn_id field is rejected by the compiler
+      kind: external-negative
+      assertion: old-path-rejected-for-removed-symbol
+      change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-sn-server-command-stream-selection", "CHG-qa-timeout-command-stream-close", "CHG-remove-active-sn-conn-id"]
+      run: ["python3", "p2p-frame/tests/sn_active_sn_api_check.py", "--mode", "negative"]
+    - id: active-sn-removed-symbol-scan
+      name: No unallowlisted repository reference to the removed field
+      kind: removed-symbol-scan
+      assertion: no-unallowlisted-old-symbol-references
+      change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-sn-server-command-stream-selection", "CHG-qa-timeout-command-stream-close", "CHG-remove-active-sn-conn-id"]
+      run: ["python3", "harness/scripts/consumer-closure-check.py", "--version", "v0.1", "--module", "p2p-frame", "--task-name", "073-sn-client-multi-channel-commands"]
+    - id: p2p-frame-compile-closure
+      name: Repository consumers compile after the breaking field removal
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-sn-server-command-stream-selection", "CHG-qa-timeout-command-stream-close", "CHG-remove-active-sn-conn-id"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets"]
+
+levels:
+  unit:
+    mode: enabled
+    summary: Classified dispatch, peer-keyed active-SN lifecycle, timeout closure and classification branches inside the p2p-frame lib suite.
+    test_targets:
+      - p2p-frame/src/sn/client/sn_service.rs
+      - p2p-frame/src/sn/service/service.rs
+      - p2p-frame/src/sn/tests.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The lib suite runs with x509 so every SN client, service and profile test module is compiled.
+    steps:
+      - id: sn-command-unit-lib
+        name: Run p2p-frame lib suite with x509
+        change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-qa-timeout-command-stream-close", "CHG-remove-active-sn-conn-id"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "--", "--test-threads=4"]
+  dv:
+    mode: enabled
+    summary: Whole-module SN protocol behaviour over real TCP and QUIC command tunnels.
+    test_targets:
+      - p2p-frame/tests/sn_protocol_real_network.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The real-network matrix registers clients through the real SN service and asserts the active SN surface without a pinned stream handle.
+    steps:
+      - id: sn-protocol-real-network
+        name: Run real TCP/QUIC SN protocol matrix
+        change_ids: ["CHG-sn-client-classified-command-channel", "CHG-remove-active-sn-conn-id"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "sn_protocol_real_network", "--", "--test-threads=1"]
+  integration:
+    mode: enabled
+    summary: Rendezvous, cross-SN and public SN protocol contracts that consume the changed command dispatch.
+    test_targets:
+      - p2p-frame/tests/real_p2p_tunnel_flow.rs
+      - p2p-frame/tests/tunnel_rendezvous_protocol.rs
+      - p2p-frame/tests/nat_profile_public_api.rs
+      - p2p-frame/tests/sn_protocol_version_public_api.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Loopback real-socket flows are covered; public NAT, multi-host and deployed SN environments remain outside this environment.
+    steps:
+      - id: sn-command-integration-suites
+        name: Run cross-SN, rendezvous and public SN protocol suites
+        change_ids: ["CHG-sn-client-classified-command-channel", "CHG-sn-command-active-identity-lifecycle", "CHG-sn-server-command-stream-selection"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--test", "real_p2p_tunnel_flow", "--test", "tunnel_rendezvous_protocol", "--test", "nat_profile_public_api", "--test", "sn_protocol_version_public_api", "--", "--test-threads=1"]

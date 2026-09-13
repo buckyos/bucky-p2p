@@ -1,6 +1,6 @@
 use super::*;
 use crate::nat_type::NatProfile;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 struct PunchDropFlag(Arc<AtomicBool>);
 
@@ -483,7 +483,6 @@ fn ext_wan_endpoint(protocol: Protocol, port: u16) -> Endpoint {
 #[tokio::test]
 async fn rendezvous_ext_prediction_uses_snapshot_protocol_network() {
     use crate::sn::client::{ActiveSN, SNClientService};
-    use crate::sn::types::CmdTunnelId;
     use crate::types::SequenceGenerator;
 
     init_tls_once();
@@ -514,7 +513,6 @@ async fn rendezvous_ext_prediction_uses_snapshot_protocol_network() {
     sn_client.set_active_sn_list_for_test(vec![ActiveSN {
         sn_peer_id: sn_id.clone(),
         latest_time: bucky_time_now(),
-        conn_id: CmdTunnelId::from(700u32),
         protocol: Protocol::Ext(1),
         sn_endpoint: ext_wan_endpoint(Protocol::Ext(1), 7001),
         wan_ep_list: vec![],
@@ -555,7 +553,6 @@ async fn rendezvous_ext_prediction_uses_snapshot_protocol_network() {
 #[tokio::test]
 async fn rendezvous_ext_prediction_fails_closed_when_snapshot_protocol_network_missing() {
     use crate::sn::client::{ActiveSN, SNClientService};
-    use crate::sn::types::CmdTunnelId;
     use crate::types::SequenceGenerator;
 
     init_tls_once();
@@ -581,7 +578,6 @@ async fn rendezvous_ext_prediction_fails_closed_when_snapshot_protocol_network_m
     sn_client.set_active_sn_list_for_test(vec![ActiveSN {
         sn_peer_id: sn_id.clone(),
         latest_time: bucky_time_now(),
-        conn_id: CmdTunnelId::from(701u32),
         protocol: Protocol::Ext(1),
         sn_endpoint: ext_wan_endpoint(Protocol::Ext(1), 7002),
         wan_ep_list: vec![],
@@ -771,6 +767,7 @@ async fn punch_only_stops_on_incoming_success_and_owner_drop() {
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: true,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
     assert!(manager.on_incoming_tunnel(incoming.clone()).await.unwrap());
     assert!(Arc::ptr_eq(&action.await.unwrap().unwrap(), &incoming));
@@ -1146,6 +1143,7 @@ async fn direction_aware_waiter_matches_active_tunnel_without_consuming_reverse_
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: false,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
 
     assert!(manager.on_incoming_tunnel(active.clone()).await.unwrap());
@@ -1183,6 +1181,7 @@ async fn wrong_direction_does_not_consume_active_plan_waiter() {
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: true,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
 
     assert!(!manager.on_incoming_tunnel(reverse).await.unwrap());
@@ -1432,6 +1431,7 @@ async fn rendezvous_waiter_owner_duplicate_preserves_incumbent() {
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: false,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
     assert!(manager.on_incoming_tunnel(incoming.clone()).await.unwrap());
     let matched = runtime::timeout(Duration::from_secs(1), incumbent_waiter)
@@ -1522,6 +1522,7 @@ async fn rendezvous_waiter_owner_duplicate_notify_completes_incumbent_action() {
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: false,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
     assert!(manager.on_incoming_tunnel(incoming.clone()).await.unwrap());
 
@@ -1635,6 +1636,7 @@ async fn rendezvous_waiter_owner_displaced_preserves_replacement() {
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: false,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
     assert!(manager.on_incoming_tunnel(incoming.clone()).await.unwrap());
     let matched = runtime::timeout(Duration::from_secs(1), replacement_waiter)
@@ -1814,6 +1816,7 @@ async fn rendezvous_outbound_collision_waits_for_incoming_winner_result() {
         remote_id: remote_id.clone(),
         state: TunnelState::Connected,
         is_reverse: true,
+        close_count: Arc::new(AtomicUsize::new(0)),
     });
     let (incoming_notify, incoming_waiter) = Notify::new();
     manager.add_incoming_waiter(remote_id.clone(), tunnel_id, true, incoming_notify);

@@ -376,7 +376,6 @@ fn nat_probe_directive_does_not_gate_initial_online_publication() {
     let active = ActiveSN {
         sn_peer_id: sn.clone(),
         latest_time: 1,
-        conn_id: CmdTunnelId::from(41),
         protocol: Protocol::Quic,
         sn_endpoint: directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630"),
         wan_ep_list: vec![],
@@ -398,12 +397,10 @@ fn nat_probe_directive_does_not_gate_initial_online_publication() {
     );
 
     let mut stale_replacement = active;
-    stale_replacement.conn_id = CmdTunnelId::from(42);
     stale_replacement.sn_endpoint =
         directive_test_endpoint(Protocol::Quic, "203.0.113.42:3630");
     assert!(!publish_active_sn(&mut active_sn_list, stale_replacement));
     assert_eq!(active_sn_list.len(), 1);
-    assert_eq!(active_sn_list[0].conn_id, CmdTunnelId::from(41));
     assert_eq!(
         active_sn_list[0].sn_endpoint,
         directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630")
@@ -424,7 +421,6 @@ fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
     fn assert_active_sn_fields(actual: &ActiveSN, expected: &ActiveSN) {
         assert_eq!(actual.sn_peer_id, expected.sn_peer_id);
         assert_eq!(actual.latest_time, expected.latest_time);
-        assert_eq!(actual.conn_id, expected.conn_id);
         assert_eq!(actual.protocol, expected.protocol);
         assert_eq!(actual.sn_endpoint, expected.sn_endpoint);
         assert_eq!(actual.wan_ep_list, expected.wan_ep_list);
@@ -461,7 +457,6 @@ fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
     let replacement = ActiveSN {
         sn_peer_id: sn.clone(),
         latest_time: 200,
-        conn_id: CmdTunnelId::from(42),
         protocol: Protocol::Quic,
         sn_endpoint: replacement_endpoint,
         wan_ep_list: vec![directive_test_endpoint(
@@ -488,7 +483,6 @@ fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
     let stale_completion = ActiveSN {
         sn_peer_id: P2pId::from(vec![44; 32]),
         latest_time: 100,
-        conn_id: CmdTunnelId::from(41),
         protocol: Protocol::Tcp,
         sn_endpoint: directive_test_endpoint(Protocol::Tcp, "198.51.100.44:4630"),
         wan_ep_list: vec![directive_test_endpoint(
@@ -505,19 +499,18 @@ fn nat_probe_stale_owner_completion_cannot_overwrite_replacement_active_sn() {
         last_nat_probe_request_id: 4,
         next_probe_at: 0,
     };
-    assert!(!update_active_sn_if_owner(
+    let stale_completion_sn = stale_completion.sn_peer_id.clone();
+    assert!(!update_active_sn(
         &mut active_sn_list,
-        &sn,
-        CmdTunnelId::from(41),
+        &stale_completion_sn,
         |active| *active = stale_completion,
     ));
     assert_active_sn_fields(&active_sn_list[0], &replacement_snapshot);
 
     let current_endpoint = directive_test_endpoint(Protocol::Quic, "203.0.113.45:3630");
-    assert!(update_active_sn_if_owner(
+    assert!(update_active_sn(
         &mut active_sn_list,
         &sn,
-        CmdTunnelId::from(42),
         |active| {
             active.latest_time = 201;
             active.sn_endpoint = current_endpoint;
@@ -976,7 +969,6 @@ fn collect_due_active_sns_force_initial_reports_recent_active_sn() {
     let active = ActiveSN {
         sn_peer_id: P2pId::from(vec![45; 32]),
         latest_time: now,
-        conn_id: 41u32.into(),
         protocol: Protocol::Quic,
         sn_endpoint: directive_test_endpoint(Protocol::Quic, "198.51.100.20:3630"),
         wan_ep_list: vec![],
@@ -1163,7 +1155,6 @@ fn ext_udp_probe_test_service(
         state.active_sn_list.push(ActiveSN {
             sn_peer_id: sn.get_id(),
             latest_time: 1,
-            conn_id: CmdTunnelId::from(42),
             protocol: Protocol::Ext(1),
             sn_endpoint,
             wan_ep_list: vec![],
