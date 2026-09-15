@@ -190,10 +190,19 @@ impl TcpTunnelListener {
     ) -> P2pResult<()> {
         let listener = self.clone();
         let bind_local = resolve_tcp_bind_endpoint(local)?;
-        let config = TcpServiceConfig::new(*bind_local.addr()).with_socket_options(SocketOptions {
-            reuse_address,
-            ..SocketOptions::default()
-        });
+        let bind_addr = *bind_local.addr();
+        let config = TcpServiceConfig::new(bind_addr)
+            .with_socket_options(SocketOptions {
+                reuse_address,
+                ..SocketOptions::default()
+            })
+            .with_socket_init_callback(move |socket| {
+                crate::networks::apply_listener_socket_options(
+                    bind_addr,
+                    socket,
+                    |socket, only_v6| socket.set_only_v6(only_v6),
+                )
+            });
         log::info!(
             "tcp listener serve begin local={} bind_local={} out={:?} mapping_port={:?}",
             local,

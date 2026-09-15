@@ -1090,10 +1090,19 @@ impl QuicTunnelListener {
         };
 
         let server_config = self.build_server_config()?;
-        let config = UdpServiceConfig::new(*local.addr()).with_socket_options(SocketOptions {
-            reuse_address,
-            ..SocketOptions::default()
-        });
+        let bind_addr = *local.addr();
+        let config = UdpServiceConfig::new(bind_addr)
+            .with_socket_options(SocketOptions {
+                reuse_address,
+                ..SocketOptions::default()
+            })
+            .with_socket_init_callback(move |socket| {
+                crate::networks::apply_listener_socket_options(
+                    bind_addr,
+                    socket,
+                    |socket, only_v6| socket.set_only_v6(only_v6),
+                )
+            });
         let listener = self.clone();
         let server =
             QuicServer::serve_socket(&self.server_runtime, config, move |socket, worker_id| {

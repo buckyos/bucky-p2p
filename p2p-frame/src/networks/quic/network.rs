@@ -999,6 +999,46 @@ mod tests {
         incoming_channel().0
     }
 
+    #[tokio::test]
+    async fn quic_listener_binds_ipv4_and_ipv6_wildcards_on_the_same_port() {
+        let Ok(probe) = std::net::UdpSocket::bind("[::]:0") else {
+            // Host without usable IPv6: there is no IPv6 bind behavior to check.
+            return;
+        };
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        init_tls_once();
+        let (network, resolver) = new_network();
+        register_listener_identity(&resolver, new_identity("quic-wildcard")).await;
+
+        let ipv4 = Endpoint::from((
+            Protocol::Quic,
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                port,
+            ),
+        ));
+        let ipv6 = Endpoint::from((
+            Protocol::Quic,
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                port,
+            ),
+        ));
+
+        network
+            .listen(&ipv4, None, None, ignore_incoming())
+            .await
+            .expect("IPv4 wildcard QUIC listener must bind");
+        network
+            .listen(&ipv6, None, None, ignore_incoming())
+            .await
+            .expect("IPv6 wildcard QUIC listener must coexist with the IPv4 wildcard");
+
+        assert_eq!(network.listener_infos().len(), 2);
+    }
+
     async fn accept_incoming(rx: &AsyncMutex<mpsc::Receiver<P2pResult<TunnelRef>>>) -> TunnelRef {
         let mut rx = rx.lock().await;
         accept_incoming_rx(&mut rx).await

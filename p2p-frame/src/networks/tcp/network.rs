@@ -297,7 +297,12 @@ mod construction_tests {
     };
     use crate::tls::DefaultTlsServerCertResolver;
     use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Arc;
+
+    fn ignore_incoming() -> IncomingTunnelCallback {
+        Arc::new(|_result| Box::pin(async {}))
+    }
 
     #[cfg(feature = "x509")]
     mod reverse_data_first_claim_tests {
@@ -382,6 +387,82 @@ mod construction_tests {
         network.set_reuse_address(true);
         network.close_all_listener().await.unwrap();
         assert!(network.listener_infos().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tcp_listener_binds_ipv4_and_ipv6_wildcards_on_the_same_port() {
+        #[cfg(not(feature = "x509"))]
+        {
+            // The TCP listener needs a TLS identity factory; x509 provides it.
+            return;
+        }
+        #[cfg(feature = "x509")]
+        crate::tls::init_tls(Arc::new(crate::x509::X509IdentityFactory));
+
+        let Ok(probe) = std::net::TcpListener::bind("[::]:0") else {
+            // Host without usable IPv6: there is no IPv6 bind behavior to check.
+            return;
+        };
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let network = network();
+        let ipv4 = Endpoint::from((
+            Protocol::Tcp,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+        ));
+        let ipv6 = Endpoint::from((
+            Protocol::Tcp,
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+        ));
+
+        network
+            .listen(&ipv4, None, None, ignore_incoming())
+            .await
+            .expect("IPv4 wildcard listener must bind");
+        network
+            .listen(&ipv6, None, None, ignore_incoming())
+            .await
+            .expect("IPv6 wildcard listener must coexist with the IPv4 wildcard");
+
+        assert_eq!(network.listener_infos().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tcp_ipv6_only_listener_does_not_accept_ipv4_connections() {
+        #[cfg(not(feature = "x509"))]
+        {
+            // The TCP listener needs a TLS identity factory; x509 provides it.
+            return;
+        }
+        #[cfg(feature = "x509")]
+        crate::tls::init_tls(Arc::new(crate::x509::X509IdentityFactory));
+
+        let Ok(probe) = std::net::TcpListener::bind("[::]:0") else {
+            // Host without usable IPv6: there is no IPv6 bind behavior to check.
+            return;
+        };
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let network = network();
+        let ipv6 = Endpoint::from((
+            Protocol::Tcp,
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+        ));
+        network
+            .listen(&ipv6, None, None, ignore_incoming())
+            .await
+            .expect("IPv6 wildcard listener must bind");
+
+        let ipv4_connect = std::net::TcpStream::connect_timeout(
+            &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            Duration::from_secs(2),
+        );
+        assert!(
+            ipv4_connect.is_err(),
+            "an IPv6-only listener must not accept IPv4 connections through a v4-mapped socket"
+        );
     }
 
     #[tokio::test]
