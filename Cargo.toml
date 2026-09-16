@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "./cyfs-p2p",
-    "./sn-miner-rust",
     "cyfs-p2p-test",
-    "desc-tool",
     "p2p-frame",
 ]

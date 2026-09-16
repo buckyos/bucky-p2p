@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/globals/077-remove-cyfs-legacy-tools-x509-test-identity/proposal.md": "17d1efb714dc5bdfa069102ef0a7c051892f295896c41ba79d2c4855d6d4f21e"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "090c7a46b5da67a8ce4dacd45f8a2a5dc735dcef7f8c4f9ddc7c7db840a3dab6"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

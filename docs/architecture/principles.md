@@ -4,7 +4,7 @@
 - 在保留现有多 crate P2P 架构的前提下，让工作区对 agent 和审阅者都保持清晰可读。
 
 ## 仓库事实
-- 工作区根目录定义了五个成员：`p2p-frame`、`cyfs-p2p`、`cyfs-p2p-test`、`sn-miner-rust` 和 `desc-tool`。
+- 工作区根目录定义了两个成员：`p2p-frame` 和 `cyfs-p2p-test`。
 - `p2p-frame` 是架构中心。所有严格验证规则都假设这里的改动会产生全系统级影响面。
 - `p2p-frame/docs/` 下现有的协议和设计说明仍然是有效参考材料，并属于设计证据链的一部分。
 
@@ -28,8 +28,8 @@
 
 ## 高风险面
 - `p2p-frame/src/networks/**`、`p2p-frame/src/ttp/**`、`p2p-frame/src/tunnel/**`、`p2p-frame/src/sn/**` 和 `p2p-frame/src/pn/**` 中的传输协议与线协议兼容性。
-- `p2p-frame/src/tls/**`、`p2p-frame/src/x509*` 以及 `desc-tool` 中的密码学、TLS 与身份边界。
-- `cyfs-p2p-test`、`sn-miner-rust` 以及生成的 desc/sec/device 制品中由 CLI/配置驱动的运行时行为。
+- `p2p-frame/src/tls/**`、`p2p-frame/src/x509*` 以及 `cyfs-p2p-test` 中的密码学、TLS 与身份边界。
+- `cyfs-p2p-test` 中由 CLI/配置驱动的 x509 身份与运行时行为。
 
 ## 必需证据链
 - 手工流的 `proposal.md`、`design.md` 以及任何 `design/` 补充说明；显式启动 auto-pipeline 时使用启动确认的 proposal 与任务本地 pipeline plan 映射

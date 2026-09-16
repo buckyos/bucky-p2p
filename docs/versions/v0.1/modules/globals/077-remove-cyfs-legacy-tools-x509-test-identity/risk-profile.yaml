@@ -1,0 +1,35 @@
+schema_version: 1
+task_manifest: task.yaml
+change_ids: ["remove_cyfs_p2p_crate", "remove_sn_miner_crate", "remove_desc_tool_crate", "x509_identity_cyfs_p2p_test", "sync_workspace_governance"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+risks:
+  contract:
+    applies: true
+    evidence: ["删除 cyfs-p2p 公共 crate、sn-miner 与 desc-tool 可执行产物，剩余 p2p-frame 公共 API 不变"]
+    required_checks: ["cargo check --workspace", "活跃引用扫尾 rg 无旧 crate 命中"]
+  data:
+    applies: false
+    evidence: 本任务不改变任何持久化数据、数据库 schema 或运行期存储格式。
+    required_checks: []
+  security:
+    applies: true
+    evidence: ["cyfs-p2p-test 身份从 CYFS object desc+PrivateKey 切换为 x509 证书+证书签名"]
+    required_checks: ["cargo test -p p2p-frame --features x509 --lib", "cyfs-p2p-test 全目标编译"]
+  runtime:
+    applies: true
+    evidence: ["cyfs-p2p-test 直接使用 p2p-frame stack/x509 装配，删除 SN 启动二进制"]
+    required_checks: ["缩减 workspace 编译", "p2p-frame x509 运行期测试套件"]
+  build:
+    applies: true
+    evidence: ["workspace members、Cargo.lock 依赖图与构建产物发生删除/改写"]
+    required_checks: ["cargo check --workspace", "Cargo.lock 不再含被删 crate 依赖边"]
+  ui:
+    applies: false
+    evidence: 无 UI、可访问性、本地化或用户工作流变化。
+    required_checks: []
+  harness:
+    applies: true
+    evidence: ["更新 workspace governance、verify-workspace-harness.py、AGENTS 与模块/架构文档中的活跃模块清单"]
+    required_checks: ["verify-workspace-harness.py", "harness-check completion 校验", "pipelines pipeline-plan-check"]

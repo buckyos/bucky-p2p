@@ -8,13 +8,9 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"]}
 clap = "2"
-cyfs-p2p = { path = "../cyfs-p2p" }
-p2p-frame = { path = "../p2p-frame"}
+p2p-frame = { path = "../p2p-frame", features = ["x509"] }
 sfo-reuseport = "0.3"
 serde = { version = "1.0.217", features = ["derive"] }
-bucky-objects = {version = "0.1"}
-bucky-crypto = {version = "0.1"}
-bucky-raw-codec = {version = "0.1", features = ["derive"]}
 log = "0.4.22"
 toml = "0.8.19"
 sfo-log = "0.1.3"

@@ -1,0 +1,45 @@
+schema_version: 1
+workflow_tier: high-risk
+
+version: v0.1
+packet_module: globals
+task_name: 077-remove-cyfs-legacy-tools-x509-test-identity
+stage: implementation
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/077-remove-cyfs-legacy-tools-x509-test-identity.paths
+baseline_manifest:
+
+changes:
+  - id: remove_cyfs_p2p_crate
+    target_module: cyfs-p2p
+    scope_paths: ["cyfs-p2p/**", "Cargo.toml", "Cargo.lock"]
+    changed_paths_file:
+  - id: remove_sn_miner_crate
+    target_module: sn-miner
+    scope_paths: ["sn-miner-rust/**", "Cargo.toml", "Cargo.lock"]
+    changed_paths_file:
+  - id: remove_desc_tool_crate
+    target_module: desc-tool
+    scope_paths: ["desc-tool/**", "Cargo.toml", "Cargo.lock"]
+    changed_paths_file:
+  - id: x509_identity_cyfs_p2p_test
+    target_module: cyfs-p2p-test
+    scope_paths: ["cyfs-p2p-test/**", "Cargo.toml", "Cargo.lock"]
+    changed_paths_file:
+  - id: sync_workspace_governance
+    target_module: workspace-harness
+    scope_paths: ["AGENTS.md", "Cargo.toml", "Cargo.lock", "harness/workspace-governance.yaml", "harness/scripts/verify-workspace-harness.py", "docs/architecture/principles.md", "docs/architecture/workspace-constraints.md", "docs/modules/cyfs-p2p.md", "docs/modules/cyfs-p2p-test.md", "docs/modules/sn-miner.md", "docs/modules/desc-tool.md", "harness/human-rules/module-tier-matrix.md"]
+    changed_paths_file:

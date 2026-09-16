@@ -55,18 +55,6 @@ modules:
       - contract-protocol
       - runtime-integration
       - security-identity
-  - name: cyfs-p2p
-    tier: 1
-    type: library
-    long_lived_doc: docs/modules/cyfs-p2p.md
-    packet_dir: docs/versions/v0.1/modules/cyfs-p2p
-    commands:
-      unit: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p", "unit"]
-      dv: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p", "dv"]
-      integration: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p", "integration"]
-    trigger_classes:
-      - contract-protocol
-      - runtime-integration
   - name: cyfs-p2p-test
     tier: 1
     type: binary
@@ -79,27 +67,3 @@ modules:
       integration: ["python3", "./harness/scripts/test-run.py", "cyfs-p2p-test", "integration"]
     trigger_classes:
       - runtime-integration
-  - name: sn-miner
-    tier: 1
-    type: binary
-    long_lived_doc: docs/modules/sn-miner.md
-    packet_dir: docs/versions/v0.1/modules/sn-miner
-    commands:
-      unit: ["python3", "./harness/scripts/test-run.py", "sn-miner", "unit"]
-      dv: ["python3", "./harness/scripts/test-run.py", "sn-miner", "dv"]
-      integration: ["python3", "./harness/scripts/test-run.py", "sn-miner", "integration"]
-    trigger_classes:
-      - runtime-integration
-      - durable-artifact
-  - name: desc-tool
-    tier: 2
-    type: binary
-    long_lived_doc: docs/modules/desc-tool.md
-    packet_dir: docs/versions/v0.1/modules/desc-tool
-    commands:
-      unit: ["python3", "./harness/scripts/test-run.py", "desc-tool", "unit"]
-      dv: ["python3", "./harness/scripts/test-run.py", "desc-tool", "dv"]
-      integration: ["python3", "./harness/scripts/test-run.py", "desc-tool", "integration"]
-    trigger_classes:
-      - durable-artifact
-      - security-identity

@@ -7,10 +7,7 @@ import sys
 
 MODULES = (
     "p2p-frame",
-    "cyfs-p2p",
     "cyfs-p2p-test",
-    "sn-miner",
-    "desc-tool",
 )
 
 REQUIRED_ROOT_FILES = (

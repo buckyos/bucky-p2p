@@ -38,12 +38,9 @@
 - Rust 异步/网络/密码学相关 crate
 - runtime feature flags
 - `sfo-reuseport` 的 `ServerRuntime`、`TcpServer`、`QuicServer` 和 listener socket 分发能力
-- 面向 CYFS 的适配层必须消费本 crate，而不是重新定义协议语义
 
 ## 下游依赖
-- `cyfs-p2p`
 - `cyfs-p2p-test`
-- `sn-miner-rust`
 
 ## 模块级别
 - Tier 0：耦合度最高、回归成本最高

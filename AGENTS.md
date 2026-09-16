@@ -87,6 +87,6 @@ Read the owning rule for details; this file remains a routing map.
 
 ## P2P Project Navigation
 - Project constraints: `docs/architecture/principles.md`, `docs/architecture/workspace-constraints.md`, and `docs/architecture/validation-model.md`.
-- Long-lived boundaries: `docs/modules/p2p-frame.md`, `docs/modules/cyfs-p2p.md`, `docs/modules/cyfs-p2p-test.md`, `docs/modules/sn-miner.md`, and `docs/modules/desc-tool.md`.
+- Long-lived boundaries: `docs/modules/p2p-frame.md` and `docs/modules/cyfs-p2p-test.md`.
 - Current version packets: `docs/versions/v0.1/modules/`; unfinished-task identity is managed only through `.harness/tasks/v0.1/tasks.json` via `harness/scripts/task-index.py`.
 - Task tests: `UV_CACHE_DIR=.harness/uv-cache uv run --active python ./harness/scripts/test-run.py <module>/<task-name> all`. Module or `all all` runs are explicit maintenance operations only.

@@ -1,0 +1,95 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: breaking
+  crate_root_export_change: true
+  build_surface_change: true
+  documentation_examples_affected: true
+evidence_inputs: ["Cargo.toml", "Cargo.lock", "cyfs-p2p-test/Cargo.toml", "cyfs-p2p-test/src/main.rs", "AGENTS.md", "harness/workspace-governance.yaml", "harness/scripts/verify-workspace-harness.py", "docs/architecture/principles.md", "docs/architecture/workspace-constraints.md", "docs/modules/cyfs-p2p-test.md", "docs/modules/p2p-frame.md", "docs/versions/v0.1/modules/globals/077-remove-cyfs-legacy-tools-x509-test-identity/proposal.md", "docs/versions/v0.1/modules/globals/077-remove-cyfs-legacy-tools-x509-test-identity/pipeline/plan.md"]
+contract_checks:
+  mode: disabled
+  reason: The task removes repository-wide crates and reconfigures cyfs-p2p-test identity; it changes no p2p-frame wire protocol or public runtime contract, so contract steps are disabled and build/static/x509 evidence covers the affected boundaries.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 900
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Assert the removal is complete in the manifest/lockfile/source, the x509 identity path compiles, and x509 identity round-trips stay green.
+    test_targets:
+      - Cargo.toml
+      - Cargo.lock
+      - cyfs-p2p-test/Cargo.toml
+      - cyfs-p2p-test/src/main.rs
+      - p2p-frame/src/x509.rs
+    preconditions:
+      tools: ["python3", "cargo"]
+      env: []
+      services: []
+      notes:
+        - Static assertions use only repository files; no cyfs-p2p-test process is executed.
+    steps:
+      - id: removed-crates-static-sweep
+        name: Verify removed directories, workspace members, lockfile packages, and legacy source imports are gone
+        change_ids: ["remove_cyfs_p2p_crate", "remove_sn_miner_crate", "remove_desc_tool_crate", "x509_identity_cyfs_p2p_test", "sync_workspace_governance"]
+        run: ["python3", "-c", "from pathlib import Path; assert not Path('cyfs-p2p').exists(); assert not Path('sn-miner-rust').exists(); assert not Path('desc-tool').exists(); members=Path('Cargo.toml').read_text(encoding='utf-8'); assert 'sn-miner-rust' not in members and 'desc-tool' not in members and '\"./cyfs-p2p\"' not in members; lock=Path('Cargo.lock').read_text(encoding='utf-8'); assert 'name = \"bucky-crypto\"' not in lock and 'name = \"ecies\"' not in lock; manifest=Path('cyfs-p2p-test/Cargo.toml').read_text(encoding='utf-8'); assert 'cyfs-p2p = {' not in manifest and all(token not in manifest for token in ['bucky-crypto','bucky-objects','bucky-raw-codec']); source=Path('cyfs-p2p-test/src/main.rs').read_text(encoding='utf-8'); assert 'use cyfs_p2p' not in source and 'use bucky_crypto' not in source and 'use bucky_objects' not in source; assert 'p2p_frame::x509' in source"]
+      - id: cyfs-p2p-test-build-surface
+        name: Compile cyfs-p2p-test all targets with p2p-frame x509 enabled
+        change_ids: ["x509_identity_cyfs_p2p_test", "remove_cyfs_p2p_crate", "remove_sn_miner_crate", "remove_desc_tool_crate", "sync_workspace_governance"]
+        run: ["cargo", "check", "-p", "cyfs-p2p-test", "--all-targets"]
+      - id: x509-identity-unit
+        name: Run p2p-frame x509 identity generation and round-trip unit tests
+        change_ids: ["x509_identity_cyfs_p2p_test"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "x509::tests"]
+  dv:
+    mode: enabled
+    summary: Compile the reduced workspace, prove live references are synchronized, and verify workspace harness structure.
+    test_targets:
+      - Cargo.toml
+      - Cargo.lock
+      - cyfs-p2p-test/src/main.rs
+      - AGENTS.md
+      - harness/workspace-governance.yaml
+      - harness/scripts/verify-workspace-harness.py
+      - docs/architecture/principles.md
+      - docs/architecture/workspace-constraints.md
+    preconditions:
+      tools: ["python3", "cargo"]
+      env: []
+      services: []
+      notes:
+        - The live reference sweep ignores historical docs/versions/ and test-results/ artifacts.
+    steps:
+      - id: reduced-workspace-cargo-check
+        name: Compile the two-member workspace
+        change_ids: ["remove_cyfs_p2p_crate", "remove_sn_miner_crate", "remove_desc_tool_crate", "x509_identity_cyfs_p2p_test", "sync_workspace_governance"]
+        run: ["cargo", "check", "--workspace"]
+      - id: live-reference-sweep
+        name: Assert live AGENTS/governance/architecture/module docs only reference remaining members
+        change_ids: ["sync_workspace_governance", "remove_cyfs_p2p_crate", "remove_sn_miner_crate", "remove_desc_tool_crate"]
+        run: ["python3", "-c", "from pathlib import Path; targets=[Path('AGENTS.md'),Path('harness/workspace-governance.yaml'),Path('harness/scripts/verify-workspace-harness.py'),Path('docs/architecture/principles.md'),Path('docs/architecture/workspace-constraints.md'),Path('docs/modules/cyfs-p2p-test.md'),Path('docs/modules/p2p-frame.md'),Path('harness/human-rules/module-tier-matrix.md')]; forbidden=['cyfs-p2p/','sn-miner-rust','desc-tool/','docs/modules/cyfs-p2p.md','docs/modules/sn-miner.md','docs/modules/desc-tool.md']; hits=[]; [(hits.append(f'{p}:{i+1}') if any(term in line for term in forbidden) else None) for p in targets for i,line in enumerate(p.read_text(encoding='utf-8').splitlines())]; assert not hits, hits"]
+      - id: workspace-harness-verification
+        name: Verify workspace harness structure for v0.1
+        change_ids: ["sync_workspace_governance"]
+        run: ["python3", "harness/scripts/verify-workspace-harness.py", "v0.1"]
+  integration:
+    mode: enabled
+    summary: Re-run the full p2p-frame x509 library suite as the identity/runtime integration evidence for the reduced workspace.
+    test_targets:
+      - p2p-frame/src/x509.rs
+      - p2p-frame/src/stack.rs
+      - cyfs-p2p-test/src/main.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - This is p2p-frame's own formal test surface; cyfs-p2p-test is never executed or registered as formal evidence.
+    steps:
+      - id: x509-lib-suite
+        name: Run p2p-frame x509 library suite
+        change_ids: ["x509_identity_cyfs_p2p_test", "remove_cyfs_p2p_crate", "remove_sn_miner_crate", "remove_desc_tool_crate", "sync_workspace_governance"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib"]

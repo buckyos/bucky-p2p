@@ -1,26 +1,19 @@
 extern crate core;
 
-use bucky_crypto::PrivateKey;
-use bucky_objects::{
-    sign_and_push_named_object, Area, Device, DeviceCategory, DeviceId, RsaCPUObjectSigner,
-    SignatureSource, UniqueId, SIGNATURE_SOURCE_REFINDEX_SELF,
-};
-use bucky_objects::{Endpoint, EndpointArea, Protocol};
-use bucky_raw_codec::FileDecoder;
-use cyfs_p2p::error::{P2pError, P2pErrorCode, P2pResult};
-use cyfs_p2p::p2p_identity::P2pId;
-use cyfs_p2p::pn::PnServer;
-use cyfs_p2p::sn::service::{create_sn_service, SnServiceConfig};
-use cyfs_p2p::stack::{create_p2p_env, create_p2p_stack, P2pStackRef};
-use cyfs_p2p::{
-    create_cyfs_p2p_config, create_cyfs_p2p_stack_config, cyfs_to_p2p_endpoint, CyfsIdentity,
-    CyfsIdentityCertFactory, CyfsIdentityFactory,
-};
-use p2p_frame::endpoint::Endpoint as P2pEndpoint;
+use p2p_frame::endpoint::{Endpoint, EndpointArea, Protocol};
+use p2p_frame::error::{P2pError, P2pErrorCode, P2pResult};
 use p2p_frame::networks::TunnelPurpose;
-use p2p_frame::p2p_identity::{P2pIdentityCertFactory, P2pIdentityCertRef};
+use p2p_frame::p2p_identity::{
+    P2pId, P2pIdentityCertFactory, P2pIdentityCertRef, P2pIdentityRef, P2pSn,
+};
+use p2p_frame::pn::PnServer;
 use p2p_frame::sn::client::{SNClientServiceRef, SnLocalIpProvider, SnLocalIpProviderRef};
-use p2p_frame::stack::{DeviceFinder, DeviceFinderRef, P2pEnvRef, PnServerAddress};
+use p2p_frame::sn::service::{create_sn_service, SnServiceConfig};
+use p2p_frame::stack::{
+    create_p2p_env, create_p2p_stack, DeviceFinder, DeviceFinderRef, P2pConfig as P2pFrameConfig,
+    P2pEnvRef, P2pStackConfig, P2pStackRef, PnServerAddress,
+};
+use p2p_frame::x509::{X509IdentityCertFactory, X509IdentityFactory, generate_rsa_x509_identity};
 use serde::{Deserialize, Serialize};
 use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig};
 use std::collections::{HashMap, HashSet};
@@ -33,9 +26,22 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const APP_NAME: &str = "cyfs-p2p-test";
-
 fn tunnel_purpose(value: u16) -> TunnelPurpose {
     TunnelPurpose::from_value(&value).unwrap()
+}
+
+fn build_identity(name: &str, endpoints: Vec<Endpoint>) -> P2pIdentityRef {
+    let identity = generate_rsa_x509_identity(Some(name.to_owned()))
+        .unwrap_or_else(|e| panic!("generate x509 identity {name} failed: {e:?}"));
+    let identity: P2pIdentityRef = Arc::new(identity);
+    identity.update_endpoints(endpoints)
+}
+
+fn build_sn_entry(identity: &P2pIdentityRef) -> P2pSn {
+    let cert = identity
+        .get_identity_cert()
+        .expect("x509 identity cert must be available");
+    P2pSn::new(cert.get_id(), cert.get_name(), cert.endpoints())
 }
 
 #[derive(Deserialize)]
@@ -51,19 +57,19 @@ pub struct UdpConfig {
 }
 
 #[derive(Deserialize)]
-pub struct P2pConfig {
+pub struct TestP2pConfig {
     ep_list: Vec<EP>,
     port_map: Option<u16>,
     tcp: Option<TcpConfig>,
     udp: Option<UdpConfig>,
 }
 
-impl P2pConfig {
+impl TestP2pConfig {
     pub fn get_ep_list(&self) -> Vec<Endpoint> {
         let mut eps = Vec::new();
         for ep in self.ep_list.iter() {
             eps.push(Endpoint::from((
-                Protocol::Udp,
+                Protocol::Quic,
                 SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)),
             )));
             eps.push(Endpoint::from((
@@ -82,7 +88,7 @@ impl P2pConfig {
         if let Some(udp) = self.udp.as_ref() {
             for ep in udp.ep_list.iter() {
                 eps.push(Endpoint::from((
-                    Protocol::Udp,
+                    Protocol::Quic,
                     SocketAddr::V4(SocketAddrV4::new(ep.ip.parse().unwrap(), ep.port)),
                 )));
             }
@@ -182,8 +188,8 @@ async fn main() {
         ("client", Some(matches)) => {
             let data_folder = matches.value_of("config").unwrap();
             let target = matches.value_of("target").map_or(None, |v| {
-                if let Ok(device_id) = DeviceId::from_str(v) {
-                    Some(device_id)
+                if let Ok(p2p_id) = P2pId::from_str(v) {
+                    Some(p2p_id)
                 } else {
                     None
                 }
@@ -212,22 +218,29 @@ async fn main() {
     std::future::pending::<u8>().await;
 }
 
-async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
-    let sn_desc_path = data_folder.join("sn.desc");
-    let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new())
-        .unwrap()
-        .0;
+async fn client_instance(data_folder: &Path, target: Option<P2pId>) {
+    let sn_identity = build_identity(
+        "sn",
+        vec![Endpoint::from((
+            Protocol::Quic,
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from_str("127.0.0.1").unwrap(),
+                3456,
+            )),
+        ))],
+    );
+    let sn_list = vec![build_sn_entry(&sn_identity)];
     let config_path = data_folder.join("config.toml");
     let (local_eps, map_port_list) = if config_path.exists() {
         let config = std::fs::read_to_string(config_path.as_path()).unwrap();
-        let config: P2pConfig = toml::from_str(config.as_str()).unwrap();
+        let config: TestP2pConfig = toml::from_str(config.as_str()).unwrap();
         let local_eps = config.get_ep_list();
         let map_port_list = config.get_port_mapping();
         (local_eps, Some(map_port_list))
     } else {
         let mut local_eps = Vec::new();
         let mut ep = Endpoint::from((
-            Protocol::Udp,
+            Protocol::Quic,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
         ));
         ep.set_area(EndpointArea::Lan);
@@ -235,37 +248,29 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
         (local_eps, None)
     };
     let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
-    let mut p2p_config = create_cyfs_p2p_config(
-        local_eps
-            .iter()
-            .map(|v| cyfs_to_p2p_endpoint(v))
-            .collect::<Vec<_>>(),
+    let mut p2p_config = P2pFrameConfig::new(
+        Arc::new(X509IdentityFactory),
+        Arc::new(X509IdentityCertFactory),
+        local_eps.clone(),
         server_runtime,
     );
     if let Some(map_port_list) = map_port_list {
         for (ep, port) in map_port_list.iter() {
-            p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
+            p2p_config = p2p_config.add_port_mapping((ep.clone(), *port));
         }
     }
 
     let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()])
+    let stack = create_stack(env, "client", local_eps.clone(), sn_list.clone())
         .await
         .unwrap();
     stack.wait_online(None).await.unwrap();
 
-    // let resp = stack.sn_client().query(&DeviceId::from_str("5aSixgM5JhQHzm2DDaWRsAS24QdR3DhvDr2ZDn5aJj6w").unwrap()).await.unwrap();
-    let remote_id = if target.is_some() {
-        P2pId::from(target.unwrap().object_id().as_slice())
-    } else {
-        P2pId::from(
-            DeviceId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP")
-                .unwrap()
-                .object_id()
-                .as_slice(),
-        )
-    };
+    let remote_id = target.unwrap_or_else(|| {
+        P2pId::from_str("5aSixgLnAyXzWaqpyKTz7hFkvzXMzJgGnxnuCg67JYJP")
+            .expect("default p2p id must parse")
+    });
 
     loop {
         {
@@ -295,45 +300,51 @@ async fn client_instance(data_folder: &Path, target: Option<DeviceId>) {
 }
 
 async fn server_instance(data_folder: &Path) {
-    let sn_desc_path = data_folder.join("sn.desc");
-    let sn_desc = Device::decode_from_file(sn_desc_path.as_path(), &mut Vec::new())
-        .unwrap()
-        .0;
+    let sn_identity = build_identity(
+        "sn",
+        vec![Endpoint::from((
+            Protocol::Quic,
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from_str("127.0.0.1").unwrap(),
+                3456,
+            )),
+        ))],
+    );
+    let sn_list = vec![build_sn_entry(&sn_identity)];
 
     let config_path = data_folder.join("config.toml");
     let (local_eps, map_port_lsit) = if config_path.exists() {
         let config = std::fs::read_to_string(config_path.as_path()).unwrap();
-        let config: P2pConfig = toml::from_str(config.as_str()).unwrap();
+        let config: TestP2pConfig = toml::from_str(config.as_str()).unwrap();
         let local_eps = config.get_ep_list();
         let map_port_list = config.get_port_mapping();
         (local_eps, Some(map_port_list))
     } else {
         let mut local_eps = Vec::new();
-        let mut ep = bucky_objects::Endpoint::from((
-            bucky_objects::Protocol::Udp,
+        let mut ep = Endpoint::from((
+            Protocol::Quic,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
         ));
-        ep.set_area(bucky_objects::EndpointArea::Lan);
+        ep.set_area(EndpointArea::Lan);
         local_eps.push(ep);
         (local_eps, None)
     };
     let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
-    let mut p2p_config = create_cyfs_p2p_config(
-        local_eps
-            .iter()
-            .map(|v| cyfs_to_p2p_endpoint(v))
-            .collect::<Vec<_>>(),
+    let mut p2p_config = P2pFrameConfig::new(
+        Arc::new(X509IdentityFactory),
+        Arc::new(X509IdentityCertFactory),
+        local_eps.clone(),
         server_runtime,
     );
     if let Some(map_port_list) = map_port_lsit {
         for (ep, port) in map_port_list.iter() {
-            p2p_config = p2p_config.add_port_mapping((cyfs_to_p2p_endpoint(ep), *port));
+            p2p_config = p2p_config.add_port_mapping((ep.clone(), *port));
         }
     }
 
     let env = create_p2p_env(p2p_config).await.unwrap();
 
-    let stack = create_stack(env, data_folder, local_eps.clone(), vec![sn_desc.clone()])
+    let stack = create_stack(env, "server", local_eps.clone(), sn_list.clone())
         .await
         .unwrap();
     stack.wait_online(None).await.unwrap();
@@ -370,8 +381,8 @@ struct CaseMetric {
 
 struct OverrideDeviceFinder {
     sn_client: SNClientServiceRef,
-    cert_factory: Arc<CyfsIdentityCertFactory>,
-    override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+    cert_factory: Arc<X509IdentityCertFactory>,
+    override_eps: HashMap<P2pId, Vec<Endpoint>>,
     blocked_ids: HashSet<P2pId>,
     blocked_all: bool,
 }
@@ -387,16 +398,16 @@ impl SnLocalIpProvider for EmptySnLocalIpProvider {
 impl OverrideDeviceFinder {
     fn new(
         sn_client: SNClientServiceRef,
-        cert_factory: Arc<CyfsIdentityCertFactory>,
-        override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+        cert_factory: Arc<X509IdentityCertFactory>,
+        override_eps: HashMap<P2pId, Vec<Endpoint>>,
     ) -> DeviceFinderRef {
         Self::new_with_block(sn_client, cert_factory, override_eps, HashSet::new(), false)
     }
 
     fn new_with_block(
         sn_client: SNClientServiceRef,
-        cert_factory: Arc<CyfsIdentityCertFactory>,
-        override_eps: HashMap<P2pId, Vec<P2pEndpoint>>,
+        cert_factory: Arc<X509IdentityCertFactory>,
+        override_eps: HashMap<P2pId, Vec<Endpoint>>,
         blocked_ids: HashSet<P2pId>,
         blocked_all: bool,
     ) -> DeviceFinderRef {
@@ -617,49 +628,25 @@ async fn start_datagram_listener(stack: P2pStackRef, port: u16, label: &'static 
 }
 
 async fn all_in_one() {
-    let sn_key = PrivateKey::generate_rsa(1024)
-        .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))
-        .unwrap();
-    let sn_public_key = sn_key.public();
-    let mut sn_desc = Device::new(
-        None,
-        UniqueId::default(),
-        vec![],
-        vec![],
-        vec![],
-        sn_public_key.clone(),
-        Area::default(),
-        DeviceCategory::OOD,
-    )
-    .build();
-
-    let eps = sn_desc.mut_connect_info().mut_endpoints();
-    if eps.len() == 0 {
-        // eps.push(Endpoint::from((Protocol::Udp, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0,1), 3456)))));
-        eps.push(Endpoint::from((
-            Protocol::Udp,
+    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
+    let identity_factory = Arc::new(X509IdentityFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
+    let sn_identity = build_identity(
+        "sn",
+        vec![Endpoint::from((
+            Protocol::Quic,
             SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from_str("127.0.0.1").unwrap(),
                 3456,
             )),
-        )));
-    }
+        ))],
+    );
+    let sn_list = vec![build_sn_entry(&sn_identity)];
 
-    let signer = RsaCPUObjectSigner::new(sn_public_key, sn_key.clone());
-    sign_and_push_named_object(
-        &signer,
-        &mut sn_desc,
-        &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF),
-    )
-    .await
-    .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))
-    .unwrap();
-
-    let server_runtime = ServerRuntime::start(ServerRuntimeConfig::default()).unwrap();
     let sn_service = SnServiceConfig::new(
-        Arc::new(CyfsIdentity::new(sn_desc.clone(), sn_key)),
-        Arc::new(CyfsIdentityFactory),
-        Arc::new(CyfsIdentityCertFactory),
+        sn_identity,
+        identity_factory.clone(),
+        cert_factory.clone(),
         server_runtime.clone(),
     );
     let sn_service = create_sn_service(sn_service).await.unwrap();
@@ -667,36 +654,18 @@ async fn all_in_one() {
     _pn_server.start().await.unwrap();
     sn_service.start().await.unwrap();
 
-    //
-    // let (device_desc, _) = Device::decode_from_file(device_desc_path.as_path(), &mut Vec::new()).unwrap();
-    // let (device_key, _) = PrivateKey::decode_from_file(device_key_path.as_path(), &mut Vec::new()).unwrap();
-
-    // let unique_id = String::from_utf8_lossy(device_desc.desc().unique_id().as_slice());
-    // cyfs_debug::CyfsLoggerBuilder::new_app(APP_NAME)
-    //     .level("debug")
-    //     .console("debug")
-    //     .build()
-    //     .unwrap()
-    //     .start();
-
-    // cyfs_debug::PanicBuilder::new(APP_NAME, "test")
-    //     .exit_on_panic(true)
-    //     .build()
-    //     .start();
-
     let mut env_eps = Vec::new();
-    let mut env_ep = bucky_objects::Endpoint::from((
-        Protocol::Udp,
+    let mut env_ep = Endpoint::from((
+        Protocol::Quic,
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
     ));
-    env_ep.set_area(bucky_objects::EndpointArea::Lan);
+    env_ep.set_area(EndpointArea::Lan);
     env_eps.push(env_ep);
 
-    let mut p2p_config = create_cyfs_p2p_config(
-        env_eps
-            .iter()
-            .map(|v| cyfs_to_p2p_endpoint(v))
-            .collect::<Vec<_>>(),
+    let mut p2p_config = P2pFrameConfig::new(
+        identity_factory,
+        cert_factory.clone(),
+        env_eps.clone(),
         server_runtime,
     );
     p2p_config = p2p_config
@@ -706,29 +675,29 @@ async fn all_in_one() {
     let env = create_p2p_env(p2p_config).await.unwrap();
 
     let mut direct_eps = Vec::new();
-    let mut direct_ep = bucky_objects::Endpoint::from((
-        Protocol::Udp,
+    let mut direct_ep = Endpoint::from((
+        Protocol::Quic,
         SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::from_str("127.0.0.1").unwrap(),
             4433,
         )),
     ));
-    direct_ep.set_area(bucky_objects::EndpointArea::Lan);
+    direct_ep.set_area(EndpointArea::Lan);
     direct_eps.push(direct_ep);
 
     let mut reverse_eps = Vec::new();
-    let mut reverse_ep = bucky_objects::Endpoint::from((
-        Protocol::Udp,
+    let mut reverse_ep = Endpoint::from((
+        Protocol::Quic,
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4433)),
     ));
-    reverse_ep.set_area(bucky_objects::EndpointArea::Lan);
+    reverse_ep.set_area(EndpointArea::Lan);
     reverse_eps.push(reverse_ep);
 
     let stack_direct_target = create_stack(
         env.clone(),
-        Path::new("./"),
+        "direct-target",
         direct_eps.clone(),
-        vec![sn_desc.clone()],
+        sn_list.clone(),
     )
     .await
     .unwrap();
@@ -736,9 +705,9 @@ async fn all_in_one() {
 
     let stack_reverse_target = create_stack(
         env.clone(),
-        Path::new("./"),
+        "reverse-target",
         reverse_eps.clone(),
-        vec![sn_desc.clone()],
+        sn_list.clone(),
     )
     .await
     .unwrap();
@@ -746,15 +715,15 @@ async fn all_in_one() {
 
     let stack_client = create_stack(
         env.clone(),
-        Path::new("./"),
+        "client",
         direct_eps.clone(),
-        vec![sn_desc.clone()],
+        sn_list.clone(),
     )
     .await
     .unwrap();
     stack_client.wait_online(None).await.unwrap();
 
-    let cert_factory = Arc::new(CyfsIdentityCertFactory);
+    let cert_factory = Arc::new(X509IdentityCertFactory);
     let proxy_target_finder = OverrideDeviceFinder::new_with_block(
         stack_client.sn_client().clone(),
         cert_factory.clone(),
@@ -765,9 +734,9 @@ async fn all_in_one() {
 
     let stack_proxy_target = create_stack_with_device_finder(
         env.clone(),
-        Path::new("./"),
+        "proxy-target",
         reverse_eps.clone(),
-        vec![sn_desc.clone()],
+        sn_list.clone(),
         Some(proxy_target_finder),
         None,
     )
@@ -824,9 +793,9 @@ async fn all_in_one() {
 
     let stack_reverse_caller = create_stack_with_device_finder(
         env.clone(),
-        Path::new("./"),
+        "reverse-caller",
         direct_eps.clone(),
-        vec![sn_desc.clone()],
+        sn_list.clone(),
         Some(reverse_finder),
         None,
     )
@@ -836,9 +805,9 @@ async fn all_in_one() {
 
     let stack_proxy_caller = create_stack_with_device_finder(
         env.clone(),
-        Path::new("./"),
+        "proxy-caller",
         reverse_eps.clone(),
-        vec![sn_desc.clone()],
+        sn_list.clone(),
         Some(proxy_finder),
         Some(Arc::new(EmptySnLocalIpProvider)),
     )
@@ -1249,61 +1218,17 @@ async fn all_in_one() {
         }
     }
 }
-async fn create_stack(
-    env: P2pEnvRef,
-    config_path: &Path,
-    eps: Vec<bucky_objects::Endpoint>,
-    sn_list: Vec<Device>,
-) -> P2pResult<P2pStackRef> {
-    create_stack_with_device_finder(env, config_path, eps, sn_list, None, None).await
-}
-
 async fn create_stack_with_device_finder(
     env: P2pEnvRef,
-    config_path: &Path,
-    eps: Vec<bucky_objects::Endpoint>,
-    sn_list: Vec<Device>,
+    identity_name: &str,
+    eps: Vec<Endpoint>,
+    sn_list: Vec<P2pSn>,
     device_finder: Option<DeviceFinderRef>,
     local_ip_provider: Option<SnLocalIpProviderRef>,
 ) -> P2pResult<P2pStackRef> {
-    let (private_key, device) = if config_path.join("device.desc").exists()
-        && config_path.join("device.sec").exists()
-    {
-        let (device_desc, _) =
-            Device::decode_from_file(config_path.join("device.desc").as_path(), &mut Vec::new())
-                .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
-        let (private_key, _) =
-            PrivateKey::decode_from_file(config_path.join("device.sec").as_path(), &mut Vec::new())
-                .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
-        (private_key, device_desc)
-    } else {
-        let private_key = PrivateKey::generate_rsa(1024)
-            .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
-        let public_key = private_key.public();
-        let mut device = Device::new(
-            None,
-            UniqueId::default(),
-            eps,
-            vec![],
-            vec![],
-            public_key.clone(),
-            Area::default(),
-            DeviceCategory::OOD,
-        )
-        .build();
-
-        let signer = RsaCPUObjectSigner::new(public_key, private_key.clone());
-        sign_and_push_named_object(
-            &signer,
-            &mut device,
-            &SignatureSource::RefIndex(SIGNATURE_SOURCE_REFINDEX_SELF),
-        )
-        .await
-        .map_err(|e| P2pError::from((P2pErrorCode::Failed, "".to_string(), e)))?;
-        (private_key, device)
-    };
-
-    let mut config = create_cyfs_p2p_stack_config(env.clone(), device, private_key, sn_list)
+    let local_identity = build_identity(identity_name, eps);
+    let mut config = P2pStackConfig::new(env, local_identity)
+        .add_sn_list(sn_list)
         .set_support_proxy(true)
         .set_proxy_server(PnServerAddress::Sn)
         .set_proxy_stream_encrypted(true);
@@ -1315,4 +1240,13 @@ async fn create_stack_with_device_finder(
     }
 
     create_p2p_stack(config).await
+}
+
+async fn create_stack(
+    env: P2pEnvRef,
+    identity_name: &str,
+    eps: Vec<Endpoint>,
+    sn_list: Vec<P2pSn>,
+) -> P2pResult<P2pStackRef> {
+    create_stack_with_device_finder(env, identity_name, eps, sn_list, None, None).await
 }
