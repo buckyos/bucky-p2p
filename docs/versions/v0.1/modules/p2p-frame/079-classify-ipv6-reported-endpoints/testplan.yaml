@@ -1,0 +1,74 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: false
+  documentation_examples_affected: false
+evidence_inputs:
+  - p2p-frame/src/endpoint.rs
+  - p2p-frame/src/sn/service/service.rs
+  - p2p-frame/src/sn/client/sn_service.rs
+  - p2p-frame/tests/unit/sn_tests/service/distributed_nat_profile_tests.rs
+  - docs/versions/v0.1/modules/p2p-frame/079-classify-ipv6-reported-endpoints/proposal.md
+  - docs/versions/v0.1/modules/p2p-frame/079-classify-ipv6-reported-endpoints/pipeline/plan.md
+contract_checks:
+  mode: disabled
+  reason: The change affects only private SN/client helpers and sanitizer classification; no public API, wire format, crate-root export, build surface, or documentation example changes.
+  steps: []
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify IPv6 reported-endpoint area classification and DefaultSnLocalIpProvider address filtering.
+    test_targets:
+      - p2p-frame/src/endpoint.rs
+      - p2p-frame/src/sn/service/service.rs
+      - p2p-frame/src/sn/client/sn_service.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - F-078-1 pre-existing tunnel_manager include-base issue is worked around by an empty temporary src/tunnel/tunnel_manager/tests directory; production worktree is otherwise unchanged.
+    steps:
+      - id: ipv6-endpoint-area-classification
+        name: IPv6 reported endpoint area classification
+        change_ids: ["CHG-ipv6-sanitizer-area"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "reported_ipv6", "--", "--test-threads=1"]
+      - id: sn-ipv6-sanitizer
+        name: SN sanitizer IPv6 retention and omission
+        change_ids: ["CHG-ipv6-sanitizer-area"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sanitizer", "--", "--test-threads=1"]
+      - id: provider-filter-ipv6
+        name: DefaultSnLocalIpProvider loopback unspecified multicast filter
+        change_ids: ["CHG-client-ip-report-filter"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "filter_local_ips", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Regression closure over the full p2p-frame lib suite and workspace build.
+    test_targets:
+      - p2p-frame
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - Full lib suite runs 533 tests under the F-078-1 workaround; cargo check --workspace passes.
+    steps:
+      - id: full-lib-suite
+        name: Full p2p-frame x509 lib suite
+        change_ids: ["CHG-ipv6-sanitizer-area", "CHG-client-ip-report-filter"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib"]
+      - id: workspace-check
+        name: Workspace compile closure
+        change_ids: ["CHG-ipv6-sanitizer-area", "CHG-client-ip-report-filter"]
+        run: ["cargo", "check", "--workspace"]
+  integration:
+    mode: disabled
+    reason: No cross-process, real-socket, or deployment integration surface changed; classification and provider filter behavior is fully covered at unit/DV level.
+    steps: []

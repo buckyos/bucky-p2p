@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/079-classify-ipv6-reported-endpoints/proposal.md": "a3c8ea64419e42d399255dccc422e372329747ef758d50bb99360d75087912fc"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "cee8ab000519466786fadea954946d73f1bca489d86948e7403f5b449ce078f1"
+    }
+  },
+  "task_manifest": "task.yaml"
+}

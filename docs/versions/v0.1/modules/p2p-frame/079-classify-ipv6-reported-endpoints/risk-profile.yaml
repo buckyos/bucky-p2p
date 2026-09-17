@@ -1,0 +1,61 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-ipv6-sanitizer-area", "CHG-client-ip-report-filter"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence:
+      - pipeline/plan.md#exported-interfaces
+      - pipeline/plan.md#failure-flows
+      - pipeline/plan.md#implementation-scope-bindings
+      - p2p-frame/src/endpoint.rs EndpointArea classification helper
+      - p2p-frame/src/sn/service/service.rs sanitize_reported_endpoints IPv6 branch
+    required_checks:
+      - IPv6 global unicast stays Wan without observed-IP condition while IPv4 exact-observed rule is unchanged
+      - Loopback, unspecified, multicast omitted for IPv6 in server sanitizer and DefaultSnLocalIpProvider
+      - ULA, link-local, IPv4-mapped, doc, benchmark ranges remain Lan
+      - Rendezvous/punch IPv4-only eligibility and 053 authorization boundaries unchanged
+  data:
+    applies: false
+    evidence: The task changes no persistence, schema, migration, serialization layout, cache key, or durable state.
+    required_checks: []
+  security:
+    applies: true
+    evidence:
+      - pipeline/plan.md#state-ownership
+      - pipeline/plan.md#failure-flows
+      - pipeline/plan.md#rejected-alternatives
+      - User confirmed IPv6 Wan remains in legacy SnCall reverse arrays without exclusion
+    required_checks:
+      - IPv4 public-endpoint trust boundary (exact-observed) is not weakened
+      - IPv6 Wan is client self-asserted; recorded as known compromise and does not gain rendezvous authorization by itself
+      - Client loopback/unspecified/multicast omission covers both address families
+      - Existing 053 exact-tunnel authorization tests remain green
+  runtime:
+    applies: true
+    evidence:
+      - pipeline/plan.md#dependency-graphs
+      - pipeline/plan.md#state-ownership
+      - p2p-frame/src/sn/service/service.rs report sanitize call chain
+      - p2p-frame/src/sn/client/sn_service.rs DefaultSnLocalIpProvider
+    required_checks:
+      - sanitize_reported_endpoints unit coverage for every IPv6 area class
+      - DefaultSnLocalIpProvider unit coverage for loopback/unspecified/multicast omission
+      - full p2p-frame lib suite and workspace check pass
+  build:
+    applies: false
+    evidence: No dependency, feature definition, build graph, produced artifact, deployment, release, or exported API change is planned.
+    required_checks: []
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow surface is affected.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing pipeline, test runner, and checkers without changing repository Harness policy or tooling.
+    required_checks: []

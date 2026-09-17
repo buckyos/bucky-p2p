@@ -150,6 +150,51 @@ pub(crate) fn is_non_lan_ipv4_addr(addr: &SocketAddr) -> bool {
         && !ip.is_multicast()
 }
 
+fn is_ipv4_mapped_prefix(ip: &Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    segments[..5].iter().all(|&s| s == 0) && segments[5] == 0xffff
+}
+
+fn is_documentation_range(ip: &Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    // 2001:db8::/32 per RFC 3849; 3fff::/20 per RFC 9637.
+    segments[0] == 0x2001 && segments[1] == 0x0db8
+        || segments[0] & 0xfff0 == 0x3ff0
+}
+
+fn is_benchmarking_range(ip: &Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    // 2001:2::/48 per RFC 5180 (errata 1752).
+    segments[0] == 0x2001 && segments[1] == 0x0002
+}
+
+/// Classify a reported IPv6 socket address into a server-normalized area.
+///
+/// Loopback, unspecified, and multicast addresses are omitted. The following
+/// are retained as `Lan`: unique-local, unicast link-local, IPv4-mapped,
+/// documentation, and benchmarking ranges. Every other non-special address
+/// (primarily global unicast) is classified as `Wan`. Unlike the IPv4 Wan
+/// branch, no observed-IP cross-check is required: SN reports arrive over
+/// IPv4 tunnels, so the SN cannot observe an IPv6 source address.
+pub(crate) fn classify_reported_ipv6_area(addr: &SocketAddr) -> Option<EndpointArea> {
+    let SocketAddr::V6(addr) = addr else {
+        return None;
+    };
+    let ip = addr.ip();
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return None;
+    }
+    if ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || is_ipv4_mapped_prefix(ip)
+        || is_documentation_range(ip)
+        || is_benchmarking_range(ip)
+    {
+        return Some(EndpointArea::Lan);
+    }
+    Some(EndpointArea::Wan)
+}
+
 /// Address eligibility for rendezvous endpoints, predictions, and UDP punch.
 ///
 /// Non-test builds keep the strict non-LAN rule. The `test-real-socket-matrix`
@@ -643,6 +688,52 @@ mod tests {
         assert!(remain.is_empty());
         assert_eq!(decoded.get_area(), EndpointArea::ServerReflexive);
         assert_eq!(decoded, endpoint);
+    }
+
+    fn v6(addr: &str) -> SocketAddr {
+        addr.parse().unwrap()
+    }
+
+    #[test]
+    fn reported_ipv6_global_unicast_classified_wan() {
+        assert_eq!(
+            classify_reported_ipv6_area(&v6("[240e:3b1:d003:70a0::1]:3622")),
+            Some(EndpointArea::Wan)
+        );
+    }
+
+    #[test]
+    fn reported_ipv6_lan_classes_are_retained() {
+        for addr in [
+            "[fc00::1]:3622",
+            "[fd12:3456:789a::1]:3622",
+            "[fe80::1]:3622",
+            "[::ffff:192.168.1.10]:3622",
+            "[2001:db8::1]:3622",
+            "[2001:2::1]:3622",
+        ] {
+            assert_eq!(
+                classify_reported_ipv6_area(&v6(addr)),
+                Some(EndpointArea::Lan),
+                "expected Lan for {addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_ipv6_non_routable_classes_are_omitted() {
+        for addr in [
+            "[::1]:3622",
+            "[::]:3622",
+            "[ff02::1]:3622",
+            "[ff00::]:3622",
+        ] {
+            assert_eq!(
+                classify_reported_ipv6_area(&v6(addr)),
+                None,
+                "expected omission for {addr}"
+            );
+        }
     }
 
 }

@@ -65,18 +65,27 @@ fn reported_endpoint_sanitizer_retains_only_lan_and_observed_public_addresses() 
 
     let sanitized = SnService::sanitize_reported_endpoints(&inputs, Some(&observed)).unwrap();
 
-    assert_eq!(sanitized.len(), 5);
+    assert_eq!(sanitized.len(), 6);
     assert_eq!(sanitized[0], reported_endpoint(Protocol::Tcp, "10.1.2.3:1001", EndpointArea::Lan));
     assert_eq!(sanitized[1], reported_endpoint(Protocol::Quic, "169.254.10.20:1002", EndpointArea::Lan));
     assert_eq!(sanitized[2], reported_endpoint(Protocol::Tcp, "[fd00::1]:1003", EndpointArea::Lan));
     assert_eq!(sanitized[3], reported_endpoint(Protocol::Quic, "[fe80::1234]:1004", EndpointArea::Lan));
     assert_eq!(sanitized[4], reported_endpoint(Protocol::Quic, "198.51.100.7:1005", EndpointArea::Wan));
+    assert_eq!(
+        sanitized[5],
+        reported_endpoint(
+            Protocol::Quic,
+            "[2001:4860:4860::8888]:1015",
+            EndpointArea::Wan
+        )
+    );
     assert!(
         sanitized[..4]
             .iter()
             .all(|endpoint| endpoint.get_area() == EndpointArea::Lan)
     );
     assert_eq!(sanitized[4].get_area(), EndpointArea::Wan);
+    assert_eq!(sanitized[5].get_area(), EndpointArea::Wan);
 }
 
 #[test]

@@ -507,7 +507,10 @@ impl DefaultSnLocalIpProvider {
         addrs
             .iter()
             .filter(|addr| {
-                !Self::should_ignore_interface(&addr.name) && !addr.ip().is_loopback()
+                !Self::should_ignore_interface(&addr.name)
+                    && !addr.ip().is_loopback()
+                    && !addr.ip().is_unspecified()
+                    && !addr.ip().is_multicast()
             })
             .map(|addr| addr.addr.ip())
             .take(MAX_LOCAL_IP_COUNT)
@@ -2489,6 +2492,28 @@ mod tests {
         }
     }
 
+    fn test_interface_any(name: &str, addr: IpAddr) -> if_addrs::Interface {
+        let if_addr = match addr {
+            IpAddr::V4(ip) => if_addrs::IfAddr::V4(if_addrs::Ifv4Addr {
+                ip,
+                netmask: "255.255.255.0".parse().unwrap(),
+                prefixlen: 24,
+                broadcast: None,
+            }),
+            IpAddr::V6(ip) => if_addrs::IfAddr::V6(if_addrs::Ifv6Addr {
+                ip,
+                prefixlen: 64,
+                netmask: ip,
+                broadcast: None,
+            }),
+        };
+        if_addrs::Interface {
+            name: name.to_string(),
+            addr: if_addr,
+            index: None,
+        }
+    }
+
     #[test]
     fn filter_local_ips_drops_virtual_tunnel_and_loopback() {
         let addrs = vec![
@@ -2570,6 +2595,28 @@ mod tests {
             local_ips[MAX_LOCAL_IP_COUNT - 1],
             IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, MAX_LOCAL_IP_COUNT as u8 - 1))
         );
+    }
+
+    #[test]
+    fn filter_local_ips_omits_loopback_unspecified_and_multicast() {
+        let addrs = vec![
+            test_interface_any("eth0", "192.168.1.10".parse().unwrap()),
+            test_interface_any("unused0", "127.0.0.1".parse().unwrap()),
+            test_interface_any("unused1", "0.0.0.0".parse().unwrap()),
+            test_interface_any("unused2", "224.0.0.1".parse().unwrap()),
+            test_interface_any("eth1", "240e:9500:3002:91b1::1".parse().unwrap()),
+            test_interface_any("unused3", "::1".parse().unwrap()),
+            test_interface_any("unused4", "::".parse().unwrap()),
+            test_interface_any("unused5", "ff02::1".parse().unwrap()),
+            test_interface_any("unused6", "fe80::1".parse().unwrap()),
+        ];
+
+        let local_ips = DefaultSnLocalIpProvider::filter_local_ips(&addrs);
+
+        assert_eq!(local_ips.len(), 3);
+        assert!(local_ips.contains(&"192.168.1.10".parse::<IpAddr>().unwrap()));
+        assert!(local_ips.contains(&"240e:9500:3002:91b1::1".parse::<IpAddr>().unwrap()));
+        assert!(local_ips.contains(&"fe80::1".parse::<IpAddr>().unwrap()));
     }
 
     include!(concat!(

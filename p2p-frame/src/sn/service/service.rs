@@ -5,7 +5,8 @@ use super::{
     rendezvous_state::{RendezvousBegin, RendezvousState},
 };
 use crate::endpoint::{
-    Endpoint, EndpointArea, Protocol, endpoints_to_string, is_non_lan_ipv4_addr,
+    Endpoint, EndpointArea, Protocol, classify_reported_ipv6_area, endpoints_to_string,
+    is_non_lan_ipv4_addr,
 };
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::Executor;
@@ -605,10 +606,11 @@ impl SnService {
                 {
                     EndpointArea::Lan
                 }
-                SocketAddr::V6(addr)
-                    if addr.ip().is_unique_local() || addr.ip().is_unicast_link_local() =>
-                {
+                addr if classify_reported_ipv6_area(addr) == Some(EndpointArea::Lan) => {
                     EndpointArea::Lan
+                }
+                addr if classify_reported_ipv6_area(addr) == Some(EndpointArea::Wan) => {
+                    EndpointArea::Wan
                 }
                 addr if is_non_lan_ipv4_addr(addr)
                     && observed_ip == Some(endpoint.addr().ip()) =>
@@ -2995,6 +2997,57 @@ mod tests {
         SnService::extend_unique_endpoints(&mut endpoints, &[mapped_same_addr, ipv6_ep]);
 
         assert_eq!(endpoints, vec![wan_ep, local_ep, ipv6_ep]);
+    }
+
+    #[test]
+    fn sanitizer_keeps_ipv6_wan_without_observed_check() {
+        let reported =
+            Endpoint::from((Protocol::Quic, "[240e:9500:3002:91b1::1]:3622".parse().unwrap()));
+
+        let sanitized = SnService::sanitize_reported_endpoints(&[reported], None).unwrap();
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].get_area(), EndpointArea::Wan);
+    }
+
+    #[test]
+    fn sanitizer_keeps_ipv6_lan_special_ranges() {
+        let reported = [
+            "[fc00::1]:3622",
+            "[fe80::1]:3622",
+            "[::ffff:192.168.1.10]:3622",
+            "[2001:db8::1]:3622",
+            "[2001:2::1]:3622",
+        ]
+        .iter()
+        .map(|addr| Endpoint::from((Protocol::Quic, addr.parse().unwrap())))
+        .collect::<Vec<_>>();
+
+        let sanitized = SnService::sanitize_reported_endpoints(&reported, None).unwrap();
+
+        assert_eq!(sanitized.len(), reported.len());
+        assert!(sanitized.iter().all(|ep| ep.get_area() == EndpointArea::Lan));
+    }
+
+    #[test]
+    fn sanitizer_omits_ipv6_loopback_unspecified_multicast() {
+        let reported = [
+            "[::1]:3622",
+            "[::]:3622",
+            "[ff02::1]:3622",
+            "[240e:9500:3002:91b1::1]:3622",
+        ]
+        .iter()
+        .map(|addr| Endpoint::from((Protocol::Quic, addr.parse().unwrap())))
+        .collect::<Vec<_>>();
+
+        let sanitized = SnService::sanitize_reported_endpoints(&reported, None).unwrap();
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            sanitized[0].addr().ip(),
+            "240e:9500:3002:91b1::1".parse::<std::net::IpAddr>().unwrap()
+        );
     }
 
     #[test]
