@@ -461,6 +461,8 @@ pub type SnLocalIpProviderRef = Arc<dyn SnLocalIpProvider>;
 
 pub struct DefaultSnLocalIpProvider;
 
+const MAX_LOCAL_IP_COUNT: usize = 32;
+
 impl DefaultSnLocalIpProvider {
     fn should_ignore_interface(name: &str) -> bool {
         name.contains("VMware")
@@ -477,21 +479,46 @@ impl DefaultSnLocalIpProvider {
             || name.contains("V-M")
             || name.contains("br-")
             || name.contains("vEthernet")
+            || name.contains("TAP")
+            || name.contains("tap")
+            || name.contains("virbr")
+            || name.contains("vmnet")
+            || name.contains("VMnet")
+            || name.contains("vboxnet")
+            || name.contains("dummy")
+            || name.starts_with("wg")
+            || name.contains("tailscale")
+            || name.contains("hamachi")
+            || name.contains("sit")
+            || name.contains("ip6tnl")
+            || name.contains("teredo")
+            || name.contains("isatap")
+            || name.contains("6to4")
+            || name.contains("gif")
+            || name.contains("stf")
+            || name.contains("awdl")
+            || name.contains("ip6ip")
+            || name.contains("ppp")
+            || name.contains("bridge")
+            || name.contains("nflog")
+    }
+
+    fn filter_local_ips(addrs: &[if_addrs::Interface]) -> Vec<IpAddr> {
+        addrs
+            .iter()
+            .filter(|addr| {
+                !Self::should_ignore_interface(&addr.name) && !addr.ip().is_loopback()
+            })
+            .map(|addr| addr.addr.ip())
+            .take(MAX_LOCAL_IP_COUNT)
+            .collect::<Vec<IpAddr>>()
     }
 }
 
 impl SnLocalIpProvider for DefaultSnLocalIpProvider {
     fn get_local_ips(&self) -> Vec<IpAddr> {
         if_addrs::get_if_addrs()
-            .map(|addrs| {
-                addrs
-                    .iter()
-                    .filter(|addr| {
-                        !Self::should_ignore_interface(&addr.name) && !addr.ip().is_loopback()
-                    })
-                    .map(|addr| addr.addr.ip())
-                    .collect::<Vec<IpAddr>>()
-            })
+            .map(|addrs| Self::filter_local_ips(&addrs))
             .unwrap_or_default()
     }
 }
@@ -1958,6 +1985,7 @@ impl SNClientService {
                 }
             }
         }
+        local_eps.truncate(MAX_LOCAL_IP_COUNT);
 
         let report = ReportSn {
             protocol_version: SN_PROTOCOL_VERSION,
@@ -2424,6 +2452,124 @@ mod tests {
         );
 
         assert_eq!(candidates[0], (Protocol::Tcp, vec![None]));
+    }
+
+    #[cfg(not(windows))]
+    fn test_interface(name: &str, addr: IpAddr) -> if_addrs::Interface {
+        if_addrs::Interface {
+            name: name.to_string(),
+            addr: if_addrs::IfAddr::V4(if_addrs::Ifv4Addr {
+                ip: match addr {
+                    IpAddr::V4(ip) => ip,
+                    _ => unreachable!(),
+                },
+                netmask: "255.255.255.0".parse().unwrap(),
+                prefixlen: 24,
+                broadcast: None,
+            }),
+            index: None,
+        }
+    }
+
+    #[cfg(windows)]
+    fn test_interface(name: &str, addr: IpAddr) -> if_addrs::Interface {
+        if_addrs::Interface {
+            name: name.to_string(),
+            addr: if_addrs::IfAddr::V4(if_addrs::Ifv4Addr {
+                ip: match addr {
+                    IpAddr::V4(ip) => ip,
+                    _ => unreachable!(),
+                },
+                netmask: "255.255.255.0".parse().unwrap(),
+                prefixlen: 24,
+                broadcast: None,
+            }),
+            index: None,
+            adapter_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn filter_local_ips_drops_virtual_tunnel_and_loopback() {
+        let addrs = vec![
+            test_interface("eth0", "192.168.1.10".parse().unwrap()),
+            test_interface("enp0s3", "192.168.1.11".parse().unwrap()),
+            test_interface("lo", "127.0.0.1".parse().unwrap()),
+            test_interface("docker0", "172.17.0.1".parse().unwrap()),
+            test_interface("veth123", "172.18.0.1".parse().unwrap()),
+            test_interface("br-abc", "10.0.0.1".parse().unwrap()),
+            test_interface("virbr0", "192.168.122.1".parse().unwrap()),
+            test_interface("tun0", "10.8.0.1".parse().unwrap()),
+            test_interface("TAP-Windows", "10.0.0.2".parse().unwrap()),
+            test_interface("wg0", "10.10.0.1".parse().unwrap()),
+            test_interface("tailscale0", "100.64.0.1".parse().unwrap()),
+            test_interface("hamachi", "25.0.0.1".parse().unwrap()),
+            test_interface("vboxnet0", "192.168.56.1".parse().unwrap()),
+            test_interface("vmnet8", "192.168.99.1".parse().unwrap()),
+            test_interface("dummy0", "10.1.0.1".parse().unwrap()),
+            test_interface("sit0", "10.2.0.1".parse().unwrap()),
+            test_interface("isatap", "10.3.0.1".parse().unwrap()),
+            test_interface("6to4", "10.4.0.1".parse().unwrap()),
+        ];
+
+        let local_ips = DefaultSnLocalIpProvider::filter_local_ips(&addrs);
+
+        assert_eq!(local_ips.len(), 2);
+        assert!(local_ips.contains(&"192.168.1.10".parse::<IpAddr>().unwrap()));
+        assert!(local_ips.contains(&"192.168.1.11".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn filter_local_ips_keeps_physical_nics() {
+        let addrs = vec![
+            test_interface("eth0", "192.168.1.10".parse().unwrap()),
+            test_interface("enp0s3", "10.0.0.10".parse().unwrap()),
+            test_interface("wlan0", "192.168.0.5".parse().unwrap()),
+            test_interface("en0", "192.168.0.6".parse().unwrap()),
+        ];
+
+        let local_ips = DefaultSnLocalIpProvider::filter_local_ips(&addrs);
+
+        assert_eq!(local_ips.len(), 4);
+        for ip in [
+            "192.168.1.10".parse::<IpAddr>().unwrap(),
+            "10.0.0.10".parse::<IpAddr>().unwrap(),
+            "192.168.0.5".parse::<IpAddr>().unwrap(),
+            "192.168.0.6".parse::<IpAddr>().unwrap(),
+        ] {
+            assert!(local_ips.contains(&ip));
+        }
+    }
+
+    #[test]
+    fn filter_local_ips_caps_count_at_max() {
+        let addrs: Vec<_> = (0..64)
+            .map(|i| test_interface(&format!("eth{i}"), format!("192.168.{}.{}", i / 256, i % 256).parse().unwrap()))
+            .collect();
+
+        let local_ips = DefaultSnLocalIpProvider::filter_local_ips(&addrs);
+
+        assert!(local_ips.len() <= MAX_LOCAL_IP_COUNT);
+        assert_eq!(local_ips.len(), MAX_LOCAL_IP_COUNT.min(64));
+    }
+
+    #[test]
+    fn filter_local_ips_keeps_first_max_ordered_ips() {
+        let addrs: Vec<_> = (0..40)
+            .map(|i| test_interface(&format!("eth{i}"), IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, i as u8))))
+            .collect();
+
+        let local_ips = DefaultSnLocalIpProvider::filter_local_ips(&addrs);
+
+        assert_eq!(local_ips.len(), MAX_LOCAL_IP_COUNT);
+        assert_eq!(
+            local_ips[0],
+            IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 0))
+        );
+        assert_eq!(
+            local_ips[MAX_LOCAL_IP_COUNT - 1],
+            IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, MAX_LOCAL_IP_COUNT as u8 - 1))
+        );
     }
 
     include!(concat!(
