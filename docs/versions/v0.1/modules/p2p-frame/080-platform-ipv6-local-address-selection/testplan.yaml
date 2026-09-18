@@ -1,0 +1,74 @@
+schema_version: 1
+task_manifest: task.yaml
+risk_profile: risk-profile.yaml
+api_impact:
+  public_api: none
+  crate_root_export_change: false
+  build_surface_change: true
+  documentation_examples_affected: false
+evidence_inputs: ["p2p-frame/src/sn/client/local_ip.rs", "p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/src/sn/client/mod.rs", "p2p-frame/Cargo.toml", "docs/versions/v0.1/modules/p2p-frame/080-platform-ipv6-local-address-selection/proposal.md", "docs/versions/v0.1/modules/p2p-frame/080-platform-ipv6-local-address-selection/pipeline/plan.md"]
+contract_checks:
+  mode: enabled
+  reason: Enabling the iptypes/iphlpapi features on the existing winapi dependency changes the Windows build surface, so repository compile closure is asserted for every crate target after the change.
+  steps:
+    - id: repository-compile-closure
+      name: Repository consumer compile closure
+      kind: repository-compile-closure
+      assertion: repository-consumers-compile
+      change_ids: ["CHG-local-ip-metadata-pipeline", "CHG-linux-if-inet6-source", "CHG-windows-adapters-source", "CHG-fallback-platform-parity", "CHG-enhanced-provider-wiring"]
+      run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--no-run", "--all-targets", "--offline"]
+defaults:
+  workdir: .
+  timeout_sec: 1800
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: Verify platform metadata decoding, deterministic filtering/ranking and the provider subset invariant.
+    test_targets:
+      - p2p-frame/src/sn/client/local_ip.rs
+      - p2p-frame/src/sn/client/sn_service.rs
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The workspace crate cache is pre-populated, so cargo steps run with --offline.
+        - F-078-1 pre-existing tunnel_manager include-base issue is worked around by an empty p2p-frame/src/tunnel/tunnel_manager/tests directory; production sources are unchanged by that workaround.
+    steps:
+      - id: local-ip-selection-core
+        name: Platform metadata decoding and local address selection
+        change_ids: ["CHG-local-ip-metadata-pipeline", "CHG-linux-if-inet6-source", "CHG-windows-adapters-source", "CHG-fallback-platform-parity"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::client::local_ip", "--", "--test-threads=1"]
+      - id: provider-subset-invariant
+        name: Enhanced provider subset invariant plus provider filter regressions
+        change_ids: ["CHG-enhanced-provider-wiring"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "sn::client::sn_service::tests::", "--", "--test-threads=1"]
+  dv:
+    mode: enabled
+    summary: Regression closure over the full p2p-frame lib suite, the workspace build and the Windows cross target.
+    test_targets:
+      - p2p-frame
+    preconditions:
+      tools: ["cargo"]
+      env: []
+      services: []
+      notes:
+        - The Windows cross check uses the default feature set because the x509 feature pulls aws-lc-sys, whose Windows build requires NASM; the cfg(windows) adapter code carries no x509 dependency.
+    steps:
+      - id: full-lib-suite
+        name: Full p2p-frame x509 lib suite
+        change_ids: ["CHG-local-ip-metadata-pipeline", "CHG-linux-if-inet6-source", "CHG-windows-adapters-source", "CHG-fallback-platform-parity", "CHG-enhanced-provider-wiring"]
+        run: ["cargo", "test", "-p", "p2p-frame", "--features", "x509", "--lib", "--offline"]
+      - id: workspace-check
+        name: Workspace compile closure on the host
+        change_ids: ["CHG-local-ip-metadata-pipeline", "CHG-linux-if-inet6-source", "CHG-windows-adapters-source", "CHG-fallback-platform-parity", "CHG-enhanced-provider-wiring"]
+        run: ["cargo", "check", "--workspace", "--offline"]
+      - id: windows-target-cross-check
+        name: Windows target cross compile of the adapter source
+        change_ids: ["CHG-windows-adapters-source"]
+        run: ["cargo", "check", "-p", "p2p-frame", "--target", "x86_64-pc-windows-gnu", "--offline"]
+  integration:
+    mode: disabled
+    reason: No cross-process, real-socket or deployment surface changed; address selection is fully covered by unit cases plus the compile and regression levels.
+    steps: []

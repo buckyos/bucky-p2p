@@ -1,0 +1,63 @@
+schema_version: 1
+task_manifest: task.yaml
+
+change_ids: ["CHG-local-ip-metadata-pipeline", "CHG-linux-if-inet6-source", "CHG-windows-adapters-source", "CHG-fallback-platform-parity", "CHG-enhanced-provider-wiring"]
+source_bindings:
+  proposal: proposal.md
+  design_source: pipeline/plan.md
+
+risks:
+  contract:
+    applies: true
+    evidence:
+      - pipeline/plan.md#exported-interfaces
+      - pipeline/plan.md#failure-flows
+      - pipeline/plan.md#implementation-scope-bindings
+      - p2p-frame/src/sn/client/sn_service.rs SnLocalIpProvider trait and DefaultSnLocalIpProvider
+    required_checks:
+      - SnLocalIpProvider trait signature and stack.rs set_local_ip_provider injection path stay unchanged
+      - Enhanced provider output is a subset of DefaultSnLocalIpProvider output on every platform
+      - report_on_send assembly and the MAX_LOCAL_IP_COUNT=32 truncation stay unchanged
+  data:
+    applies: false
+    evidence: The task changes no persistence, schema, migration, serialization layout, cache key, or durable state; only the in-memory local address selection result changes.
+    required_checks: []
+  security:
+    applies: true
+    evidence:
+      - pipeline/plan.md#state-ownership
+      - pipeline/plan.md#failure-flows
+      - pipeline/plan.md#rejected-alternatives
+      - Confirmed scope keeps 079 server-side classification and legacy SnCall reverse endpoint consumption unchanged
+    required_checks:
+      - The reported address set is narrowed, never widened; deprecated, tentative and DAD-failed addresses are never reported
+      - Only read-only kernel and adapter inspection is used; no address table mutation and no new privilege requirement
+      - 079 sanitizer boundaries and 078 name-blacklist/cap behavior remain green
+  runtime:
+    applies: true
+    evidence:
+      - pipeline/plan.md#dependency-graphs
+      - pipeline/plan.md#state-ownership
+      - pipeline/plan.md#failure-flows
+      - p2p-frame/src/sn/client/local_ip.rs platform sources with fallback
+    required_checks:
+      - /proc/net/if_inet6 parsing handles missing files, short lines and three-or-more hex digit flags without panicking
+      - Addresses without platform metadata are retained so fallback platforms keep base behavior
+      - Existing filter_local_ips tests plus the full p2p-frame lib suite stay green
+  build:
+    applies: true
+    evidence:
+      - pipeline/plan.md#implementation-scope-bindings
+      - pipeline/plan.md#consumer-migration-closure
+      - p2p-frame/Cargo.toml winapi feature addition
+    required_checks:
+      - cargo check -p p2p-frame --target x86_64-pc-windows-gnu passes
+      - cargo check --workspace passes on the Linux host
+  ui:
+    applies: false
+    evidence: No UI, accessibility, localization, navigation, or user workflow surface is affected by local address selection.
+    required_checks: []
+  harness:
+    applies: false
+    evidence: The task consumes the existing pipeline, test runner, and checkers without changing repository Harness policy or tooling.
+    required_checks: []

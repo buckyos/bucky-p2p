@@ -1,3 +1,4 @@
+use super::local_ip::{MAX_LOCAL_IP_COUNT, platform_annotate, select_local_ips};
 use crate::endpoint::{Endpoint, EndpointArea, Protocol};
 use crate::error::{P2pErrorCode, P2pResult, into_p2p_err, p2p_err};
 use crate::executor::{Executor, SpawnHandle};
@@ -461,8 +462,6 @@ pub type SnLocalIpProviderRef = Arc<dyn SnLocalIpProvider>;
 
 pub struct DefaultSnLocalIpProvider;
 
-const MAX_LOCAL_IP_COUNT: usize = 32;
-
 impl DefaultSnLocalIpProvider {
     fn should_ignore_interface(name: &str) -> bool {
         name.contains("VMware")
@@ -503,7 +502,10 @@ impl DefaultSnLocalIpProvider {
             || name.contains("nflog")
     }
 
-    fn filter_local_ips(addrs: &[if_addrs::Interface]) -> Vec<IpAddr> {
+    /// Enumeration order preserving variant of [`Self::filter_local_ips`] that
+    /// also keeps the interface name so the platform metadata source can match
+    /// kernel/adapter state back to the address.
+    fn filter_local_ip_entries(&self, addrs: &[if_addrs::Interface]) -> Vec<(String, IpAddr)> {
         addrs
             .iter()
             .filter(|addr| {
@@ -512,8 +514,16 @@ impl DefaultSnLocalIpProvider {
                     && !addr.ip().is_unspecified()
                     && !addr.ip().is_multicast()
             })
-            .map(|addr| addr.addr.ip())
+            .map(|addr| (addr.name.clone(), addr.addr.ip()))
             .take(MAX_LOCAL_IP_COUNT)
+            .collect::<Vec<(String, IpAddr)>>()
+    }
+
+    fn filter_local_ips(addrs: &[if_addrs::Interface]) -> Vec<IpAddr> {
+        DefaultSnLocalIpProvider
+            .filter_local_ip_entries(addrs)
+            .into_iter()
+            .map(|(_, ip)| ip)
             .collect::<Vec<IpAddr>>()
     }
 }
@@ -523,6 +533,37 @@ impl SnLocalIpProvider for DefaultSnLocalIpProvider {
         if_addrs::get_if_addrs()
             .map(|addrs| Self::filter_local_ips(&addrs))
             .unwrap_or_default()
+    }
+}
+
+/// Default provider that narrows the reported local address set with platform
+/// duplicate-address-detection state.
+///
+/// The base provider still owns the interface-name blacklist and the
+/// loopback/unspecified/multicast filter, so this provider can only remove
+/// addresses: the reported set stays a subset of the previous behavior while
+/// `deprecated`, `tentative` and DAD-failed addresses stop being advertised.
+/// Platforms without a metadata API (macOS and others) keep the base order.
+struct EnhancedLocalIpProvider {
+    base: DefaultSnLocalIpProvider,
+}
+
+impl EnhancedLocalIpProvider {
+    fn new() -> Self {
+        Self {
+            base: DefaultSnLocalIpProvider,
+        }
+    }
+}
+
+impl SnLocalIpProvider for EnhancedLocalIpProvider {
+    fn get_local_ips(&self) -> Vec<IpAddr> {
+        let addrs = match if_addrs::get_if_addrs() {
+            Ok(addrs) => addrs,
+            Err(_) => return Vec::new(),
+        };
+        let entries = self.base.filter_local_ip_entries(&addrs);
+        select_local_ips(&platform_annotate(&entries))
     }
 }
 
@@ -579,7 +620,7 @@ impl SNClientService {
             ping_timeout,
             call_timeout,
             conn_timeout,
-            Arc::new(DefaultSnLocalIpProvider),
+            Arc::new(EnhancedLocalIpProvider::new()),
         )
     }
 
@@ -2617,6 +2658,30 @@ mod tests {
         assert!(local_ips.contains(&"192.168.1.10".parse::<IpAddr>().unwrap()));
         assert!(local_ips.contains(&"240e:9500:3002:91b1::1".parse::<IpAddr>().unwrap()));
         assert!(local_ips.contains(&"fe80::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn enhanced_provider_selection_stays_inside_base_filter_output() {
+        let addrs = vec![
+            test_interface_any("eth1", "240e:9500:3002:91b1::1".parse().unwrap()),
+            test_interface_any("lo", "::1".parse().unwrap()),
+            test_interface_any("docker0", "240e:9500:3002:91b1::2".parse().unwrap()),
+            test_interface_any("unused1", "::".parse().unwrap()),
+            test_interface_any("unused2", "ff02::1".parse().unwrap()),
+        ];
+
+        let base = DefaultSnLocalIpProvider::filter_local_ips(&addrs);
+        let entries = DefaultSnLocalIpProvider.filter_local_ip_entries(&addrs);
+        let selected = select_local_ips(&platform_annotate(&entries));
+
+        assert_eq!(base.len(), 1);
+        assert_eq!(base, vec!["240e:9500:3002:91b1::1".parse::<IpAddr>().unwrap()]);
+        // The enhanced pipeline may only narrow the base set: every selected
+        // address must already be part of the previous provider output.
+        assert!(
+            selected.iter().all(|addr| base.contains(addr)),
+            "enhanced selection must stay inside the base set: {selected:?} vs {base:?}"
+        );
     }
 
     include!(concat!(

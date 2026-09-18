@@ -1,0 +1,45 @@
+schema_version: 1
+workflow_tier: high-risk
+
+version: v0.1
+packet_module: p2p-frame
+task_name: 080-platform-ipv6-local-address-selection
+stage: acceptance
+mode: auto-pipeline
+auto_pipeline_start_stage: design
+
+proposal: proposal.md
+completion_report: completion-report.md
+change_record:
+design: design.md
+testing: testing.md
+testplan: testplan.yaml
+acceptance_report: acceptance-report.md
+pipeline_plan: pipeline/plan.md
+risk_profile: risk-profile.yaml
+lifecycle_state: lifecycle.json
+
+changed_paths_file: .harness/evidence/v0.1/stage-scope/080-platform-ipv6-local-address-selection.paths
+baseline_manifest:
+
+changes:
+  - id: CHG-local-ip-metadata-pipeline
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs"]
+    changed_paths_file:
+  - id: CHG-linux-if-inet6-source
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs"]
+    changed_paths_file:
+  - id: CHG-windows-adapters-source
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "p2p-frame/Cargo.toml"]
+    changed_paths_file:
+  - id: CHG-fallback-platform-parity
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs", "docs/modules/p2p-frame.md"]
+    changed_paths_file:
+  - id: CHG-enhanced-provider-wiring
+    target_module: p2p-frame
+    scope_paths: ["p2p-frame/src/sn/client/sn_service.rs"]
+    changed_paths_file:

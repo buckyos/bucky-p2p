@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stages": {
+    "proposal": {
+      "inputs": {
+        "docs/versions/v0.1/modules/p2p-frame/080-platform-ipv6-local-address-selection/proposal.md": "a9036143c61fe6b8028572963767d7e27badc91f731b99f1cacea928875aa7ac"
+      },
+      "status": "complete",
+      "task_binding_schema": 2,
+      "task_binding_sha256": "20087cca84ab3cdab6f23370bf93d505b035d29ad3661c6102d3b2afd030d917"
+    }
+  },
+  "task_manifest": "task.yaml"
+}
