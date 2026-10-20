@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
@@ -343,6 +343,8 @@ struct LeaseContext {
     local_initiator: bool,
     read: Option<runtime::ReadHalf<runtime::TlsStream<runtime::TcpStream>>>,
     write: Option<runtime::WriteHalf<runtime::TlsStream<runtime::TcpStream>>>,
+    read_waker: Option<Waker>,
+    write_waker: Option<Waker>,
     tx_bytes: u64,
     rx_bytes: u64,
     peer_final_tx_bytes: Option<u64>,
@@ -425,6 +427,7 @@ pub(crate) struct TcpTunnel {
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
     connected_notify: Notify,
+    control_error_notify: Notify,
     #[cfg(test)]
     reverse_open_test_control: ReverseOpenTestControl,
 }
@@ -436,7 +439,7 @@ const REVERSE_OPEN_TEST_RESPONSE_PAUSE: u8 = 1;
 #[cfg(test)]
 const REVERSE_OPEN_TEST_RESPONSE_SUPPRESS: u8 = 2;
 #[cfg(test)]
-const LEGACY_TCP_CONTROL_MAX_COMMAND_ID: u8 = 11;
+include!("tests/control_failure_tests.rs");
 
 #[cfg(test)]
 struct ReverseOpenTestControl {
@@ -545,6 +548,27 @@ impl DataConnEntry {
 }
 
 impl LeaseContext {
+    fn poll_read(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.read_waker = Some(cx.waker().clone());
+        let result = if let Some(read) = self.read.as_mut() {
+            runtime::AsyncRead::poll_read(Pin::new(read), cx, buf)
+        } else {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "tcp lease read released",
+            )))
+        };
+        // Hidden reads keep their registration until the observer validates the result.
+        if result.is_ready() && !self.hidden_zero_read {
+            self.read_waker = None;
+        }
+        result
+    }
+
     fn can_send_read_done(&self) -> bool {
         self.peer_write_fin_received
             && self.peer_final_tx_bytes == Some(self.rx_bytes)
@@ -560,6 +584,7 @@ impl LeaseContext {
             && self.write_released
             && !self.retired
             && !self.no_reuse
+            && (!self.hidden_zero_read || self.read_waker.is_none())
     }
 
     fn ready_for_close(&self) -> bool {
@@ -612,14 +637,7 @@ impl runtime::AsyncRead for TcpLeaseRead {
     ) -> Poll<std::io::Result<()>> {
         let mut lease = self.lease.lock().unwrap();
         let before = buf.filled().len();
-        let result = if let Some(read) = lease.read.as_mut() {
-            Pin::new(read).poll_read(cx, buf)
-        } else {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "tcp lease read released",
-            )))
-        };
+        let result = lease.poll_read(cx, buf);
         drop(lease);
 
         match result {
@@ -650,6 +668,7 @@ impl runtime::AsyncWrite for TcpLeaseWrite {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let mut lease = self.lease.lock().unwrap();
+        lease.write_waker = Some(cx.waker().clone());
         let result = if let Some(write) = lease.write.as_mut() {
             Pin::new(write).poll_write(cx, buf)
         } else {
@@ -658,6 +677,9 @@ impl runtime::AsyncWrite for TcpLeaseWrite {
                 "tcp lease write released",
             )))
         };
+        if result.is_ready() {
+            lease.write_waker = None;
+        }
         match result {
             Poll::Ready(Ok(n)) => {
                 lease.tx_bytes += n as u64;
@@ -674,6 +696,7 @@ impl runtime::AsyncWrite for TcpLeaseWrite {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut lease = self.lease.lock().unwrap();
+        lease.write_waker = Some(cx.waker().clone());
         let result = if let Some(write) = lease.write.as_mut() {
             Pin::new(write).poll_flush(cx)
         } else {
@@ -682,6 +705,9 @@ impl runtime::AsyncWrite for TcpLeaseWrite {
                 "tcp lease write released",
             )))
         };
+        if result.is_ready() {
+            lease.write_waker = None;
+        }
         if let Poll::Ready(Err(_)) = &result {
             drop(lease);
             TcpTunnel::retire_lease_arc(&self.lease, P2pErrorCode::IoError);
@@ -691,6 +717,7 @@ impl runtime::AsyncWrite for TcpLeaseWrite {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut lease = self.lease.lock().unwrap();
+        lease.write_waker = Some(cx.waker().clone());
         let result = if let Some(write) = lease.write.as_mut() {
             Pin::new(write).poll_shutdown(cx)
         } else {
@@ -699,6 +726,9 @@ impl runtime::AsyncWrite for TcpLeaseWrite {
                 "tcp lease write released",
             )))
         };
+        if result.is_ready() {
+            lease.write_waker = None;
+        }
         if let Poll::Ready(Err(_)) = &result {
             drop(lease);
             TcpTunnel::retire_lease_arc(&self.lease, P2pErrorCode::IoError);
@@ -866,6 +896,7 @@ impl TcpTunnel {
             heartbeat_interval,
             heartbeat_timeout,
             connected_notify: Notify::new(),
+            control_error_notify: Notify::new(),
             #[cfg(test)]
             reverse_open_test_control: ReverseOpenTestControl::default(),
         });
@@ -920,8 +951,32 @@ impl TcpTunnel {
     }
 
     async fn send_control(&self, cmd: &TcpControlCmd) -> P2pResult<()> {
-        let mut write = self.control_write.lock().await;
-        write_raw_frame(&mut *write, cmd).await
+        let failed = self.control_error_notify.notified();
+        tokio::pin!(failed);
+        // Register before inspecting terminal state, including mutex waiters.
+        failed.as_mut().enable();
+        if self.state.lock().unwrap().phase == LocalTunnelPhase::Error {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "tcp control connection failed"));
+        }
+        let result = tokio::select! {
+            biased;
+            _ = &mut failed => {
+                Err(p2p_err!(P2pErrorCode::Interrupted, "tcp control connection failed"))
+            }
+            result = async {
+                let mut write = self.control_write.lock().await;
+                if self.state.lock().unwrap().phase == LocalTunnelPhase::Error {
+                    return Err(p2p_err!(P2pErrorCode::Interrupted, "tcp control connection failed"));
+                }
+                write_raw_frame(&mut *write, cmd).await
+            } => result,
+        };
+        if let Err(err) = &result {
+            if err.code() == P2pErrorCode::IoError {
+                let _ = self.close_impl(LocalTunnelPhase::Error, err.code()).await;
+            }
+        }
+        result
     }
 
     async fn send_ping(&self) -> P2pResult<()> {
@@ -951,6 +1006,9 @@ impl TcpTunnel {
 
     async fn wait_until_connected(&self) -> P2pResult<()> {
         loop {
+            let connected = self.connected_notify.notified();
+            tokio::pin!(connected);
+            connected.as_mut().enable();
             let phase = self.state.lock().unwrap().phase;
             match phase {
                 LocalTunnelPhase::Connected => return Ok(()),
@@ -961,7 +1019,7 @@ impl TcpTunnel {
                     return Err(p2p_err!(P2pErrorCode::ErrorState, "tunnel error"));
                 }
                 LocalTunnelPhase::PassiveReady => {
-                    self.connected_notify.notified().await;
+                    connected.await;
                 }
             }
         }
@@ -992,6 +1050,9 @@ impl TcpTunnel {
                 state.data_conns.values().cloned().collect::<Vec<_>>(),
             )
         };
+        if phase == LocalTunnelPhase::Error {
+            self.control_error_notify.notify_waiters();
+        }
         self.connected_notify.notify_waiters();
 
         for (_, pending) in pending_open_requests {
@@ -1024,6 +1085,10 @@ impl TcpTunnel {
                 }
             };
             if let Some(lease) = maybe_lease {
+                if phase == LocalTunnelPhase::Error {
+                    Self::retire_lease_arc(&lease, reason);
+                    continue;
+                }
                 let mut lease_inner = lease.lock().unwrap();
                 lease_inner.no_reuse = true;
                 if lease_inner.ready_for_close() {
@@ -1031,7 +1096,7 @@ impl TcpTunnel {
                     Self::retire_lease_arc(&lease, reason);
                 }
             } else {
-                entry.drop_stream();
+                self.retire_plain_entry(&entry, reason);
             }
         }
         true
@@ -1039,6 +1104,19 @@ impl TcpTunnel {
 
     async fn close_impl(&self, phase: LocalTunnelPhase, reason: P2pErrorCode) -> P2pResult<()> {
         if !self.close_local(phase, reason) {
+            return Ok(());
+        }
+        if phase == LocalTunnelPhase::Error {
+            // Terminal callers and data retirement never wait for a backpressured
+            // control writer. Cleanup holds only its writer, with a bounded lifetime.
+            let control_write = self.control_write.clone();
+            let timeout = self.connector.timeout;
+            Executor::spawn_ok(async move {
+                let _ = runtime::timeout(timeout, async {
+                    let mut write = control_write.lock().await;
+                    let _ = runtime::AsyncWriteExt::shutdown(&mut *write).await;
+                }).await;
+            });
             return Ok(());
         }
         let mut write = self.control_write.lock().await;
@@ -1068,7 +1146,7 @@ impl TcpTunnel {
                         err
                     );
                     let _ = self
-                        .close_impl(LocalTunnelPhase::Closed, P2pErrorCode::Interrupted)
+                        .close_impl(LocalTunnelPhase::Error, P2pErrorCode::Interrupted)
                         .await;
                     break;
                 }
@@ -1162,6 +1240,9 @@ impl TcpTunnel {
 
     fn register_entry(&self, entry: Arc<DataConnEntry>) -> P2pResult<()> {
         let mut state = self.state.lock().unwrap();
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "tcp tunnel closed"));
+        }
         if state.data_conns.contains_key(&entry.conn_id) {
             return Err(p2p_err!(
                 P2pErrorCode::Conflict,
@@ -1783,22 +1864,24 @@ impl TcpTunnel {
     }
 
     fn retire_lease_arc(lease: &Arc<Mutex<LeaseContext>>, reason: P2pErrorCode) {
-        let (tunnel, entry, conn_id, channel_id, lease_seq) = {
+        let (tunnel, entry, conn_id, channel_id, lease_seq, read, write, wakers) = {
             let mut inner = lease.lock().unwrap();
             if inner.retired {
                 return;
             }
             inner.retired = true;
-            inner.read.take();
-            inner.write.take();
             (
                 inner.tunnel.upgrade(),
                 inner.entry.upgrade(),
                 inner.conn_id,
                 inner.channel_id,
                 inner.lease_seq,
+                inner.read.take(),
+                inner.write.take(),
+                (inner.read_waker.take(), inner.write_waker.take()),
             )
         };
+        drop((read, write));
         if let Some(entry) = entry {
             if let Some(tunnel) = tunnel {
                 {
@@ -1812,6 +1895,9 @@ impl TcpTunnel {
                     Err(p2p_err!(reason, "tcp lease retired")),
                 );
             }
+        }
+        for waker in [wakers.0, wakers.1].into_iter().flatten() {
+            waker.wake();
         }
     }
 
@@ -1827,17 +1913,19 @@ impl TcpTunnel {
                 }
                 let read = inner.read.take().unwrap();
                 let write = inner.write.take().unwrap();
+                inner.retired = true;
                 (entry, tunnel, Some(read.unsplit(write)), false, conn_id)
             } else if inner.ready_for_close() {
-                inner.retired = true;
-                inner.read.take();
-                inner.write.take();
                 (entry, tunnel, None, true, conn_id)
             } else {
                 return;
             }
         };
 
+        if should_retire {
+            Self::retire_lease_arc(lease, P2pErrorCode::Interrupted);
+            return;
+        }
         let Some(entry) = entry else {
             return;
         };
@@ -1845,23 +1933,19 @@ impl TcpTunnel {
             return;
         };
 
-        if should_retire {
-            {
-                let mut inner = entry.inner.lock().unwrap();
-                inner.state = DataConnEntryState::Retired;
-            }
-            tunnel.remove_entry(conn_id);
-            return;
-        }
-
         if let Some(stream) = stream_to_idle {
-            entry.put_stream(stream);
             let mut inner = entry.inner.lock().unwrap();
-            if matches!(
+            if !tunnel.is_closed() && !inner.no_reuse && matches!(
                 inner.state,
                 DataConnEntryState::Bound(_) | DataConnEntryState::Draining(_)
             ) {
+                entry.put_stream(stream);
                 inner.state = DataConnEntryState::Idle;
+            } else {
+                inner.state = DataConnEntryState::Retired;
+                drop(inner);
+                drop(stream);
+                tunnel.remove_entry(conn_id);
             }
         }
     }
@@ -2006,23 +2090,18 @@ impl TcpTunnel {
     fn spawn_hidden_zero_read_observer(lease: Arc<Mutex<LeaseContext>>) {
         let _ = Executor::spawn(async move {
             loop {
-                let mut read = {
-                    let mut inner = lease.lock().unwrap();
-                    if inner.retired {
-                        drop(inner);
-                        TcpTunnel::maybe_finalize_lease(&lease);
-                        return;
-                    }
-                    match inner.read.take() {
-                        Some(read) => read,
-                        None => return,
-                    }
-                };
-
                 let mut buf = [0u8; 2048];
                 let result = runtime::timeout(
                     Duration::from_millis(100),
-                    runtime::AsyncReadExt::read(&mut read, &mut buf),
+                    std::future::poll_fn(|cx| {
+                        let mut inner = lease.lock().unwrap();
+                        let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+                        match inner.poll_read(cx, &mut read_buf) {
+                            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                            Poll::Pending => Poll::Pending,
+                        }
+                    }),
                 )
                 .await;
 
@@ -2031,8 +2110,8 @@ impl TcpTunnel {
                 let mut refresh_drain_timeout = false;
                 {
                     let mut inner = lease.lock().unwrap();
-                    inner.read = Some(read);
                     if inner.retired {
+                        inner.read_waker = None;
                         drop(inner);
                         TcpTunnel::maybe_finalize_lease(&lease);
                         return;
@@ -2055,6 +2134,9 @@ impl TcpTunnel {
                         }
                     }
 
+                    if !retire {
+                        inner.read_waker = None;
+                    }
                     if inner.ready_for_idle() || inner.ready_for_close() {
                         drop(inner);
                         TcpTunnel::maybe_finalize_lease(&lease);
@@ -2165,6 +2247,8 @@ impl TcpTunnel {
             local_initiator,
             read: Some(read),
             write: Some(write),
+            read_waker: None,
+            write_waker: None,
             tx_bytes: 0,
             rx_bytes: 0,
             peer_final_tx_bytes: None,
@@ -2188,6 +2272,12 @@ impl TcpTunnel {
         let pending_drain;
         {
             let mut inner = entry.inner.lock().unwrap();
+            if self.is_closed() || matches!(inner.state, DataConnEntryState::Retired) {
+                return Err(p2p_err!(
+                    P2pErrorCode::Interrupted,
+                    "tcp data connection retired"
+                ));
+            }
             inner.committed_lease_seq = lease_seq;
             inner.state = DataConnEntryState::Bound(lease.clone());
             pending_fin = inner.pending_fin.take();
@@ -2319,6 +2409,12 @@ impl TcpTunnel {
 
             {
                 let mut inner = entry.inner.lock().unwrap();
+                if self.is_closed() || inner.no_reuse
+                    || !matches!(&inner.state, DataConnEntryState::Claiming(claiming)
+                        if claiming.channel_id == ack.channel_id && claiming.lease_seq == ack.lease_seq)
+                {
+                    return Ok(());
+                }
                 if matches!(result, ClaimConnAckResult::ConflictLost) {
                     if !matches!(
                         inner.state,
@@ -3181,11 +3277,12 @@ impl TcpTunnel {
     async fn request_remote_data_connection(self: &Arc<Self>) -> P2pResult<Arc<DataConnEntry>> {
         let request_id = self.next_local_request_id();
         let (tx, rx) = oneshot::channel();
-        self.state
-            .lock()
-            .unwrap()
-            .pending_open_requests
-            .insert(
+        {
+            let mut state = self.state.lock().unwrap();
+            if self.is_closed() {
+                return Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel closed"));
+            }
+            state.pending_open_requests.insert(
                 request_id,
                 PendingOpenRequest {
                     sender: Some(tx),
@@ -3193,6 +3290,7 @@ impl TcpTunnel {
                     correlation: ReverseOpenCorrelation::new(),
                 },
             );
+        }
         let mut owner = PendingOpenRequestGuard::new(self.clone(), request_id);
 
         if let Err(err) = self
@@ -3465,6 +3563,9 @@ impl TcpTunnel {
         let channel_id = self.next_local_channel_id();
         let (lease_seq, claim_nonce) = {
             let mut inner = entry.inner.lock().unwrap();
+            if self.is_closed() {
+                return Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel closed"));
+            }
             let expected_next = Self::next_lease_seq(inner.committed_lease_seq);
             match &inner.state {
                 DataConnEntryState::FirstClaimPending if entry.first_claim_local => {
@@ -3499,11 +3600,13 @@ impl TcpTunnel {
         };
 
         let (tx, rx) = oneshot::channel();
-        self.state
-            .lock()
-            .unwrap()
-            .pending_claims
-            .insert(channel_id, tx);
+        {
+            let mut state = self.state.lock().unwrap();
+            if self.is_closed() {
+                return Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel closed"));
+            }
+            state.pending_claims.insert(channel_id, tx);
+        }
         if let Err(err) = self
             .send_control(&TcpControlCmd::ClaimConnReq(ClaimConnReq {
                 channel_id,
@@ -3522,13 +3625,15 @@ impl TcpTunnel {
                 .remove(&channel_id);
             {
                 let mut inner = entry.inner.lock().unwrap();
-                inner.state = if entry.first_claim_local
-                    && inner.committed_lease_seq == TcpLeaseSeq::default()
-                {
-                    DataConnEntryState::FirstClaimPending
-                } else {
-                    DataConnEntryState::Idle
-                };
+                if !self.is_closed() && !inner.no_reuse {
+                    inner.state = if entry.first_claim_local
+                        && inner.committed_lease_seq == TcpLeaseSeq::default()
+                    {
+                        DataConnEntryState::FirstClaimPending
+                    } else {
+                        DataConnEntryState::Idle
+                    };
+                }
             }
             return Err(err);
         }

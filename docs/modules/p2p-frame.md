@@ -1,5 +1,8 @@
 # p2p-frame
 
+## Control-Failure Behavior
+- [081 control/data teardown](../versions/v0.1/modules/p2p-frame/081-tcp-error-close-data-connections/design.md) implements source behavior: internally detected TCP control failures retire owned data leases and wake their pending IO, while local explicit close retains graceful draining. QUIC command-write failure uses connection-wide teardown. Public transport interfaces and wire formats are unchanged; scoped transport tests and identical pre-fix/fixed regression replays pass. Installed service deployment is outside this delivery.
+
 ## 类型
 - 核心库
 

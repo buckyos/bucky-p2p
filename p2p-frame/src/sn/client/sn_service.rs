@@ -2552,6 +2552,8 @@ mod tests {
             name: name.to_string(),
             addr: if_addr,
             index: None,
+            #[cfg(windows)]
+            adapter_name: String::new(),
         }
     }
 

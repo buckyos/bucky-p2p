@@ -51,6 +51,11 @@ enum TunnelChannelKind {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "x509")]
+    mod control_failure_tests {
+        include!("tests/control_failure_tests.rs");
+    }
+
     #[test]
     fn quic_tunnel_heartbeat_timeout_is_thirty_seconds_without_interval_change() {
         assert_eq!(COMMAND_HEARTBEAT_INTERVAL, Duration::from_secs(5));
@@ -499,8 +504,16 @@ impl QuicTunnel {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "quic tunnel closed"));
         }
         let cmd = TunnelCommand::<T>::new(body)?;
-        let mut write = self.command_write.lock().await;
-        write_tunnel_command(&mut *write, &cmd).await
+        let result = {
+            let mut write = self.command_write.lock().await;
+            write_tunnel_command(&mut *write, &cmd).await
+        };
+        if let Err(err) = &result {
+            if err.code() == P2pErrorCode::IoError {
+                self.close_with_error(err.code(), format!("quic command send failed: {:?}", err));
+            }
+        }
+        result
     }
 
     async fn write_command<T>(write: &mut quinn::SendStream, body: T) -> P2pResult<()>
