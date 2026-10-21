@@ -69,7 +69,7 @@
 ```rust
 pub struct TtpTarget {
     pub local_ep: Option<Endpoint>,
-    pub remote_ep: Endpoint,
+    pub remote_ep: Vec<Endpoint>,
     pub remote_id: P2pId,
     pub remote_name: Option<String>,
 }
@@ -77,7 +77,7 @@ pub struct TtpTarget {
 
 说明：
 
-- `remote_ep` 是实际连接目标地址
+- `remote_ep` 是按优先级排列的远端候选地址；单地址使用 `vec![endpoint]`
 - `remote_id` 是远端身份标识，不与地址混用
 - `remote_name` 用于需要名称的握手场景
 - `local_ep` 为可选项，用于需要固定本地出口地址的场景
@@ -339,13 +339,11 @@ pub struct TtpServer { ... }
 
 `TtpConnector::open_stream()` / `open_datagram()` 的内部流程建议如下：
 
-1. 读取 `target.remote_ep.protocol()`
-2. 通过 `NetManager::get_network(protocol)` 找到对应 `TunnelNetwork`
-3. 优先从客户端内部 tunnel 池中查找可复用 tunnel
-4. 若未命中：
-   - 若 `target.local_ep.is_some()`，调用 `create_tunnel_with_local_ep()`
-   - 否则调用 `create_tunnel()`
-5. 将新 tunnel 注册到 `TtpRuntime`
+1. 优先从内部 tunnel 池查找身份、本地地址及任一候选地址匹配的可用 tunnel
+2. 若未命中，按 `target.remote_ep` 的原始顺序逐个尝试候选；空列表返回 `InvalidParam`
+3. 当前候选按协议通过 `NetManager::get_network(protocol)` 查询 `TunnelNetwork`
+4. 若有 `local_ep`，检查协议与地址族兼容后调用 `create_tunnel_with_local_ep()`，否则调用 `create_tunnel()`；当前候选失败则继续下一项
+5. 将新 tunnel 注册到 `TtpRuntime`；注册成功即缓存并停止尝试，注册失败继续下一项；全部失败返回带各候选上下文的错误
 6. 根据调用类型：
    - `stream` 调用 `tunnel.open_stream(vport)`
    - `datagram` 调用 `tunnel.open_datagram(vport)`
@@ -356,6 +354,9 @@ pub struct TtpServer { ... }
 - 连接建立与通道打开对上层表现为一次调用
 - tunnel 复用逻辑留在`Ttp` 层内部
 - 上层不需要感知 `TunnelRef`
+- 元数据中的 `remote_ep` 仍是选中 tunnel 的单个实际地址；地址未知时为 `None`
+- `connect_server` 保留完整有序列表供断线重连；复用成功的备用连接时不会主动切回首地址
+- 业务通道打开失败直接返回错误，不重放到后续候选
 
 对于客户端与服务端，这里的语义不同：
 

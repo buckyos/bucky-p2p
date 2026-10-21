@@ -371,7 +371,7 @@ impl PnShared {
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let target = TtpTarget {
             local_ep: None,
-            remote_ep: Endpoint::default(),
+            remote_ep: vec![Endpoint::default()],
             remote_id: relay_id.clone(),
             remote_name: None,
         };
@@ -995,7 +995,7 @@ mod tests {
         ttp_client.remember_tunnel(cached);
         ttp_client.remember_server_target_for_test(crate::ttp::TtpTarget {
             local_ep: None,
-            remote_ep: Endpoint::default(),
+            remote_ep: vec![Endpoint::default()],
             remote_id: relay_id.clone(),
             remote_name: None,
         });

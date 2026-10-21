@@ -298,7 +298,7 @@ async fn shared_validator_reject_and_error_never_attach_or_cache() {
 
         let target = TtpTarget {
             local_ep: None,
-            remote_ep,
+            remote_ep: vec![remote_ep],
             remote_id: remote.get_id(),
             remote_name: Some(remote.get_name()),
         };
@@ -337,7 +337,7 @@ async fn shared_cache_matches_remote_id_and_endpoint_while_server_stays_passive(
 
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -381,7 +381,7 @@ async fn shared_cache_matches_remote_id_and_endpoint_while_server_stays_passive(
     }
 
     let wrong_endpoint = TtpTarget {
-        remote_ep: other_ep,
+        remote_ep: vec![other_ep],
         ..target.clone()
     };
     assert_eq!(

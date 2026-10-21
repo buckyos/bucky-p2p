@@ -676,27 +676,15 @@ async fn create_proxy_server_ttp_client(
         config.local_identity().clone(),
         config.env.net_manager.clone(),
     );
-    let mut last_error = None;
-    for endpoint in endpoints {
-        let result = ttp_client
-            .connect_server(TtpTarget {
-                local_ep: None,
-                remote_ep: endpoint,
-                remote_id: pn_server.get_id(),
-                remote_name: Some(pn_server.get_name()),
-            })
-            .await;
-        match result {
-            Ok(()) => return Ok(ttp_client),
-            Err(err) => last_error = Some(err),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| {
-        p2p_err!(
-            P2pErrorCode::ConnectFailed,
-            "connect proxy pn server failed"
-        )
-    }))
+    ttp_client
+        .connect_server(TtpTarget {
+            local_ep: None,
+            remote_ep: endpoints,
+            remote_id: pn_server.get_id(),
+            remote_name: Some(pn_server.get_name()),
+        })
+        .await?;
+    Ok(ttp_client)
 }
 
 async fn create_default_proxy_client_parts(

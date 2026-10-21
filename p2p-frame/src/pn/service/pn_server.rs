@@ -684,7 +684,7 @@ impl PnTargetStreamFactory for TtpServer {
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let ttp_target = TtpTarget {
             local_ep: None,
-            remote_ep: Endpoint::default(),
+            remote_ep: vec![Endpoint::default()],
             remote_id: target.clone(),
             remote_name: Some(target.to_string()),
         };

@@ -160,7 +160,7 @@ impl TtpConnector for TtpServer {
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                remote_ep: tunnel.remote_ep(),
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
@@ -181,7 +181,7 @@ impl TtpConnector for TtpServer {
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                remote_ep: tunnel.remote_ep(),
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
@@ -202,7 +202,7 @@ impl TtpConnector for TtpServer {
         Ok((
             TtpDatagramMeta {
                 local_ep: tunnel.local_ep(),
-                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                remote_ep: tunnel.remote_ep(),
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),

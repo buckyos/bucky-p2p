@@ -1,5 +1,8 @@
 # p2p-frame
 
+## TTP Ordered Endpoints
+- [086 ordered endpoints](../versions/v0.1/modules/p2p-frame/086-ttp-ordered-remote-endpoints/design.md) changes `TtpTarget.remote_ep` to an ordered `Vec<Endpoint>`, reuses matching live tunnels, and tries new connections sequentially until connection and TTP attachment succeed. Maintained targets retain the full list; TtpServer stays lookup-only and metadata retains a single actual endpoint. External Rust consumers must migrate target construction to `vec![endpoint]`; transport wire formats remain unchanged.
+
 ## Control-Failure Behavior
 - [081 control/data teardown](../versions/v0.1/modules/p2p-frame/081-tcp-error-close-data-connections/design.md) implements source behavior: internally detected TCP control failures retire owned data leases and wake their pending IO, while local explicit close retains graceful draining. QUIC command-write failure uses connection-wide teardown. Public transport interfaces and wire formats are unchanged; scoped transport tests and identical pre-fix/fixed regression replays pass. Installed service deployment is outside this delivery.
 

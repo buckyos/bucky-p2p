@@ -122,7 +122,7 @@ async fn run_tcp_reverse_data_first_claim_pn_proxy_stream_case() {
 
     let b_target = TtpTarget {
         local_ep: None,
-        remote_ep: Endpoint::default(),
+        remote_ep: vec![Endpoint::default()],
         remote_id: b_identity.get_id(),
         remote_name: Some(b_identity.get_id().to_string()),
     };

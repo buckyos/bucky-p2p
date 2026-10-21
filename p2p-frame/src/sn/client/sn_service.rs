@@ -326,7 +326,7 @@ impl SnClientTunnelFactory {
         let classification = SnTunnelClassification::new(local_ep.copied(), *remote_ep);
         let target = TtpTarget {
             local_ep: local_ep.copied(),
-            remote_ep: *remote_ep,
+            remote_ep: vec![*remote_ep],
             remote_id: remote_id.clone(),
             remote_name: Some(remote_name.clone()),
         };

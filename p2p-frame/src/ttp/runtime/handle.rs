@@ -203,7 +203,7 @@ impl RuntimeCore {
         find_existing_tunnel_in_multi(&self.tunnels, target).ok_or_else(|| {
             p2p_err!(
                 P2pErrorCode::NotFound,
-                "ttp server has no incoming tunnel for {} {}",
+                "ttp server has no incoming tunnel for {} {:?}",
                 target.remote_id,
                 target.remote_ep
             )

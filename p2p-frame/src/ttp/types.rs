@@ -5,7 +5,8 @@ use crate::p2p_identity::P2pId;
 #[derive(Clone, Debug)]
 pub struct TtpTarget {
     pub local_ep: Option<Endpoint>,
-    pub remote_ep: Endpoint,
+    /// Ordered connection candidates; the first successful tunnel is used.
+    pub remote_ep: Vec<Endpoint>,
     pub remote_id: P2pId,
     pub remote_name: Option<String>,
 }

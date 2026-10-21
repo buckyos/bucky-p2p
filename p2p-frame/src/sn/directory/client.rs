@@ -266,12 +266,12 @@ impl CmdTunnelFactory<(), SnTunnelRead, SnTunnelWrite> for OwnerServingTunnelFac
 fn owner_targets(membership: &OwnerMembership) -> HashMap<P2pId, TtpTarget> {
     let mut targets = HashMap::new();
     for member in membership.members() {
-        if let Some(endpoint) = member.endpoints.first().copied() {
+        if !member.endpoints.is_empty() {
             targets.insert(
                 member.sn_id.clone(),
                 TtpTarget {
                     local_ep: None,
-                    remote_ep: endpoint,
+                    remote_ep: member.endpoints.clone(),
                     remote_id: member.sn_id.clone(),
                     remote_name: member.name.clone(),
                 },
@@ -356,6 +356,7 @@ fn cmd_to_p2p_err(err: sfo_cmd_server::errors::CmdError) -> P2pError {
 
 #[cfg(test)]
 mod tests {
+    include!("ordered_endpoint_tests.rs");
     use super::*;
     use crate::endpoint::{Endpoint, Protocol};
     use crate::networks::{TunnelDatagramWrite, TunnelPurpose};

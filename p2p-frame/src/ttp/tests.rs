@@ -149,6 +149,7 @@ struct FakeTunnel {
     remote_id: P2pId,
     local_ep: Endpoint,
     remote_ep: Endpoint,
+    reported_remote_ep: Mutex<Option<Endpoint>>,
     state: Mutex<TunnelState>,
     incoming_stream_rx: AsyncMutex<
         mpsc::Receiver<
@@ -197,6 +198,7 @@ struct FakeTunnel {
     datagram_listen_error: Mutex<Option<(P2pErrorCode, &'static str)>>,
     close_error: Mutex<Option<(P2pErrorCode, &'static str)>>,
     close_count: AtomicUsize,
+    stream_open_error: Mutex<Option<P2pErrorCode>>,
 }
 
 #[derive(Clone, Copy)]
@@ -223,6 +225,7 @@ impl FakeTunnel {
             remote_id,
             local_ep,
             remote_ep,
+            reported_remote_ep: Mutex::new(Some(remote_ep)),
             state: Mutex::new(TunnelState::Connected),
             incoming_stream_rx: AsyncMutex::new(stream_rx),
             incoming_stream_tx: stream_tx,
@@ -241,6 +244,7 @@ impl FakeTunnel {
             datagram_listen_error: Mutex::new(None),
             close_error: Mutex::new(None),
             close_count: AtomicUsize::new(0),
+            stream_open_error: Mutex::new(None),
         })
     }
 
@@ -401,7 +405,7 @@ impl Tunnel for FakeTunnel {
     }
 
     fn remote_ep(&self) -> Option<Endpoint> {
-        Some(self.remote_ep)
+        *self.reported_remote_ep.lock().unwrap()
     }
 
     fn state(&self) -> TunnelState {
@@ -474,6 +478,9 @@ impl Tunnel for FakeTunnel {
     ) -> P2pResult<(TunnelStreamRead, TunnelStreamWrite)> {
         let vport = purpose.decode_as::<u16>().unwrap();
         self.opened_stream_vports.lock().unwrap().push(vport);
+        if let Some(code) = *self.stream_open_error.lock().unwrap() {
+            return Err(p2p_err!(code, "business stream open failed"));
+        }
         let (peer_end, tunnel_end) = tokio::io::duplex(64);
         let (tunnel_read, tunnel_write) = split(tunnel_end);
         drop(peer_end);
@@ -515,6 +522,9 @@ struct FakeTunnelNetwork {
     infos: Mutex<Vec<TunnelListenerInfo>>,
     created_tunnel: Mutex<Option<TunnelRef>>,
     create_count: AtomicUsize,
+    create_results: Mutex<std::collections::VecDeque<(Endpoint, P2pResult<TunnelRef>)>>,
+    attempted: Mutex<Vec<Endpoint>>,
+    bound_local: Mutex<Vec<Endpoint>>,
 }
 
 impl FakeTunnelNetwork {
@@ -527,6 +537,9 @@ impl FakeTunnelNetwork {
             infos: Mutex::new(Vec::new()),
             created_tunnel: Mutex::new(None),
             create_count: AtomicUsize::new(0),
+            create_results: Mutex::new(std::collections::VecDeque::new()),
+            attempted: Mutex::new(Vec::new()),
+            bound_local: Mutex::new(Vec::new()),
         })
     }
 
@@ -617,12 +630,17 @@ impl TunnelNetwork for FakeTunnelNetwork {
     async fn create_tunnel_with_intent(
         &self,
         _local_identity: &P2pIdentityRef,
-        _remote: &Endpoint,
+        remote: &Endpoint,
         _remote_id: &P2pId,
         _remote_name: Option<String>,
         _intent: crate::networks::TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
         self.create_count.fetch_add(1, Ordering::SeqCst);
+        self.attempted.lock().unwrap().push(*remote);
+        if let Some((expected, result)) = self.create_results.lock().unwrap().pop_front() {
+            assert_eq!(*remote, expected, "candidate order changed");
+            return result;
+        }
         self.created_tunnel
             .lock()
             .unwrap()
@@ -633,12 +651,13 @@ impl TunnelNetwork for FakeTunnelNetwork {
     async fn create_tunnel_with_local_ep_and_intent(
         &self,
         local_identity: &P2pIdentityRef,
-        _local_ep: &Endpoint,
+        local_ep: &Endpoint,
         remote: &Endpoint,
         remote_id: &P2pId,
         remote_name: Option<String>,
         intent: crate::networks::TunnelConnectIntent,
     ) -> P2pResult<TunnelRef> {
+        self.bound_local.lock().unwrap().push(*local_ep);
         self.create_tunnel_with_intent(local_identity, remote, remote_id, remote_name, intent)
             .await
     }
@@ -777,7 +796,7 @@ async fn client_open_stream_and_datagram_reuse_same_tunnel() {
     let client = TtpClient::new(local, manager);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -810,7 +829,7 @@ async fn client_open_control_stream_with_id_target_reuses_ttp_tunnel() {
     let client = TtpClient::new(local, manager);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -821,7 +840,7 @@ async fn client_open_control_stream_with_id_target_reuses_ttp_tunnel() {
         .unwrap();
     let cached_target = TtpTarget {
         local_ep: None,
-        remote_ep: Endpoint::default(),
+        remote_ep: vec![Endpoint::default()],
         remote_id: target.remote_id.clone(),
         remote_name: None,
     };
@@ -852,7 +871,7 @@ async fn ttp_client_remove_server_deletes_exact_maintained_target() {
     let client = TtpClient::new(local, manager);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -883,7 +902,7 @@ async fn ttp_client_releases_non_maintained_idle_tunnel_cache() {
         TtpClient::new_with_idle_timeout_for_test(local, manager, Duration::from_millis(20));
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -912,7 +931,7 @@ async fn ttp_client_active_stream_lease_blocks_idle_release() {
         TtpClient::new_with_idle_timeout_for_test(local, manager, Duration::from_millis(20));
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -945,7 +964,7 @@ async fn ttp_client_maintained_target_is_not_idle_released() {
         TtpClient::new_with_idle_timeout_for_test(local, manager, Duration::from_millis(20));
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -972,7 +991,7 @@ async fn node_open_stream_and_control_stream_create_missing_tunnel() {
     let node = TtpNode::new(local, manager).unwrap();
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1009,7 +1028,7 @@ async fn node_reuses_existing_tunnel_for_id_target_and_datagram() {
     let node = TtpNode::new(local, manager).unwrap();
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1017,7 +1036,7 @@ async fn node_reuses_existing_tunnel_for_id_target_and_datagram() {
     let _ = node.open_stream(&target, purpose_of(1031)).await.unwrap();
     let cached_target = TtpTarget {
         local_ep: None,
-        remote_ep: Endpoint::default(),
+        remote_ep: vec![Endpoint::default()],
         remote_id: target.remote_id.clone(),
         remote_name: None,
     };
@@ -1053,7 +1072,7 @@ async fn node_open_stream_propagates_create_tunnel_error() {
     let node = TtpNode::new(local, manager).unwrap();
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1177,7 +1196,7 @@ async fn server_default_validator_accepts_incoming_tunnel() {
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1209,7 +1228,7 @@ async fn server_cache_readiness_observer_preserves_connecting_tunnel() {
     tunnel.set_state(TunnelState::Connecting);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1226,7 +1245,7 @@ async fn server_cache_readiness_observer_preserves_connecting_tunnel() {
     tunnel.set_state(TunnelState::Connected);
 
     let mismatched_target = TtpTarget {
-        remote_ep: other_remote_ep,
+        remote_ep: vec![other_remote_ep],
         ..target.clone()
     };
     assert!(!server.has_cached_tunnel_for_test(&mismatched_target));
@@ -1249,7 +1268,7 @@ async fn server_accept_validator_records_context_and_accepts_incoming_tunnel() {
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1291,7 +1310,7 @@ async fn server_reject_validator_blocks_attach_and_cache() {
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1328,7 +1347,7 @@ async fn server_validator_error_blocks_attach_and_cache() {
     let tunnel = FakeTunnel::new(local.get_id(), remote.get_id(), local_ep, remote_ep);
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1359,7 +1378,7 @@ async fn server_open_stream_requires_existing_incoming_tunnel() {
     let server = TtpServer::new(local, manager).unwrap();
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1405,7 +1424,7 @@ async fn server_open_stream_and_datagram_reuse_existing_incoming_tunnel() {
 
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1455,7 +1474,7 @@ async fn server_open_control_stream_reuses_existing_incoming_tunnel() {
 
     let target = TtpTarget {
         local_ep: None,
-        remote_ep,
+        remote_ep: vec![remote_ep],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1465,7 +1484,7 @@ async fn server_open_control_stream_reuses_existing_incoming_tunnel() {
         .unwrap();
     let cached_target = TtpTarget {
         local_ep: None,
-        remote_ep: Endpoint::default(),
+        remote_ep: vec![Endpoint::default()],
         remote_id: remote.get_id(),
         remote_name: Some(remote.get_name()),
     };
@@ -1480,3 +1499,5 @@ async fn server_open_control_stream_reuses_existing_incoming_tunnel() {
     assert!(tunnel.opened_stream_vports().is_empty());
     assert!(tunnel.opened_datagram_vports().is_empty());
 }
+
+mod ordered_endpoints;

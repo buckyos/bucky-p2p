@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use super::connection::TtpDialer;
 use super::listener::{
     TtpIncomingControlStreamCallback, TtpIncomingDatagramCallback, TtpIncomingStreamCallback,
     TtpPortListener,
@@ -271,29 +272,9 @@ impl TtpClient {
             return Ok(tunnel);
         }
 
-        let network = self.net_manager.get_network(target.remote_ep.protocol())?;
-        let tunnel = if let Some(local_ep) = target.local_ep.as_ref() {
-            network
-                .create_tunnel_with_local_ep(
-                    &self.local_identity,
-                    local_ep,
-                    &target.remote_ep,
-                    &target.remote_id,
-                    target.remote_name.clone(),
-                )
-                .await?
-        } else {
-            network
-                .create_tunnel(
-                    &self.local_identity,
-                    &target.remote_ep,
-                    &target.remote_id,
-                    target.remote_name.clone(),
-                )
-                .await?
-        };
-
-        self.runtime.attach_tunnel(tunnel.clone()).await?;
+        let tunnel = TtpDialer::new(&self.local_identity, &self.net_manager)
+            .connect(target, |tunnel| self.runtime.attach_tunnel(tunnel))
+            .await?;
         self.remember_tunnel_entry(tunnel.clone());
         Ok(tunnel)
     }
@@ -462,7 +443,7 @@ impl TtpConnector for TtpClient {
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep().or(target.local_ep),
-                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                remote_ep: tunnel.remote_ep(),
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
@@ -495,7 +476,7 @@ impl TtpConnector for TtpClient {
         Ok((
             TtpStreamMeta {
                 local_ep: tunnel.local_ep().or(target.local_ep),
-                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                remote_ep: tunnel.remote_ep(),
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
@@ -528,7 +509,7 @@ impl TtpConnector for TtpClient {
         Ok((
             TtpDatagramMeta {
                 local_ep: tunnel.local_ep().or(target.local_ep),
-                remote_ep: tunnel.remote_ep().or(Some(target.remote_ep)),
+                remote_ep: tunnel.remote_ep(),
                 local_id: tunnel.local_id(),
                 remote_id: tunnel.remote_id(),
                 remote_name: target.remote_name.clone(),
@@ -644,29 +625,9 @@ pub(crate) async fn get_or_create_tunnel_for_multi(
         return Ok(tunnel);
     }
 
-    let network = net_manager.get_network(target.remote_ep.protocol())?;
-    let tunnel = if let Some(local_ep) = target.local_ep.as_ref() {
-        network
-            .create_tunnel_with_local_ep(
-                local_identity,
-                local_ep,
-                &target.remote_ep,
-                &target.remote_id,
-                target.remote_name.clone(),
-            )
-            .await?
-    } else {
-        network
-            .create_tunnel(
-                local_identity,
-                &target.remote_ep,
-                &target.remote_id,
-                target.remote_name.clone(),
-            )
-            .await?
-    };
-
-    runtime.attach_tunnel(tunnel.clone()).await?;
+    let tunnel = TtpDialer::new(local_identity, net_manager)
+        .connect(target, |tunnel| runtime.attach_tunnel(tunnel))
+        .await?;
     remember_tunnel_in_multi(tunnels, tunnel.clone());
     Ok(tunnel)
 }
@@ -692,9 +653,10 @@ pub(crate) fn match_target(tunnel: &dyn crate::networks::Tunnel, target: &TtpTar
         }
     }
 
-    target.remote_ep == Endpoint::default()
-        || tunnel
-            .remote_ep()
-            .map(|ep| ep == target.remote_ep)
-            .unwrap_or(true)
+    !target.remote_ep.is_empty()
+        && (target.remote_ep.contains(&Endpoint::default())
+            || tunnel
+                .remote_ep()
+                .map(|ep| target.remote_ep.contains(&ep))
+                .unwrap_or(true))
 }

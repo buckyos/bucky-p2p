@@ -631,12 +631,12 @@ fn inter_sn_command_code(request: &InterSnRequest) -> InterSnCommandCode {
 fn owner_targets(membership: &OwnerMembership) -> HashMap<P2pId, TtpTarget> {
     let mut targets = HashMap::new();
     for member in membership.members() {
-        if let Some(endpoint) = member.endpoints.first().copied() {
+        if !member.endpoints.is_empty() {
             targets.insert(
                 member.sn_id.clone(),
                 TtpTarget {
                     local_ep: None,
-                    remote_ep: endpoint,
+                    remote_ep: member.endpoints.clone(),
                     remote_id: member.sn_id.clone(),
                     remote_name: member.name.clone(),
                 },
@@ -935,6 +935,7 @@ impl From<InterSnError> for crate::error::P2pError {
 
 #[cfg(test)]
 mod tests {
+    include!("ordered_endpoint_tests.rs");
     use super::*;
 
     fn test_id(seed: u8) -> P2pId {
