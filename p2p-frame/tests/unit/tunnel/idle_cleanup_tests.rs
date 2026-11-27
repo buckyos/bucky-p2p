@@ -368,3 +368,54 @@ async fn duplicate_registration_recognizes_the_original_arc() {
         &source_ref
     ));
 }
+
+#[tokio::test]
+async fn cleanup_closes_unavailable_connecting_tunnel() {
+    let (manager, local, remote) = manager_and_ids("connecting-unavailable");
+    let source = IdleAwareTunnel::new(
+        TunnelForm::Passive,
+        local.get_id(),
+        remote.get_id(),
+        false,
+    );
+    *source.state.lock().unwrap() = TunnelState::Connecting;
+    let source_ref: TunnelRef = source.clone();
+    manager.register_tunnel(source_ref).await.unwrap();
+
+    manager.cleanup_closed_tunnels(Duration::ZERO).await;
+
+    assert!(manager.get_tunnel(&remote.get_id()).is_none());
+    assert_eq!(
+        source.close_count(),
+        1,
+        "an unavailable non-consumer-closed tunnel must still be closed"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_recloses_consumer_closed_tunnel_idempotently() {
+    let (manager, local, remote) = manager_and_ids("consumer-closed");
+    let source = IdleAwareTunnel::new(
+        TunnelForm::Active,
+        local.get_id(),
+        remote.get_id(),
+        false,
+    );
+    let source_ref: TunnelRef = source.clone();
+    manager
+        .register_tunnel_and_publish(source_ref)
+        .await
+        .unwrap();
+
+    source.close().unwrap();
+    assert_eq!(source.close_count(), 1);
+
+    manager.cleanup_closed_tunnels(Duration::ZERO).await;
+
+    assert!(manager.get_tunnel(&remote.get_id()).is_none());
+    assert_eq!(
+        source.close_count(),
+        2,
+        "cleanup calls close again; real TCP close stays idempotent for consumer-closed tunnels"
+    );
+}

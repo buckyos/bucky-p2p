@@ -407,6 +407,7 @@ pub(crate) struct TcpTunnel {
     state: Mutex<TcpTunnelState>,
     activity: Arc<TunnelActivity>,
     closed: AtomicBool,
+    control_closed: AtomicBool,
     next_conn_seq: AtomicU32,
     next_channel_seq: AtomicU32,
     next_request_seq: AtomicU32,
@@ -428,6 +429,7 @@ pub(crate) struct TcpTunnel {
     heartbeat_timeout: Duration,
     connected_notify: Notify,
     control_error_notify: Notify,
+    control_closed_notify: Notify,
     #[cfg(test)]
     reverse_open_test_control: ReverseOpenTestControl,
 }
@@ -876,6 +878,7 @@ impl TcpTunnel {
             }),
             activity: TunnelActivity::new(),
             closed: AtomicBool::new(false),
+            control_closed: AtomicBool::new(false),
             next_conn_seq: AtomicU32::new(1),
             next_channel_seq: AtomicU32::new(1),
             next_request_seq: AtomicU32::new(1),
@@ -897,6 +900,7 @@ impl TcpTunnel {
             heartbeat_timeout,
             connected_notify: Notify::new(),
             control_error_notify: Notify::new(),
+            control_closed_notify: Notify::new(),
             #[cfg(test)]
             reverse_open_test_control: ReverseOpenTestControl::default(),
         });
@@ -955,7 +959,7 @@ impl TcpTunnel {
         tokio::pin!(failed);
         // Register before inspecting terminal state, including mutex waiters.
         failed.as_mut().enable();
-        if self.state.lock().unwrap().phase == LocalTunnelPhase::Error {
+        if self.is_control_closed() || self.state.lock().unwrap().phase == LocalTunnelPhase::Error {
             return Err(p2p_err!(P2pErrorCode::Interrupted, "tcp control connection failed"));
         }
         let result = tokio::select! {
@@ -965,7 +969,7 @@ impl TcpTunnel {
             }
             result = async {
                 let mut write = self.control_write.lock().await;
-                if self.state.lock().unwrap().phase == LocalTunnelPhase::Error {
+                if self.is_control_closed() || self.state.lock().unwrap().phase == LocalTunnelPhase::Error {
                     return Err(p2p_err!(P2pErrorCode::Interrupted, "tcp control connection failed"));
                 }
                 write_raw_frame(&mut *write, cmd).await
@@ -1051,7 +1055,9 @@ impl TcpTunnel {
             )
         };
         if phase == LocalTunnelPhase::Error {
+            self.control_closed.store(true, Ordering::SeqCst);
             self.control_error_notify.notify_waiters();
+            self.control_closed_notify.notify_waiters();
         }
         self.connected_notify.notify_waiters();
 
@@ -1102,6 +1108,45 @@ impl TcpTunnel {
         true
     }
 
+    fn is_control_closed(&self) -> bool {
+        self.control_closed.load(Ordering::SeqCst)
+    }
+
+    fn spawn_control_shutdown(&self) {
+        const ATTEMPTS: usize = 2;
+        let control_write = self.control_write.clone();
+        let timeout = self.connector.timeout;
+        let tunnel_id = self.tunnel_id.value();
+        Executor::spawn_ok(async move {
+            // A timed-out attempt is retried; otherwise a transient stall would
+            // leave the peer without an EOF until the tunnel is dropped.
+            for attempt in 1..=ATTEMPTS {
+                let outcome = runtime::timeout(timeout, async {
+                    let mut write = control_write.lock().await;
+                    runtime::AsyncWriteExt::shutdown(&mut *write).await
+                })
+                .await;
+                match outcome {
+                    Ok(Ok(())) => return,
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "tcp tunnel {} control shutdown failed: {:?}",
+                            tunnel_id,
+                            err
+                        );
+                        return;
+                    }
+                    Err(_) if attempt < ATTEMPTS => {}
+                    Err(_) => log::warn!(
+                        "tcp tunnel {} control shutdown timed out after {} attempts",
+                        tunnel_id,
+                        attempt
+                    ),
+                }
+            }
+        });
+    }
+
     async fn close_impl(&self, phase: LocalTunnelPhase, reason: P2pErrorCode) -> P2pResult<()> {
         if !self.close_local(phase, reason) {
             return Ok(());
@@ -1129,14 +1174,29 @@ impl TcpTunnel {
         mut control_read: runtime::ReadHalf<runtime::TlsStream<runtime::TcpStream>>,
     ) {
         loop {
+            let closed = self.control_closed_notify.notified();
+            tokio::pin!(closed);
+            // Register before checking the terminal flag so a concurrent
+            // close cannot lose its wake-up.
+            closed.as_mut().enable();
+            if self.is_control_closed() {
+                break;
+            }
             #[cfg(test)]
-            let cmd = TcpControlCmd::read_from_wire_with_dynamic_max_command_id(
-                &mut control_read,
-                &self.reverse_open_test_control.max_control_command_id,
-            )
-            .await;
+            let cmd = tokio::select! {
+                biased;
+                _ = &mut closed => break,
+                cmd = TcpControlCmd::read_from_wire_with_dynamic_max_command_id(
+                    &mut control_read,
+                    &self.reverse_open_test_control.max_control_command_id,
+                ) => cmd,
+            };
             #[cfg(not(test))]
-            let cmd = read_raw_frame::<_, TcpControlCmd>(&mut control_read).await;
+            let cmd = tokio::select! {
+                biased;
+                _ = &mut closed => break,
+                cmd = read_raw_frame::<_, TcpControlCmd>(&mut control_read) => cmd,
+            };
             let cmd = match cmd {
                 Ok(cmd) => cmd,
                 Err(err) => {
@@ -1171,6 +1231,9 @@ impl TcpTunnel {
     }
 
     async fn handle_control_cmd(self: &Arc<Self>, cmd: TcpControlCmd) -> P2pResult<()> {
+        if self.is_control_closed() {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel closed"));
+        }
         match cmd {
             TcpControlCmd::Ping(ping) => {
                 self.send_control(&TcpControlCmd::Pong(PongCmd {
@@ -3020,6 +3083,9 @@ impl TcpTunnel {
         self: &Arc<Self>,
         open_request_id: Option<TcpRequestId>,
     ) -> P2pResult<Arc<DataConnEntry>> {
+        if self.is_closed() {
+            return Err(p2p_err!(P2pErrorCode::Interrupted, "tunnel closed"));
+        }
         let conn_id = self.next_local_conn_id();
         let mut connection = self
             .connector
@@ -3221,6 +3287,21 @@ impl TcpTunnel {
     }
 
     fn spawn_reverse_data_connection(self: &Arc<Self>, request_id: TcpRequestId) {
+        if self.is_closed() {
+            if !self.is_control_closed() {
+                let this = self.clone();
+                let _ = Executor::spawn(async move {
+                    let _ = this
+                        .send_control(&TcpControlCmd::OpenDataConnResp(OpenDataConnResp {
+                            request_id,
+                            conn_id: None,
+                            result: OpenDataConnRespResult::ConnectFailed,
+                        }))
+                        .await;
+                });
+            }
+            return;
+        }
         let this = self.clone();
         let _ = Executor::spawn(async move {
             match this.create_data_connection(Some(request_id)).await {
@@ -3807,7 +3888,17 @@ impl Tunnel for TcpTunnel {
     }
 
     fn close(&self) -> P2pResult<()> {
+        // Commit the control barrier before the data-plane drain so the reader
+        // and in-flight control writes stop serving immediately.
+        let first_control_close = !self.control_closed.swap(true, Ordering::SeqCst);
+        if first_control_close {
+            self.control_closed_notify.notify_waiters();
+            self.control_error_notify.notify_waiters();
+        }
         self.close_local(LocalTunnelPhase::Closed, P2pErrorCode::Interrupted);
+        if first_control_close {
+            self.spawn_control_shutdown();
+        }
         Ok(())
     }
 

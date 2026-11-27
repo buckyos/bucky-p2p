@@ -726,4 +726,291 @@ mod control_failure_tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn unit_close_rejects_commands_and_peer_observes_close() {
+        let fixture = Fixture::new().await;
+        assert!(!fixture.tunnel.is_control_closed());
+        fixture.tunnel.close().unwrap();
+        assert!(fixture.tunnel.is_control_closed());
+        assert!(fixture.tunnel.is_closed());
+        assert_eq!(
+            fixture.tunnel.state.lock().unwrap().phase,
+            LocalTunnelPhase::Closed
+        );
+
+        let ping = TcpControlCmd::Ping(PingCmd {
+            seq: 1,
+            send_time: Default::default(),
+        });
+        let error = timeout(
+            Duration::from_secs(1),
+            fixture.tunnel.handle_control_cmd(ping),
+        )
+        .await
+        .expect("closed tunnel must reject commands without blocking")
+        .expect_err("closed tunnel must not serve control commands");
+        assert_eq!(error.code(), P2pErrorCode::Interrupted);
+
+        let mut peer = fixture.control_peer;
+        let mut buf = [0u8; 1];
+        let result = timeout(Duration::from_secs(2), peer.stream.read(&mut buf))
+            .await
+            .expect("peer must observe the control close");
+        assert!(
+            matches!(result, Ok(0) | Err(_)),
+            "expected EOF or error after close, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dv_close_stops_control_command_path() {
+        let fixture = Fixture::new().await;
+        fixture.tunnel.close().unwrap();
+        assert!(fixture.tunnel.is_closed());
+        assert!(fixture.tunnel.is_control_closed());
+
+        let ping = TcpControlCmd::Ping(PingCmd {
+            seq: 2,
+            send_time: Default::default(),
+        });
+        let error = timeout(
+            Duration::from_secs(1),
+            fixture.tunnel.handle_control_cmd(ping),
+        )
+        .await
+        .expect("closed tunnel must answer without blocking")
+        .expect_err("closed tunnel must not keep the 081 command path");
+        assert_eq!(error.code(), P2pErrorCode::Interrupted);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dv_close_is_idempotent_and_race_safe() {
+        let fixture = Fixture::new().await;
+        let tunnel = fixture.tunnel.clone();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let tunnel = tunnel.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                tunnel.close()
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            timeout(Duration::from_secs(2), task)
+                .await
+                .expect("concurrent close must finish")
+                .expect("close task must not panic")
+                .expect("close must be idempotent");
+        }
+        assert!(tunnel.is_control_closed());
+        assert!(tunnel.is_closed());
+        for _ in 0..3 {
+            tunnel.close().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dv_close_cancels_blocked_control_write() {
+        let fixture = Fixture::new().await;
+        let write_guard = fixture.tunnel.control_write.lock().await;
+        let tunnel = fixture.tunnel.clone();
+        let mut sender = tokio::spawn(async move {
+            tunnel
+                .send_control(&TcpControlCmd::Ping(PingCmd {
+                    seq: 9,
+                    send_time: Default::default(),
+                }))
+                .await
+        });
+
+        assert!(
+            timeout(Duration::from_millis(200), &mut sender)
+                .await
+                .is_err(),
+            "control write must block while the write half is held"
+        );
+
+        fixture.tunnel.close().unwrap();
+
+        let result = timeout(Duration::from_secs(2), sender)
+            .await
+            .expect("close must cancel a blocked control writer")
+            .expect("blocked control writer must not panic");
+        assert_eq!(result.unwrap_err().code(), P2pErrorCode::Interrupted);
+        drop(write_guard);
+    }
+
+    #[tokio::test]
+    async fn unit_close_drops_registry_tunnel_key() {
+        use crate::networks::tcp::listener::TcpTunnelRegistry;
+        let fixture = Fixture::new().await;
+        let registry = TcpTunnelRegistry::new();
+        let tunnel_id = TunnelId::from(81);
+        let candidate_id = TunnelCandidateId::from(81);
+        registry.register(fixture.tunnel.clone(), tunnel_id, candidate_id);
+        assert!(
+            registry
+                .find_tunnel(
+                    &fixture.tunnel.local_id(),
+                    &fixture.tunnel.remote_id(),
+                    tunnel_id,
+                    candidate_id,
+                )
+                .is_some()
+        );
+        fixture.tunnel.close().unwrap();
+        assert!(
+            registry
+                .find_tunnel(
+                    &fixture.tunnel.local_id(),
+                    &fixture.tunnel.remote_id(),
+                    tunnel_id,
+                    candidate_id,
+                )
+                .is_none()
+        );
+    }
+
+    struct RetiredServerFixture {
+        acceptor: crate::runtime::TlsAcceptor,
+        factory: P2pIdentityCertFactoryRef,
+        resolver: ServerCertResolverRef,
+        listener: tokio::net::TcpListener,
+        remote: Endpoint,
+    }
+
+    impl RetiredServerFixture {
+        async fn new() -> Self {
+            let (client_identity, server_identity) = &*IDENTITIES;
+            let resolver = DefaultTlsServerCertResolver::new();
+            resolver
+                .add_server_identity(server_identity.clone())
+                .await
+                .unwrap();
+            let resolver: ServerCertResolverRef = resolver;
+            let factory: P2pIdentityCertFactoryRef = Arc::new(X509IdentityCertFactory);
+            let acceptor = build_acceptor(resolver.clone(), factory.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let remote = Endpoint::from((
+                crate::endpoint::Protocol::Tcp,
+                listener.local_addr().unwrap(),
+            ));
+            let _ = client_identity;
+            Self {
+                acceptor,
+                factory,
+                resolver,
+                listener,
+                remote,
+            }
+        }
+
+        async fn accept_tunnel(&self, id: u32) -> (TcpTlsConnection, Arc<TcpTunnel>) {
+            let (client_identity, server_identity) = &*IDENTITIES;
+            let server_id = server_identity.get_id();
+            let server_name = server_identity.get_name();
+            let tunnel_id = TunnelId::from(id);
+            let candidate_id = TunnelCandidateId::from(id);
+            let hello = TcpConnectionHello {
+                role: TcpConnectionRole::Control,
+                tunnel_id,
+                candidate_id,
+                is_reverse: false,
+                conn_id: None,
+                open_request_id: None,
+            };
+            let (client, server) = timeout(Duration::from_secs(10), async {
+                tokio::join!(
+                    connect_with_optional_local(
+                        self.factory.clone(),
+                        client_identity,
+                        None,
+                        &self.remote,
+                        &server_id,
+                        Some(server_name),
+                        Duration::from_secs(5),
+                        false,
+                        &hello,
+                    ),
+                    async {
+                        let (socket, _) = self.listener.accept().await.unwrap();
+                        accept_connection(&self.acceptor, &self.factory, &self.resolver, socket)
+                            .await
+                    }
+                )
+            })
+            .await
+            .expect("loopback TLS fixture must connect");
+            let client = client.unwrap();
+            let (control, _) = server.unwrap();
+            let connector = TcpTunnelConnector {
+                cert_factory: self.factory.clone(),
+                local_identity: server_identity.clone(),
+                local_ep: control.local_ep,
+                remote_ep: Arc::new(Mutex::new(control.remote_ep)),
+                remote_id: control.remote_id.clone(),
+                remote_name: Some(control.remote_name.clone()),
+                timeout: Duration::from_secs(3),
+                tunnel_id,
+                candidate_id,
+            };
+            let tunnel = TcpTunnel::new(
+                control,
+                connector,
+                tunnel_id,
+                candidate_id,
+                TunnelForm::Passive,
+                false,
+                Duration::from_secs(3600),
+                Duration::from_secs(7200),
+                LocalTunnelPhase::Connected,
+            );
+            (client, tunnel)
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_close_closes_peer_and_allows_fresh_control() {
+        let server = RetiredServerFixture::new().await;
+        let (mut peer, tunnel) = server.accept_tunnel(91).await;
+        tunnel.close().unwrap();
+
+        let ping = TcpControlCmd::Ping(PingCmd {
+            seq: 6,
+            send_time: Default::default(),
+        });
+        let _ = write_raw_frame(&mut peer.stream, &ping).await;
+        let mut buf = [0u8; 1];
+        let result = timeout(Duration::from_secs(2), peer.stream.read(&mut buf))
+            .await
+            .expect("peer must observe the closed control connection");
+        assert!(
+            matches!(result, Ok(0) | Err(_)),
+            "expected EOF or error instead of Pong after close, got {result:?}"
+        );
+
+        let (mut fresh_peer, fresh_tunnel) = server.accept_tunnel(92).await;
+        assert!(!fresh_tunnel.is_closed());
+        let ping = TcpControlCmd::Ping(PingCmd {
+            seq: 7,
+            send_time: Default::default(),
+        });
+        write_raw_frame(&mut fresh_peer.stream, &ping)
+            .await
+            .unwrap();
+        let pong = timeout(
+            Duration::from_secs(2),
+            read_raw_frame::<_, TcpControlCmd>(&mut fresh_peer.stream),
+        )
+        .await
+        .expect("fresh control tunnel must answer within the test bound")
+        .expect("fresh control tunnel must keep serving commands");
+        assert!(matches!(pong, TcpControlCmd::Pong(_)));
+
+        fresh_tunnel.close().unwrap();
+    }
 }

@@ -6,6 +6,9 @@
 ## Control-Failure Behavior
 - [081 control/data teardown](../versions/v0.1/modules/p2p-frame/081-tcp-error-close-data-connections/design.md) implements source behavior: internally detected TCP control failures retire owned data leases and wake their pending IO, while local explicit close retains graceful draining. QUIC command-write failure uses connection-wide teardown. Public transport interfaces and wire formats are unchanged; scoped transport tests and identical pre-fix/fixed regression replays pass. Installed service deployment is outside this delivery.
 
+## TCP Close Semantics
+- [089 TCP close control plane](../versions/v0.1/modules/p2p-frame/089-tcp-close-control-plane-only/design.md) makes `Tunnel::close()` the single TCP lifecycle verb and supersedes the 088 `terminate()` split. Close stops serving control commands and shuts down the control write half so the peer observes EOF and rebuilds, while borrowed `Bound`/`Draining` data leases drain locally until release. Internal retire/reject paths and proxy-upgrade replacement use the same `close()`; 081 internal-control-failure teardown still force-retires owned data leases. TCP/TLS wire formats, identity checks and registry keys stay unchanged; a consumer that never releases a borrowed lease keeps its socket until it does.
+
 ## 类型
 - 核心库
 
