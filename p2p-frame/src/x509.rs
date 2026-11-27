@@ -70,7 +70,7 @@ fn sign_type_from_algorithm(
 }
 
 fn sign_type_from_cert(cert: &Certificate) -> P2pResult<P2pIdentitySignType> {
-    sign_type_from_algorithm(&cert.tbs_certificate.subject_public_key_info.algorithm)
+    sign_type_from_algorithm(&cert.tbs_certificate().subject_public_key_info().algorithm)
 }
 
 #[derive(Debug, Clone, RawEncode, RawDecode)]
@@ -154,8 +154,8 @@ impl P2pIdentityCert for X509IdentityCert {
         let mut sha256 = sha2::Sha256::new();
         sha256.update(
             self.cert
-                .tbs_certificate
-                .subject_public_key_info
+                .tbs_certificate()
+                .subject_public_key_info()
                 .subject_public_key
                 .raw_bytes(),
         );
@@ -163,7 +163,7 @@ impl P2pIdentityCert for X509IdentityCert {
     }
 
     fn get_name(&self) -> String {
-        if let Some(ref extends) = self.cert.tbs_certificate.extensions {
+        if let Some(extends) = self.cert.tbs_certificate().extensions() {
             for extend in extends.iter() {
                 if extend.extn_id == x509_verify::der::oid::db::rfc5912::ID_CE_SUBJECT_ALT_NAME {
                     match x509_cert::ext::pkix::SubjectAltName::from_der(extend.extn_value.as_ref())
@@ -192,8 +192,8 @@ impl P2pIdentityCert for X509IdentityCert {
     fn verify(&self, message: &[u8], sign: &P2pSignature) -> bool {
         let public_key = self
             .cert
-            .tbs_certificate
-            .subject_public_key_info
+            .tbs_certificate()
+            .subject_public_key_info()
             .subject_public_key
             .raw_bytes();
 
